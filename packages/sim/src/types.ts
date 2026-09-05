@@ -15,6 +15,9 @@ export interface PlayerInput {
 }
 export interface PlayerStore {
   count: number;
+  freeIds: number[];
+  active: Uint8Array;
+  team: Uint8Array;
   position: Float64Array;
   /** Where each player entered the world; the fall-out reset returns them here. */
   spawn: Float64Array;

@@ -38,6 +38,9 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
     killY: lowestTerrainHeight(terrain) - KILL_DEPTH,
     players: {
       count: 0,
+      freeIds: [],
+      active: new Uint8Array(capacity),
+      team: new Uint8Array(capacity),
       position: new Float64Array(capacity * 3),
       spawn: new Float64Array(capacity * 3),
       velocity: new Float64Array(capacity * 3),
@@ -52,14 +55,33 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
   };
 }
 
-export function addPlayer(world: World, spawn: Vec3): number {
-  const id = world.players.count;
-  if (id >= world.players.energy.length) throw new RangeError('Player capacity exceeded');
-  world.players.count += 1;
-  world.players.position.set([spawn.x, spawn.y, spawn.z], id * 3);
-  world.players.spawn.set([spawn.x, spawn.y, spawn.z], id * 3);
-  world.players.energy[id] = 60;
+export function addPlayer(world: World, spawn: Vec3, team = 0): number {
+  const players = world.players;
+  const id = players.freeIds.pop() ?? players.count;
+  if (id >= players.energy.length) throw new RangeError('Player capacity exceeded');
+  if (id === players.count) players.count += 1;
+  players.active[id] = 1;
+  players.team[id] = team;
+  players.position.set([spawn.x, spawn.y, spawn.z], id * 3);
+  players.spawn.set([spawn.x, spawn.y, spawn.z], id * 3);
+  players.velocity.set([0, 0, 0], id * 3);
+  players.yaw[id] = 0;
+  players.energy[id] = 60;
+  players.onGround[id] = 0;
+  players.ski[id] = 0;
+  players.wasGrounded[id] = 0;
+  players.wasJumpHeld[id] = 0;
+  players.landingSpeed[id] = 0;
   return id;
+}
+
+export function removePlayer(world: World, id: number): void {
+  const players = world.players;
+  if (id < 0 || id >= players.count || !players.active[id]) {
+    throw new RangeError(`Cannot remove inactive player ${String(id)}`);
+  }
+  players.active[id] = 0;
+  players.freeIds.push(id);
 }
 
 export function stepWorld(

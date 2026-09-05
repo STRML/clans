@@ -333,6 +333,7 @@ export function stepPlayers(
   dt: number,
 ): void {
   for (let id = 0; id < world.players.count; id += 1) {
+    if (!world.players.active[id]) continue;
     const input = inputs.get(id) ?? { ...IDLE, yaw: world.players.yaw[id] ?? 0 };
     stepPlayer(world, id, input, LIGHT_ARMOR, dt);
   }
