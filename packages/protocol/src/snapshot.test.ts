@@ -91,4 +91,38 @@ describe('snapshot codec', () => {
     const deltaBytes = encodeSnapshot(2, 1, 0, players, { snapshotId: 1, players });
     expect(() => decodeSnapshot(deltaBytes, null)).toThrow(RangeError);
   });
+
+  it('rejects a full snapshot carrying a non-finite transform value', () => {
+    // Codex round 2 (PR #4): snapshot floats were accepted with no finiteness check and
+    // written straight into prediction state, so a NaN x from a corrupted or adversarial
+    // server response would poison the local simulation permanently.
+    const source = createWorld(terrain, 1);
+    addPlayer(source, { x: 0, y: 0, z: 0 }, 1);
+    const players = serializeActivePlayers(source);
+    const poisoned = players.map((p) => ({ ...p, x: Number.NaN }));
+    const bytes = encodeSnapshot(1, 0, 0, poisoned, null);
+    expect(() => decodeSnapshot(bytes, null)).toThrow(RangeError);
+  });
+
+  it('rejects a delta carrying a non-finite changed value', () => {
+    const source = createWorld(terrain, 1);
+    const a = addPlayer(source, { x: 0, y: 0, z: 0 }, 1);
+    const baselinePlayers = serializeActivePlayers(source);
+    const baselineBytes = encodeSnapshot(1, 0, 0, baselinePlayers, null);
+    // dirtyMask compares with `> EPSILON`, which NaN always fails, so a NaN x alone would
+    // never mark the transform dirty and the field would just never make it into a delta.
+    // Change y for real too, which does mark it dirty and gets the whole transform block
+    // -- x included -- written, the way a real corrupted value reaching the wire would.
+    source.players.position[a * 3] = Number.NaN;
+    source.players.position[a * 3 + 1] = 5;
+    const nextPlayers = serializeActivePlayers(source);
+    const deltaBytes = encodeSnapshot(2, 1, 0, nextPlayers, {
+      snapshotId: 1,
+      players: baselinePlayers,
+    });
+    const decodedBaseline = decodeSnapshot(baselineBytes, null);
+    expect(() =>
+      decodeSnapshot(deltaBytes, { snapshotId: 1, players: decodedBaseline.players }),
+    ).toThrow(RangeError);
+  });
 });

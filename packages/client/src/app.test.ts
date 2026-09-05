@@ -31,9 +31,10 @@ describe('updateRemotes', () => {
     const meshes = new Map<number, THREE.Mesh>();
     const buffers = new Map<number, RemoteBuffer>();
     const lastRemoteTick = { tick: 0 };
-    const activeNet: Pick<NetClient, 'remoteTick' | 'remotePlayers'> = {
+    const activeNet: Pick<NetClient, 'remoteTick' | 'remotePlayers' | 'connected'> = {
       remoteTick: 500, // a server tick count unrelated to any client-side clock reading
       remotePlayers: new Map([[1, snapshot]]),
+      connected: true,
     };
     const nowMs = 123456; // an arbitrary performance.now() reading
 
@@ -43,5 +44,29 @@ describe('updateRemotes', () => {
     expect(buffer).toBeDefined();
     const samples = (buffer as unknown as { samples: Array<{ atMs: number }> }).samples;
     expect(samples[0]?.atMs).toBe(nowMs);
+  });
+
+  it('clears every remote buffer once the connection is no longer active, so pruning disposes their meshes', () => {
+    // Codex round 2 (PR #4): remotePlayers only changes when a snapshot arrives, and
+    // nothing else cleared it on disconnect, so a plain socket close left every remote
+    // mesh (and the GPU resources behind it) stranded until the page tore down.
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    const buffers = new Map<number, RemoteBuffer>();
+    const lastRemoteTick = { tick: 0 };
+    const fakeNet = {
+      remoteTick: 1,
+      remotePlayers: new Map([[1, snapshot]]),
+      connected: true,
+    };
+    updateRemotes(fakeNet, scene, meshes, buffers, lastRemoteTick, 0);
+    expect(buffers.has(1)).toBe(true);
+    expect(scene.children).toHaveLength(1);
+
+    fakeNet.connected = false;
+    updateRemotes(fakeNet, scene, meshes, buffers, lastRemoteTick, 100);
+
+    expect(buffers.size).toBe(0);
+    expect(scene.children).toHaveLength(0);
   });
 });

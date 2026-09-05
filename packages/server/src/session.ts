@@ -3,13 +3,30 @@ import type { InputMessage, NetInputSample } from '@clans/protocol';
 export interface Session {
   playerId: number;
   team: number;
+  /** Highest Input message sequence parsed so far. Governs message-level dedup only. */
   lastAppliedSequence: number;
+  /**
+   * Sequence of the newest sample actually dequeued into a simulation tick. A message
+   * can queue more than one sample (its redundant samples catching up a missed tick),
+   * and the server only ever applies one queued sample per tick, so this can trail
+   * lastAppliedSequence by however many samples are still queued. This is what a
+   * snapshot's lastInputSequence must report: it tells the client which of its inputs
+   * are safe to drop from replay, and a sample only queued (not yet simulated) is not.
+   */
+  lastSimulatedSequence: number;
   lastAckedSnapshotId: number;
   lastAckedAt: number | null;
 }
 
 export function createSession(playerId: number, team: number, now: number): Session {
-  return { playerId, team, lastAppliedSequence: 0, lastAckedSnapshotId: 0, lastAckedAt: now };
+  return {
+    playerId,
+    team,
+    lastAppliedSequence: 0,
+    lastSimulatedSequence: 0,
+    lastAckedSnapshotId: 0,
+    lastAckedAt: now,
+  };
 }
 
 /**

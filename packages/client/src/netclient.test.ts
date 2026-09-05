@@ -183,6 +183,36 @@ describe('NetClient', () => {
     expect(client.world.players.position[0]).toBe(3);
   });
 
+  it('survives a Snapshot frame too short to hold a header instead of throwing out of the handler', () => {
+    // Codex round 2 (PR #4): peekSnapshotHeader ran before the try/catch that wraps
+    // decodeSnapshot, so a malformed frame it couldn't even peek threw straight out of
+    // the transport's message handler instead of being counted as a dropped packet.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 10 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    expect(() => transport.pump([Uint8Array.of(MessageType.Snapshot)])).not.toThrow();
+    expect(client.stats.packetLossEstimate).toBeGreaterThan(0);
+  });
+
+  it('caps its input backlog even while the transport stays open but stops receiving snapshots', () => {
+    // Codex round 2 (PR #4): isOpen() stays true for a live-but-stalled connection (the
+    // socket never closed, the server or network just stopped producing snapshots), so
+    // gating growth on isOpen() alone did not bound pendingInputs/inputSentAt in that case.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 11 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    const skiInput: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: true, jet: false };
+    // Well past the ceiling (4x MAX_REPLAY_TICKS), and well past the existing "40 ticks,
+    // then reconcile hard-snaps" scenario this must not disturb.
+    for (let i = 0; i < 500; i += 1) client.tick(skiInput);
+    const pending = (client as unknown as { pendingInputs: unknown[] }).pendingInputs;
+    const sentAt = (client as unknown as { inputSentAt: Map<number, number> }).inputSentAt;
+    expect(pending.length).toBe(120);
+    expect(sentAt.size).toBeLessThanOrEqual(120);
+  });
+
   it('drops a delta whose baseline it never received and keeps running', () => {
     clock.ms = 0;
     const transport = makeTransport(makeLink({ value: 9 }));

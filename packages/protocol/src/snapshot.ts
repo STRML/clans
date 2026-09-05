@@ -83,6 +83,15 @@ function writePlayerFull(cursor: Cursor, data: PlayerSnapshotData): void {
   writeF32(cursor, data.energy);
   writeU8(cursor, statusByte(data));
 }
+// A NaN or Infinity in any of these would otherwise reach client-side prediction
+// (or the server's own authoritative state, for a delta the server decodes) and poison
+// it, exactly as an unvalidated input axis would (see handshake.ts's readSample).
+function assertFinite(values: readonly number[]): void {
+  if (values.some((value) => !Number.isFinite(value))) {
+    throw new RangeError('Snapshot value must be finite');
+  }
+}
+
 function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const id = readU16(cursor);
   const team = readU8(cursor);
@@ -95,6 +104,7 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const yaw = readF32(cursor);
   const energy = readF32(cursor);
   const flags = readU8(cursor);
+  assertFinite([x, y, z, vx, vy, vz, yaw, energy]);
   return {
     id,
     team,
@@ -259,18 +269,31 @@ function decodeFull(cursor: Cursor, header: SnapshotHeader): DecodedSnapshot {
 }
 
 function readChangedTransform(cursor: Cursor, next: PlayerSnapshotData): void {
-  next.x = readF32(cursor);
-  next.y = readF32(cursor);
-  next.z = readF32(cursor);
-  next.vx = readF32(cursor);
-  next.vy = readF32(cursor);
-  next.vz = readF32(cursor);
-  next.yaw = readF32(cursor);
+  const x = readF32(cursor);
+  const y = readF32(cursor);
+  const z = readF32(cursor);
+  const vx = readF32(cursor);
+  const vy = readF32(cursor);
+  const vz = readF32(cursor);
+  const yaw = readF32(cursor);
+  assertFinite([x, y, z, vx, vy, vz, yaw]);
+  next.x = x;
+  next.y = y;
+  next.z = z;
+  next.vx = vx;
+  next.vy = vy;
+  next.vz = vz;
+  next.yaw = yaw;
 }
 function readChangedStatus(cursor: Cursor, next: PlayerSnapshotData): void {
   const flags = readU8(cursor);
   next.onGround = flags & 1 ? 1 : 0;
   next.ski = flags & 2 ? 1 : 0;
+}
+function readChangedEnergy(cursor: Cursor, next: PlayerSnapshotData): void {
+  const energy = readF32(cursor);
+  assertFinite([energy]);
+  next.energy = energy;
 }
 function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData>): void {
   const id = readU16(cursor);
@@ -279,7 +302,7 @@ function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData
   if (!before) throw new RangeError(`Changed player ${String(id)} missing from baseline`);
   const next: PlayerSnapshotData = { ...before };
   if (mask & DIRTY_TRANSFORM) readChangedTransform(cursor, next);
-  if (mask & DIRTY_ENERGY) next.energy = readF32(cursor);
+  if (mask & DIRTY_ENERGY) readChangedEnergy(cursor, next);
   if (mask & DIRTY_STATUS) readChangedStatus(cursor, next);
   if (mask & DIRTY_TEAM) next.team = readU8(cursor);
   byId.set(id, next);

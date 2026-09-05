@@ -33,6 +33,10 @@ export interface NetServer {
   tick(tickNumber: number): void;
 }
 
+interface QueuedInput {
+  sequence: number;
+  input: PlayerInput;
+}
 interface ClientEntry {
   socket: WebSocket;
   session: Session;
@@ -44,7 +48,7 @@ interface ClientEntry {
    * spreads them across the ticks they were meant for instead of the newest sample
    * overwriting the others before stepWorld ever sees them.
    */
-  pendingInputs: PlayerInput[];
+  pendingInputs: QueuedInput[];
   lastInput: PlayerInput;
 }
 
@@ -91,10 +95,15 @@ function handleInput(
 ): void {
   const entry = clients.get(socket);
   if (!entry) return;
-  for (const sample of applyInputMessage(entry.session, decodeInput(bytes))) {
-    entry.pendingInputs.push(sample);
+  const message = decodeInput(bytes);
+  const samples = applyInputMessage(entry.session, message);
+  // applyInputMessage returns samples oldest-first for the consecutive sequences ending
+  // at message.sequence, so the oldest returned sample is this many back from it.
+  const startSequence = message.sequence - samples.length + 1;
+  samples.forEach((input, index) => {
+    entry.pendingInputs.push({ sequence: startSequence + index, input });
     if (entry.pendingInputs.length > MAX_PENDING_INPUTS) entry.pendingInputs.shift();
-  }
+  });
 }
 
 function handleAck(
@@ -148,7 +157,7 @@ function sendSnapshot(
   const bytes = encodeSnapshot(
     nextSnapshotId,
     tickNumber,
-    entry.session.lastAppliedSequence,
+    entry.session.lastSimulatedSequence,
     players,
     baseline,
   );
@@ -161,16 +170,34 @@ function sendSnapshot(
 function collectTickInputs(clients: Map<WebSocket, ClientEntry>): Map<number, PlayerInput> {
   const inputs = new Map<number, PlayerInput>();
   for (const entry of clients.values()) {
-    const next = entry.pendingInputs.shift() ?? entry.lastInput;
-    entry.lastInput = next;
-    inputs.set(entry.session.playerId, next);
+    const queued = entry.pendingInputs.shift();
+    // Only a queued sample actually being simulated this tick advances
+    // lastSimulatedSequence; holding the last input again does not, since nothing new
+    // was applied and a snapshot reporting a later sequence than what actually ran
+    // would make the client drop inputs it still needs to replay.
+    if (queued) {
+      entry.lastInput = queued.input;
+      entry.session.lastSimulatedSequence = queued.sequence;
+    }
+    inputs.set(entry.session.playerId, entry.lastInput);
   }
   return inputs;
 }
 
 export function startNetServer(options: NetServerOptions): NetServer {
   const wss = new WebSocketServer({ port: options.port });
-  const ready = new Promise<void>((resolve) => wss.once('listening', resolve));
+  // A bind failure (e.g. the port is already in use) must reject `ready`, not leave the
+  // caller awaiting it forever: an EventEmitter's 'error' with no listener at all throws
+  // synchronously and crashes the process with no context. The once-listener below wins
+  // that race and turns it into a normal rejection; the permanent one after it catches
+  // any later error (once the server is already up) so 'error' is never unhandled again.
+  const ready = new Promise<void>((resolve, reject) => {
+    wss.once('listening', resolve);
+    wss.once('error', reject);
+  });
+  wss.on('error', (error) => {
+    console.error('[clans-server] websocket server error:', error);
+  });
   const clients = new Map<WebSocket, ClientEntry>();
   let nextSnapshotId = 1;
 

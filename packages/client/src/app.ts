@@ -191,14 +191,21 @@ function stepNetworked(
  * stuck to a stale sample.
  */
 export function updateRemotes(
-  activeNet: Pick<NetClient, 'remoteTick' | 'remotePlayers'>,
+  activeNet: Pick<NetClient, 'remoteTick' | 'remotePlayers' | 'connected'>,
   targetScene: THREE.Scene,
   meshes: Map<number, THREE.Mesh>,
   buffers: Map<number, RemoteBuffer>,
   lastRemoteTick: { tick: number },
   nowMs: number,
 ): void {
-  if (activeNet.remoteTick !== lastRemoteTick.tick) {
+  // remotePlayers only changes when a snapshot arrives, and nothing else clears it once
+  // the socket drops -- a plain disconnect (no final empty snapshot) left every remote
+  // mesh, and the GPU resources syncRemoteMeshes' pruning now disposes, stranded until
+  // the page itself tore down. Clearing every buffer here lets that same pruning path
+  // remove and dispose them on the very next call.
+  if (!activeNet.connected) {
+    buffers.clear();
+  } else if (activeNet.remoteTick !== lastRemoteTick.tick) {
     lastRemoteTick.tick = activeNet.remoteTick;
     for (const [id, snapshot] of activeNet.remotePlayers) {
       let buffer = buffers.get(id);

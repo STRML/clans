@@ -22,6 +22,13 @@ import type { SnapshotBaseline } from '@clans/protocol';
 import type { Transport } from './transport.js';
 
 const MAX_REPLAY_TICKS = 30;
+// A generous ceiling on the backlog itself, well above MAX_REPLAY_TICKS: reconcile
+// already hard-snaps and clears the backlog once it exceeds MAX_REPLAY_TICKS, so this
+// only guards the case a snapshot never arrives to trigger that at all (a live-but-
+// stalled connection). It must stay above any realistic brief-stall backlog or it would
+// start silently dropping inputs reconcile's own, error-reporting hard-snap would
+// otherwise have handled.
+const MAX_PENDING_INPUTS = MAX_REPLAY_TICKS * 4;
 const LOSS_WINDOW = 50;
 const BYTES_WINDOW_MS = 1000;
 const LOCAL_SLOT = 0;
@@ -80,6 +87,11 @@ export class NetClient {
     transport.send(encodeJoin());
   }
 
+  /** False once the transport has closed (or failed to open); never reopens. */
+  get connected(): boolean {
+    return this.transport.isOpen();
+  }
+
   tick(input: PlayerInput): void {
     stepWorld(this.world, new Map([[LOCAL_SLOT, input]]));
     // Once the transport is closed it never delivers another snapshot to reconcile
@@ -89,6 +101,14 @@ export class NetClient {
     if (!this.transport.isOpen()) return;
     this.sequence += 1;
     this.pendingInputs.push({ sequence: this.sequence, input });
+    // A live but stalled connection (socket still OPEN, server or network just stopped
+    // producing snapshots) never trims this via reconcile either, since reconcile only
+    // runs when a snapshot arrives. Cap it unconditionally so a stall that never ends
+    // cannot grow this forever.
+    if (this.pendingInputs.length > MAX_PENDING_INPUTS) {
+      const dropped = this.pendingInputs.shift();
+      if (dropped) this.inputSentAt.delete(dropped.sequence);
+    }
     const samples: [PlayerInput, PlayerInput, PlayerInput] = [
       input,
       this.pendingInputs.at(-2)?.input ?? input,
@@ -121,17 +141,20 @@ export class NetClient {
 
   private handleSnapshot(bytes: Uint8Array): void {
     this.recordBytes(bytes.byteLength);
-    const header = peekSnapshotHeader(bytes);
-    const baseline = header.isDelta
-      ? (this.snapshotHistory.find((entry) => entry.snapshotId === header.baselineId) ?? null)
-      : null;
     let decoded;
     try {
+      // peekSnapshotHeader reads the same fixed-size header decodeSnapshot does, so a
+      // frame too short to hold one throws here just as readily as inside decodeSnapshot
+      // itself; it has to share this same try/catch rather than run ahead of it.
+      const header = peekSnapshotHeader(bytes);
+      const baseline = header.isDelta
+        ? (this.snapshotHistory.find((entry) => entry.snapshotId === header.baselineId) ?? null)
+        : null;
       decoded = decodeSnapshot(bytes, baseline);
     } catch {
-      // A delta against a baseline outside our history (older than SNAPSHOT_HISTORY_DEPTH
-      // sends ago, or one we never received at all). Count it as loss and do not ack; the
-      // server's 1 s fallback then sends a full snapshot.
+      // A malformed frame, or a delta against a baseline outside our history (older than
+      // SNAPSHOT_HISTORY_DEPTH sends ago, or one we never received at all). Count it as
+      // loss and do not ack; the server's 1 s fallback then sends a full snapshot.
       this.pushLoss(0);
       return;
     }

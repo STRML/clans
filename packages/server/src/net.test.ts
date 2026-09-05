@@ -250,4 +250,37 @@ describe('startNetServer', () => {
     expect(second.baselineId).toBe(first.snapshotId);
     client.close();
   });
+
+  it('reports lastInputSequence as what was simulated, not merely queued', async () => {
+    // Codex round 2 (PR #4): applyInputMessage advances the session's sequence the
+    // instant a message is parsed, but a message that queues 2 samples only gets one of
+    // them simulated per tick. Reporting the parse-time sequence in a snapshot tells the
+    // client an input was applied a tick before it actually was, so the client drops it
+    // from replay early and permanently diverges from the server by that one input.
+    const client = await connect(TEST_PORT);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    client.send(encodeInput({ sequence: 1, samples: [idleSample, idleSample, idleSample] }));
+    await wait(10);
+    server.tick(2); // simulates sequence 1
+
+    // Queues sequence 2 and 3; only sequence 2 will be simulated by the very next tick.
+    const forward: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: false, jet: false };
+    client.send(encodeInput({ sequence: 3, samples: [idleSample, forward, idleSample] }));
+    await wait(10);
+
+    const snapshotPromise = receive(client);
+    server.tick(4); // simulates only sequence 2; sequence 3 is still queued
+    const snapshot = decodeSnapshot(await snapshotPromise, null);
+    expect(snapshot.lastInputSequence).toBe(2);
+    client.close();
+  });
+
+  it('rejects a bind failure through `ready` instead of hanging or crashing unhandled', async () => {
+    const busy = startNetServer({ world: createWorld(terrain, 1, 4), spawns, port: TEST_PORT });
+    await expect(busy.ready).rejects.toThrow();
+    busy.close();
+  });
 });
