@@ -190,9 +190,6 @@ function classify(world: World, body: Body, input: PlayerInput, armor: ArmorData
   return { sample, grounded, slope, forcedSki, skiing, mayRun };
 }
 
-const isIdleOnGround = (ctx: TickContext, input: PlayerInput): boolean =>
-  ctx.grounded && !ctx.skiing && input.moveX === 0 && input.moveZ === 0;
-
 interface Forces {
   jumped: boolean;
   jetted: boolean;
@@ -207,15 +204,16 @@ function applyForces(
   armor: ArmorData,
   dt: number,
 ): Forces {
-  if (ctx.mayRun) applyRun(body, input, armor, dt);
   const jumpEdge = input.jump && (!players.wasJumpHeld[id] || !players.wasGrounded[id]);
   const jumped = ctx.grounded && jumpEdge && ctx.slope <= armor.jumpSurfaceAngle;
   if (jumped) body.vy = Math.max(body.vy, armor.jumpForce / armor.mass);
   if (ctx.grounded) applyGround(body, ctx.sample, dt);
   else applyAir(body, armor, dt);
-  // Friction runs after slope gravity so an idle player settles on any slope below
-  // runSurfaceAngle instead of creeping downhill by one tick of gravity every tick.
-  if (isIdleOnGround(ctx, input)) applyFriction(body, armor, dt);
+  // Ground friction applies to everyone on the surface who is not skiing: it is what
+  // skiing removes. It runs after slope gravity so an idle player settles, and before the
+  // run force so a runner holds exactly the armor's cap, downhill included.
+  if (ctx.grounded && !ctx.skiing) applyFriction(body, armor, dt);
+  if (ctx.mayRun) applyRun(body, input, armor, dt);
   const jetted = applyJet(players, id, body, input, armor, dt);
   return { jumped, jetted };
 }

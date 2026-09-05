@@ -82,6 +82,34 @@ describe('Light movement', () => {
     expect(world.players.position[id * 3 + 2]).toBe(10);
   });
 
+  it('holds the run cap when running downhill without skiing', () => {
+    const rise = Math.tan((30 * Math.PI) / 180) * 1000;
+    const slope: Heightfield = {
+      gridSize: 2,
+      squareSize: 1000,
+      originX: 0,
+      originY: 0,
+      originZ: 1000,
+      heightScale: 1,
+      heights: Uint16Array.from([Math.round(rise), Math.round(rise), 0, 0]),
+    };
+    const world = createWorld(slope, 1);
+    const id = addPlayer(world, { x: 500, y: rise / 2, z: 500 });
+    world.players.onGround[id] = 1;
+    world.players.wasGrounded[id] = 1;
+    // Facing downhill (-z): yaw PI makes forward (sin, cos) = (0, -1).
+    for (let tick = 0; tick < Math.ceil(3 / FIXED_DT); tick += 1) {
+      stepWorld(world, inputMap(id, { moveZ: 1, yaw: Math.PI }));
+    }
+    const speed = Math.hypot(
+      world.players.velocity[id * 3] ?? 0,
+      world.players.velocity[id * 3 + 2] ?? 0,
+    );
+    expect(speed).toBeLessThanOrEqual(15.01);
+    expect(speed).toBeGreaterThan(14);
+    expect(world.players.ski[id]).toBe(0);
+  });
+
   it('stops from run speed in under 0.5 seconds', () => {
     const world = createWorld(flat, 1);
     const id = addPlayer(world, { x: 10, y: 0, z: 10 });
