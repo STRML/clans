@@ -1,3 +1,4 @@
+import { stepPlayers } from './movement.js';
 import type { Heightfield } from './terrain.js';
 import type { PlayerInput, Vec3, World } from './types.js';
 
@@ -40,6 +41,6 @@ export function stepWorld(
 ): void {
   if (dt !== FIXED_DT)
     throw new RangeError(`Simulation step requires fixed tick ${FIXED_TICK_MS} ms`);
-  void inputs;
+  stepPlayers(world, inputs, dt);
   world.tick += 1;
 }
