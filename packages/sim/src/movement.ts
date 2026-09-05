@@ -139,12 +139,15 @@ function applyAir(body: Body, armor: ArmorData, dt: number): void {
 
 /**
  * Torque's jump impulse: jumpForce/mass upward, scaled down linearly once the body already
- * rises faster than minJumpSpeed, and refused above maxJumpSpeed. Returns true when it fired.
+ * rises faster than minJumpSpeed, and refused above maxJumpSpeed. The scale and refusal read
+ * the vertical speed from the start of the tick (startVy), not the speed after this tick's
+ * gravity and run steering already ran, so a jump on the edge of the refusal threshold isn't
+ * decided by an accel this same tick applied before the jump. Returns true when it fired.
  */
-function applyJump(body: Body, armor: ArmorData): boolean {
-  if (body.vy > armor.maxJumpSpeed) return false;
+function applyJump(body: Body, armor: ArmorData, startVy: number): boolean {
+  if (startVy > armor.maxJumpSpeed) return false;
   const range = armor.maxJumpSpeed - armor.minJumpSpeed;
-  const scale = body.vy > armor.minJumpSpeed ? (armor.maxJumpSpeed - body.vy) / range : 1;
+  const scale = startVy > armor.minJumpSpeed ? (armor.maxJumpSpeed - startVy) / range : 1;
   body.vy += (armor.jumpForce / armor.mass) * scale;
   return true;
 }
@@ -258,12 +261,15 @@ function applyForces(
 ): Forces {
   const jumpEdge = input.jump && (!players.wasJumpHeld[id] || !players.wasGrounded[id]);
   const mayJump = ctx.grounded && jumpEdge && ctx.slope <= armor.jumpSurfaceAngle;
+  const startVy = body.vy;
   if (ctx.grounded) applyGround(body, ctx.sample, dt);
   else applyAir(body, armor, dt);
   if (ctx.mayRun) applyRun(body, input, ctx.sample.normal, armor, dt);
   // The jump comes after the run steering, as in Torque, so the steering toward a
-  // horizontal target cannot eat part of the impulse on the tick it fires.
-  const jumped = mayJump && applyJump(body, armor);
+  // horizontal target cannot eat part of the impulse on the tick it fires. It scales and
+  // refuses off startVy (captured before ground/run this tick) so this tick's own gravity
+  // and steering can't push a jump on the refusal edge into being wrongly refused or scaled.
+  const jumped = mayJump && applyJump(body, armor, startVy);
   const jetted = applyJet(players, id, body, input, armor, dt);
   return { jumped, jetted };
 }

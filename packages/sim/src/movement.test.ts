@@ -309,6 +309,36 @@ describe('Light movement', () => {
     expect(gainFrom(31)).toBeLessThanOrEqual(0);
   });
 
+  it("scales the jump off the vertical speed at the start of the tick, not after this tick's own accel", () => {
+    // Round 14: on a steep uphill slope (69 degrees, below the 70 degree runSurfaceAngle) a
+    // grounded player near maxJumpSpeed runs applyGround (slope gravity) and applyRun
+    // (steering) before applyJump. Those can nudge vy up or down before the jump reads it,
+    // so the scale/refusal must use the speed from the start of the tick, not whatever this
+    // tick's own gravity and steering already did to vy.
+    const rise = Math.tan((69 * Math.PI) / 180) * 1000;
+    const slope: Heightfield = {
+      gridSize: 2,
+      squareSize: 1000,
+      originX: 0,
+      originY: 0,
+      originZ: 1000,
+      heightScale: 1,
+      heights: Uint16Array.from([Math.round(rise), Math.round(rise), 0, 0]),
+    };
+    const vyAfter = (jump: boolean): number => {
+      const world = createWorld(slope, 1);
+      const id = addPlayer(world, { x: 500, y: rise / 2, z: 500 });
+      world.players.onGround[id] = 1;
+      world.players.wasGrounded[id] = 1;
+      world.players.velocity[id * 3 + 1] = 30.1;
+      stepWorld(world, inputMap(id, { jump }));
+      return world.players.velocity[id * 3 + 1] ?? 0;
+    };
+    const withJump = vyAfter(true);
+    const withoutJump = vyAfter(false);
+    expect(withJump).toBeCloseTo(withoutJump, 9);
+  });
+
   it('hard caps horizontal speed at 68 m/s for 100 ticks', () => {
     const slope: Heightfield = {
       gridSize: 2,
