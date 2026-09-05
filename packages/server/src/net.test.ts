@@ -279,6 +279,24 @@ describe('startNetServer', () => {
     client.close();
   });
 
+  it("reports the post-step world tick in a snapshot, not the loop's pre-step tick argument", async () => {
+    // Issue #6: stepWorld increments world.tick as its last action, but sendSnapshot was
+    // passed the tick loop's own tickNumber parameter (the pre-step value) instead of
+    // options.world.tick. hashWorld mixes world.tick into its hash for desync detection,
+    // so a client that restores its tick from the snapshot ends up permanently offset by
+    // one from the server, even though the simulated state itself is identical.
+    const client = await connect(TEST_PORT);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    const firstPromise = receive(client);
+    server.tick(0);
+    const first = decodeSnapshot(await firstPromise, null);
+    expect(first.tick).toBe(world.tick);
+    client.close();
+  });
+
   it('rejects a bind failure through `ready` instead of hanging or crashing unhandled', async () => {
     const busy = startNetServer({ world: createWorld(terrain, 1, 4), spawns, port: TEST_PORT });
     await expect(busy.ready).rejects.toThrow();

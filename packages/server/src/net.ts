@@ -232,7 +232,11 @@ export function startNetServer(options: NetServerOptions): NetServer {
     if (tickNumber % SNAPSHOT_EVERY_N_TICKS !== 0) return;
     const players = serializeActivePlayers(options.world);
     nextSnapshotId += 1;
-    for (const entry of clients.values()) sendSnapshot(entry, nextSnapshotId, tickNumber, players);
+    // Report options.world.tick (the value stepWorld just produced), not the loop's own
+    // tickNumber argument (the pre-step value): see issue #6.
+    for (const entry of clients.values()) {
+      sendSnapshot(entry, nextSnapshotId, options.world.tick, players);
+    }
   }
 
   function close(): void {
