@@ -82,4 +82,30 @@ describe('WebSocketTransport', () => {
     transport.close();
     stalled.close();
   });
+
+  it('flushes the first send plus the most recent ones once open, not the earliest after it', async () => {
+    // Codex round 9 (PR #4): the old policy dropped every send attempted once the queue
+    // was full, keeping only the earliest ones. A socket slow enough to fill it flushed
+    // ancient early-connection input the moment it finally opened, then jumped straight
+    // to whatever sequence the client was on by then — a gap the server's 2-tick
+    // redundant-sample catch-up cannot recover, so it was permanent and unrecoverable.
+    const received = new Promise<number[][]>((resolve) => {
+      const frames: number[][] = [];
+      server.once('connection', (socket) => {
+        socket.on('message', (data) => {
+          frames.push([...new Uint8Array(data as Uint8Array)]);
+          if (frames.length === 128) resolve(frames);
+        });
+      });
+    });
+    const transport = new WebSocketTransport(`ws://127.0.0.1:${String(PORT)}`);
+    // Byte 0 stands in for the client's Join, always sent first; the rest simulate 500
+    // ticks of local prediction while the connection is still slow to complete.
+    transport.send(Uint8Array.of(0));
+    for (let i = 1; i <= 500; i += 1) transport.send(Uint8Array.of(i % 256));
+    const frames = await received;
+    expect(frames[0]).toEqual([0]);
+    expect(frames[frames.length - 1]).toEqual([500 % 256]);
+    transport.close();
+  });
 });

@@ -36,14 +36,22 @@ export class WebSocketTransport implements Transport {
   }
 
   send(bytes: Uint8Array): void {
-    if (this.socket.readyState === WebSocket.OPEN) this.socket.send(bytes);
-    else if (this.socket.readyState === WebSocket.CONNECTING) {
-      // Drop the newest attempted send once at capacity rather than evicting the
-      // oldest: the very first queued frame is the client's Join, and losing that
-      // would silently strand the connection with no Welcome ever coming back. A
-      // socket connecting this long has already made its queued input samples stale.
-      if (this.outgoing.length < MAX_QUEUED_BEFORE_OPEN) this.outgoing.push(bytes);
+    if (this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(bytes);
+      return;
     }
+    if (this.socket.readyState !== WebSocket.CONNECTING) return;
+    this.outgoing.push(bytes);
+    // Codex round 9 (PR #4): dropping every attempted send once at capacity (keeping only
+    // the earliest ones) meant a socket slow enough to fill this queue flushed ancient
+    // early-connection input the moment it finally opened, then jumped straight to
+    // whatever sequence the client was on by then. The server's redundant-sample catch-up
+    // only ever recovers the 2 most recent ticks, so that gap was permanent. Evicting from
+    // just after the protected first entry instead keeps the first send (the client's
+    // Join — losing it would silently strand the connection with no Welcome ever coming
+    // back) plus the MOST RECENT input, so what eventually flushes reflects where the
+    // client actually is, not where it was when the connection attempt started.
+    if (this.outgoing.length > MAX_QUEUED_BEFORE_OPEN) this.outgoing.splice(1, 1);
   }
 
   isOpen(): boolean {

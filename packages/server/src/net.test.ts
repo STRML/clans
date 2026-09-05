@@ -233,6 +233,37 @@ describe('startNetServer', () => {
     client.close();
   });
 
+  it('keeps every queued sample through a burst larger than the old backlog cap of eight', async () => {
+    // Codex round 9 (PR #4): MAX_PENDING_INPUTS reused SNAPSHOT_HISTORY_DEPTH (8), an
+    // unrelated constant. A burst of more than 8 Input messages arriving before a single
+    // tick drained any of them evicted the oldest queued samples here, even though
+    // applyInputMessage had already advanced session.lastAppliedSequence past them:
+    // marked "applied" but never simulated, and unrecoverable by any later message's
+    // redundant catch-up window (which only ever covers the 2 most recent ticks).
+    const client = await connect(TEST_PORT);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    const base = welcome.playerId * 3;
+
+    // Settle onto the ground first (see the note two tests up) so a forward sample
+    // actually produces velocity once it is finally simulated.
+    for (let i = 0; i < 3; i += 1) server.tick(200 + i);
+
+    // 12 messages, each advancing the sequence by exactly one, arrive before any tick
+    // drains the queue: a burst comfortably larger than the old cap of 8.
+    const forward: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: false, jet: false };
+    client.send(encodeInput({ sequence: 1, samples: [forward, idleSample, idleSample] }));
+    for (let sequence = 2; sequence <= 12; sequence += 1) {
+      client.send(encodeInput({ sequence, samples: [idleSample, idleSample, idleSample] }));
+    }
+    await wait(20);
+
+    server.tick(210); // dequeues the oldest queued sample: sequence 1's forward input
+    expect(world.players.velocity[base + 2] ?? 0).toBeGreaterThan(0);
+    client.close();
+  });
+
   it('ignores a forged ack for a snapshot the server never sent, instead of permanently forcing full snapshots', async () => {
     const client = await connect(TEST_PORT);
     const welcomePromise = receive(client);

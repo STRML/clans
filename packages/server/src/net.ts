@@ -67,7 +67,15 @@ const IDLE_INPUT: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: 
 // Bounds a client's catch-up queue. Each Input message contributes at most 3 samples and
 // a duplicate/reordered sequence is dropped in applyInputMessage, so this only guards the
 // pathological case of a client that keeps sending while the server falls behind ticking.
-const MAX_PENDING_INPUTS = SNAPSHOT_HISTORY_DEPTH;
+// Codex round 9 (PR #4): this previously reused SNAPSHOT_HISTORY_DEPTH (8), an unrelated
+// constant (a delta-snapshot baseline window) that happened to have a plausible-looking
+// value. applyInputMessage advances session.lastAppliedSequence the moment a message is
+// parsed, regardless of queue capacity, so once more than 8 messages arrived before a
+// tick drained any of them, the oldest queued samples were evicted here and permanently
+// lost: already marked "applied" but never simulated, and unrecoverable by any later
+// message's redundant catch-up window (that only ever covers the most recent 2 ticks).
+// A burst this size is ordinary during a tick-loop stall, not just adversarial traffic.
+const MAX_PENDING_INPUTS = 128;
 
 function handleJoin(
   world: World,
