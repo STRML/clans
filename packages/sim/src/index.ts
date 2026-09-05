@@ -1,2 +1,4 @@
-// Pure TypeScript game simulation. No DOM, no Three.js, no Node APIs.
-export {};
+export * from './random.js';
+export * from './terrain.js';
+export * from './types.js';
+export * from './world.js';
