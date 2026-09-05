@@ -3,6 +3,7 @@ import {
   FIXED_DT,
   addPlayer,
   createWorld,
+  sampleTerrain,
   stepWorld,
   type Heightfield,
   type PlayerInput,
@@ -63,5 +64,113 @@ describe('Light movement', () => {
     expect(world.players.energy[id]).toBeCloseTo(52);
     for (let tick = 0; tick < 100; tick += 1) stepWorld(world, inputMap(id, {}));
     expect(world.players.energy[id]).toBeCloseTo(60);
+  });
+
+  it('pushes a fast descending player onto a slope and records landing speed', () => {
+    const slope: Heightfield = {
+      gridSize: 2,
+      squareSize: 8,
+      originX: 0,
+      originY: 0,
+      originZ: 8,
+      heightScale: 1,
+      heights: Uint16Array.from([0, 4, 0, 4]),
+    };
+    const world = createWorld(slope, 1);
+    const id = addPlayer(world, { x: 4, y: 3, z: 4 });
+    world.players.velocity[id * 3 + 1] = -80;
+    stepWorld(world, inputMap(id, {}));
+    expect(world.players.position[id * 3 + 1]).toBeCloseTo(2);
+    // Landing removes the velocity into the surface and keeps the tangent part.
+    const { normal } = sampleTerrain(slope, 4, 4);
+    const [vx, vy, vz] = [
+      world.players.velocity[id * 3] ?? 0,
+      world.players.velocity[id * 3 + 1] ?? 0,
+      world.players.velocity[id * 3 + 2] ?? 0,
+    ];
+    expect(vx * normal.x + vy * normal.y + vz * normal.z).toBeCloseTo(0);
+    expect(Math.hypot(vx, vy, vz)).toBeGreaterThan(30);
+    expect(world.players.landingSpeed[id]).toBeGreaterThanOrEqual(80);
+  });
+
+  it('gains speed every tick while skiing down a 20 degree slope for 3 seconds', () => {
+    const rise = Math.tan((20 * Math.PI) / 180) * 1000;
+    const slope: Heightfield = {
+      gridSize: 2,
+      squareSize: 1000,
+      originX: 0,
+      originY: 0,
+      originZ: 1000,
+      heightScale: 1,
+      heights: Uint16Array.from([Math.round(rise), Math.round(rise), 0, 0]),
+    };
+    const world = createWorld(slope, 1);
+    const id = addPlayer(world, { x: 500, y: rise / 2, z: 500 });
+    world.players.onGround[id] = 1;
+    world.players.wasGrounded[id] = 1;
+    world.players.wasJumpHeld[id] = 1;
+    let previous = 0;
+    for (let tick = 0; tick < Math.ceil(3 / FIXED_DT); tick += 1) {
+      stepWorld(world, inputMap(id, { jump: true }));
+      const speed = Math.hypot(
+        world.players.velocity[id * 3] ?? 0,
+        world.players.velocity[id * 3 + 2] ?? 0,
+      );
+      expect(speed + 1e-9).toBeGreaterThanOrEqual(previous);
+      previous = speed;
+    }
+    // 3 s at g*sin(20 deg) = 6.84 m/s^2 stays under horizResistSpeed (33), so speed is
+    // monotonic. Above 33 the resistance term can win a tick and the assertion is invalid.
+    expect(previous).toBeGreaterThan(15);
+  });
+
+  it('fires one jump impulse and refuses it above 80 degrees', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 10, y: 0, z: 10 });
+    world.players.onGround[id] = 1;
+    world.players.wasGrounded[id] = 1;
+    stepWorld(world, inputMap(id, { jump: true }));
+    const first = world.players.velocity[id * 3 + 1] ?? 0;
+    stepWorld(world, inputMap(id, { jump: true }));
+    expect(world.players.velocity[id * 3 + 1]).toBeLessThan(first);
+
+    const cliff: Heightfield = {
+      gridSize: 2,
+      squareSize: 8,
+      originX: 0,
+      originY: 0,
+      originZ: 8,
+      heightScale: 1,
+      heights: Uint16Array.from([64, 64, 0, 0]),
+    };
+    const steep = createWorld(cliff, 1);
+    const steepId = addPlayer(steep, { x: 4, y: 32, z: 4 });
+    steep.players.onGround[steepId] = 1;
+    steep.players.wasGrounded[steepId] = 1;
+    stepWorld(steep, inputMap(steepId, { jump: true }));
+    // Refused jump: no upward impulse. Slope gravity may pull the value below zero.
+    expect(steep.players.velocity[steepId * 3 + 1]).toBeLessThanOrEqual(0);
+    expect(steep.players.ski[steepId]).toBe(1);
+  });
+
+  it('hard caps horizontal speed at 68 m/s for 100 ticks', () => {
+    const slope: Heightfield = {
+      gridSize: 2,
+      squareSize: 1000,
+      originX: 0,
+      originY: 0,
+      originZ: 1000,
+      heightScale: 1,
+      heights: Uint16Array.from([1000, 1000, 0, 0]),
+    };
+    const world = createWorld(slope, 1);
+    const id = addPlayer(world, { x: 500, y: 500, z: 500 });
+    world.players.velocity[id * 3 + 2] = -80; // downhill: row 1 (z = 0) is the low edge
+    world.players.wasGrounded[id] = 1;
+    world.players.wasJumpHeld[id] = 1;
+    for (let tick = 0; tick < 100; tick += 1) stepWorld(world, inputMap(id, { jump: true }));
+    expect(
+      Math.hypot(world.players.velocity[id * 3] ?? 0, world.players.velocity[id * 3 + 2] ?? 0),
+    ).toBeLessThanOrEqual(68);
   });
 });

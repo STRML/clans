@@ -114,17 +114,20 @@ function applyJet(
 
 function applyResistance(body: Body, armor: ArmorData, dt: number): void {
   const horizontal = Math.hypot(body.vx, body.vz);
-  if (horizontal > armor.horizResistSpeed) {
-    const resisted = Math.min(armor.horizMaxSpeed, horizontal * (1 - armor.horizResistFactor * dt));
-    body.vx *= resisted / horizontal;
-    body.vz *= resisted / horizontal;
+  if (horizontal > armor.horizMaxSpeed) {
+    const scale = armor.horizMaxSpeed / horizontal;
+    body.vx *= scale;
+    body.vz *= scale;
+  } else if (horizontal > armor.horizResistSpeed) {
+    const decay = 1 - armor.horizResistFactor * dt;
+    body.vx *= decay;
+    body.vz *= decay;
   }
-  if (Math.abs(body.vy) > armor.upResistSpeed) {
-    const resisted = Math.min(
-      armor.upMaxSpeed,
-      Math.abs(body.vy) * (1 - armor.upResistFactor * dt),
-    );
-    body.vy = Math.sign(body.vy) * resisted;
+  const vertical = Math.abs(body.vy);
+  if (vertical > armor.upMaxSpeed) {
+    body.vy = Math.sign(body.vy) * armor.upMaxSpeed;
+  } else if (vertical > armor.upResistSpeed) {
+    body.vy *= 1 - armor.upResistFactor * dt;
   }
 }
 
