@@ -5,11 +5,13 @@ export interface MissionObject {
   children: MissionObject[];
 }
 
+type TokenKind = 'string' | 'word' | 'delimiter';
+
 interface Token {
   value: string;
   line: number;
-  /** True for a quoted string literal, which is never a keyword or delimiter. */
-  quoted: boolean;
+  /** string: quoted literal. word: bare identifier or keyword. delimiter: one of { } ( ) ; = */
+  kind: TokenKind;
 }
 
 function isWhitespace(char: string): boolean {
@@ -72,19 +74,19 @@ function tokenize(source: string): Token[] {
       continue;
     }
     if ('{}();='.includes(char)) {
-      tokens.push({ value: char, line, quoted: false });
+      tokens.push({ value: char, line, kind: 'delimiter' });
       index += 1;
       continue;
     }
     if (char === '"') {
       const result = readString(source, index, line);
-      tokens.push({ value: result.value, line: result.line, quoted: true });
+      tokens.push({ value: result.value, line: result.line, kind: 'string' });
       index = result.nextIndex;
       line = result.nextLine;
       continue;
     }
     const result = readWord(source, index, line);
-    tokens.push({ value: result.value, line: result.line, quoted: false });
+    tokens.push({ value: result.value, line: result.line, kind: 'word' });
     index = result.nextIndex;
   }
   return tokens;
@@ -102,19 +104,21 @@ class Cursor {
     return this.tokens[this.index];
   }
 
-  /** Consumes an unquoted identifier: a class name, object name, or property key. */
+  /** Consumes a bare word: a class name, object name, or property key. */
   takeIdentifier(role: string): Token {
     const token = this.take();
-    if (token.quoted) {
-      throw new SyntaxError(`Expected ${role}, got quoted string at line ${String(token.line)}`);
+    if (token.kind !== 'word' || token.value === 'new') {
+      throw new SyntaxError(
+        `Expected ${role}, got ${describe(token)} at line ${String(token.line)}`,
+      );
     }
     return token;
   }
 
-  /** Consumes the next token. With `value`, it must be that exact unquoted keyword or delimiter. */
+  /** Consumes the next token. With `value`, it must be that exact bare keyword or delimiter. */
   take(value?: string): Token {
     const token = this.tokens[this.index];
-    if (!token || (value !== undefined && (token.value !== value || token.quoted))) {
+    if (!token || (value !== undefined && (token.value !== value || token.kind === 'string'))) {
       throw new SyntaxError(
         `Expected ${value ?? 'token'} at line ${token?.line ?? this.totalLines}`,
       );
@@ -131,15 +135,17 @@ function assertNotEof(cursor: Cursor, classToken: Token): void {
 }
 
 const isDelimiter = (token: Token | undefined, value: string): boolean =>
-  token !== undefined && !token.quoted && token.value === value;
+  token !== undefined && token.kind === 'delimiter' && token.value === value;
+
+const describe = (token: Token): string =>
+  token.kind === 'string' ? 'quoted string' : `${token.kind} ${token.value}`;
 
 function parseHeader(cursor: Cursor): { classToken: Token; name: string | null } {
   cursor.take('new');
   const classToken = cursor.takeIdentifier('class name');
   cursor.take('(');
   const next = cursor.peek();
-  const name =
-    next && !next.quoted && next.value === ')' ? null : cursor.takeIdentifier('object name').value;
+  const name = isDelimiter(next, ')') ? null : cursor.takeIdentifier('object name').value;
   cursor.take(')');
   cursor.take('{');
   return { classToken, name };
@@ -149,8 +155,8 @@ function parseHeader(cursor: Cursor): { classToken: Token; name: string | null }
 function parsePropertyValue(cursor: Cursor, classToken: Token): string {
   assertNotEof(cursor, classToken);
   const token = cursor.take();
-  if (!token.quoted && (token.value === 'new' || token.value === '}' || token.value === ';')) {
-    throw new SyntaxError(`Expected a value before ${token.value} at line ${String(token.line)}`);
+  if (token.kind === 'delimiter' || (token.kind === 'word' && token.value === 'new')) {
+    throw new SyntaxError(`Expected a value, got ${describe(token)} at line ${String(token.line)}`);
   }
   assertNotEof(cursor, classToken);
   cursor.take(';');
@@ -160,7 +166,7 @@ function parsePropertyValue(cursor: Cursor, classToken: Token): string {
 function parseBody(cursor: Cursor, classToken: Token, object: MissionObject): void {
   while (cursor.peek() && !isDelimiter(cursor.peek(), '}')) {
     const next = cursor.peek();
-    if (next && !next.quoted && next.value === 'new') {
+    if (next && next.kind === 'word' && next.value === 'new') {
       object.children.push(parseObject(cursor));
       continue;
     }

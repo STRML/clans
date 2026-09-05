@@ -44,7 +44,13 @@ describe('parseMission', () => {
       'Expected ; at line 2',
     );
     expect(() => parseMission('new A(X) {\n key = ;\n};')).toThrow(
-      'Expected a value before ; at line 2',
+      'Expected a value, got delimiter ; at line 2',
+    );
+    expect(() => parseMission('new A(X) {\n key = =;\n};')).toThrow(
+      'Expected a value, got delimiter = at line 2',
+    );
+    expect(() => parseMission('new =(X) { };')).toThrow(
+      'Expected class name, got delimiter = at line 1',
     );
   });
 

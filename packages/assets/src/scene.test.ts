@@ -49,4 +49,13 @@ describe('scene extraction', () => {
       'Expected a finite number for SimGroup.team, got "not-a-number"',
     );
   });
+
+  it('rejects a missing terrainFile instead of writing an empty string', () => {
+    const source =
+      'new TerrainBlock(T) { squareSize = "8"; position = "0 0 0"; };\n' +
+      'new Sun() { direction = "0 0 -1"; color = "1 1 1 1"; ambient = "0 0 0 1"; };\n' +
+      'new Sky(Sky) { visibleDistance = "500"; fogDistance = "400"; fogColor = "0 0 0 1"; materialList = "x"; };\n' +
+      'new MissionArea(M) { area = "0 0 1 1"; };';
+    expect(() => extractScene(parseMission(source))).toThrow('Missing TerrainBlock.terrainFile');
+  });
 });
