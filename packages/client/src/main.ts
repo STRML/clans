@@ -1,3 +1,13 @@
-// Client entry. Milestone 1 replaces this with the terrain scene.
-const app = document.getElementById('app');
-if (app) app.textContent = 'Clans: loading';
+import { createApp } from './app.js';
+
+const container = document.getElementById('app');
+if (!container) throw new Error('#app missing');
+
+const app = await createApp(container);
+let last = performance.now();
+const tick = (now: number): void => {
+  app.frame((now - last) / 1000);
+  last = now;
+  requestAnimationFrame(tick);
+};
+requestAnimationFrame(tick);
