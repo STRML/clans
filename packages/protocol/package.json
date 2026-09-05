@@ -11,5 +11,8 @@
   "scripts": {
     "build": "tsc -b",
     "test": "vitest run"
+  },
+  "dependencies": {
+    "@clans/sim": "workspace:*"
   }
 }
