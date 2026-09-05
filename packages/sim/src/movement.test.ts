@@ -46,6 +46,28 @@ describe('Light movement', () => {
     expect(Math.abs(world.players.velocity[id * 3 + 2] ?? 0)).toBeLessThan(1e-9);
   });
 
+  it('settles when idle on a 20 degree slope instead of creeping downhill', () => {
+    const rise = Math.tan((20 * Math.PI) / 180) * 1000;
+    const slope: Heightfield = {
+      gridSize: 2,
+      squareSize: 1000,
+      originX: 0,
+      originY: 0,
+      originZ: 1000,
+      heightScale: 1,
+      heights: Uint16Array.from([Math.round(rise), Math.round(rise), 0, 0]),
+    };
+    const world = createWorld(slope, 1);
+    const id = addPlayer(world, { x: 500, y: rise / 2, z: 500 });
+    world.players.onGround[id] = 1;
+    world.players.wasGrounded[id] = 1;
+    for (let tick = 0; tick < 50; tick += 1) stepWorld(world, inputMap(id, {}));
+    expect(
+      Math.hypot(world.players.velocity[id * 3] ?? 0, world.players.velocity[id * 3 + 2] ?? 0),
+    ).toBe(0);
+    expect(world.players.position[id * 3 + 2]).toBeCloseTo(500, 3);
+  });
+
   it('stops from run speed in under 0.5 seconds', () => {
     const world = createWorld(flat, 1);
     const id = addPlayer(world, { x: 10, y: 0, z: 10 });

@@ -65,13 +65,18 @@ function applyRun(body: Body, input: PlayerInput, armor: ArmorData, dt: number):
   body.vz = nextSide * sin + nextForward * cos;
 }
 
-/** Ground friction when standing still on the surface without skiing. */
+/**
+ * Ground friction when standing still on the surface without skiing. A grounded body's
+ * velocity is tangent to the surface, so friction damps the whole vector; damping only the
+ * horizontal part would leave the tangent's vertical share to re-emerge on contact.
+ */
 function applyFriction(body: Body, armor: ArmorData, dt: number): void {
-  const speed = Math.hypot(body.vx, body.vz);
+  const speed = Math.hypot(body.vx, body.vy, body.vz);
   if (speed === 0) return;
-  const next = approachZero(speed, armor.groundFriction * dt);
-  body.vx *= next / speed;
-  body.vz *= next / speed;
+  const scale = approachZero(speed, armor.groundFriction * dt) / speed;
+  body.vx *= scale;
+  body.vy *= scale;
+  body.vz *= scale;
 }
 
 /** Remove any velocity into the surface, then add the slope component of gravity. */
@@ -202,12 +207,14 @@ function applyForces(
   dt: number,
 ): Forces {
   if (ctx.mayRun) applyRun(body, input, armor, dt);
-  if (isIdleOnGround(ctx, input)) applyFriction(body, armor, dt);
   const jumpEdge = input.jump && (!players.wasJumpHeld[id] || !players.wasGrounded[id]);
   const jumped = ctx.grounded && jumpEdge && ctx.slope <= armor.jumpSurfaceAngle;
   if (jumped) body.vy = Math.max(body.vy, armor.jumpForce / armor.mass);
   if (ctx.grounded) applyGround(body, ctx.sample, dt);
   else applyAir(body, armor, dt);
+  // Friction runs after slope gravity so an idle player settles on any slope below
+  // runSurfaceAngle instead of creeping downhill by one tick of gravity every tick.
+  if (isIdleOnGround(ctx, input)) applyFriction(body, armor, dt);
   const jetted = applyJet(players, id, body, input, armor, dt);
   return { jumped, jetted };
 }
