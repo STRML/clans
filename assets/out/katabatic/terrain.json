@@ -1,0 +1,55 @@
+{
+  "gridSize": 256,
+  "squareSize": 8,
+  "origin": {
+    "x": -1024,
+    "y": 0,
+    "z": 1024
+  },
+  "minHeight": 50,
+  "maxHeight": 275,
+  "heightScale": 32,
+  "heights": "heights.bin",
+  "materials": "materials.bin",
+  "layers": [
+    {
+      "name": "terrain.IceWorld.Snow",
+      "texture": "terrain.IceWorld.Snow.png",
+      "alpha": "alpha-0.bin"
+    },
+    {
+      "name": "terrain.IceWorld.RockBlue",
+      "texture": "terrain.IceWorld.RockBlue.png",
+      "alpha": "alpha-1.bin"
+    },
+    {
+      "name": "terrain.IceWorld.SnowRock",
+      "texture": "terrain.IceWorld.SnowRock.png",
+      "alpha": "alpha-2.bin"
+    },
+    {
+      "name": "terrain.IceWorld.Ice",
+      "texture": "terrain.IceWorld.Ice.png",
+      "alpha": "alpha-3.bin"
+    }
+  ],
+  "emptySquares": [
+    26538,
+    26787,
+    27043,
+    27299,
+    27555,
+    27811,
+    43830,
+    44084,
+    44340,
+    44597,
+    44853,
+    45110,
+    45366,
+    45622,
+    45878,
+    46134,
+    46390
+  ]
+}

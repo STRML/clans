@@ -1,0 +1,108 @@
+{
+  "terrain": {
+    "terrainFile": "Katabatic.ter",
+    "squareSize": 8,
+    "position": [
+      -1024,
+      0,
+      1024
+    ],
+    "emptySquares": [
+      26538,
+      26787,
+      27043,
+      27299,
+      27555,
+      27811,
+      43830,
+      44084,
+      44340,
+      44597,
+      44853,
+      45110,
+      45366,
+      45622,
+      45878,
+      46134,
+      46390
+    ]
+  },
+  "sun": {
+    "direction": [
+      0.57735,
+      -0.57735,
+      -0.57735
+    ],
+    "color": [
+      0.7,
+      0.7,
+      0.7,
+      1
+    ],
+    "ambient": [
+      0.4,
+      0.4,
+      0.4,
+      1
+    ]
+  },
+  "sky": {
+    "visibleDistance": 500,
+    "fogDistance": 400,
+    "fogColor": [
+      0.65,
+      0.65,
+      0.7,
+      1
+    ],
+    "materialList": "sky_ice_blue.dml"
+  },
+  "missionArea": {
+    "minX": -896,
+    "minZ": -696,
+    "width": 1504,
+    "depth": 1392
+  },
+  "spawns": [
+    {
+      "name": null,
+      "team": 1,
+      "position": [
+        326.888,
+        74.8106,
+        168.521
+      ],
+      "radius": 100
+    },
+    {
+      "name": null,
+      "team": 1,
+      "position": [
+        -257.527,
+        145.5,
+        53.2192
+      ],
+      "radius": 75
+    },
+    {
+      "name": null,
+      "team": 2,
+      "position": [
+        -576.432,
+        63.92,
+        -383.169
+      ],
+      "radius": 100
+    },
+    {
+      "name": null,
+      "team": 2,
+      "position": [
+        62.7873,
+        163.189,
+        -286.995
+      ],
+      "radius": 65
+    }
+  ]
+}

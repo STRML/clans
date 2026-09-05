@@ -1,10 +1,10 @@
+pnpm-lock.yaml
 node_modules/
 dist/
 dist-types/
-.env
-.env.*
-*.log
-.DS_Store
+assets/out/
 packages/assets/cache/
 playwright-report/
 test-results/
+*.md
+.claude/

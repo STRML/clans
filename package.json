@@ -1,0 +1,36 @@
+{
+  "name": "clans",
+  "version": "0.0.1",
+  "private": true,
+  "description": "A Tribes 2 tech demo for the browser: Katabatic, skiing, jetpacks, bots, authoritative server.",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@11.0.3",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @clans/client dev",
+    "build": "pnpm -r --filter './packages/*' build",
+    "typecheck": "tsc -b",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "e2e": "playwright test",
+    "assets:fetch": "pnpm --filter @clans/assets fetch",
+    "assets:build": "pnpm --filter @clans/assets build:assets"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^26.4.1",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.69.0",
+    "vitest": "^4.1.11"
+  }
+}
