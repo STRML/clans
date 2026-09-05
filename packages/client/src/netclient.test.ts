@@ -297,6 +297,37 @@ describe('NetClient', () => {
     expect(() => client.tick({ moveX: 0, moveZ: 1, yaw: 0, jump: true, jet: false })).not.toThrow();
   });
 
+  it('bounds the packet-loss loop instead of freezing on a forged snapshotId gap', () => {
+    // Codex round 13 (PR #4): snapshotId is an arbitrary wire u32, and recordLoss ran its
+    // loop once per id it judged missing, with no bound. A server reached through the
+    // user-selectable ?server= parameter could send ids 1 then 0xffffffff, which the old
+    // code would treat as ~4.3 billion missing snapshots and freeze the tab counting them.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 15 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    const state = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      onGround: 1 as const,
+      ski: 0 as const,
+    };
+    transport.pump([encodeSnapshot(1, 0, 0, [state], null)]);
+    expect(() => transport.pump([encodeSnapshot(0xffffffff, 2, 0, [state], null)])).not.toThrow();
+
+    const lossWindow = (client as unknown as { lossWindow: number[] }).lossWindow;
+    expect(lossWindow.length).toBeLessThanOrEqual(50);
+    expect(client.stats.packetLossEstimate).toBeGreaterThan(0.9);
+  });
+
   it('hard-snaps and records a prediction error when the replay backlog exceeds 30 ticks', () => {
     clock.ms = 0;
     const transport = makeTransport(makeLink({ value: 5 }));

@@ -251,7 +251,13 @@ export class NetClient {
 
   private recordLoss(snapshotId: number): void {
     if (this.previousSnapshotId !== 0) {
-      const gap = Math.max(0, snapshotId - this.previousSnapshotId - 1);
+      // Codex round 13 (PR #4): snapshotId is an arbitrary wire u32, and this ran the
+      // loop once per missing id with no bound. A server reached through the
+      // user-selectable ?server= parameter (malicious or just badly behaved) could send
+      // ids 1 then 0xffffffff and freeze the tab for roughly 4.3 billion iterations.
+      // pushLoss only keeps LOSS_WINDOW samples, so any gap at or beyond that already
+      // saturates packetLossEstimate at 1 -- looping further adds nothing observable.
+      const gap = Math.min(Math.max(0, snapshotId - this.previousSnapshotId - 1), LOSS_WINDOW);
       for (let i = 0; i < gap; i += 1) this.pushLoss(0);
       this.pushLoss(1);
     }
