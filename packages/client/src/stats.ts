@@ -40,5 +40,30 @@ export function describePlayer(world: World, playerId: number, stats: AppStats):
     { id: 'debug-energy', label: 'energy', text: fixed(energy), value: energy },
     { id: 'debug-ground', label: 'ground', text: String(onGround), value: onGround },
     { id: 'debug-ski', label: 'ski', text: String(ski), value: ski },
+    { id: 'debug-ping', label: 'ping', text: `${fixed(stats.ping, 0)} ms`, value: stats.ping },
+    {
+      id: 'debug-bps',
+      label: 'snapshot B/s',
+      text: fixed(stats.bytesPerSecond, 0),
+      value: stats.bytesPerSecond,
+    },
+    {
+      id: 'debug-loss',
+      label: 'loss',
+      text: `${fixed(stats.packetLossEstimate * 100, 1)}%`,
+      value: stats.packetLossEstimate,
+    },
+    {
+      id: 'debug-prediction-error',
+      label: 'predict err',
+      text: `${fixed(stats.predictionErrorM, 2)} m`,
+      value: stats.predictionErrorM,
+    },
+    {
+      id: 'debug-entities',
+      label: 'entities',
+      text: String(stats.entityCount),
+      value: stats.entityCount,
+    },
   ];
 }
