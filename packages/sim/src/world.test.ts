@@ -32,4 +32,13 @@ describe('fixed world', () => {
   it('does not export the per-tick player step, so the fixed-tick guard cannot be bypassed', () => {
     expect('stepPlayers' in sim).toBe(false);
   });
+
+  it('puts the kill plane 30 m below the lowest terrain point, not the origin', () => {
+    const raised: Heightfield = {
+      ...terrain,
+      heights: Uint16Array.from([1600, 1700, 1800, 1900]),
+      heightScale: 32,
+    };
+    expect(createWorld(raised, 1).killY).toBe(50 - 30);
+  });
 });

@@ -5,11 +5,21 @@ import type { PlayerInput, Vec3, World } from './types.js';
 export const FIXED_TICK_MS = 32;
 export const FIXED_DT = FIXED_TICK_MS / 1000;
 
+// Distance below the lowest terrain point at which a falling player returns to spawn.
+export const KILL_DEPTH = 30;
+
+function lowestTerrainHeight(terrain: Heightfield): number {
+  let lowest = Infinity;
+  for (const raw of terrain.heights) lowest = Math.min(lowest, raw);
+  return terrain.originY + (Number.isFinite(lowest) ? lowest : 0) / terrain.heightScale;
+}
+
 export function createWorld(terrain: Heightfield, seed: number, capacity = 32): World {
   return {
     tick: 0,
     random: { value: seed || 1 },
     terrain,
+    killY: lowestTerrainHeight(terrain) - KILL_DEPTH,
     players: {
       count: 0,
       position: new Float64Array(capacity * 3),

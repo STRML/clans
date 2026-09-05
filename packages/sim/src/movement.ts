@@ -8,9 +8,6 @@ const GROUND_EPSILON = 0.001;
 // A grounded player who did not jump or jet may drop this far in one tick and stay
 // grounded. Without it a skier leaves the surface every tick the slope falls away.
 const GROUND_SNAP = 1.0;
-// A player this far below the lowest possible terrain height has fallen out of the world
-// (through an empty square with no interior under it yet) and returns to their spawn.
-const KILL_DEPTH = 30;
 const IDLE: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
 
 interface Body {
@@ -263,7 +260,7 @@ function stepPlayer(
   const forces = applyForces(players, id, body, input, ctx, armor, dt);
   applyResistance(body, armor, dt);
   const contact = integrate(world, body, ctx.grounded, forces.jumped || forces.jetted, dt);
-  if (body.y < world.terrain.originY - KILL_DEPTH) resetToSpawn(players, id, body);
+  if (body.y < world.killY) resetToSpawn(players, id, body);
   writeState(players, id, body, contact, input, ctx.skiing);
 }
 

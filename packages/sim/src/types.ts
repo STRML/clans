@@ -31,5 +31,7 @@ export interface World {
   tick: number;
   random: RandomState;
   terrain: Heightfield;
+  /** Below this height a player has fallen out of the world and returns to spawn. */
+  killY: number;
   players: PlayerStore;
 }
