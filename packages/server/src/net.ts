@@ -237,10 +237,11 @@ export function startNetServer(options: NetServerOptions): NetServer {
 
   function close(): void {
     // wss.close() alone stops accepting new connections; it does not touch sockets
-    // already connected. Without closing those too, a client stays OPEN and its player
-    // slot stays active until the client happens to disconnect on its own, which can
-    // hang a caller waiting for a clean shutdown.
-    for (const entry of clients.values()) entry.socket.close();
+    // already connected. `clients` only holds sockets that have sent a Join, so closing
+    // just those still left an accepted-but-not-yet-joined socket open; wss.clients is
+    // the WebSocket server's own ground truth for every currently connected socket,
+    // joined or not.
+    for (const socket of wss.clients) socket.close();
     wss.close();
   }
 

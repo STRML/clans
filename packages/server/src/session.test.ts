@@ -21,8 +21,9 @@ const inputMessage = (
 describe('applyInputMessage', () => {
   it('drops a message whose sequence is not newer than the last applied one', () => {
     const session = createSession(0, 1, 0);
+    // A gap of 10 with only 3 redundant samples per message backfills at most 3.
     expect(applyInputMessage(session, inputMessage(10, [sample(1), sample(1), sample(1)]))).toEqual(
-      [sample(1)],
+      [sample(1), sample(1), sample(1)],
     );
     expect(
       applyInputMessage(session, inputMessage(7, [sample(-1), sample(-1), sample(-1)])),
@@ -35,6 +36,22 @@ describe('applyInputMessage', () => {
     applyInputMessage(session, inputMessage(5, [sample(5), sample(4), sample(3)]));
     const filled = applyInputMessage(session, inputMessage(7, [sample(7), sample(6), sample(5)]));
     expect(filled).toEqual([sample(6), sample(7)]);
+  });
+
+  it('recovers redundant samples even on the very first message a session ever sees', () => {
+    // Codex round 5 (PR #4): "nothing applied yet" is true both before a genuine first
+    // message and after a genuine first message was itself lost, but only the second
+    // case has a redundant sample worth recovering. Forcing exactly one sample through
+    // regardless (as this used to) permanently lost whatever a lost first packet
+    // carried -- often the player's very first jump or move key.
+    const session = createSession(0, 1, 0);
+    // Sequence 1 was lost in transit; sequence 2 is the first message this session sees,
+    // and its redundant samples still carry sequence 1's input.
+    expect(applyInputMessage(session, inputMessage(2, [sample(2), sample(1), sample(1)]))).toEqual([
+      sample(1),
+      sample(2),
+    ]);
+    expect(session.lastAppliedSequence).toBe(2);
   });
 });
 

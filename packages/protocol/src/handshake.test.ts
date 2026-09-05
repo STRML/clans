@@ -89,4 +89,20 @@ describe('handshake codec', () => {
     });
     expect(() => decodeWelcome(bytes)).toThrow(RangeError);
   });
+
+  it('clamps an out-of-range move axis instead of letting it scale past the speed cap', () => {
+    // Codex round 5 (PR #4): desiredSpeed scales the armor's speed cap directly by the
+    // raw axis with no clamp of its own, so a crafted moveZ = 100 reached 68 m/s after
+    // 100 ticks against the legal 15 m/s run cap.
+    const message: Omit<InputMessage, 'type'> = {
+      sequence: 1,
+      samples: [
+        { moveX: -100, moveZ: 100, yaw: 0, jump: false, jet: false },
+        { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false },
+        { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false },
+      ],
+    };
+    const decoded = decodeInput(encodeInput(message));
+    expect(decoded.samples[0]).toEqual({ moveX: -1, moveZ: 1, yaw: 0, jump: false, jet: false });
+  });
 });

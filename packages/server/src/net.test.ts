@@ -334,4 +334,21 @@ describe('startNetServer', () => {
     await wait(20);
     expect(shutdownWorld.players.active[0]).toBe(0);
   });
+
+  it('closes an accepted socket that never sent Join, not just joined ones', async () => {
+    // Codex round 5 (PR #4): `clients` is only populated inside handleJoin, so closing
+    // just clients.values() left an accepted-but-unjoined socket open indefinitely.
+    const port = TEST_PORT + 2;
+    const unjoinedServer = startNetServer({
+      world: createWorld(terrain, 1, 8),
+      spawns,
+      port,
+    });
+    await unjoinedServer.ready;
+
+    const client = await connect(port); // connects, but never sends Join
+    const closed = new Promise<void>((resolve) => client.once('close', () => resolve()));
+    unjoinedServer.close();
+    await expect(closed).resolves.toBeUndefined();
+  });
 });

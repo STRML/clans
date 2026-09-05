@@ -36,6 +36,8 @@ function writeSample(cursor: Cursor, sample: NetInputSample): void {
   writeF32(cursor, sample.yaw);
   writeU8(cursor, (sample.jump ? 1 : 0) | (sample.jet ? 2 : 0));
 }
+const clampAxis = (value: number): number => Math.max(-1, Math.min(1, value));
+
 function readSample(cursor: Cursor): NetInputSample {
   const moveX = readF32(cursor);
   const moveZ = readF32(cursor);
@@ -46,7 +48,17 @@ function readSample(cursor: Cursor): NetInputSample {
   if (!Number.isFinite(moveX) || !Number.isFinite(moveZ) || !Number.isFinite(yaw)) {
     throw new RangeError('Input sample must be finite');
   }
-  return { moveX, moveZ, yaw, jump: (flags & 1) !== 0, jet: (flags & 2) !== 0 };
+  // desiredSpeed scales the armor's speed cap directly by the raw axis with no clamp of
+  // its own, so an out-of-range axis (e.g. moveZ = 100 from a crafted client) reaches
+  // the sim as a multiplier on the cap rather than a fraction of it, moving well past
+  // the legal run speed. Only moveX/moveZ need this: yaw is an angle, unbounded by design.
+  return {
+    moveX: clampAxis(moveX),
+    moveZ: clampAxis(moveZ),
+    yaw,
+    jump: (flags & 1) !== 0,
+    jet: (flags & 2) !== 0,
+  };
 }
 
 export function encodeJoin(): Uint8Array {
