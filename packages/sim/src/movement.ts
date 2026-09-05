@@ -299,14 +299,30 @@ function writeState(
   players.wasJumpHeld[id] = input.jump ? 1 : 0;
 }
 
-function resetToSpawn(players: PlayerStore, id: number, body: Body): void {
+/**
+ * Codex round 10 (PR #4): this used to only reset the local `body` (position, velocity)
+ * before writeState ran, which then unconditionally overwrote onGround/ski/wasGrounded
+ * from the stale ctx/contact computed for the tick the player fell out on, and left
+ * energy exactly where the fall interrupted it rather than restoring it. A fall-out is a
+ * respawn like any other, and should leave the player in the same fresh state addPlayer
+ * (world.ts's resetPlayerToSpawn) produces, not a mix of a reset position and everything
+ * else mid-fall. Written directly to the SoA arrays (not `body`) because the caller
+ * returns immediately after this, skipping writeState entirely for this tick.
+ */
+function resetToSpawn(players: PlayerStore, id: number, armor: ArmorData): void {
   const base = id * 3;
-  body.x = players.spawn[base] ?? 0;
-  body.y = players.spawn[base + 1] ?? 0;
-  body.z = players.spawn[base + 2] ?? 0;
-  body.vx = 0;
-  body.vy = 0;
-  body.vz = 0;
+  players.position.set(
+    [players.spawn[base] ?? 0, players.spawn[base + 1] ?? 0, players.spawn[base + 2] ?? 0],
+    base,
+  );
+  players.velocity.set([0, 0, 0], base);
+  players.yaw[id] = 0;
+  players.energy[id] = armor.maxEnergy;
+  players.onGround[id] = 0;
+  players.ski[id] = 0;
+  players.wasGrounded[id] = 0;
+  players.wasJumpHeld[id] = 0;
+  players.landingSpeed[id] = 0;
 }
 
 function stepPlayer(
@@ -323,7 +339,10 @@ function stepPlayer(
   const forces = applyForces(players, id, body, input, ctx, armor, dt);
   applyResistance(body, armor, dt);
   const contact = integrate(world, body, ctx.grounded, forces.jumped || forces.jetted, dt);
-  if (body.y < world.killY) resetToSpawn(players, id, body);
+  if (body.y < world.killY) {
+    resetToSpawn(players, id, armor);
+    return; // already fully reset; writeState below would overwrite it with this tick's stale fall state
+  }
   writeState(players, id, body, contact, input, ctx);
 }
 

@@ -21,4 +21,12 @@ describe('parseArgs', () => {
     expect(() => parseArgs(['--bots', String(WORLD_CAPACITY + 1)])).toThrow(RangeError);
     expect(parseArgs(['--bots', String(WORLD_CAPACITY)]).bots).toBe(WORLD_CAPACITY);
   });
+  it('rejects a --port outside the valid TCP range instead of crashing startup later', () => {
+    // Codex round 10 (PR #4): parseArgs only checked positivity, so --port 65536 passed
+    // validation here and then threw ERR_SOCKET_BAD_PORT deep inside startNetServer
+    // instead of a clear error naming the actual bad argument.
+    expect(() => parseArgs(['--port', '65536'])).toThrow(RangeError);
+    expect(() => parseArgs(['--port', '0'])).toThrow(RangeError);
+    expect(parseArgs(['--port', '65535']).port).toBe(65535);
+  });
 });

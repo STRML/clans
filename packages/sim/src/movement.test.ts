@@ -82,6 +82,25 @@ describe('Light movement', () => {
     expect(world.players.position[id * 3 + 2]).toBe(10);
   });
 
+  it('restores full energy and ground state on a kill-plane reset, like any other respawn', () => {
+    // Codex round 10 (PR #4): the kill-plane path only reset the local body's position
+    // and velocity, then writeState unconditionally overwrote onGround/ski/wasGrounded
+    // from the stale ctx/contact computed for the falling tick, and energy was left
+    // wherever the fall interrupted its natural recharge rather than restored. A fall-out
+    // is a respawn like any other and must leave the same fresh state addPlayer does.
+    const holed: Heightfield = { ...flat, emptySquares: new Set([0]) };
+    const world = createWorld(holed, 1);
+    const id = addPlayer(world, { x: 10, y: 0, z: 10 });
+    world.players.energy[id] = 10;
+    world.players.onGround[id] = 1;
+    world.players.wasGrounded[id] = 1;
+    for (let tick = 0; tick < 200; tick += 1) stepWorld(world, inputMap(id, {}));
+    expect(world.players.energy[id]).toBe(60);
+    expect(world.players.onGround[id]).toBe(0);
+    expect(world.players.ski[id]).toBe(0);
+    expect(world.players.wasGrounded[id]).toBe(0);
+  });
+
   it('holds the run cap when running downhill without skiing', () => {
     const rise = Math.tan((30 * Math.PI) / 180) * 1000;
     const slope: Heightfield = {

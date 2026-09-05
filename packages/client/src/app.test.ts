@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { PlayerSnapshotData } from '@clans/sim';
 import { updateRemotes } from './app.js';
 import { RemoteBuffer } from './remote.js';
-import type { NetClient } from './netclient.js';
+import type { NetClient, RemoteSnapshot } from './netclient.js';
 
 const snapshot: PlayerSnapshotData = {
   id: 1,
@@ -30,15 +30,13 @@ describe('updateRemotes', () => {
     const scene = new THREE.Scene();
     const meshes = new Map<number, THREE.Mesh>();
     const buffers = new Map<number, RemoteBuffer>();
-    const lastRemoteTick = { tick: 0 };
-    const activeNet: Pick<NetClient, 'remoteTick' | 'remotePlayers' | 'connected'> = {
-      remoteTick: 500, // a server tick count unrelated to any client-side clock reading
-      remotePlayers: new Map([[1, snapshot]]),
+    const activeNet: Pick<NetClient, 'remoteSnapshots' | 'connected'> = {
+      remoteSnapshots: [{ tick: 500, players: new Map([[1, snapshot]]) }],
       connected: true,
     };
     const nowMs = 123456; // an arbitrary performance.now() reading
 
-    updateRemotes(activeNet, scene, meshes, buffers, lastRemoteTick, nowMs);
+    updateRemotes(activeNet, scene, meshes, buffers, nowMs);
 
     const buffer = buffers.get(1);
     expect(buffer).toBeDefined();
@@ -53,20 +51,45 @@ describe('updateRemotes', () => {
     const scene = new THREE.Scene();
     const meshes = new Map<number, THREE.Mesh>();
     const buffers = new Map<number, RemoteBuffer>();
-    const lastRemoteTick = { tick: 0 };
-    const fakeNet = {
-      remoteTick: 1,
-      remotePlayers: new Map([[1, snapshot]]),
+    const fakeNet: { remoteSnapshots: NetClient['remoteSnapshots']; connected: boolean } = {
+      remoteSnapshots: [{ tick: 1, players: new Map([[1, snapshot]]) }],
       connected: true,
     };
-    updateRemotes(fakeNet, scene, meshes, buffers, lastRemoteTick, 0);
+    updateRemotes(fakeNet, scene, meshes, buffers, 0);
     expect(buffers.has(1)).toBe(true);
     expect(scene.children).toHaveLength(1);
 
     fakeNet.connected = false;
-    updateRemotes(fakeNet, scene, meshes, buffers, lastRemoteTick, 100);
+    updateRemotes(fakeNet, scene, meshes, buffers, 100);
 
     expect(buffers.size).toBe(0);
     expect(scene.children).toHaveLength(0);
+  });
+
+  it('drains every queued snapshot from a single render call, not just the latest', () => {
+    // Codex round 10 (PR #4): a snapshot replaces remotePlayers wholesale the instant it
+    // decodes, and updateRemotes only ever read the current value once per render call.
+    // A frame stall (or simply more than one snapshot landing before the next paint) left
+    // only the newest snapshot's position reachable; the earlier one was gone before
+    // anything read it, so RemoteBuffer's interpolation history silently lost it and the
+    // remote snapped instead of smoothing through the gap.
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    const buffers = new Map<number, RemoteBuffer>();
+    const remoteSnapshots: RemoteSnapshot[] = [
+      { tick: 10, players: new Map([[1, { ...snapshot, x: 10 }]]) },
+      { tick: 20, players: new Map([[1, { ...snapshot, x: 20 }]]) },
+    ];
+    const activeNet: Pick<NetClient, 'remoteSnapshots' | 'connected'> = {
+      remoteSnapshots,
+      connected: true,
+    };
+
+    updateRemotes(activeNet, scene, meshes, buffers, 0);
+
+    expect(remoteSnapshots).toHaveLength(0); // the queue is drained, not just peeked
+    const samples = (buffers.get(1) as unknown as { samples: Array<{ data: { x: number } }> })
+      .samples;
+    expect(samples.map((sample) => sample.data.x)).toEqual([10, 20]);
   });
 });

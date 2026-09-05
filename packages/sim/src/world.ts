@@ -1,3 +1,4 @@
+import { LIGHT_ARMOR } from './armor.js';
 import { stepPlayers } from './movement.js';
 import type { Heightfield } from './terrain.js';
 import type { PlayerInput, Vec3, World } from './types.js';
@@ -68,7 +69,7 @@ export function resetPlayerToSpawn(world: World, id: number, spawn: Vec3): void 
   players.spawn.set([spawn.x, spawn.y, spawn.z], id * 3);
   players.velocity.set([0, 0, 0], id * 3);
   players.yaw[id] = 0;
-  players.energy[id] = 60;
+  players.energy[id] = LIGHT_ARMOR.maxEnergy;
   players.onGround[id] = 0;
   players.ski[id] = 0;
   players.wasGrounded[id] = 0;

@@ -33,10 +33,19 @@ const MAX_PENDING_INPUTS = MAX_REPLAY_TICKS * 4;
 const LOSS_WINDOW = 50;
 const BYTES_WINDOW_MS = 1000;
 const LOCAL_SLOT = 0;
+// Bounds the interpolation queue below in case a caller ever stops draining it. Under
+// normal operation it holds at most a couple of entries: render frames (~60/s) happen far
+// more often than snapshots (every SNAPSHOT_EVERY_N_TICKS ticks), so the render loop
+// drains this well before it could grow.
+const MAX_REMOTE_SNAPSHOT_QUEUE = 16;
 
 interface PendingInput {
   sequence: number;
   input: PlayerInput;
+}
+export interface RemoteSnapshot {
+  tick: number;
+  players: Map<number, PlayerSnapshotData>;
 }
 export interface NetClientStats {
   ping: number;
@@ -55,6 +64,16 @@ export class NetClient {
   team = 0;
   remotePlayers = new Map<number, PlayerSnapshotData>();
   remoteTick = 0;
+  /**
+   * Every remote-player snapshot since the last drain, oldest first. Codex round 10
+   * (PR #4): remotePlayers is replaced wholesale each time a snapshot decodes, so if more
+   * than one arrived within a single render frame (a frame stall, or simply more than one
+   * landing before the next paint), only the newest survived to reach RemoteBuffer's
+   * interpolation history -- the earlier one's position was gone before anything read it,
+   * so a remote snapped instead of smoothing through it. A consumer must splice this
+   * queue empty on every drain, not just read the latest entry.
+   */
+  remoteSnapshots: RemoteSnapshot[] = [];
   stats: NetClientStats = {
     ping: 0,
     bytesPerSecond: 0,
@@ -188,6 +207,8 @@ export class NetClient {
         .map((player) => [player.id, player]),
     );
     this.remoteTick = decoded.tick;
+    this.remoteSnapshots.push({ tick: decoded.tick, players: this.remotePlayers });
+    if (this.remoteSnapshots.length > MAX_REMOTE_SNAPSHOT_QUEUE) this.remoteSnapshots.shift();
     this.stats.entityCount = decoded.players.length;
   }
 

@@ -12,7 +12,7 @@ import {
 import { loadKatabatic, type KatabaticAssets } from './assets.js';
 import { Input } from './input.js';
 import { advance, type Accumulator } from './loop.js';
-import { NetClient } from './netclient.js';
+import { NetClient, type RemoteSnapshot } from './netclient.js';
 import { RemoteBuffer, syncRemoteMeshes } from './remote.js';
 import { addEnvironment, createTerrain } from './terrain.js';
 import { WebSocketTransport } from './transport.js';
@@ -171,10 +171,9 @@ function stepNetworked(
   scene: THREE.Scene,
   remoteMeshes: Map<number, THREE.Mesh>,
   remoteBuffers: Map<number, RemoteBuffer>,
-  lastRemoteTick: { tick: number },
 ): void {
   for (let step = 0; step < steps; step += 1) net.tick(input);
-  updateRemotes(net, scene, remoteMeshes, remoteBuffers, lastRemoteTick, performance.now());
+  updateRemotes(net, scene, remoteMeshes, remoteBuffers, performance.now());
   stats.ping = net.stats.ping;
   stats.bytesPerSecond = net.stats.bytesPerSecond;
   stats.packetLossEstimate = net.stats.packetLossEstimate;
@@ -182,43 +181,56 @@ function stepNetworked(
   stats.entityCount = net.stats.entityCount;
 }
 
+function applyRemoteSnapshot(
+  buffers: Map<number, RemoteBuffer>,
+  snapshot: RemoteSnapshot,
+  nowMs: number,
+): void {
+  for (const [id, player] of snapshot.players) {
+    const buffer = buffers.get(id) ?? new RemoteBuffer();
+    buffers.set(id, buffer);
+    buffer.push(nowMs, player);
+  }
+}
+
+/** Drops any buffer for an id the most recent snapshot no longer reports (left or died). */
+function pruneStaleRemoteBuffers(buffers: Map<number, RemoteBuffer>, latest: RemoteSnapshot): void {
+  for (const id of [...buffers.keys()]) {
+    if (!latest.players.has(id)) buffers.delete(id);
+  }
+}
+
 /**
  * Exported for a focused unit test. `nowMs` must be the same clock RemoteBuffer.positionAt
- * is later queried on (the caller's performance.now()) -- remoteTick is the server's own
- * tick counter, on a clock that starts whenever the server process did, not this page
- * load, so timestamping samples with it against a positionAt(performance.now()) query
- * meant the two epochs never lined up and a remote player either extrapolated forever or
- * stuck to a stale sample.
+ * is later queried on (the caller's performance.now()).
  */
 export function updateRemotes(
-  activeNet: Pick<NetClient, 'remoteTick' | 'remotePlayers' | 'connected'>,
+  activeNet: Pick<NetClient, 'remoteSnapshots' | 'connected'>,
   targetScene: THREE.Scene,
   meshes: Map<number, THREE.Mesh>,
   buffers: Map<number, RemoteBuffer>,
-  lastRemoteTick: { tick: number },
   nowMs: number,
 ): void {
-  // remotePlayers only changes when a snapshot arrives, and nothing else clears it once
+  // remoteSnapshots only grows when a snapshot arrives, and nothing else clears it once
   // the socket drops -- a plain disconnect (no final empty snapshot) left every remote
   // mesh, and the GPU resources syncRemoteMeshes' pruning now disposes, stranded until
   // the page itself tore down. Clearing every buffer here lets that same pruning path
   // remove and dispose them on the very next call.
   if (!activeNet.connected) {
     buffers.clear();
-  } else if (activeNet.remoteTick !== lastRemoteTick.tick) {
-    lastRemoteTick.tick = activeNet.remoteTick;
-    for (const [id, snapshot] of activeNet.remotePlayers) {
-      let buffer = buffers.get(id);
-      if (!buffer) {
-        buffer = new RemoteBuffer();
-        buffers.set(id, buffer);
-      }
-      buffer.push(nowMs, snapshot);
-    }
-    for (const id of [...buffers.keys()]) {
-      if (!activeNet.remotePlayers.has(id)) buffers.delete(id);
-    }
+    syncRemoteMeshes(targetScene, meshes, buffers, nowMs);
+    return;
   }
+  // Codex round 10 (PR #4): reading only the latest remotePlayers/remoteTick once per
+  // render call meant any earlier snapshot that arrived within the same frame (a frame
+  // stall, or simply more than one landing before the next paint) was already gone --
+  // RemoteBuffer's interpolation history silently lost that sample, so a remote snapped
+  // instead of smoothing through it. Draining every queued snapshot here instead keeps
+  // that history complete regardless of how render and network delivery interleave.
+  const pending = activeNet.remoteSnapshots.splice(0, activeNet.remoteSnapshots.length);
+  for (const snapshot of pending) applyRemoteSnapshot(buffers, snapshot, nowMs);
+  const latest = pending.at(-1);
+  if (latest) pruneStaleRemoteBuffers(buffers, latest);
   syncRemoteMeshes(targetScene, meshes, buffers, nowMs);
 }
 
@@ -249,7 +261,6 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const acc: Accumulator = { remainder: 0 };
   const remoteMeshes = new Map<number, THREE.Mesh>();
   const remoteBuffers = new Map<number, RemoteBuffer>();
-  const lastRemoteTick = { tick: -1 };
   const fps: FpsWindow = { windowStart: performance.now(), frames: 0 };
 
   const app: App = {
@@ -285,16 +296,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       const currentInput = app.freeCam ? { ...IDLE, yaw: input.yaw } : input.snapshot();
       const simStart = performance.now();
       if (net) {
-        stepNetworked(
-          net,
-          app.stats,
-          currentInput,
-          steps,
-          scene,
-          remoteMeshes,
-          remoteBuffers,
-          lastRemoteTick,
-        );
+        stepNetworked(net, app.stats, currentInput, steps, scene, remoteMeshes, remoteBuffers);
       } else {
         stepSinglePlayer(world, playerId, currentInput, steps);
       }

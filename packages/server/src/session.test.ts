@@ -53,6 +53,24 @@ describe('applyInputMessage', () => {
     ]);
     expect(session.lastAppliedSequence).toBe(2);
   });
+
+  it('rejects an implausibly large sequence jump instead of poisoning the session forever', () => {
+    // Codex round 10 (PR #4): decodeInput accepts any u32 sequence. A forged or corrupted
+    // 0xffffffff passed the "newer than lastAppliedSequence" check once and became the
+    // new lastAppliedSequence -- after that, no real client sequence could ever be
+    // "newer" than the wire format's own maximum again, permanently freezing the session.
+    const session = createSession(0, 1, 0);
+    expect(
+      applyInputMessage(session, inputMessage(0xffffffff, [sample(1), sample(1), sample(1)])),
+    ).toEqual([]);
+    expect(session.lastAppliedSequence).toBe(0);
+
+    // Normal input keeps working: the forged message never touched the session.
+    expect(applyInputMessage(session, inputMessage(1, [sample(2), sample(2), sample(2)]))).toEqual([
+      sample(2),
+    ]);
+    expect(session.lastAppliedSequence).toBe(1);
+  });
 });
 
 describe('recordAck', () => {

@@ -6,6 +6,7 @@ export interface ServerOptions {
 }
 
 const DEFAULT_PORT = 7777;
+const MAX_PORT = 65_535;
 
 function readFlag(argv: string[], index: number, name: string): string {
   const value = argv[index];
@@ -32,7 +33,11 @@ export function parseArgs(argv: string[]): ServerOptions {
   // stack trace points nowhere near the actual --bots argument that caused it.
   if (bots > WORLD_CAPACITY)
     throw new RangeError(`--bots must not exceed world capacity (${String(WORLD_CAPACITY)})`);
-  if (!Number.isInteger(port) || port <= 0)
-    throw new RangeError('--port must be a positive integer');
+  // net.createServer (via ws's WebSocketServer) throws ERR_SOCKET_BAD_PORT for anything
+  // outside the valid TCP port range, deep inside startNetServer rather than here where
+  // the actual bad --port argument is. Rejecting it at parse time gives a clear,
+  // actionable startup error instead of an unrelated-looking crash.
+  if (!Number.isInteger(port) || port <= 0 || port > MAX_PORT)
+    throw new RangeError(`--port must be an integer between 1 and ${String(MAX_PORT)}`);
   return { bots, port };
 }
