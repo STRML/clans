@@ -20,6 +20,11 @@ describe('parseMission', () => {
     });
   });
 
+  it('accepts quoted values that spell a keyword or delimiter', () => {
+    const [object] = parseMission('new A(X) {\n key = "new";\n other = "}";\n};');
+    expect(object?.props).toEqual({ key: 'new', other: '}' });
+  });
+
   it('rejects a property value that runs into a nested object instead of dropping it', () => {
     expect(() => parseMission('new A(X) {\n key = value new B(Y) {\n };\n};')).toThrow(
       'Expected ; before new at line 2',

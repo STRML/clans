@@ -8,6 +8,8 @@ export interface MissionObject {
 interface Token {
   value: string;
   line: number;
+  /** True for a quoted string literal, which is never a keyword or delimiter. */
+  quoted: boolean;
 }
 
 function isWhitespace(char: string): boolean {
@@ -70,19 +72,19 @@ function tokenize(source: string): Token[] {
       continue;
     }
     if ('{}();='.includes(char)) {
-      tokens.push({ value: char, line });
+      tokens.push({ value: char, line, quoted: false });
       index += 1;
       continue;
     }
     if (char === '"') {
       const result = readString(source, index, line);
-      tokens.push({ value: result.value, line: result.line });
+      tokens.push({ value: result.value, line: result.line, quoted: true });
       index = result.nextIndex;
       line = result.nextLine;
       continue;
     }
     const result = readWord(source, index, line);
-    tokens.push({ value: result.value, line: result.line });
+    tokens.push({ value: result.value, line: result.line, quoted: false });
     index = result.nextIndex;
   }
   return tokens;
@@ -132,7 +134,7 @@ function parsePropertyValue(cursor: Cursor, classToken: Token): string {
   const parts: string[] = [];
   while (cursor.peek() && cursor.peek()?.value !== ';') {
     const token = cursor.take();
-    if (token.value === 'new' || token.value === '}') {
+    if (!token.quoted && (token.value === 'new' || token.value === '}')) {
       throw new SyntaxError(`Expected ; before ${token.value} at line ${String(token.line)}`);
     }
     parts.push(token.value);
@@ -144,7 +146,8 @@ function parsePropertyValue(cursor: Cursor, classToken: Token): string {
 
 function parseBody(cursor: Cursor, classToken: Token, object: MissionObject): void {
   while (cursor.peek() && cursor.peek()?.value !== '}') {
-    if (cursor.peek()?.value === 'new') {
+    const next = cursor.peek();
+    if (next && !next.quoted && next.value === 'new') {
       object.children.push(parseObject(cursor));
       continue;
     }
