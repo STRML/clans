@@ -29,3 +29,6 @@ export interface AckMessage {
   type: MessageType.Ack;
   snapshotId: number;
 }
+
+export const SNAPSHOT_EVERY_N_TICKS = 2;
+export const SNAPSHOT_FALLBACK_MS = 1000;
