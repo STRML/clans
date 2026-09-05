@@ -13,7 +13,7 @@ import {
   writeU8,
   type Cursor,
 } from './codec.js';
-import { MessageType } from './messages.js';
+import { MAX_SNAPSHOT_PLAYERS, MessageType } from './messages.js';
 
 export interface SnapshotBaseline {
   snapshotId: number;
@@ -254,8 +254,15 @@ export function encodeSnapshot(
     : encodeFullSnapshot(snapshotId, tick, lastInputSequence, players);
 }
 
+function assertPlausibleCount(count: number): void {
+  if (count > MAX_SNAPSHOT_PLAYERS) {
+    throw new RangeError(`Snapshot count ${String(count)} exceeds ${String(MAX_SNAPSHOT_PLAYERS)}`);
+  }
+}
+
 function decodeFull(cursor: Cursor, header: SnapshotHeader): DecodedSnapshot {
   const count = readU16(cursor);
+  assertPlausibleCount(count);
   const players: PlayerSnapshotData[] = [];
   for (let i = 0; i < count; i += 1) players.push(readPlayerFull(cursor));
   return {
@@ -318,13 +325,16 @@ function decodeDelta(
   }
   const byId = new Map(baseline.players.map((player) => [player.id, player]));
   const addedCount = readU16(cursor);
+  assertPlausibleCount(addedCount);
   for (let i = 0; i < addedCount; i += 1) {
     const player = readPlayerFull(cursor);
     byId.set(player.id, player);
   }
   const changedCount = readU16(cursor);
+  assertPlausibleCount(changedCount);
   for (let i = 0; i < changedCount; i += 1) applyChangedPlayer(cursor, byId);
   const removedCount = readU16(cursor);
+  assertPlausibleCount(removedCount);
   const removedIds: number[] = [];
   for (let i = 0; i < removedCount; i += 1) {
     const id = readU16(cursor);

@@ -50,3 +50,12 @@ export const SNAPSHOT_FALLBACK_MS = 1000;
  * the matching baseline when a delta names it.
  */
 export const SNAPSHOT_HISTORY_DEPTH = 8;
+/**
+ * A count field in the snapshot codec (player count, added/changed/removed counts) is a
+ * raw wire u16 and would otherwise accept up to 65535 with no relation to how many
+ * players can actually exist. World capacity is 64 today; this stays generous above any
+ * milestone's planned roster (up to 32 v 32) so it never has to move for real growth,
+ * while still rejecting a count that could only come from a corrupted or adversarial
+ * packet, which would otherwise allocate tens of thousands of players and meshes.
+ */
+export const MAX_SNAPSHOT_PLAYERS = 256;

@@ -1,3 +1,4 @@
+import net, { type AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WebSocketTransport } from './transport.js';
@@ -61,5 +62,24 @@ describe('WebSocketTransport', () => {
     transport.close();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(transport.isOpen()).toBe(false);
+  });
+
+  it('bounds the pre-open send queue on a socket that never finishes connecting', async () => {
+    // Codex round 3 (PR #4): the queue of bytes held for a still-CONNECTING socket had
+    // no limit, so a black-holed connection (accepted at the TCP level but never
+    // completing the WebSocket upgrade) grew it forever.
+    const stalled = net.createServer(() => {
+      // Accept the TCP connection but never write an HTTP upgrade response, so the
+      // WebSocket handshake -- and readyState -- never leaves CONNECTING.
+    });
+    await new Promise<void>((resolve) => stalled.listen(0, '127.0.0.1', resolve));
+    const stalledPort = (stalled.address() as AddressInfo).port;
+    const transport = new WebSocketTransport(`ws://127.0.0.1:${String(stalledPort)}`);
+    for (let i = 0; i < 500; i += 1) transport.send(Uint8Array.of(i % 256));
+    expect(transport.isOpen()).toBe(true); // still CONNECTING
+    const outgoing = (transport as unknown as { outgoing: unknown[] }).outgoing;
+    expect(outgoing.length).toBe(128);
+    transport.close();
+    stalled.close();
   });
 });

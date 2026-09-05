@@ -195,6 +195,18 @@ describe('NetClient', () => {
     expect(client.stats.packetLossEstimate).toBeGreaterThan(0);
   });
 
+  it('survives a Welcome frame too short to hold its fields instead of throwing out of the handler', () => {
+    // Codex round 3 (PR #4): handleMessage dispatched to handleWelcome with no catch of
+    // its own, so a truncated Welcome (or one carrying a non-finite spawn, per
+    // handshake.ts's new check) threw a RangeError straight out of the transport's
+    // message handler instead of being dropped like any other malformed frame.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 12 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    expect(() => transport.pump([Uint8Array.of(MessageType.Welcome)])).not.toThrow();
+    expect(client.playerId).toBe(-1);
+  });
+
   it('caps its input backlog even while the transport stays open but stops receiving snapshots', () => {
     // Codex round 2 (PR #4): isOpen() stays true for a live-but-stalled connection (the
     // socket never closed, the server or network just stopped producing snapshots), so

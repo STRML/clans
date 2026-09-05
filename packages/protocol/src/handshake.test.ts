@@ -74,4 +74,19 @@ describe('handshake codec', () => {
     };
     expect(() => decodeInput(encodeInput(message))).toThrow(RangeError);
   });
+
+  it('rejects a Welcome message carrying a non-finite spawn coordinate', () => {
+    // Codex round 3 (PR #4): an unvalidated NaN spawn would otherwise be written straight
+    // into the client's local prediction world and resurface, still NaN, the first time
+    // it falls below the kill plane and gets reset to "spawn".
+    const bytes = encodeWelcome({
+      playerId: 1,
+      team: 1,
+      tickMs: 32,
+      spawnX: Number.NaN,
+      spawnY: 0,
+      spawnZ: 0,
+    });
+    expect(() => decodeWelcome(bytes)).toThrow(RangeError);
+  });
 });

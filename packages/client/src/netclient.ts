@@ -120,8 +120,16 @@ export class NetClient {
 
   private handleMessage(bytes: Uint8Array): void {
     const type = bytes[0];
-    if (type === MessageType.Welcome) this.handleWelcome(bytes);
-    else if (type === MessageType.Snapshot) this.handleSnapshot(bytes);
+    try {
+      // handleSnapshot already has its own inner try/catch for the loss-accounting it
+      // does on a bad frame; this one exists for handleWelcome (and any other message
+      // this dispatch grows), which has no such fallback and let a truncated or
+      // non-finite-spawn Welcome throw straight out of the transport's message handler.
+      if (type === MessageType.Welcome) this.handleWelcome(bytes);
+      else if (type === MessageType.Snapshot) this.handleSnapshot(bytes);
+    } catch {
+      // Malformed frame: drop it. There is nothing to ack or reconcile against.
+    }
   }
 
   private handleWelcome(bytes: Uint8Array): void {

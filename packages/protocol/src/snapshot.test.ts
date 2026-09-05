@@ -10,6 +10,8 @@ import {
   type PlayerSnapshotData,
   type World,
 } from '@clans/sim';
+import { bytesOf, createWriter, writeU16, writeU32, writeU8 } from './codec.js';
+import { MAX_SNAPSHOT_PLAYERS, MessageType } from './messages.js';
 import { decodeSnapshot, encodeSnapshot } from './snapshot.js';
 
 const terrain: Heightfield = {
@@ -124,5 +126,20 @@ describe('snapshot codec', () => {
     expect(() =>
       decodeSnapshot(deltaBytes, { snapshotId: 1, players: decodedBaseline.players }),
     ).toThrow(RangeError);
+  });
+
+  it('rejects a full snapshot whose declared player count exceeds the plausible maximum', () => {
+    // Codex round 3 (PR #4): the count is a raw wire u16 with no semantic limit, so a
+    // corrupted or adversarial packet declaring 65535 players would decode all of them --
+    // the client then allocates one mesh per player, freezing or exhausting it.
+    const cursor = createWriter(20);
+    writeU8(cursor, MessageType.Snapshot);
+    writeU32(cursor, 1); // snapshotId
+    writeU32(cursor, 0); // baselineId
+    writeU32(cursor, 0); // tick
+    writeU32(cursor, 0); // lastInputSequence
+    writeU8(cursor, 0); // flags: full, not delta
+    writeU16(cursor, MAX_SNAPSHOT_PLAYERS + 1); // declared count, no player data follows
+    expect(() => decodeSnapshot(bytesOf(cursor), null)).toThrow(RangeError);
   });
 });

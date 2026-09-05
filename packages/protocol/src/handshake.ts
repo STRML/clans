@@ -74,15 +74,19 @@ export function encodeWelcome(message: Omit<WelcomeMessage, 'type'>): Uint8Array
 export function decodeWelcome(bytes: Uint8Array): WelcomeMessage {
   const cursor = createReader(bytes);
   expectType(cursor, MessageType.Welcome);
-  return {
-    type: MessageType.Welcome,
-    playerId: readU16(cursor),
-    team: readU8(cursor),
-    tickMs: readU16(cursor),
-    spawnX: readF32(cursor),
-    spawnY: readF32(cursor),
-    spawnZ: readF32(cursor),
-  };
+  const playerId = readU16(cursor);
+  const team = readU8(cursor);
+  const tickMs = readU16(cursor);
+  const spawnX = readF32(cursor);
+  const spawnY = readF32(cursor);
+  const spawnZ = readF32(cursor);
+  // A non-finite spawn would otherwise be written straight into the client's local
+  // prediction world and resurface, still NaN, the first time it falls below the kill
+  // plane and gets reset to "spawn".
+  if (!Number.isFinite(spawnX) || !Number.isFinite(spawnY) || !Number.isFinite(spawnZ)) {
+    throw new RangeError('Welcome spawn point must be finite');
+  }
+  return { type: MessageType.Welcome, playerId, team, tickMs, spawnX, spawnY, spawnZ };
 }
 
 export function encodeInput(message: Omit<InputMessage, 'type'>): Uint8Array {

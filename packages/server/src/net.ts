@@ -219,6 +219,12 @@ export function startNetServer(options: NetServerOptions): NetServer {
       }
     });
     socket.on('close', () => handleClose(options.world, clients, socket));
+    // A malformed frame at the WebSocket protocol level itself (an invalid raw frame,
+    // e.g. an unmasked client frame) fires 'error' on the socket before 'message' ever
+    // sees it, and our application-level try/catch above only ever covers decoded
+    // messages. With no 'error' listener at all, Node's default is to throw and crash
+    // the process; this absorbs it the same way the server-level handler below does.
+    socket.on('error', () => handleClose(options.world, clients, socket));
   });
 
   function tick(tickNumber: number): void {

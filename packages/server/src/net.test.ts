@@ -1,3 +1,4 @@
+import net from 'node:net';
 import { WebSocket } from 'ws';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createWorld, type Heightfield, type PlayerInput, type World } from '@clans/sim';
@@ -282,5 +283,32 @@ describe('startNetServer', () => {
     const busy = startNetServer({ world: createWorld(terrain, 1, 4), spawns, port: TEST_PORT });
     await expect(busy.ready).rejects.toThrow();
     busy.close();
+  });
+
+  it('survives a malformed raw WebSocket frame instead of an unhandled socket error crashing the server', async () => {
+    // Codex round 3 (PR #4): an invalid frame at the WebSocket protocol level itself (an
+    // unmasked client-to-server frame) fires 'error' on the socket before 'message' ever
+    // sees it. With no per-socket 'error' listener, ws's default is to throw, which
+    // crashes the process -- a class the application-level try/catch around handleMessage
+    // never covers, since it only wraps decoded application messages.
+    const raw = net.createConnection(TEST_PORT, '127.0.0.1');
+    await new Promise<void>((resolve) => raw.once('connect', () => resolve()));
+    // The canonical RFC 6455 example key, so ws's handshake validation accepts it.
+    raw.write(
+      `GET / HTTP/1.1\r\nHost: 127.0.0.1:${String(TEST_PORT)}\r\nUpgrade: websocket\r\n` +
+        `Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n` +
+        `Sec-WebSocket-Version: 13\r\n\r\n`,
+    );
+    await new Promise<void>((resolve) => raw.once('data', () => resolve()));
+    raw.write(Buffer.from([0x82, 0x01, 0xff])); // unmasked frame from a client: invalid
+    await wait(50);
+    raw.destroy();
+
+    // The server must still be alive and able to serve a normal client afterward.
+    const client = await connect(TEST_PORT);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await expect(welcomePromise).resolves.toBeDefined();
+    client.close();
   });
 });
