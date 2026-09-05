@@ -198,11 +198,15 @@ asset pipeline is the only place that knows about Torque Z-up.
 
 The T2 model, applied per tick:
 
-1. On the ground, if the player is not holding jump, apply `runForce` toward the move
-   direction, capped at the armor's max speeds, and apply ground friction.
-2. On the ground with jump held (skiing): no friction, no run force above run speed,
-   gravity and slope decide the rest. The `jumpForce` impulse fires once on the ground
-   contact edge, not while held.
+1. On the ground, if the player is not holding jump, steer the velocity toward the move
+   direction along the surface at the armor's max speed, changing it by at most
+   `runForce / mass` per second (Torque's `Player::updateMove`). With no move key the
+   target is zero, and that same steering is what stops a runner. There is no separate
+   ground friction constant.
+2. On the ground with jump held (skiing): no run steering, so nothing brakes the skier.
+   Below run speed a held move key still steers; gravity and slope decide the rest. The
+   `jumpForce` impulse fires once on the ground contact edge, not while held, scaled down
+   between `minJumpSpeed` and `maxJumpSpeed` and refused above (Torque's jump code).
 3. Jetting: apply `jetForce` upward while energy is above `minJetEnergy`, drain
    `jetEnergyDrain` per tick. No air run force. Recharge `rechargeRate` per tick when not
    jetting (Energy Pack doubles the recharge).

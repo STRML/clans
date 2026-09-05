@@ -25,7 +25,6 @@ export interface ArmorData {
   runSurfaceAngle: number;
   jumpSurfaceAngle: number;
   speedDamageScale: number;
-  groundFriction: number;
 }
 
 export const LIGHT_ARMOR: ArmorData = {
@@ -55,5 +54,4 @@ export const LIGHT_ARMOR: ArmorData = {
   runSurfaceAngle: 70,
   jumpSurfaceAngle: 80,
   speedDamageScale: 0.004,
-  groundFriction: 40, // Our tuning value, not a T2 script value.
 };

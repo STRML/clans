@@ -101,8 +101,10 @@ describe('Light movement', () => {
     for (let tick = 0; tick < Math.ceil(3 / FIXED_DT); tick += 1) {
       stepWorld(world, inputMap(id, { moveZ: 1, yaw: Math.PI }));
     }
+    // The cap is along the surface, as in Torque, so measure the full tangent speed.
     const speed = Math.hypot(
       world.players.velocity[id * 3] ?? 0,
+      world.players.velocity[id * 3 + 1] ?? 0,
       world.players.velocity[id * 3 + 2] ?? 0,
     );
     expect(speed).toBeLessThanOrEqual(15.01);
@@ -182,6 +184,52 @@ describe('Light movement', () => {
     expect(world.players.landingSpeed[id]).toBeGreaterThanOrEqual(80);
   });
 
+  it('runs up a 60 degree slope at run speed instead of stalling', () => {
+    // Torque steers velocity toward the run speed at runForce/mass, and that steering is
+    // also what stops a player. A separate friction term fought the run force uphill and
+    // left the player crawling at 1 m/s into the spawn hill.
+    const rise = Math.tan((60 * Math.PI) / 180) * 1000;
+    const slope: Heightfield = {
+      gridSize: 2,
+      squareSize: 1000,
+      originX: 0,
+      originY: 0,
+      originZ: 1000,
+      heightScale: 1,
+      heights: Uint16Array.from([Math.round(rise), Math.round(rise), 0, 0]),
+    };
+    const world = createWorld(slope, 1);
+    const id = addPlayer(world, { x: 500, y: rise / 2, z: 500 });
+    world.players.onGround[id] = 1;
+    world.players.wasGrounded[id] = 1;
+    // Facing uphill (+z): yaw 0 makes forward (sin, cos) = (0, 1).
+    for (let tick = 0; tick < Math.ceil(2 / FIXED_DT); tick += 1) {
+      stepWorld(world, inputMap(id, { moveZ: 1 }));
+    }
+    const speed = Math.hypot(
+      world.players.velocity[id * 3] ?? 0,
+      world.players.velocity[id * 3 + 1] ?? 0,
+      world.players.velocity[id * 3 + 2] ?? 0,
+    );
+    expect(speed).toBeGreaterThan(14);
+    expect(speed).toBeLessThanOrEqual(15.01);
+    expect(world.players.position[id * 3 + 2]).toBeGreaterThan(510);
+  });
+
+  it('keeps its speed while skiing slowly on flat ground with no move input', () => {
+    // Skiing removes the ground's grip. Below run speed a skier may still run, but only
+    // when a move key is held; with none held nothing may brake them.
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 10, y: 0, z: 10 });
+    world.players.onGround[id] = 1;
+    world.players.wasGrounded[id] = 1;
+    world.players.wasJumpHeld[id] = 1;
+    world.players.velocity[id * 3 + 2] = 5;
+    for (let tick = 0; tick < 15; tick += 1) stepWorld(world, inputMap(id, { jump: true }));
+    expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(5, 6);
+    expect(world.players.ski[id]).toBe(1);
+  });
+
   it('gains speed every tick while skiing down a 20 degree slope for 3 seconds', () => {
     const rise = Math.tan((20 * Math.PI) / 180) * 1000;
     const slope: Heightfield = {
@@ -240,6 +288,25 @@ describe('Light movement', () => {
     // Refused jump: no upward impulse. Slope gravity may pull the value below zero.
     expect(steep.players.velocity[steepId * 3 + 1]).toBeLessThanOrEqual(0);
     expect(steep.players.ski[steepId]).toBe(1);
+  });
+
+  it('scales the jump impulse down between minJumpSpeed and maxJumpSpeed and refuses it above', () => {
+    const gainFrom = (vy: number): number => {
+      const world = createWorld(flat, 1);
+      const id = addPlayer(world, { x: 10, y: 0, z: 10 });
+      world.players.onGround[id] = 1;
+      world.players.wasGrounded[id] = 1;
+      world.players.velocity[id * 3 + 1] = vy;
+      stepWorld(world, inputMap(id, { jump: true }));
+      return (world.players.velocity[id * 3 + 1] ?? 0) - vy;
+    };
+    const full = gainFrom(0);
+    expect(full).toBeCloseTo(8.3, 6);
+    const partial = gainFrom(25);
+    expect(partial).toBeGreaterThan(0);
+    expect(partial).toBeLessThan(full);
+    // Above maxJumpSpeed the jump is refused; only the run steering toward rest remains.
+    expect(gainFrom(31)).toBeLessThanOrEqual(0);
   });
 
   it('hard caps horizontal speed at 68 m/s for 100 ticks', () => {

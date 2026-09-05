@@ -20,9 +20,6 @@ interface Body {
 }
 
 const degrees = (radians: number): number => (radians * 180) / Math.PI;
-const clampAbs = (value: number, limit: number): number => Math.max(-limit, Math.min(limit, value));
-const approachZero = (value: number, amount: number): number =>
-  value <= amount ? 0 : value - amount;
 
 function readBody(players: PlayerStore, id: number): Body {
   const base = id * 3;
@@ -41,42 +38,82 @@ function writeBody(players: PlayerStore, id: number, body: Body): void {
   players.velocity.set([body.vx, body.vy, body.vz], id * 3);
 }
 
-/** Add acceleration on one local axis. Never pushes past the cap; always allows braking. */
-function accelerateAxis(velocity: number, acceleration: number, cap: number): number {
-  if (Math.abs(velocity) <= cap) return clampAbs(velocity + acceleration, cap);
-  return Math.sign(acceleration) === Math.sign(velocity) ? velocity : velocity + acceleration;
+interface Vec3 {
+  x: number;
+  y: number;
+  z: number;
 }
 
-/** Run force in the player's local frame with T2's per-axis speed caps. */
-function applyRun(body: Body, input: PlayerInput, armor: ArmorData, dt: number): void {
-  const length = Math.hypot(input.moveX, input.moveZ);
-  if (length === 0) return;
-  const acceleration = (armor.runForce / armor.mass) * dt;
+/** Torque picks one speed for the move: the larger of the per-axis caps, each scaled by its key. */
+function desiredSpeed(input: PlayerInput, armor: ArmorData): number {
+  const forwardCap = input.moveZ < 0 ? armor.maxBackwardSpeed : armor.maxForwardSpeed;
+  return Math.max(Math.abs(input.moveX) * armor.maxSideSpeed, Math.abs(input.moveZ) * forwardCap);
+}
+
+/**
+ * Tilt a horizontal heading onto the surface without turning it: drop the part of the
+ * surface normal that points sideways from the heading, then remove that from the heading.
+ * This is Torque's construction in Player::updateMove.
+ */
+function tiltOntoSurface(heading: Vec3, normal: Vec3): Vec3 {
+  const sideLength = Math.hypot(heading.z, heading.x);
+  const side = { x: -heading.z / sideLength, y: 0, z: heading.x / sideLength };
+  const sideShare = side.x * normal.x + side.z * normal.z;
+  const cv = {
+    x: normal.x - side.x * sideShare,
+    y: normal.y,
+    z: normal.z - side.z * sideShare,
+  };
+  const along = heading.x * cv.x + heading.z * cv.z;
+  return { x: heading.x - cv.x * along, y: -cv.y * along, z: heading.z - cv.z * along };
+}
+
+/** The velocity the player wants: the move direction along the surface at the armor's cap. */
+function desiredVelocity(input: PlayerInput, normal: Vec3, armor: ArmorData): Vec3 {
+  const speed = desiredSpeed(input, armor);
+  if (speed === 0) return { x: 0, y: 0, z: 0 };
   // Forward is (sin yaw, 0, cos yaw). Right is forward x up = (-cos yaw, 0, sin yaw), so
   // positive moveX (the D key) strafes to the camera's right.
   const sin = Math.sin(input.yaw);
   const cos = Math.cos(input.yaw);
-  const side = -body.vx * cos + body.vz * sin;
-  const forward = body.vx * sin + body.vz * cos;
-  const forwardCap = input.moveZ < 0 ? armor.maxBackwardSpeed : armor.maxForwardSpeed;
-  const nextSide = accelerateAxis(side, (input.moveX / length) * acceleration, armor.maxSideSpeed);
-  const nextForward = accelerateAxis(forward, (input.moveZ / length) * acceleration, forwardCap);
-  body.vx = -nextSide * cos + nextForward * sin;
-  body.vz = nextSide * sin + nextForward * cos;
+  const heading = {
+    x: input.moveZ * sin - input.moveX * cos,
+    y: 0,
+    z: input.moveZ * cos + input.moveX * sin,
+  };
+  const tilted = tiltOntoSurface(heading, normal);
+  const scale = speed / Math.hypot(tilted.x, tilted.y, tilted.z);
+  return { x: tilted.x * scale, y: tilted.y * scale, z: tilted.z * scale };
 }
 
 /**
- * Ground friction when standing still on the surface without skiing. A grounded body's
- * velocity is tangent to the surface, so friction damps the whole vector; damping only the
- * horizontal part would leave the tangent's vertical share to re-emerge on contact.
+ * Torque's run model: steer the velocity toward the desired velocity, at most runForce/mass
+ * per second. With no move key the desired velocity is zero, and that pull is what stops a
+ * runner; there is no separate ground friction. It runs after slope gravity, so a runner
+ * holds the cap downhill and an idle player settles on any slope below runSurfaceAngle.
  */
-function applyFriction(body: Body, armor: ArmorData, dt: number): void {
-  const speed = Math.hypot(body.vx, body.vy, body.vz);
-  if (speed === 0) return;
-  const scale = approachZero(speed, armor.groundFriction * dt) / speed;
-  body.vx *= scale;
-  body.vy *= scale;
-  body.vz *= scale;
+function applyRun(
+  body: Body,
+  input: PlayerInput,
+  normal: Vec3,
+  armor: ArmorData,
+  dt: number,
+): void {
+  const target = desiredVelocity(input, normal, armor);
+  let ax = target.x - body.vx;
+  let ay = target.y - body.vy;
+  let az = target.z - body.vz;
+  const wanted = Math.hypot(ax, ay, az);
+  const maxAcc = (armor.runForce / armor.mass) * dt;
+  if (wanted > maxAcc) {
+    const scale = maxAcc / wanted;
+    ax *= scale;
+    ay *= scale;
+    az *= scale;
+  }
+  body.vx += ax;
+  body.vy += ay;
+  body.vz += az;
 }
 
 /** Remove any velocity into the surface, then add the slope component of gravity. */
@@ -98,6 +135,18 @@ function applyAir(body: Body, armor: ArmorData, dt: number): void {
   const airDrag = Math.max(0, 1 - armor.drag * dt);
   body.vx *= airDrag;
   body.vz *= airDrag;
+}
+
+/**
+ * Torque's jump impulse: jumpForce/mass upward, scaled down linearly once the body already
+ * rises faster than minJumpSpeed, and refused above maxJumpSpeed. Returns true when it fired.
+ */
+function applyJump(body: Body, armor: ArmorData): boolean {
+  if (body.vy > armor.maxJumpSpeed) return false;
+  const range = armor.maxJumpSpeed - armor.minJumpSpeed;
+  const scale = body.vy > armor.minJumpSpeed ? (armor.maxJumpSpeed - body.vy) / range : 1;
+  body.vy += (armor.jumpForce / armor.mass) * scale;
+  return true;
 }
 
 /** Returns true when the jet fired this tick. Recharges only while the jet key is up. */
@@ -185,8 +234,11 @@ function classify(world: World, body: Body, input: PlayerInput, armor: ArmorData
   const slope = degrees(Math.acos(Math.max(-1, Math.min(1, sample.normal.y))));
   const forcedSki = slope > armor.runSurfaceAngle;
   const skiing = grounded && (input.jump || forcedSki);
-  const belowRunSpeed = Math.hypot(body.vx, body.vz) < armor.maxForwardSpeed;
-  const mayRun = grounded && !forcedSki && (!input.jump || belowRunSpeed);
+  // A skier below run speed may still run, but only while a move key is held: with no key
+  // the run steering would pull them to a stop, and skiing exists to remove that pull.
+  const belowRunSpeed = Math.hypot(body.vx, body.vy, body.vz) < armor.maxForwardSpeed;
+  const moving = input.moveX !== 0 || input.moveZ !== 0;
+  const mayRun = grounded && !forcedSki && (!input.jump || (belowRunSpeed && moving));
   return { sample, grounded, slope, forcedSki, skiing, mayRun };
 }
 
@@ -205,15 +257,13 @@ function applyForces(
   dt: number,
 ): Forces {
   const jumpEdge = input.jump && (!players.wasJumpHeld[id] || !players.wasGrounded[id]);
-  const jumped = ctx.grounded && jumpEdge && ctx.slope <= armor.jumpSurfaceAngle;
-  if (jumped) body.vy = Math.max(body.vy, armor.jumpForce / armor.mass);
+  const mayJump = ctx.grounded && jumpEdge && ctx.slope <= armor.jumpSurfaceAngle;
   if (ctx.grounded) applyGround(body, ctx.sample, dt);
   else applyAir(body, armor, dt);
-  // Ground friction applies to everyone on the surface who is not skiing: it is what
-  // skiing removes. It runs after slope gravity so an idle player settles, and before the
-  // run force so a runner holds exactly the armor's cap, downhill included.
-  if (ctx.grounded && !ctx.skiing) applyFriction(body, armor, dt);
-  if (ctx.mayRun) applyRun(body, input, armor, dt);
+  if (ctx.mayRun) applyRun(body, input, ctx.sample.normal, armor, dt);
+  // The jump comes after the run steering, as in Torque, so the steering toward a
+  // horizontal target cannot eat part of the impulse on the tick it fires.
+  const jumped = mayJump && applyJump(body, armor);
   const jetted = applyJet(players, id, body, input, armor, dt);
   return { jumped, jetted };
 }
