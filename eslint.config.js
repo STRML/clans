@@ -10,6 +10,7 @@ export default defineConfig(
       '**/dist/**',
       '**/dist-types/**',
       '**/node_modules/**',
+      '.claude/**',
       'assets/out/**',
       'packages/assets/cache/**',
       'playwright-report/**',

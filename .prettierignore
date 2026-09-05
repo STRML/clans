@@ -7,3 +7,4 @@ packages/assets/cache/
 playwright-report/
 test-results/
 *.md
+.claude/
