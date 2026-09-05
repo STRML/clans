@@ -102,9 +102,10 @@ class Cursor {
     return this.tokens[this.index];
   }
 
+  /** Consumes the next token. With `value`, it must be that exact unquoted keyword or delimiter. */
   take(value?: string): Token {
     const token = this.tokens[this.index];
-    if (!token || (value !== undefined && token.value !== value)) {
+    if (!token || (value !== undefined && (token.value !== value || token.quoted))) {
       throw new SyntaxError(
         `Expected ${value ?? 'token'} at line ${token?.line ?? this.totalLines}`,
       );
@@ -120,11 +121,15 @@ function assertNotEof(cursor: Cursor, classToken: Token): void {
   }
 }
 
+const isDelimiter = (token: Token | undefined, value: string): boolean =>
+  token !== undefined && !token.quoted && token.value === value;
+
 function parseHeader(cursor: Cursor): { classToken: Token; name: string | null } {
   cursor.take('new');
   const classToken = cursor.take();
   cursor.take('(');
-  const name = cursor.peek()?.value === ')' ? null : cursor.take().value;
+  const next = cursor.peek();
+  const name = next && !next.quoted && next.value === ')' ? null : cursor.take().value;
   cursor.take(')');
   cursor.take('{');
   return { classToken, name };
@@ -132,7 +137,7 @@ function parseHeader(cursor: Cursor): { classToken: Token; name: string | null }
 
 function parsePropertyValue(cursor: Cursor, classToken: Token): string {
   const parts: string[] = [];
-  while (cursor.peek() && cursor.peek()?.value !== ';') {
+  while (cursor.peek() && !isDelimiter(cursor.peek(), ';')) {
     const token = cursor.take();
     if (!token.quoted && (token.value === 'new' || token.value === '}')) {
       throw new SyntaxError(`Expected ; before ${token.value} at line ${String(token.line)}`);
@@ -145,7 +150,7 @@ function parsePropertyValue(cursor: Cursor, classToken: Token): string {
 }
 
 function parseBody(cursor: Cursor, classToken: Token, object: MissionObject): void {
-  while (cursor.peek() && cursor.peek()?.value !== '}') {
+  while (cursor.peek() && !isDelimiter(cursor.peek(), '}')) {
     const next = cursor.peek();
     if (next && !next.quoted && next.value === 'new') {
       object.children.push(parseObject(cursor));

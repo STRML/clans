@@ -25,6 +25,11 @@ describe('parseMission', () => {
     expect(object?.props).toEqual({ key: 'new', other: '}' });
   });
 
+  it('rejects a quoted string where a structural token belongs', () => {
+    expect(() => parseMission('new A(X) { key = "value"; "}";')).toThrow(SyntaxError);
+    expect(() => parseMission('"new" A(X) { };')).toThrow(SyntaxError);
+  });
+
   it('rejects a property value that runs into a nested object instead of dropping it', () => {
     expect(() => parseMission('new A(X) {\n key = value new B(Y) {\n };\n};')).toThrow(
       'Expected ; before new at line 2',
