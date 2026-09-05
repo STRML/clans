@@ -281,6 +281,12 @@ describe('NetClient', () => {
 
     expect(client.stats.predictionErrorM).toBeGreaterThan(0);
     expect(client.world.players.position[0]).toBe(0);
+    // Codex round 4 (PR #4): the hard-snap cleared pendingInputs but left every discarded
+    // sequence's inputSentAt entry behind -- lastInputSequence was 0, so updatePing's own
+    // cleanup never touched them, and no ack for a sequence just thrown away can ever
+    // arrive to clean it up otherwise.
+    const sentAt = (client as unknown as { inputSentAt: Map<number, number> }).inputSentAt;
+    expect(sentAt.size).toBe(0);
   });
 
   it('stops growing its input backlog once the transport closes', () => {

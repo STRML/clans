@@ -330,6 +330,12 @@ function decodeDelta(
     const player = readPlayerFull(cursor);
     byId.set(player.id, player);
   }
+  // addedCount alone was capped, but a baseline near the cap plus another capped batch
+  // of additions can still push the *reconstructed* roster over MAX_SNAPSHOT_PLAYERS,
+  // and nothing ever shrinks it back down between deltas -- growing it a little on every
+  // delta a client applies eventually reaches the same tens-of-thousands-of-meshes cap
+  // the count check on a single message was meant to prevent.
+  assertPlausibleCount(byId.size);
   const changedCount = readU16(cursor);
   assertPlausibleCount(changedCount);
   for (let i = 0; i < changedCount; i += 1) applyChangedPlayer(cursor, byId);

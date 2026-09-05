@@ -311,4 +311,27 @@ describe('startNetServer', () => {
     await expect(welcomePromise).resolves.toBeDefined();
     client.close();
   });
+
+  it('closes connected clients and frees their player slots on shutdown', async () => {
+    // Codex round 4 (PR #4): close() only called wss.close(), which stops accepting new
+    // connections but leaves sockets already connected alone. A client stayed OPEN and
+    // its player slot stayed active until it happened to disconnect on its own, which
+    // can hang a caller waiting for a clean shutdown.
+    const port = TEST_PORT + 1;
+    const shutdownWorld = createWorld(terrain, 1, 8);
+    const shutdownServer = startNetServer({ world: shutdownWorld, spawns, port });
+    await shutdownServer.ready;
+
+    const client = await connect(port);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+    expect(shutdownWorld.players.count).toBe(1);
+
+    const closed = new Promise<void>((resolve) => client.once('close', () => resolve()));
+    shutdownServer.close();
+    await closed;
+    await wait(20);
+    expect(shutdownWorld.players.active[0]).toBe(0);
+  });
 });

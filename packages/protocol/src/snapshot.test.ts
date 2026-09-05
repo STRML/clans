@@ -142,4 +142,24 @@ describe('snapshot codec', () => {
     writeU16(cursor, MAX_SNAPSHOT_PLAYERS + 1); // declared count, no player data follows
     expect(() => decodeSnapshot(bytesOf(cursor), null)).toThrow(RangeError);
   });
+
+  it('rejects a delta whose reconstructed roster exceeds the maximum, even when addedCount alone does not', () => {
+    // Codex round 4 (PR #4): addedCount was capped, but the baseline plus that capped
+    // batch of additions can still push the *reconstructed* roster over the limit -- a
+    // baseline near the cap, then another capped-size batch of additions on every
+    // following delta, would grow the client's roster toward the same tens-of-thousands
+    // of players and meshes the single-message count check was meant to prevent.
+    const source = createWorld(terrain, 1, MAX_SNAPSHOT_PLAYERS + 10);
+    addPlayer(source, { x: 0, y: 0, z: 0 }, 1);
+    const baselinePlayers = serializeActivePlayers(source);
+    for (let i = 0; i < MAX_SNAPSHOT_PLAYERS; i += 1) addPlayer(source, { x: i, y: 0, z: 0 }, 1);
+    const nextPlayers = serializeActivePlayers(source);
+    const deltaBytes = encodeSnapshot(2, 1, 0, nextPlayers, {
+      snapshotId: 1,
+      players: baselinePlayers,
+    });
+    expect(() => decodeSnapshot(deltaBytes, { snapshotId: 1, players: baselinePlayers })).toThrow(
+      RangeError,
+    );
+  });
 });

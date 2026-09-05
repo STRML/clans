@@ -207,6 +207,11 @@ export class NetClient {
         beforeX - (this.world.players.position[0] ?? 0),
         beforeZ - (this.world.players.position[2] ?? 0),
       );
+      // These sequences are all > lastInputSequence, so updatePing's own cleanup loop
+      // never touched them; discarding the backlog without also dropping their
+      // inputSentAt entries here left them there forever, since no ack for a sequence
+      // that was just thrown away can ever arrive to clean it up.
+      for (const pending of this.pendingInputs) this.inputSentAt.delete(pending.sequence);
       this.pendingInputs = [];
       return;
     }

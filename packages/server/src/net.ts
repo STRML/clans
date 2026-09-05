@@ -235,5 +235,14 @@ export function startNetServer(options: NetServerOptions): NetServer {
     for (const entry of clients.values()) sendSnapshot(entry, nextSnapshotId, tickNumber, players);
   }
 
-  return { ready, close: () => wss.close(), tick };
+  function close(): void {
+    // wss.close() alone stops accepting new connections; it does not touch sockets
+    // already connected. Without closing those too, a client stays OPEN and its player
+    // slot stays active until the client happens to disconnect on its own, which can
+    // hang a caller waiting for a clean shutdown.
+    for (const entry of clients.values()) entry.socket.close();
+    wss.close();
+  }
+
+  return { ready, close, tick };
 }
