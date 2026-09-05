@@ -30,8 +30,9 @@ export function buildTerrainGeometry(data: KatabaticAssets): THREE.BufferGeometr
         b = a + 1,
         c = a + gridSize,
         d = c + 1;
-      if (((col ^ row) & 1) === 0) indices.push(a, c, d, a, d, b);
-      else indices.push(a, c, b, b, c, d);
+      // Counter-clockwise seen from above (+Y), so the front face is the walkable side.
+      if (((col ^ row) & 1) === 0) indices.push(a, d, c, a, b, d);
+      else indices.push(a, b, c, b, d, c);
     }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -77,9 +78,17 @@ export async function createTerrain(data: KatabaticAssets): Promise<THREE.Mesh> 
       fogColor: { value: fogColor(data) },
       fogNear: { value: data.scene.sky.fogDistance },
       fogFar: { value: data.scene.sky.visibleDistance },
+      // Direction toward the sun: the mission stores the direction light travels.
+      sunDirection: { value: new THREE.Vector3(...data.scene.sun.direction).negate().normalize() },
+      sunColor: {
+        value: new THREE.Color(...(data.scene.sun.color.slice(0, 3) as [number, number, number])),
+      },
+      ambientColor: {
+        value: new THREE.Color(...(data.scene.sun.ambient.slice(0, 3) as [number, number, number])),
+      },
     },
-    vertexShader: `varying vec2 vUv; varying float vFogDepth; void main(){vUv=uv;vec4 mv=modelViewMatrix*vec4(position,1.0);vFogDepth=-mv.z;gl_Position=projectionMatrix*mv;}`,
-    fragmentShader: `uniform sampler2D map0,map1,map2,map3,alpha0,alpha1,alpha2,alpha3;uniform vec3 fogColor;uniform float fogNear,fogFar;varying vec2 vUv;varying float vFogDepth;void main(){vec2 tile=vUv*64.0;vec4 w=vec4(texture2D(alpha0,vUv).r,texture2D(alpha1,vUv).r,texture2D(alpha2,vUv).r,texture2D(alpha3,vUv).r);w/=max(dot(w,vec4(1.0)),0.0001);vec3 color=texture2D(map0,tile).rgb*w.x+texture2D(map1,tile).rgb*w.y+texture2D(map2,tile).rgb*w.z+texture2D(map3,tile).rgb*w.w;float fog=smoothstep(fogNear,fogFar,vFogDepth);gl_FragColor=vec4(mix(color,fogColor,fog),1.0);}`,
+    vertexShader: `varying vec2 vUv; varying float vFogDepth; varying vec3 vNormal; void main(){vUv=uv;vNormal=normalize(mat3(modelMatrix)*normal);vec4 mv=modelViewMatrix*vec4(position,1.0);vFogDepth=-mv.z;gl_Position=projectionMatrix*mv;}`,
+    fragmentShader: `uniform sampler2D map0,map1,map2,map3,alpha0,alpha1,alpha2,alpha3;uniform vec3 fogColor,sunDirection,sunColor,ambientColor;uniform float fogNear,fogFar;varying vec2 vUv;varying float vFogDepth;varying vec3 vNormal;void main(){vec2 tile=vUv*64.0;vec4 w=vec4(texture2D(alpha0,vUv).r,texture2D(alpha1,vUv).r,texture2D(alpha2,vUv).r,texture2D(alpha3,vUv).r);w/=max(dot(w,vec4(1.0)),0.0001);vec3 albedo=texture2D(map0,tile).rgb*w.x+texture2D(map1,tile).rgb*w.y+texture2D(map2,tile).rgb*w.z+texture2D(map3,tile).rgb*w.w;float lambert=max(dot(normalize(vNormal),sunDirection),0.0);vec3 color=albedo*(ambientColor+sunColor*lambert);float fog=smoothstep(fogNear,fogFar,vFogDepth);gl_FragColor=vec4(mix(color,fogColor,fog),1.0);}`,
   });
   const mesh = new THREE.Mesh(buildTerrainGeometry(data), material);
   mesh.receiveShadow = true;
@@ -95,8 +104,8 @@ export function addEnvironment(target: THREE.Scene, data: KatabaticAssets): void
       top: { value: new THREE.Color(0x5b7899) },
       bottom: { value: new THREE.Color(0xd7e2e8) },
     },
-    vertexShader: `varying vec3 world;void main(){world=(modelMatrix*vec4(position,1.0)).xyz;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
-    fragmentShader: `uniform vec3 top,bottom;varying vec3 world;void main(){float h=clamp(normalize(world).y*0.5+0.5,0.0,1.0);gl_FragColor=vec4(mix(bottom,top,h),1.0);}`,
+    vertexShader: `varying vec3 local;void main(){local=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+    fragmentShader: `uniform vec3 top,bottom;varying vec3 local;void main(){float h=clamp(normalize(local).y*0.5+0.5,0.0,1.0);gl_FragColor=vec4(mix(bottom,top,h),1.0);}`,
   });
   const sky = new THREE.Mesh(new THREE.SphereGeometry(450, 32, 16), skyMaterial);
   sky.name = 'sky'; // Task 10 moves this mesh to the camera position every frame.

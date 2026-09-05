@@ -34,7 +34,7 @@ const data = {
 describe('buildTerrainGeometry', () => {
   it('uses split45 on even squares and the opposite split on odd squares', () => {
     const index = [...(buildTerrainGeometry(data).getIndex()?.array ?? [])];
-    expect(index.slice(0, 6)).toEqual([0, 3, 4, 0, 4, 1]);
-    expect(index.slice(6, 12)).toEqual([1, 4, 2, 2, 4, 5]);
+    expect(index.slice(0, 6)).toEqual([0, 4, 3, 0, 1, 4]);
+    expect(index.slice(6, 12)).toEqual([1, 2, 4, 2, 5, 4]);
   });
 });
