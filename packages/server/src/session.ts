@@ -29,12 +29,6 @@ export function createSession(playerId: number, team: number, now: number): Sess
   };
 }
 
-// The wire format serializes sequence as a u32 (see protocol's codec.ts), so a client
-// that stays connected long enough eventually wraps back to 0. At one Input message per
-// tick (FIXED_TICK_MS), that takes about 4.36 years -- rare, but not impossible for a
-// long-running dedicated server -- and a plain `current > last` comparison would reject
-// every sequence forever afterward, since nothing can look "newer" than 0xffffffff again.
-const SEQUENCE_SPACE = 0x100000000; // 2^32
 // A real client starts its sequence at 1 and advances it by exactly one per tick, so
 // even a long reconnect stall only produces a gap of however many ticks were missed —
 // nowhere near this. This exists to catch a forged or corrupted sequence (a raw u32 up
@@ -57,36 +51,33 @@ const MAX_SEQUENCE_JUMP = 10_000;
  * away the recoverable backfill in the second case, permanently losing whatever jump or
  * move key that lost first packet carried.
  *
- * The forward distance is computed in a 32-bit circular sequence space (mirroring TCP's
- * own wraparound-safe comparison), not a plain subtraction: stepping forward from
- * 0xffffffff to 0 is a distance of 1, exactly like stepping from 1 to 2, so a genuine
- * wraparound after ~4.36 years of continuous play is accepted like any other tick advance
- * while a forged jump that looks huge in the forward direction is still rejected by the
- * same MAX_SEQUENCE_JUMP bound that catches a forged 0xffffffff today.
+ * WONTFIX (PR #4, M2 status table): the wire format serializes sequence as a u32, so a
+ * session kept continuously open for ~4.36 years at one Input message per tick would wrap
+ * back to 0 and this comparison would then reject all further input, requiring a
+ * reconnect. Round 11 made this comparison wraparound-safe (circular sequence-space
+ * arithmetic), but every downstream consumer of a sequence or snapshotId -- the client's
+ * own unwrapped bookkeeping, the server's ack matching, remote-interpolation timestamps,
+ * packet-loss accounting -- would need the same treatment to stay consistent, and round
+ * 12 found exactly that: fixing one site surfaced the next. Given the years-long timescale
+ * involved, a clean "please reconnect" after a session outlives the wire format is an
+ * acceptable terminal state; chasing wraparound-consistency across every subsystem is not
+ * proportionate to a scenario no real deployment of this project will reach. Reverted to
+ * a plain forward comparison plus the MAX_SEQUENCE_JUMP bound below, which still closes
+ * the actually-reachable finding (a forged large jump poisoning the session) without
+ * pretending to support multi-year uninterrupted uptime.
  */
 export function applyInputMessage(session: Session, message: InputMessage): NetInputSample[] {
-  const gap = (message.sequence - session.lastAppliedSequence + SEQUENCE_SPACE) % SEQUENCE_SPACE;
-  if (gap === 0 || gap > MAX_SEQUENCE_JUMP) return [];
+  if (message.sequence <= session.lastAppliedSequence) return [];
+  const gap = message.sequence - session.lastAppliedSequence;
+  if (gap > MAX_SEQUENCE_JUMP) return [];
   const missing = Math.min(gap, message.samples.length);
   const toApply = message.samples.slice(0, missing).reverse();
   session.lastAppliedSequence = message.sequence;
   return toApply;
 }
 
-/**
- * snapshotId is the same wire-format u32 as an Input sequence (see snapshot.ts), so it
- * wraps back to 0 after long enough uptime too (roughly 8.7 years at one snapshot every
- * SNAPSHOT_EVERY_N_TICKS ticks) -- the same class of bug applyInputMessage above guards
- * against. handleAck in net.ts already rejects any snapshotId the server never actually
- * sent, so unlike applyInputMessage this needs no forged-jump bound: every id reaching
- * here is a real one from the server's own recent history, bounded to a handful of
- * candidates. A gap past the halfway point of the circular space means snapshotId is
- * really behind lastAckedSnapshotId once wraparound is accounted for (mirrors TCP's own
- * wrapped-sequence comparison).
- */
 export function recordAck(session: Session, snapshotId: number, now: number): void {
-  const gap = (snapshotId - session.lastAckedSnapshotId + SEQUENCE_SPACE) % SEQUENCE_SPACE;
-  if (gap > SEQUENCE_SPACE / 2) return;
+  if (snapshotId < session.lastAckedSnapshotId) return;
   session.lastAckedSnapshotId = snapshotId;
   session.lastAckedAt = now;
 }
