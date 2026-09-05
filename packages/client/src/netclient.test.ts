@@ -10,6 +10,7 @@ import {
   type Heightfield,
   type PlayerInput,
   type RandomState,
+  type World,
 } from '@clans/sim';
 import { MessageType, SNAPSHOT_EVERY_N_TICKS, decodeInput, encodeSnapshot } from '@clans/protocol';
 import { NetClient } from './netclient.js';
@@ -58,6 +59,21 @@ function makeTransport(
   };
 }
 
+type Positions = Map<number, [number, number]>;
+
+/** Largest client/server gap over the sequences both sides recorded after `settled`. */
+function worstDistance(clientAt: Positions, serverAt: Positions, settled: number) {
+  let compared = 0;
+  let worst = 0;
+  for (const [sequence, [sx, sz]] of serverAt) {
+    const client = clientAt.get(sequence);
+    if (sequence <= settled || !client) continue;
+    compared += 1;
+    worst = Math.max(worst, Math.hypot(client[0] - sx, client[1] - sz));
+  }
+  return { compared, worst };
+}
+
 describe('NetClient', () => {
   it('keeps prediction within 0.5 m of the server after a 3 s ski run at 150ms latency, 5% loss', () => {
     clock.ms = 0;
@@ -72,14 +88,35 @@ describe('NetClient', () => {
     let nextSnapshotId = 1;
     let lastInputSequence = 0;
     const skiInput: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: true, jet: false };
+    // Like the real server: step with the newest input received, idle until the first arrives.
+    let serverInput: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
     const totalTicks = Math.ceil(3 / FIXED_DT);
+    // Prediction is judged at equal input sequence: the client's position right after it
+    // applied input n must match the server's position right after it applied input n.
+    // Comparing the client's present to the server's present would measure latency, not error.
+    const clientAt = new Map<number, [number, number]>();
+    const serverAt = new Map<number, [number, number]>();
+    const positionOf = (world: World): [number, number] => [
+      world.players.position[0] ?? 0,
+      world.players.position[2] ?? 0,
+    ];
 
-    for (let tick = 0; tick < totalTicks; tick += 1) {
+    // Run 3 s of client ticks, then let the last inputs reach the server.
+    const drainTicks = Math.ceil((LATENCY_MS * 2) / FIXED_TICK_MS);
+    for (let tick = 0; tick < totalTicks + drainTicks; tick += 1) {
       clock.ms += FIXED_TICK_MS;
+      let arrived = 0;
       for (const bytes of clientToServer.drain()) {
-        if (bytes[0] === MessageType.Input) lastInputSequence = decodeInput(bytes).sequence;
+        if (bytes[0] !== MessageType.Input) continue;
+        const message = decodeInput(bytes);
+        if (message.sequence > lastInputSequence) {
+          lastInputSequence = message.sequence;
+          serverInput = message.samples[0];
+          arrived = message.sequence;
+        }
       }
-      stepWorld(server, new Map([[0, skiInput]]));
+      stepWorld(server, new Map([[0, serverInput]]));
+      if (arrived > 0) serverAt.set(arrived, positionOf(server));
       if (tick % SNAPSHOT_EVERY_N_TICKS === 0) {
         const players = serializeActivePlayers(server);
         serverToClient.send(
@@ -88,14 +125,18 @@ describe('NetClient', () => {
         nextSnapshotId += 1;
       }
       transport.pump(serverToClient.drain());
-      client.tick(skiInput);
+      if (tick < totalTicks) {
+        client.tick(skiInput);
+        clientAt.set(tick + 1, positionOf(client.world));
+      }
     }
 
-    const serverX = server.players.position[0] ?? 0;
-    const serverZ = server.players.position[2] ?? 0;
-    const clientX = client.world.players.position[0] ?? 0;
-    const clientZ = client.world.players.position[2] ?? 0;
-    expect(Math.hypot(clientX - serverX, clientZ - serverZ)).toBeLessThan(0.5);
+    // The client spawns at the origin and only learns its server position from the first
+    // snapshot, so skip the sequences before two snapshot round trips have happened.
+    const settled = Math.ceil((LATENCY_MS * 4) / FIXED_TICK_MS);
+    const { compared, worst } = worstDistance(clientAt, serverAt, settled);
+    expect(compared).toBeGreaterThan(50);
+    expect(worst).toBeLessThan(0.5);
   });
 
   it('drops a delta whose baseline it never received and keeps running', () => {
