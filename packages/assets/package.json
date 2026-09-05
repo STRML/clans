@@ -11,8 +11,8 @@
   "scripts": {
     "build": "tsc -b",
     "test": "vitest run",
-    "fetch": "tsx src/cli/fetch.ts",
-    "build:assets": "tsx src/cli/build.ts"
+    "fetch": "tsx src/fetch.ts",
+    "build:assets": "tsx src/fetch.ts && tsx src/build.ts"
   },
   "dependencies": {
     "pngjs": "^7.0.0"
