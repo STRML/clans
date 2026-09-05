@@ -9,5 +9,5 @@
     "types": ["vite/client"]
   },
   "include": ["src"],
-  "references": [{ "path": "../sim" }]
+  "references": [{ "path": "../protocol" }, { "path": "../sim" }]
 }
