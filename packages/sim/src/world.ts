@@ -14,7 +14,23 @@ function lowestTerrainHeight(terrain: Heightfield): number {
   return terrain.originY + (Number.isFinite(lowest) ? lowest : 0) / terrain.heightScale;
 }
 
+/**
+ * Every square, not just the diagonal-corner ones, must have a real sample: sampleTerrain
+ * indexes rows and columns with `?? 0`, so a truncated heights array (a partial asset
+ * fetch, say) would silently sample as flat rather than fail. Catch the mismatch here,
+ * at the one place every heightfield passes through before it can be simulated on.
+ */
+function assertCompleteHeights(terrain: Heightfield): void {
+  const expected = terrain.gridSize * terrain.gridSize;
+  if (terrain.heights.length !== expected) {
+    throw new RangeError(
+      `Heightfield expects ${String(expected)} heights for a ${String(terrain.gridSize)}x${String(terrain.gridSize)} grid, got ${String(terrain.heights.length)}`,
+    );
+  }
+}
+
 export function createWorld(terrain: Heightfield, seed: number, capacity = 32): World {
+  assertCompleteHeights(terrain);
   return {
     tick: 0,
     random: { value: seed || 1 },

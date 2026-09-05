@@ -41,4 +41,11 @@ describe('fixed world', () => {
     };
     expect(createWorld(raised, 1).killY).toBe(50 - 30);
   });
+
+  it('rejects a heightfield whose heights array does not match gridSize squared', () => {
+    // Codex round 15: sampleTerrain indexes with `?? 0`, so a truncated heights array
+    // (a partial asset fetch) silently sampled as flat instead of failing to load.
+    const truncated: Heightfield = { ...terrain, heights: new Uint16Array(3) };
+    expect(() => createWorld(truncated, 1)).toThrow(RangeError);
+  });
 });

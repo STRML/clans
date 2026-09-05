@@ -52,8 +52,13 @@ function desiredSpeed(input: PlayerInput, armor: ArmorData): number {
 
 /**
  * Tilt a horizontal heading onto the surface without turning it: drop the part of the
- * surface normal that points sideways from the heading, then remove that from the heading.
- * This is Torque's construction in Player::updateMove.
+ * surface normal that points sideways from the heading, then remove that (properly
+ * normalized) from the heading. This is Torque's construction in Player::updateMove.
+ * cv is not a unit vector once the surface slopes sideways from the heading too (a
+ * diagonal slope), so the removal has to divide by cv's own length squared -- skipping
+ * that division left the result short of the surface tangent on a diagonal slope, and
+ * the ground contact in applyGround then bled off the shortfall as into-surface velocity,
+ * so a runner never reached the nominal run speed.
  */
 function tiltOntoSurface(heading: Vec3, normal: Vec3): Vec3 {
   const sideLength = Math.hypot(heading.z, heading.x);
@@ -64,7 +69,8 @@ function tiltOntoSurface(heading: Vec3, normal: Vec3): Vec3 {
     y: normal.y,
     z: normal.z - side.z * sideShare,
   };
-  const along = heading.x * cv.x + heading.z * cv.z;
+  const cvLengthSq = cv.x * cv.x + cv.y * cv.y + cv.z * cv.z || 1;
+  const along = (heading.x * cv.x + heading.z * cv.z) / cvLengthSq;
   return { x: heading.x - cv.x * along, y: -cv.y * along, z: heading.z - cv.z * along };
 }
 

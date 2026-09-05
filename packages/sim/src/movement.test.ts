@@ -216,6 +216,35 @@ describe('Light movement', () => {
     expect(world.players.position[id * 3 + 2]).toBeGreaterThan(510);
   });
 
+  it('reaches full run speed on a slope that tilts sideways from the heading (diagonal slope)', () => {
+    // Codex round 15: tiltOntoSurface treated cv as a unit vector, which only holds when
+    // the slope does not tilt sideways from the heading. On a diagonal slope the result
+    // fell short of the true surface tangent, and applyGround's "remove velocity into
+    // the surface" clamp bled off the shortfall every tick, so a runner topped out well
+    // under the nominal 15 m/s run speed (13.99 m/s before this fix).
+    const diagonal: Heightfield = {
+      gridSize: 2,
+      squareSize: 1000,
+      originX: 0,
+      originY: 0,
+      originZ: 1000,
+      heightScale: 1,
+      heights: Uint16Array.from([0, 1000, 1000, 2000]),
+    };
+    const world = createWorld(diagonal, 1);
+    const start = sampleTerrain(diagonal, 500, 500);
+    const id = addPlayer(world, { x: 500, y: start.height, z: 500 });
+    world.players.onGround[id] = 1;
+    world.players.wasGrounded[id] = 1;
+    for (let tick = 0; tick < 100; tick += 1) stepWorld(world, inputMap(id, { moveZ: 1 }));
+    const speed = Math.hypot(
+      world.players.velocity[id * 3] ?? 0,
+      world.players.velocity[id * 3 + 1] ?? 0,
+      world.players.velocity[id * 3 + 2] ?? 0,
+    );
+    expect(speed).toBeGreaterThan(14.9);
+  });
+
   it('keeps its speed while skiing slowly on flat ground with no move input', () => {
     // Skiing removes the ground's grip. Below run speed a skier may still run, but only
     // when a move key is held; with none held nothing may brake them.
