@@ -1,0 +1,29 @@
+import { readFile } from 'node:fs/promises';
+import { describe, expect, it } from 'vitest';
+import { parseMission } from './mis.js';
+import { extractScene, torqueAxisAngleToYUp, torquePositionToYUp } from './scene.js';
+
+describe('scene extraction', () => {
+  it('converts position and rotation axes exactly once', () => {
+    expect(torquePositionToYUp('1 2 3')).toEqual([1, 3, -2]);
+    expect(torqueAxisAngleToYUp('1 2 3 90')).toEqual({ axis: [1, 3, -2], degrees: 90 });
+  });
+
+  it('extracts typed leaves and inherited team membership', async () => {
+    const source = await readFile(new URL('./__fixtures__/scene.mis', import.meta.url), 'utf8');
+    const scene = extractScene(parseMission(source));
+    expect(scene.terrain).toEqual({
+      terrainFile: 'Katabatic.ter',
+      squareSize: 8,
+      position: [-1024, 0, 1024],
+    });
+    expect(scene.sun.direction).toEqual([0.57735, -0.57735, -0.57735]);
+    expect(scene.sky.visibleDistance).toBe(500);
+    expect(scene.sky.fogDistance).toBe(400);
+    expect(scene.sky.fogColor).toEqual([0.65, 0.65, 0.7, 1]);
+    expect(scene.missionArea).toEqual({ minX: -896, minZ: -696, width: 1504, depth: 1392 });
+    expect(scene.spawns).toEqual([
+      { name: 'SpawnA', team: 1, position: [326.888, 74.8106, 168.521], radius: 5 },
+    ]);
+  });
+});
