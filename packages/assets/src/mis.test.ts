@@ -28,6 +28,15 @@ describe('parseMission', () => {
   it('rejects a quoted string where a structural token belongs', () => {
     expect(() => parseMission('new A(X) { key = "value"; "}";')).toThrow(SyntaxError);
     expect(() => parseMission('"new" A(X) { };')).toThrow(SyntaxError);
+    expect(() => parseMission('new "A"(X) { };')).toThrow(
+      'Expected class name, got quoted string at line 1',
+    );
+    expect(() => parseMission('new A("X") { };')).toThrow(
+      'Expected object name, got quoted string at line 1',
+    );
+    expect(() => parseMission('new A(X) { "key" = "v"; };')).toThrow(
+      'Expected property key, got quoted string at line 1',
+    );
   });
 
   it('rejects a property value that runs into a nested object instead of dropping it', () => {

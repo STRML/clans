@@ -102,6 +102,15 @@ class Cursor {
     return this.tokens[this.index];
   }
 
+  /** Consumes an unquoted identifier: a class name, object name, or property key. */
+  takeIdentifier(role: string): Token {
+    const token = this.take();
+    if (token.quoted) {
+      throw new SyntaxError(`Expected ${role}, got quoted string at line ${String(token.line)}`);
+    }
+    return token;
+  }
+
   /** Consumes the next token. With `value`, it must be that exact unquoted keyword or delimiter. */
   take(value?: string): Token {
     const token = this.tokens[this.index];
@@ -126,10 +135,11 @@ const isDelimiter = (token: Token | undefined, value: string): boolean =>
 
 function parseHeader(cursor: Cursor): { classToken: Token; name: string | null } {
   cursor.take('new');
-  const classToken = cursor.take();
+  const classToken = cursor.takeIdentifier('class name');
   cursor.take('(');
   const next = cursor.peek();
-  const name = next && !next.quoted && next.value === ')' ? null : cursor.take().value;
+  const name =
+    next && !next.quoted && next.value === ')' ? null : cursor.takeIdentifier('object name').value;
   cursor.take(')');
   cursor.take('{');
   return { classToken, name };
@@ -156,7 +166,7 @@ function parseBody(cursor: Cursor, classToken: Token, object: MissionObject): vo
       object.children.push(parseObject(cursor));
       continue;
     }
-    const key = cursor.take().value;
+    const key = cursor.takeIdentifier('property key').value;
     cursor.take('=');
     object.props[key] = parsePropertyValue(cursor, classToken);
   }

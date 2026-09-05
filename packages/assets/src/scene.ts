@@ -14,6 +14,15 @@ export interface SceneData {
   spawns: Array<{ name: string | null; team: number; position: Vec3; radius: number }>;
 }
 
+/** One finite number from a mission property, with the property name in the error. */
+function scalar(value: string | undefined, name: string): number {
+  const parsed = Number(value);
+  if (value === undefined || value.trim() === '' || !Number.isFinite(parsed)) {
+    throw new TypeError(`Expected a finite number for ${name}, got "${String(value)}"`);
+  }
+  return parsed;
+}
+
 function numbers(value: string, count: number): number[] {
   const parsed = value.trim().split(/\s+/).map(Number);
   if (parsed.length !== count || parsed.some((item) => !Number.isFinite(item))) {
@@ -74,7 +83,7 @@ function findByClass(all: LocatedObject[], className: string): MissionObject {
 function buildTerrain(terrain: MissionObject): SceneData['terrain'] {
   return {
     terrainFile: terrain.props.terrainFile ?? '',
-    squareSize: Number(terrain.props.squareSize),
+    squareSize: scalar(terrain.props.squareSize, 'TerrainBlock.squareSize'),
     position: torquePositionToYUp(terrain.props.position ?? ''),
   };
 }
@@ -89,8 +98,8 @@ function buildSun(sun: MissionObject): SceneData['sun'] {
 
 function buildSky(sky: MissionObject): SceneData['sky'] {
   return {
-    visibleDistance: Number(sky.props.visibleDistance),
-    fogDistance: Number(sky.props.fogDistance),
+    visibleDistance: scalar(sky.props.visibleDistance, 'Sky.visibleDistance'),
+    fogDistance: scalar(sky.props.fogDistance, 'Sky.fogDistance'),
     fogColor: color(sky.props.fogColor ?? '0.65 0.65 0.7 1'),
     materialList: sky.props.materialList ?? '',
   };
@@ -108,7 +117,7 @@ function buildSpawns(all: LocatedObject[]): SceneData['spawns'] {
       name: object.name,
       team: teamFor(ancestors),
       position: torquePositionToYUp(object.props.position ?? ''),
-      radius: Number(object.props.radius),
+      radius: scalar(object.props.radius, 'SpawnSphere.radius'),
     }));
 }
 

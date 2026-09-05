@@ -26,4 +26,15 @@ describe('scene extraction', () => {
       { name: 'SpawnA', team: 1, position: [326.888, 74.8106, 168.521], radius: 5 },
     ]);
   });
+
+  it('rejects a scalar field that is missing or not a number', () => {
+    const source =
+      'new TerrainBlock(T) { terrainFile = "k.ter"; squareSize = "eight"; position = "0 0 0"; };\n' +
+      'new Sun() { direction = "0 0 -1"; color = "1 1 1 1"; ambient = "0 0 0 1"; };\n' +
+      'new Sky(Sky) { visibleDistance = "500"; fogDistance = "400"; fogColor = "0 0 0 1"; materialList = "x"; };\n' +
+      'new MissionArea(M) { area = "0 0 1 1"; };';
+    expect(() => extractScene(parseMission(source))).toThrow(
+      'Expected a finite number for TerrainBlock.squareSize, got "eight"',
+    );
+  });
 });
