@@ -2,6 +2,7 @@ import {
   addPlayer,
   createWorld,
   deserializePlayer,
+  resetPlayerToSpawn,
   stepWorld,
   type Heightfield,
   type PlayerInput,
@@ -136,18 +137,17 @@ export class NetClient {
     const welcome = decodeWelcome(bytes);
     this.playerId = welcome.playerId;
     this.team = welcome.team;
-    // Without the real spawn, a client that mispredicts falling below the kill plane
-    // before its first snapshot arrives resets to the local world's default (0,0,0)
-    // instead of the mission spawn the server would reset it to.
-    this.world.players.spawn.set([welcome.spawnX, welcome.spawnY, welcome.spawnZ], LOCAL_SLOT * 3);
     // The local player is created at (0,0,0) in the constructor, before any Welcome can
-    // arrive. Without also applying the spawn to position here, the client renders and
-    // predicts from the map origin instead of the real spawn until the first snapshot
-    // reconciles it away, which is visible whenever that snapshot is delayed.
-    this.world.players.position.set(
-      [welcome.spawnX, welcome.spawnY, welcome.spawnZ],
-      LOCAL_SLOT * 3,
-    );
+    // arrive, and a delayed Welcome (a slow first round trip) leaves time for local
+    // prediction to run several ticks from that placeholder: moving velocity, drained
+    // energy, mid-jump/ski flags. resetPlayerToSpawn is the same fresh-player reset
+    // addPlayer uses, so the client ends up in exactly the state a real spawn produces,
+    // not just corrected position with everything else still stale.
+    resetPlayerToSpawn(this.world, LOCAL_SLOT, {
+      x: welcome.spawnX,
+      y: welcome.spawnY,
+      z: welcome.spawnZ,
+    });
   }
 
   private pushSnapshotHistory(entry: SnapshotBaseline): void {

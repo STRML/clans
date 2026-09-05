@@ -1,3 +1,5 @@
+import { WORLD_CAPACITY } from './world.js';
+
 export interface ServerOptions {
   bots: number;
   port: number;
@@ -25,6 +27,11 @@ export function parseArgs(argv: string[]): ServerOptions {
   }
   if (!Number.isInteger(bots) || bots < 0)
     throw new RangeError('--bots must be a non-negative integer');
+  // addBots throws deep inside the sim package once world capacity is exhausted; catching
+  // it here instead gives a clear, actionable startup error instead of a crash whose
+  // stack trace points nowhere near the actual --bots argument that caused it.
+  if (bots > WORLD_CAPACITY)
+    throw new RangeError(`--bots must not exceed world capacity (${String(WORLD_CAPACITY)})`);
   if (!Number.isInteger(port) || port <= 0)
     throw new RangeError('--port must be a positive integer');
   return { bots, port };

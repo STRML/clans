@@ -26,6 +26,8 @@ export interface NetServerOptions {
   world: World;
   spawns: SceneSpawn[];
   port: number;
+  /** How long an accepted socket may stay unjoined before it is closed. */
+  joinTimeoutMs?: number;
 }
 export interface NetServer {
   ready: Promise<void>;
@@ -57,6 +59,10 @@ function ackedBaseline(entry: ClientEntry): SnapshotBaseline | null {
   return entry.sent.find((sent) => sent.snapshotId === entry.session.lastAckedSnapshotId) ?? null;
 }
 
+// A connection that completes the WebSocket upgrade but never sends Join stayed open
+// indefinitely before this: only the peer's own 'close' removed it, so a client (or
+// script) that connects and goes silent could exhaust sockets and memory one at a time.
+const DEFAULT_JOIN_TIMEOUT_MS = 10_000;
 const IDLE_INPUT: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
 // Bounds a client's catch-up queue. Each Input message contributes at most 3 samples and
 // a duplicate/reordered sequence is dropped in applyInputMessage, so this only guards the
@@ -74,7 +80,7 @@ function handleJoin(
   // and would sit there forever, eventually exhausting world capacity.
   if (clients.has(socket)) return;
   const team = smallerTeam(world);
-  const [x, y, z] = spawnPointFor(spawns, team, teamCount(world, team));
+  const [x, y, z] = spawnPointFor(world.terrain, spawns, team, teamCount(world, team));
   let playerId: number;
   try {
     playerId = addPlayer(world, { x, y, z }, team);
@@ -210,8 +216,14 @@ export function startNetServer(options: NetServerOptions): NetServer {
   });
   const clients = new Map<WebSocket, ClientEntry>();
   let nextSnapshotId = 1;
+  const joinTimeoutMs = options.joinTimeoutMs ?? DEFAULT_JOIN_TIMEOUT_MS;
 
   wss.on('connection', (socket) => {
+    // clients.has(socket) is only ever set once handleJoin succeeds, so this is a plain
+    // "did this socket ever join" check regardless of what fires first.
+    const joinTimeout = setTimeout(() => {
+      if (!clients.has(socket)) socket.close();
+    }, joinTimeoutMs);
     socket.on('message', (data) => {
       try {
         handleMessage(
@@ -228,13 +240,19 @@ export function startNetServer(options: NetServerOptions): NetServer {
         // idempotent, and a bad Join simply never gets a Welcome.
       }
     });
-    socket.on('close', () => handleClose(options.world, clients, socket));
+    socket.on('close', () => {
+      clearTimeout(joinTimeout);
+      handleClose(options.world, clients, socket);
+    });
     // A malformed frame at the WebSocket protocol level itself (an invalid raw frame,
     // e.g. an unmasked client frame) fires 'error' on the socket before 'message' ever
     // sees it, and our application-level try/catch above only ever covers decoded
     // messages. With no 'error' listener at all, Node's default is to throw and crash
     // the process; this absorbs it the same way the server-level handler below does.
-    socket.on('error', () => handleClose(options.world, clients, socket));
+    socket.on('error', () => {
+      clearTimeout(joinTimeout);
+      handleClose(options.world, clients, socket);
+    });
   });
 
   function tick(tickNumber: number): void {

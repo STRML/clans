@@ -228,6 +228,32 @@ describe('NetClient', () => {
     expect(Array.from(client.world.players.position.slice(0, 3))).toEqual([500, 10, 500]);
   });
 
+  it('resets velocity and energy on a delayed Welcome, not just position', () => {
+    // Codex round 8 (PR #4): tick() mutates velocity/energy/onGround before the handshake
+    // completes, but handleWelcome only reset spawn and position. A slow first round trip
+    // leaves time for several ticks of local prediction from the (0,0,0) placeholder, so
+    // velocity and energy carried that stale prediction straight through the "corrected" state.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 14 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    const forward: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: false, jet: false };
+    for (let i = 0; i < 5; i += 1) client.tick(forward);
+    expect(client.world.players.velocity[2]).not.toBe(0);
+
+    transport.pump([
+      encodeWelcome({
+        playerId: 0,
+        team: 1,
+        tickMs: FIXED_TICK_MS,
+        spawnX: 500,
+        spawnY: 10,
+        spawnZ: 500,
+      }),
+    ]);
+    expect(Array.from(client.world.players.velocity.slice(0, 3))).toEqual([0, 0, 0]);
+    expect(client.world.players.energy[0]).toBe(60);
+  });
+
   it('caps its input backlog even while the transport stays open but stops receiving snapshots', () => {
     // Codex round 2 (PR #4): isOpen() stays true for a live-but-stalled connection (the
     // socket never closed, the server or network just stopped producing snapshots), so

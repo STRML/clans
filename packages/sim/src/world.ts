@@ -55,13 +55,15 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
   };
 }
 
-export function addPlayer(world: World, spawn: Vec3, team = 0): number {
+/**
+ * Resets one player's simulated state (position, velocity, energy, ground contact, ...)
+ * to what a freshly spawned player would have. Shared by addPlayer and by a net client
+ * correcting its locally-predicted player once the server's real spawn is known: both
+ * cases need the same fresh-player state, not just position, or stale prediction (moving
+ * velocity, drained energy, mid-jump flags) survives into a state that no spawn ever had.
+ */
+export function resetPlayerToSpawn(world: World, id: number, spawn: Vec3): void {
   const players = world.players;
-  const id = players.freeIds.pop() ?? players.count;
-  if (id >= players.energy.length) throw new RangeError('Player capacity exceeded');
-  if (id === players.count) players.count += 1;
-  players.active[id] = 1;
-  players.team[id] = team;
   players.position.set([spawn.x, spawn.y, spawn.z], id * 3);
   players.spawn.set([spawn.x, spawn.y, spawn.z], id * 3);
   players.velocity.set([0, 0, 0], id * 3);
@@ -72,6 +74,16 @@ export function addPlayer(world: World, spawn: Vec3, team = 0): number {
   players.wasGrounded[id] = 0;
   players.wasJumpHeld[id] = 0;
   players.landingSpeed[id] = 0;
+}
+
+export function addPlayer(world: World, spawn: Vec3, team = 0): number {
+  const players = world.players;
+  const id = players.freeIds.pop() ?? players.count;
+  if (id >= players.energy.length) throw new RangeError('Player capacity exceeded');
+  if (id === players.count) players.count += 1;
+  players.active[id] = 1;
+  players.team[id] = team;
+  resetPlayerToSpawn(world, id, spawn);
   return id;
 }
 

@@ -207,6 +207,13 @@ describe('startNetServer', () => {
     const welcome = decodeWelcome(await welcomePromise);
     const base = welcome.playerId * 3;
 
+    // spawnPointFor raises a spawn 0.1 m above the sampled terrain (see server/world.ts),
+    // so the player starts just barely airborne and classify() won't grant run steering
+    // until gravity closes that gap and a tick lands exactly on the ground. Nobody is
+    // listening for these snapshots, so ticking idle here doesn't disturb the sequence
+    // catch-up this test actually exercises below.
+    for (let i = 0; i < 3; i += 1) server.tick(100 + i);
+
     // First message: nothing to catch up from yet, only the newest sample applies.
     client.send(encodeInput({ sequence: 1, samples: [idleSample, idleSample, idleSample] }));
     await wait(10);
@@ -393,5 +400,45 @@ describe('startNetServer', () => {
 
     first.close();
     fullServer.close();
+  });
+
+  it('closes a socket that never sends Join once the join timeout elapses', async () => {
+    // Codex round 8 (PR #4): an accepted socket that never sent Join stayed open
+    // indefinitely; only the peer's own close removed anything. Repeating this can
+    // exhaust sockets and memory one connection at a time.
+    const port = TEST_PORT + 4;
+    const timeoutServer = startNetServer({
+      world: createWorld(terrain, 1, 8),
+      spawns,
+      port,
+      joinTimeoutMs: 20,
+    });
+    await timeoutServer.ready;
+
+    const client = await connect(port); // connects, but never sends Join
+    const closed = new Promise<void>((resolve) => client.once('close', () => resolve()));
+    await expect(closed).resolves.toBeUndefined();
+    timeoutServer.close();
+  });
+
+  it('does not close a socket that joined before its join timeout elapses', async () => {
+    const port = TEST_PORT + 5;
+    const timeoutServer = startNetServer({
+      world: createWorld(terrain, 1, 8),
+      spawns,
+      port,
+      joinTimeoutMs: 20,
+    });
+    await timeoutServer.ready;
+
+    const client = await connect(port);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+    await wait(60); // well past the join timeout
+
+    expect(client.readyState).toBe(WebSocket.OPEN);
+    client.close();
+    timeoutServer.close();
   });
 });

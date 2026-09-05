@@ -42,14 +42,29 @@ describe('server world bootstrap', () => {
     expect(smallerTeam(world)).toBe(1);
   });
 
-  it('cycles spawn points within a team by index', () => {
+  it('cycles spawn points within a team by index, raised 0.1 m above this flat terrain', () => {
     const spawns: SceneSpawn[] = [
       { name: null, team: 1, position: [1, 0, 1], radius: 5 },
       { name: null, team: 1, position: [2, 0, 2], radius: 5 },
     ];
-    expect(spawnPointFor(spawns, 1, 0)).toEqual([1, 0, 1]);
-    expect(spawnPointFor(spawns, 1, 1)).toEqual([2, 0, 2]);
-    expect(spawnPointFor(spawns, 1, 2)).toEqual([1, 0, 1]);
+    expect(spawnPointFor(terrain, spawns, 1, 0)).toEqual([1, 0.1, 1]);
+    expect(spawnPointFor(terrain, spawns, 1, 1)).toEqual([2, 0.1, 2]);
+    expect(spawnPointFor(terrain, spawns, 1, 2)).toEqual([1, 0.1, 1]);
+  });
+
+  it('raises a spawn point sitting below the terrain, matching the single-player client', () => {
+    // Codex round 8 (PR #4): the server returned a mission spawn's raw y unmodified,
+    // while the single-player path (app.ts's spawnPoint) raises it to just above the
+    // sampled terrain height. The committed Katabatic scene has a spawn below terrain,
+    // so a network client spawned there started underground for a tick.
+    const sunken: Heightfield = { ...terrain, heights: new Uint16Array([50, 50, 50, 50]) };
+    const spawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, -5, 1], radius: 5 }];
+    expect(spawnPointFor(sunken, spawns, 1, 0)).toEqual([1, 50.1, 1]);
+  });
+
+  it('leaves a spawn point already above the terrain untouched', () => {
+    const spawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 40, 1], radius: 5 }];
+    expect(spawnPointFor(terrain, spawns, 1, 0)).toEqual([1, 40, 1]);
   });
 
   it('adds N idle bots balanced across both teams at real spawn points', async () => {

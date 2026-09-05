@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { addPlayer, createWorld, type Heightfield, type World } from '@clans/sim';
+import { addPlayer, createWorld, sampleTerrain, type Heightfield, type World } from '@clans/sim';
 
 export interface SceneSpawn {
   name: string | null;
@@ -24,7 +24,7 @@ interface SceneData {
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
 const assetsRoot = resolve(packageRoot, '../../assets/out/katabatic');
 // Sized for 31 idle bots plus a few real clients; later milestones raise this to 32 v 32.
-const WORLD_CAPACITY = 64;
+export const WORLD_CAPACITY = 64;
 
 async function readHeights(manifest: TerrainManifest): Promise<Uint16Array> {
   const bytes = await readFile(resolve(assetsRoot, manifest.heights));
@@ -67,7 +67,15 @@ export function smallerTeam(world: World): number {
   return teamCount(world, 1) <= teamCount(world, 2) ? 1 : 2;
 }
 
+/**
+ * Raises a spawn that sits below the terrain to just above it, matching the correction
+ * the single-player client applies to the same mission data (app.ts's spawnPoint): the
+ * committed scene has at least one team spawn below its sampled terrain height, and
+ * without this the network path placed a player underground until the next simulated
+ * tick's ground-contact resolution pushed them back up.
+ */
 export function spawnPointFor(
+  terrain: Heightfield,
   spawns: SceneSpawn[],
   team: number,
   index: number,
@@ -75,14 +83,16 @@ export function spawnPointFor(
   const teamSpawns = spawns.filter((spawn) => spawn.team === team);
   const chosen = teamSpawns[index % teamSpawns.length];
   if (!chosen) throw new Error(`No spawn point for team ${String(team)}`);
-  return chosen.position;
+  const [x, y, z] = chosen.position;
+  const ground = sampleTerrain(terrain, x, z).height;
+  return [x, Math.max(y, ground + 0.1), z];
 }
 
 export function addBots(world: World, spawns: SceneSpawn[], count: number): number[] {
   const ids: number[] = [];
   for (let i = 0; i < count; i += 1) {
     const team = smallerTeam(world);
-    const [x, y, z] = spawnPointFor(spawns, team, teamCount(world, team));
+    const [x, y, z] = spawnPointFor(world.terrain, spawns, team, teamCount(world, team));
     ids.push(addPlayer(world, { x, y, z }, team));
   }
   return ids;
