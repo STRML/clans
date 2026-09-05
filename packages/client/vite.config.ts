@@ -1,18 +1,7 @@
 import { defineConfig } from 'vite';
-import { fileURLToPath } from 'node:url';
-
-// Serve the committed asset outputs from the repo root at /assets/.
-const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 
 export default defineConfig({
-  publicDir: false,
-  server: {
-    port: 5173,
-    strictPort: true,
-    fs: { allow: [repoRoot] },
-  },
-  resolve: {
-    alias: { '/assets': `${repoRoot}assets/out` },
-  },
+  publicDir: '../../assets/out',
+  server: { host: '127.0.0.1', port: 5173, strictPort: true },
   test: { name: 'client', environment: 'node', include: ['src/**/*.test.ts'] },
 });
