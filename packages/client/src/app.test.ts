@@ -88,8 +88,14 @@ describe('updateRemotes', () => {
     updateRemotes(activeNet, scene, meshes, buffers, 0);
 
     expect(remoteSnapshots).toHaveLength(0); // the queue is drained, not just peeked
-    const samples = (buffers.get(1) as unknown as { samples: Array<{ data: { x: number } }> })
-      .samples;
+    const samples = (
+      buffers.get(1) as unknown as { samples: Array<{ atMs: number; data: { x: number } }> }
+    ).samples;
     expect(samples.map((sample) => sample.data.x)).toEqual([10, 20]);
+    // Codex round 11 (PR #4): stamping every drained snapshot with the same nowMs stored
+    // both positions at an identical timestamp, so RemoteBuffer's interpolate() (which
+    // treats equal timestamps as a single sample) still jumped straight to the newest
+    // instead of ever bracketing between them.
+    expect(samples[0]?.atMs).not.toBe(samples[1]?.atMs);
   });
 });

@@ -71,6 +71,24 @@ describe('applyInputMessage', () => {
     ]);
     expect(session.lastAppliedSequence).toBe(1);
   });
+
+  it('accepts a genuine sequence wraparound instead of freezing the session forever', () => {
+    // Codex round 11 (PR #4): the wire format serializes sequence as a u32, so a client
+    // connected long enough (about 4.36 years at one Input message per tick) wraps back
+    // to 0. A plain "current > last" comparison would reject every sequence permanently
+    // afterward, since nothing can look newer than 0xffffffff again. The wraparound-safe
+    // distance treats stepping from 0xffffffff to 0 the same as stepping from 1 to 2.
+    const session = createSession(0, 1, 0);
+    session.lastAppliedSequence = 0xffffffff;
+    expect(applyInputMessage(session, inputMessage(0, [sample(1), sample(1), sample(1)]))).toEqual([
+      sample(1),
+    ]);
+    expect(session.lastAppliedSequence).toBe(0);
+    expect(applyInputMessage(session, inputMessage(1, [sample(2), sample(2), sample(2)]))).toEqual([
+      sample(2),
+    ]);
+    expect(session.lastAppliedSequence).toBe(1);
+  });
 });
 
 describe('recordAck', () => {
@@ -80,5 +98,17 @@ describe('recordAck', () => {
     recordAck(session, 3, 200);
     expect(session.lastAckedSnapshotId).toBe(5);
     expect(session.lastAckedAt).toBe(100);
+  });
+
+  it('accepts a genuine snapshotId wraparound instead of freezing acks forever', () => {
+    // Codex round 11 (PR #4), same class as applyInputMessage's sequence wraparound:
+    // snapshotId is the same u32 wire format, so it wraps after long enough uptime (about
+    // 8.7 years at one snapshot per SNAPSHOT_EVERY_N_TICKS ticks). A plain "<" comparison
+    // would reject every ack forever afterward.
+    const session = createSession(0, 1, 0);
+    recordAck(session, 0xffffffff, 100);
+    recordAck(session, 0, 200);
+    expect(session.lastAckedSnapshotId).toBe(0);
+    expect(session.lastAckedAt).toBe(200);
   });
 });

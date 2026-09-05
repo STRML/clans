@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import {
   FIXED_DT,
+  FIXED_TICK_MS,
   addPlayer,
   createWorld,
   sampleTerrain,
@@ -184,12 +185,12 @@ function stepNetworked(
 function applyRemoteSnapshot(
   buffers: Map<number, RemoteBuffer>,
   snapshot: RemoteSnapshot,
-  nowMs: number,
+  atMs: number,
 ): void {
   for (const [id, player] of snapshot.players) {
     const buffer = buffers.get(id) ?? new RemoteBuffer();
     buffers.set(id, buffer);
-    buffer.push(nowMs, player);
+    buffer.push(atMs, player);
   }
 }
 
@@ -228,8 +229,18 @@ export function updateRemotes(
   // instead of smoothing through it. Draining every queued snapshot here instead keeps
   // that history complete regardless of how render and network delivery interleave.
   const pending = activeNet.remoteSnapshots.splice(0, activeNet.remoteSnapshots.length);
-  for (const snapshot of pending) applyRemoteSnapshot(buffers, snapshot, nowMs);
   const latest = pending.at(-1);
+  for (const snapshot of pending) {
+    // Codex round 11 (PR #4): stamping every drained snapshot with the same nowMs stored
+    // genuinely different positions at identical timestamps, and RemoteBuffer's
+    // interpolate() treats equal timestamps as one sample, falling back to it instead of
+    // bracketing between them -- the remote still jumped rather than smoothed. tick maps
+    // 1:1 to FIXED_TICK_MS of real server time, so offsetting behind nowMs by however many
+    // ticks a snapshot trails the newest one in this batch gives every entry its own,
+    // correctly-ordered timestamp.
+    const atMs = latest ? nowMs - (latest.tick - snapshot.tick) * FIXED_TICK_MS : nowMs;
+    applyRemoteSnapshot(buffers, snapshot, atMs);
+  }
   if (latest) pruneStaleRemoteBuffers(buffers, latest);
   syncRemoteMeshes(targetScene, meshes, buffers, nowMs);
 }
