@@ -20,6 +20,12 @@ describe('parseMission', () => {
     });
   });
 
+  it('rejects a property value that runs into a nested object instead of dropping it', () => {
+    expect(() => parseMission('new A(X) {\n key = value new B(Y) {\n };\n};')).toThrow(
+      'Expected ; before new at line 2',
+    );
+  });
+
   it('reports the opening line for an unterminated object', () => {
     expect(() => parseMission('new SimGroup(Broken) {\r\n key = "value";')).toThrow(
       'Unterminated SimGroup opened at line 1',

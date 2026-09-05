@@ -130,7 +130,13 @@ function parseHeader(cursor: Cursor): { classToken: Token; name: string | null }
 
 function parsePropertyValue(cursor: Cursor, classToken: Token): string {
   const parts: string[] = [];
-  while (cursor.peek() && cursor.peek()?.value !== ';') parts.push(cursor.take().value);
+  while (cursor.peek() && cursor.peek()?.value !== ';') {
+    const token = cursor.take();
+    if (token.value === 'new' || token.value === '}') {
+      throw new SyntaxError(`Expected ; before ${token.value} at line ${String(token.line)}`);
+    }
+    parts.push(token.value);
+  }
   assertNotEof(cursor, classToken);
   cursor.take(';');
   return parts.join(' ');

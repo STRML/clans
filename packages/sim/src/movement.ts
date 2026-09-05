@@ -52,15 +52,17 @@ function applyRun(body: Body, input: PlayerInput, armor: ArmorData, dt: number):
   const length = Math.hypot(input.moveX, input.moveZ);
   if (length === 0) return;
   const acceleration = (armor.runForce / armor.mass) * dt;
+  // Forward is (sin yaw, 0, cos yaw). Right is forward x up = (-cos yaw, 0, sin yaw), so
+  // positive moveX (the D key) strafes to the camera's right.
   const sin = Math.sin(input.yaw);
   const cos = Math.cos(input.yaw);
-  const side = body.vx * cos - body.vz * sin;
+  const side = -body.vx * cos + body.vz * sin;
   const forward = body.vx * sin + body.vz * cos;
   const forwardCap = input.moveZ < 0 ? armor.maxBackwardSpeed : armor.maxForwardSpeed;
   const nextSide = accelerateAxis(side, (input.moveX / length) * acceleration, armor.maxSideSpeed);
   const nextForward = accelerateAxis(forward, (input.moveZ / length) * acceleration, forwardCap);
-  body.vx = nextSide * cos + nextForward * sin;
-  body.vz = nextForward * cos - nextSide * sin;
+  body.vx = -nextSide * cos + nextForward * sin;
+  body.vz = nextSide * sin + nextForward * cos;
 }
 
 /** Ground friction when standing still on the surface without skiing. */

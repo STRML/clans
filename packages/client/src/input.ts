@@ -26,7 +26,10 @@ export class Input {
       this.keys.add(event.code);
     });
     window.addEventListener('keyup', (event) => this.keys.delete(event.code));
-    window.addEventListener('blur', () => this.keys.clear());
+    window.addEventListener('blur', () => this.releaseAll());
+    document.addEventListener('pointerlockchange', () => {
+      if (document.pointerLockElement !== target) this.releaseAll();
+    });
     target.addEventListener('mousedown', (event) => {
       if (event.button === 2) this.jet = true;
     });
@@ -43,6 +46,12 @@ export class Input {
       -PITCH_LIMIT,
       Math.min(PITCH_LIMIT, this.pitch - event.movementY * this.sensitivity),
     );
+  }
+
+  /** Drop every held input. Called on blur and pointer-lock exit so nothing sticks. */
+  releaseAll(): void {
+    this.keys.clear();
+    this.jet = false;
   }
 
   isDown(code: string): boolean {

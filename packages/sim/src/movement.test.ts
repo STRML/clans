@@ -35,6 +35,17 @@ describe('Light movement', () => {
     ).toBeCloseTo(15, 1);
   });
 
+  it('strafes right (-X at yaw 0) on positive moveX, matching the camera basis', () => {
+    // Camera forward at yaw 0 is +Z; right = forward x up = -X.
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 10, y: 0, z: 10 });
+    world.players.onGround[id] = 1;
+    world.players.wasGrounded[id] = 1;
+    for (let tick = 0; tick < 10; tick += 1) stepWorld(world, inputMap(id, { moveX: 1 }));
+    expect(world.players.velocity[id * 3]).toBeLessThan(-5);
+    expect(Math.abs(world.players.velocity[id * 3 + 2] ?? 0)).toBeLessThan(1e-9);
+  });
+
   it('stops from run speed in under 0.5 seconds', () => {
     const world = createWorld(flat, 1);
     const id = addPlayer(world, { x: 10, y: 0, z: 10 });
