@@ -15,6 +15,7 @@ interface TerrainManifest {
   origin: { x: number; y: number; z: number };
   heightScale: number;
   heights: string;
+  emptySquares: number[];
 }
 interface SceneData {
   spawns: SceneSpawn[];
@@ -49,6 +50,7 @@ export async function loadKatabaticWorld(
     originZ: manifest.origin.z,
     heightScale: manifest.heightScale,
     heights,
+    emptySquares: new Set(manifest.emptySquares),
   };
   return { world: createWorld(terrain, seed, WORLD_CAPACITY), spawns: scene.spawns };
 }

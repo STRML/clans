@@ -20,6 +20,13 @@ const terrain: Heightfield = {
 };
 
 describe('server world bootstrap', () => {
+  it("carries the mission's empty terrain squares into the sim heightfield", async () => {
+    const { world } = await loadKatabaticWorld();
+    // Katabatic marks 17 squares empty (the base interiors' terrain cut-outs).
+    expect(world.terrain.emptySquares?.size).toBe(17);
+    expect(world.terrain.emptySquares?.has(26538)).toBe(true);
+  });
+
   it('loads the committed Katabatic terrain and scene', async () => {
     const { world, spawns } = await loadKatabaticWorld();
     expect(world.terrain.gridSize).toBe(256);
