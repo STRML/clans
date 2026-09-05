@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/sim" },
+    { "path": "packages/protocol" },
+    { "path": "packages/bots" },
+    { "path": "packages/assets" },
+    { "path": "packages/server" },
+    { "path": "packages/client" }
+  ]
+}
