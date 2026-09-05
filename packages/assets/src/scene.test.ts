@@ -12,10 +12,13 @@ describe('scene extraction', () => {
   it('extracts typed leaves and inherited team membership', async () => {
     const source = await readFile(new URL('./__fixtures__/scene.mis', import.meta.url), 'utf8');
     const scene = extractScene(parseMission(source));
+    // 223146 = row 103 col 170 once the stray high bits are masked; 747683 = row 104 col 163.
+    expect(scene.terrain.emptySquares).toEqual([103 * 256 + 170, 104 * 256 + 163]);
     expect(scene.terrain).toEqual({
       terrainFile: 'Katabatic.ter',
       squareSize: 8,
       position: [-1024, 0, 1024],
+      emptySquares: [103 * 256 + 170, 104 * 256 + 163],
     });
     expect(scene.sun.direction).toEqual([0.57735, -0.57735, -0.57735]);
     expect(scene.sky.visibleDistance).toBe(500);

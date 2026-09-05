@@ -8,6 +8,7 @@ new SimGroup(Team1) {
 new TerrainBlock(Terrain) {
   terrainFile = "Katabatic.ter";
   squareSize = "8";
+  emptySquares = "223146 747683";
   position = "-1024 -1024 0";
 };
 new Sun(Sun) {

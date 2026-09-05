@@ -13,6 +13,7 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
     players: {
       count: 0,
       position: new Float64Array(capacity * 3),
+      spawn: new Float64Array(capacity * 3),
       velocity: new Float64Array(capacity * 3),
       yaw: new Float64Array(capacity),
       energy: new Float64Array(capacity),
@@ -30,6 +31,7 @@ export function addPlayer(world: World, spawn: Vec3): number {
   if (id >= world.players.energy.length) throw new RangeError('Player capacity exceeded');
   world.players.count += 1;
   world.players.position.set([spawn.x, spawn.y, spawn.z], id * 3);
+  world.players.spawn.set([spawn.x, spawn.y, spawn.z], id * 3);
   world.players.energy[id] = 60;
   return id;
 }

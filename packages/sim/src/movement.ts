@@ -8,6 +8,9 @@ const GROUND_EPSILON = 0.001;
 // A grounded player who did not jump or jet may drop this far in one tick and stay
 // grounded. Without it a skier leaves the surface every tick the slope falls away.
 const GROUND_SNAP = 1.0;
+// A player this far below the lowest possible terrain height has fallen out of the world
+// (through an empty square with no interior under it yet) and returns to their spawn.
+const KILL_DEPTH = 30;
 const IDLE: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
 
 interface Body {
@@ -156,6 +159,7 @@ function integrate(
   body.y += body.vy * dt;
   body.z += body.vz * dt;
   const landing = sampleTerrain(world.terrain, body.x, body.z);
+  if (landing.empty) return { grounded: false, landingSpeed: -1 };
   const gap = body.y - landing.height;
   if (gap <= 0) {
     body.y = landing.height;
@@ -180,7 +184,7 @@ interface TickContext {
 
 function classify(world: World, body: Body, input: PlayerInput, armor: ArmorData): TickContext {
   const sample = sampleTerrain(world.terrain, body.x, body.z);
-  const grounded = body.y <= sample.height + GROUND_EPSILON;
+  const grounded = !sample.empty && body.y <= sample.height + GROUND_EPSILON;
   const slope = degrees(Math.acos(Math.max(-1, Math.min(1, sample.normal.y))));
   const forcedSki = slope > armor.runSurfaceAngle;
   const skiing = grounded && (input.jump || forcedSki);
@@ -235,6 +239,16 @@ function writeState(
   players.wasJumpHeld[id] = input.jump ? 1 : 0;
 }
 
+function resetToSpawn(players: PlayerStore, id: number, body: Body): void {
+  const base = id * 3;
+  body.x = players.spawn[base] ?? 0;
+  body.y = players.spawn[base + 1] ?? 0;
+  body.z = players.spawn[base + 2] ?? 0;
+  body.vx = 0;
+  body.vy = 0;
+  body.vz = 0;
+}
+
 function stepPlayer(
   world: World,
   id: number,
@@ -249,6 +263,7 @@ function stepPlayer(
   const forces = applyForces(players, id, body, input, ctx, armor, dt);
   applyResistance(body, armor, dt);
   const contact = integrate(world, body, ctx.grounded, forces.jumped || forces.jetted, dt);
+  if (body.y < world.terrain.originY - KILL_DEPTH) resetToSpawn(players, id, body);
   writeState(players, id, body, contact, input, ctx.skiing);
 }
 

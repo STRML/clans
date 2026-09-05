@@ -53,6 +53,7 @@ function toHeightfield(assets: KatabaticAssets): Heightfield {
     originZ: origin.z,
     heightScale,
     heights: assets.heights,
+    emptySquares: new Set(assets.terrain.emptySquares),
   };
 }
 

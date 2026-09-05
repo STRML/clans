@@ -68,6 +68,20 @@ describe('Light movement', () => {
     expect(world.players.position[id * 3 + 2]).toBeCloseTo(500, 3);
   });
 
+  it('falls through an empty square and returns to spawn below the kill depth', () => {
+    const holed: Heightfield = { ...flat, emptySquares: new Set([0]) };
+    const world = createWorld(holed, 1);
+    const id = addPlayer(world, { x: 10, y: 0, z: 10 });
+    stepWorld(world, inputMap(id, {}));
+    expect(world.players.onGround[id]).toBe(0);
+    expect(world.players.velocity[id * 3 + 1]).toBeLessThan(0);
+    for (let tick = 0; tick < 200; tick += 1) stepWorld(world, inputMap(id, {}));
+    // 200 ticks of free fall is over 200 m; the reset put the player back at the spawn.
+    expect(world.players.position[id * 3 + 1]).toBeGreaterThan(-30);
+    expect(world.players.position[id * 3]).toBe(10);
+    expect(world.players.position[id * 3 + 2]).toBe(10);
+  });
+
   it('stops from run speed in under 0.5 seconds', () => {
     const world = createWorld(flat, 1);
     const id = addPlayer(world, { x: 10, y: 0, z: 10 });

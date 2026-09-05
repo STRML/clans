@@ -7,7 +7,7 @@ export interface AxisAngle {
   degrees: number;
 }
 export interface SceneData {
-  terrain: { terrainFile: string; squareSize: number; position: Vec3 };
+  terrain: { terrainFile: string; squareSize: number; position: Vec3; emptySquares: number[] };
   sun: { direction: Vec3; color: Color4; ambient: Color4 };
   sky: { visibleDistance: number; fogDistance: number; fogColor: Color4; materialList: string };
   missionArea: { minX: number; minZ: number; width: number; depth: number };
@@ -101,7 +101,21 @@ function buildTerrain(terrain: MissionObject): SceneData['terrain'] {
     terrainFile: requiredString(terrain.props.terrainFile, 'TerrainBlock.terrainFile'),
     squareSize: scalar(terrain.props.squareSize, 'TerrainBlock.squareSize'),
     position: torquePositionToYUp(terrain.props.position ?? ''),
+    emptySquares: emptySquares(terrain.props.emptySquares),
   };
+}
+
+/**
+ * Torque stores each empty square as row * 256 + col with stray high bits above bit 15
+ * (Katabatic has values up to 748451). Mask both to 8 bits and re-pack as row * 256 + col.
+ */
+function emptySquares(value: string | undefined): number[] {
+  if (value === undefined || value.trim() === '') return [];
+  return numbers(value, value.trim().split(/\s+/).length).map((raw) => {
+    const col = raw & 0xff;
+    const row = (raw >>> 8) & 0xff;
+    return row * 256 + col;
+  });
 }
 
 function buildSun(sun: MissionObject): SceneData['sun'] {

@@ -15,6 +15,7 @@ export interface TerrainManifest {
   heights: 'heights.bin';
   materials: 'materials.bin';
   layers: Array<{ name: string; texture: string; alpha: string }>;
+  emptySquares: number[];
 }
 
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -78,6 +79,7 @@ const manifest: TerrainManifest = {
   heights: 'heights.bin',
   materials: 'materials.bin',
   layers,
+  emptySquares: mission.terrain.emptySquares,
 };
 await writeFile(resolve(output, 'terrain.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 await writeFile(resolve(output, 'scene.json'), `${JSON.stringify(mission, null, 2)}\n`);

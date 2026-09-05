@@ -8,9 +8,15 @@ export interface TerrainManifest {
   heights: string;
   materials: string;
   layers: Array<{ name: string; texture: string; alpha: string }>;
+  emptySquares: number[];
 }
 export interface ClientSceneData {
-  terrain: { terrainFile: string; squareSize: number; position: [number, number, number] };
+  terrain: {
+    terrainFile: string;
+    squareSize: number;
+    position: [number, number, number];
+    emptySquares: number[];
+  };
   sun: {
     direction: [number, number, number];
     color: [number, number, number, number];

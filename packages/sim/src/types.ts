@@ -16,6 +16,8 @@ export interface PlayerInput {
 export interface PlayerStore {
   count: number;
   position: Float64Array;
+  /** Where each player entered the world; the fall-out reset returns them here. */
+  spawn: Float64Array;
   velocity: Float64Array;
   yaw: Float64Array;
   energy: Float64Array;

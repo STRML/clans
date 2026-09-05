@@ -24,12 +24,14 @@ export function buildTerrainGeometry(data: KatabaticAssets): THREE.BufferGeometr
       uvs.set([col / (gridSize - 1), row / (gridSize - 1)], point * 2);
     }
   const indices: number[] = [];
+  const empty = new Set(data.terrain.emptySquares);
   for (let row = 0; row < gridSize - 1; row += 1)
     for (let col = 0; col < gridSize - 1; col += 1) {
       const a = row * gridSize + col,
         b = a + 1,
         c = a + gridSize,
         d = c + 1;
+      if (empty.has(row * gridSize + col)) continue;
       // Counter-clockwise seen from above (+Y), so the front face is the walkable side.
       if (((col ^ row) & 1) === 0) indices.push(a, d, c, a, b, d);
       else indices.push(a, b, c, b, d, c);

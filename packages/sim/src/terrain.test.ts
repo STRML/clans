@@ -41,4 +41,10 @@ describe('sampleTerrain', () => {
     // u=0.25, v=0.875, u+v>1 lies in triangle (11,01,10): 24 + 0.75*(8-24) + 0.125*(0-24) = 9.
     expect(sampleTerrain(terrain, 10, 9).height).toBeCloseTo(9);
   });
+
+  it('reports an empty square and keeps the plane height for it', () => {
+    const terrain = { ...field([0, 0, 0, 0, 0, 0, 0, 0, 0]), emptySquares: new Set([0]) };
+    expect(sampleTerrain(terrain, 2, 14).empty).toBe(true);
+    expect(sampleTerrain(terrain, 10, 14).empty).toBe(false);
+  });
 });

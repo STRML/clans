@@ -6,9 +6,13 @@ export interface Heightfield {
   originZ: number;
   heightScale: number;
   heights: Uint16Array;
+  /** Square indices (row * gridSize + col) the mission marks empty: holes with no ground. */
+  emptySquares?: ReadonlySet<number>;
 }
 export interface TerrainSample {
   height: number;
+  /** True inside an empty square. The height is still the plane, but nothing is there. */
+  empty: boolean;
   normal: { x: number; y: number; z: number };
   col: number;
   row: number;
@@ -37,6 +41,7 @@ export function sampleTerrain(terrain: Heightfield, x: number, z: number): Terra
     h01 = h(0, 1),
     h11 = h(1, 1);
   const split45 = ((col ^ row) & 1) === 0;
+  const empty = terrain.emptySquares?.has(row * terrain.gridSize + col) ?? false;
   let height: number, du: number, dv: number;
   if (split45 && u >= v) {
     height = h00 + u * (h10 - h00) + v * (h11 - h10);
@@ -59,5 +64,12 @@ export function sampleTerrain(terrain: Heightfield, x: number, z: number): Terra
     ny = 1,
     nz = dv / terrain.squareSize;
   const length = Math.hypot(nx, ny, nz);
-  return { height, normal: { x: nx / length, y: ny / length, z: nz / length }, col, row, split45 };
+  return {
+    height,
+    empty,
+    normal: { x: nx / length, y: ny / length, z: nz / length },
+    col,
+    row,
+    split45,
+  };
 }

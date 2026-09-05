@@ -13,9 +13,10 @@ const data = {
     heights: 'heights.bin',
     materials: 'materials.bin',
     layers: [],
+    emptySquares: [],
   },
   scene: {
-    terrain: { terrainFile: 'x', squareSize: 8, position: [0, 0, 16] },
+    terrain: { terrainFile: 'x', squareSize: 8, position: [0, 0, 16], emptySquares: [] },
     sun: { direction: [1, -1, 0], color: [0.7, 0.7, 0.7, 1], ambient: [0.3, 0.3, 0.3, 1] },
     sky: {
       visibleDistance: 500,
@@ -36,5 +37,15 @@ describe('buildTerrainGeometry', () => {
     const index = [...(buildTerrainGeometry(data).getIndex()?.array ?? [])];
     expect(index.slice(0, 6)).toEqual([0, 4, 3, 0, 1, 4]);
     expect(index.slice(6, 12)).toEqual([1, 2, 4, 2, 5, 4]);
+  });
+
+  it('leaves a hole for each empty square', () => {
+    const withHole = {
+      ...data,
+      terrain: { ...data.terrain, emptySquares: [0] },
+    } as KatabaticAssets;
+    const full = buildTerrainGeometry(data).getIndex()?.count ?? 0;
+    const holed = buildTerrainGeometry(withHole).getIndex()?.count ?? 0;
+    expect(full - holed).toBe(6);
   });
 });
