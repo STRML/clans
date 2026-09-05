@@ -207,6 +207,27 @@ describe('NetClient', () => {
     expect(client.playerId).toBe(-1);
   });
 
+  it('applies the Welcome spawn to the predicted position, not just the respawn point', () => {
+    // Codex round 7 (PR #4): the local player is created at (0,0,0) in the constructor,
+    // before any Welcome can arrive. handleWelcome only updated players.spawn (used for
+    // kill-plane respawn), so the client kept predicting from the map origin instead of
+    // the real spawn until the first snapshot happened to reconcile it away.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 13 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    transport.pump([
+      encodeWelcome({
+        playerId: 0,
+        team: 1,
+        tickMs: FIXED_TICK_MS,
+        spawnX: 500,
+        spawnY: 10,
+        spawnZ: 500,
+      }),
+    ]);
+    expect(Array.from(client.world.players.position.slice(0, 3))).toEqual([500, 10, 500]);
+  });
+
   it('caps its input backlog even while the transport stays open but stops receiving snapshots', () => {
     // Codex round 2 (PR #4): isOpen() stays true for a live-but-stalled connection (the
     // socket never closed, the server or network just stopped producing snapshots), so

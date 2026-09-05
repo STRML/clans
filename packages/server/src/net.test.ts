@@ -369,4 +369,29 @@ describe('startNetServer', () => {
     unjoinedServer.close();
     await expect(closed).resolves.toBeUndefined();
   });
+
+  it('closes the socket instead of hanging when a Join arrives at a full world', async () => {
+    // Codex round 7 (PR #4): addPlayer throws RangeError once world capacity is
+    // exhausted, before handleJoin registers the socket in `clients` or sends a Welcome.
+    // handleMessage's outer try/catch swallowed that silently, so the socket stayed open
+    // forever with the client waiting for a Welcome that would never arrive.
+    const port = TEST_PORT + 3;
+    const fullWorld = createWorld(terrain, 1, 1);
+    const fullServer = startNetServer({ world: fullWorld, spawns, port });
+    await fullServer.ready;
+
+    const first = await connect(port);
+    const firstWelcome = receive(first);
+    first.send(encodeJoin());
+    await firstWelcome;
+    expect(fullWorld.players.count).toBe(1);
+
+    const second = await connect(port);
+    const closed = new Promise<void>((resolve) => second.once('close', () => resolve()));
+    second.send(encodeJoin());
+    await expect(closed).resolves.toBeUndefined();
+
+    first.close();
+    fullServer.close();
+  });
 });

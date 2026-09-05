@@ -75,7 +75,17 @@ function handleJoin(
   if (clients.has(socket)) return;
   const team = smallerTeam(world);
   const [x, y, z] = spawnPointFor(spawns, team, teamCount(world, team));
-  const playerId = addPlayer(world, { x, y, z }, team);
+  let playerId: number;
+  try {
+    playerId = addPlayer(world, { x, y, z }, team);
+  } catch {
+    // A full world's addPlayer throws before this socket is registered or welcomed.
+    // handleMessage's outer try/catch would otherwise swallow that silently, leaving the
+    // socket open with the client waiting forever for a Welcome that will never come.
+    // Closing it tells the client the join was rejected instead of hanging.
+    socket.close();
+    return;
+  }
   clients.set(socket, {
     socket,
     session: createSession(playerId, team, Date.now()),

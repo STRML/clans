@@ -140,6 +140,14 @@ export class NetClient {
     // before its first snapshot arrives resets to the local world's default (0,0,0)
     // instead of the mission spawn the server would reset it to.
     this.world.players.spawn.set([welcome.spawnX, welcome.spawnY, welcome.spawnZ], LOCAL_SLOT * 3);
+    // The local player is created at (0,0,0) in the constructor, before any Welcome can
+    // arrive. Without also applying the spawn to position here, the client renders and
+    // predicts from the map origin instead of the real spawn until the first snapshot
+    // reconciles it away, which is visible whenever that snapshot is delayed.
+    this.world.players.position.set(
+      [welcome.spawnX, welcome.spawnY, welcome.spawnZ],
+      LOCAL_SLOT * 3,
+    );
   }
 
   private pushSnapshotHistory(entry: SnapshotBaseline): void {
