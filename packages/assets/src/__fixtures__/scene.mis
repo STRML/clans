@@ -1,0 +1,12 @@
+new SimGroup(Team1) {
+  team = "1";
+  new SpawnSphere(SpawnA) {
+    position = "326.888 -168.521 74.8106";
+    radius = "5";
+  };
+};
+new TerrainBlock(Terrain) {
+  terrainFile = "Katabatic.ter";
+  squareSize = "8";
+  position = "-1024 -1024 0";
+};
