@@ -16,7 +16,7 @@ export interface SceneData {
 
 /** A property that must be present. Mission files never omit these. */
 function requiredString(value: string | undefined, name: string): string {
-  if (value === undefined || value === '') throw new TypeError(`Missing ${name}`);
+  if (value === undefined || value.trim() === '') throw new TypeError(`Missing ${name}`);
   return value;
 }
 

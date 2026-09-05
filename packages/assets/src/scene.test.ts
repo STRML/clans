@@ -57,5 +57,10 @@ describe('scene extraction', () => {
       'new Sky(Sky) { visibleDistance = "500"; fogDistance = "400"; fogColor = "0 0 0 1"; materialList = "x"; };\n' +
       'new MissionArea(M) { area = "0 0 1 1"; };';
     expect(() => extractScene(parseMission(source))).toThrow('Missing TerrainBlock.terrainFile');
+    const blank = source.replace(
+      'new TerrainBlock(T) {',
+      'new TerrainBlock(T) { terrainFile = "   ";',
+    );
+    expect(() => extractScene(parseMission(blank))).toThrow('Missing TerrainBlock.terrainFile');
   });
 });

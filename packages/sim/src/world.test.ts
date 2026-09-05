@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as sim from './index.js';
 import { createWorld, nextRandom, stepWorld, type Heightfield } from './index.js';
 
 const terrain: Heightfield = {
@@ -26,5 +27,9 @@ describe('fixed world', () => {
     expect(() => stepWorld(world, new Map(), 1 / 60)).toThrowError(
       new RangeError('Simulation step requires fixed tick 32 ms'),
     );
+  });
+
+  it('does not export the per-tick player step, so the fixed-tick guard cannot be bypassed', () => {
+    expect('stepPlayers' in sim).toBe(false);
   });
 });
