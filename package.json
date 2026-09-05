@@ -10,7 +10,9 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "pnpm --filter @clans/client dev",
+    "dev": "tsx scripts/dev.ts",
+    "dev:client": "pnpm --filter @clans/client dev",
+    "dev:server": "pnpm --filter @clans/server start -- --bots 31 --port 7777",
     "build": "pnpm -r --filter './packages/*' build",
     "typecheck": "tsc -b",
     "lint": "eslint . && prettier --check .",
