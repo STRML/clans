@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import {
   FIXED_DT,
-  FIXED_TICK_MS,
   addPlayer,
   createWorld,
   sampleTerrain,
@@ -175,7 +174,7 @@ function stepNetworked(
   lastRemoteTick: { tick: number },
 ): void {
   for (let step = 0; step < steps; step += 1) net.tick(input);
-  updateRemotes(net, scene, remoteMeshes, remoteBuffers, lastRemoteTick);
+  updateRemotes(net, scene, remoteMeshes, remoteBuffers, lastRemoteTick, performance.now());
   stats.ping = net.stats.ping;
   stats.bytesPerSecond = net.stats.bytesPerSecond;
   stats.packetLossEstimate = net.stats.packetLossEstimate;
@@ -183,29 +182,37 @@ function stepNetworked(
   stats.entityCount = net.stats.entityCount;
 }
 
-function updateRemotes(
-  activeNet: NetClient,
+/**
+ * Exported for a focused unit test. `nowMs` must be the same clock RemoteBuffer.positionAt
+ * is later queried on (the caller's performance.now()) -- remoteTick is the server's own
+ * tick counter, on a clock that starts whenever the server process did, not this page
+ * load, so timestamping samples with it against a positionAt(performance.now()) query
+ * meant the two epochs never lined up and a remote player either extrapolated forever or
+ * stuck to a stale sample.
+ */
+export function updateRemotes(
+  activeNet: Pick<NetClient, 'remoteTick' | 'remotePlayers'>,
   targetScene: THREE.Scene,
   meshes: Map<number, THREE.Mesh>,
   buffers: Map<number, RemoteBuffer>,
   lastRemoteTick: { tick: number },
+  nowMs: number,
 ): void {
   if (activeNet.remoteTick !== lastRemoteTick.tick) {
     lastRemoteTick.tick = activeNet.remoteTick;
-    const atMs = activeNet.remoteTick * FIXED_TICK_MS;
     for (const [id, snapshot] of activeNet.remotePlayers) {
       let buffer = buffers.get(id);
       if (!buffer) {
         buffer = new RemoteBuffer();
         buffers.set(id, buffer);
       }
-      buffer.push(atMs, snapshot);
+      buffer.push(nowMs, snapshot);
     }
     for (const id of [...buffers.keys()]) {
       if (!activeNet.remotePlayers.has(id)) buffers.delete(id);
     }
   }
-  syncRemoteMeshes(targetScene, meshes, buffers, performance.now());
+  syncRemoteMeshes(targetScene, meshes, buffers, nowMs);
 }
 
 export async function createApp(container: HTMLElement, options: AppOptions = {}): Promise<App> {

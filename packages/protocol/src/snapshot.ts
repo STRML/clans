@@ -328,3 +328,24 @@ export function decodeSnapshot(
     ? decodeDelta(cursor, header, baseline)
     : decodeFull(cursor, header);
 }
+
+export interface SnapshotHeaderPeek {
+  snapshotId: number;
+  baselineId: number;
+  isDelta: boolean;
+}
+
+/**
+ * Reads only the snapshot header, without a baseline, so a caller holding several
+ * historical snapshots (the server deltas against a client's last ACKED snapshot,
+ * which can trail the newest one it sent) can pick the matching baseline before the
+ * real decode. Cheap: it re-reads the same fixed-size header decodeSnapshot does.
+ */
+export function peekSnapshotHeader(bytes: Uint8Array): SnapshotHeaderPeek {
+  const header = readHeader(createReader(bytes));
+  return {
+    snapshotId: header.snapshotId,
+    baselineId: header.baselineId,
+    isDelta: (header.flags & DELTA_FLAG) !== 0,
+  };
+}

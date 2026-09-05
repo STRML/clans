@@ -15,6 +15,7 @@ import {
   encodeSnapshot,
   encodeWelcome,
   SNAPSHOT_EVERY_N_TICKS,
+  SNAPSHOT_HISTORY_DEPTH,
   type SnapshotBaseline,
 } from '@clans/protocol';
 import { applyInputMessage, createSession, recordAck, type Session } from './session.js';
@@ -32,13 +33,19 @@ export interface NetServer {
   tick(tickNumber: number): void;
 }
 
-// Snapshots a client may still ack. Older ones fall off; a client that far behind gets a full.
-const SENT_HISTORY = 8;
-
 interface ClientEntry {
   socket: WebSocket;
   session: Session;
   sent: SnapshotBaseline[];
+  /**
+   * Input samples not yet applied to a simulation tick, oldest first. A single Input
+   * message can carry catch-up samples for more than one missed tick (the redundant
+   * samples exist for exactly this); queueing them here and draining one per tick
+   * spreads them across the ticks they were meant for instead of the newest sample
+   * overwriting the others before stepWorld ever sees them.
+   */
+  pendingInputs: PlayerInput[];
+  lastInput: PlayerInput;
 }
 
 /** The baseline for the next delta is the snapshot the client last acked, never one merely sent. */
@@ -46,29 +53,47 @@ function ackedBaseline(entry: ClientEntry): SnapshotBaseline | null {
   return entry.sent.find((sent) => sent.snapshotId === entry.session.lastAckedSnapshotId) ?? null;
 }
 
+const IDLE_INPUT: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
+// Bounds a client's catch-up queue. Each Input message contributes at most 3 samples and
+// a duplicate/reordered sequence is dropped in applyInputMessage, so this only guards the
+// pathological case of a client that keeps sending while the server falls behind ticking.
+const MAX_PENDING_INPUTS = SNAPSHOT_HISTORY_DEPTH;
+
 function handleJoin(
   world: World,
   spawns: SceneSpawn[],
   clients: Map<WebSocket, ClientEntry>,
   socket: WebSocket,
 ): void {
+  // A second Join on a socket that already joined must not spawn a second player: that
+  // player would never be removed (handleClose only knows the latest session per socket)
+  // and would sit there forever, eventually exhausting world capacity.
+  if (clients.has(socket)) return;
   const team = smallerTeam(world);
   const [x, y, z] = spawnPointFor(spawns, team, teamCount(world, team));
   const playerId = addPlayer(world, { x, y, z }, team);
-  clients.set(socket, { socket, session: createSession(playerId, team, Date.now()), sent: [] });
-  socket.send(encodeWelcome({ playerId, team, tickMs: FIXED_TICK_MS }));
+  clients.set(socket, {
+    socket,
+    session: createSession(playerId, team, Date.now()),
+    sent: [],
+    pendingInputs: [],
+    lastInput: IDLE_INPUT,
+  });
+  socket.send(
+    encodeWelcome({ playerId, team, tickMs: FIXED_TICK_MS, spawnX: x, spawnY: y, spawnZ: z }),
+  );
 }
 
 function handleInput(
   clients: Map<WebSocket, ClientEntry>,
-  latestInputs: Map<number, PlayerInput>,
   socket: WebSocket,
   bytes: Uint8Array,
 ): void {
   const entry = clients.get(socket);
   if (!entry) return;
   for (const sample of applyInputMessage(entry.session, decodeInput(bytes))) {
-    latestInputs.set(entry.session.playerId, sample);
+    entry.pendingInputs.push(sample);
+    if (entry.pendingInputs.length > MAX_PENDING_INPUTS) entry.pendingInputs.shift();
   }
 }
 
@@ -79,33 +104,32 @@ function handleAck(
 ): void {
   const entry = clients.get(socket);
   if (!entry) return;
-  recordAck(entry.session, decodeAck(bytes).snapshotId, Date.now());
+  const { snapshotId } = decodeAck(bytes);
+  // A fabricated or stale-but-"newer-looking" ack for an id the server never sent must
+  // not move the acked baseline: recordAck's monotonic check alone lets any larger id
+  // through, and an id with no matching sent snapshot makes every future delta baseline
+  // lookup fail, permanently forcing full snapshots.
+  if (!entry.sent.some((sent) => sent.snapshotId === snapshotId)) return;
+  recordAck(entry.session, snapshotId, Date.now());
 }
 
 function handleMessage(
   world: World,
   spawns: SceneSpawn[],
   clients: Map<WebSocket, ClientEntry>,
-  latestInputs: Map<number, PlayerInput>,
   socket: WebSocket,
   bytes: Uint8Array,
 ): void {
   const type = bytes[0];
   if (type === MessageType.Join) handleJoin(world, spawns, clients, socket);
-  else if (type === MessageType.Input) handleInput(clients, latestInputs, socket, bytes);
+  else if (type === MessageType.Input) handleInput(clients, socket, bytes);
   else if (type === MessageType.Ack) handleAck(clients, socket, bytes);
 }
 
-function handleClose(
-  world: World,
-  clients: Map<WebSocket, ClientEntry>,
-  latestInputs: Map<number, PlayerInput>,
-  socket: WebSocket,
-): void {
+function handleClose(world: World, clients: Map<WebSocket, ClientEntry>, socket: WebSocket): void {
   const entry = clients.get(socket);
   if (!entry) return;
   removePlayer(world, entry.session.playerId);
-  latestInputs.delete(entry.session.playerId);
   clients.delete(socket);
 }
 
@@ -129,33 +153,49 @@ function sendSnapshot(
     baseline,
   );
   entry.sent.push({ snapshotId: nextSnapshotId, players });
-  if (entry.sent.length > SENT_HISTORY) entry.sent.shift();
+  if (entry.sent.length > SNAPSHOT_HISTORY_DEPTH) entry.sent.shift();
   entry.socket.send(bytes);
+}
+
+/** One input per connected player for this tick: the next queued sample, or a hold of the last. */
+function collectTickInputs(clients: Map<WebSocket, ClientEntry>): Map<number, PlayerInput> {
+  const inputs = new Map<number, PlayerInput>();
+  for (const entry of clients.values()) {
+    const next = entry.pendingInputs.shift() ?? entry.lastInput;
+    entry.lastInput = next;
+    inputs.set(entry.session.playerId, next);
+  }
+  return inputs;
 }
 
 export function startNetServer(options: NetServerOptions): NetServer {
   const wss = new WebSocketServer({ port: options.port });
   const ready = new Promise<void>((resolve) => wss.once('listening', resolve));
   const clients = new Map<WebSocket, ClientEntry>();
-  const latestInputs = new Map<number, PlayerInput>();
   let nextSnapshotId = 1;
 
   wss.on('connection', (socket) => {
-    socket.on('message', (data) =>
-      handleMessage(
-        options.world,
-        options.spawns,
-        clients,
-        latestInputs,
-        socket,
-        new Uint8Array(data as Uint8Array),
-      ),
-    );
-    socket.on('close', () => handleClose(options.world, clients, latestInputs, socket));
+    socket.on('message', (data) => {
+      try {
+        handleMessage(
+          options.world,
+          options.spawns,
+          clients,
+          socket,
+          new Uint8Array(data as Uint8Array),
+        );
+      } catch {
+        // A malformed or adversarial frame (wrong length, unknown fields, a non-finite
+        // input axis) must not crash the tick loop shared by every connected client.
+        // Dropping it is safe: inputs hold the client's last good sample, acks are
+        // idempotent, and a bad Join simply never gets a Welcome.
+      }
+    });
+    socket.on('close', () => handleClose(options.world, clients, socket));
   });
 
   function tick(tickNumber: number): void {
-    stepWorld(options.world, latestInputs);
+    stepWorld(options.world, collectTickInputs(clients));
     if (tickNumber % SNAPSHOT_EVERY_N_TICKS !== 0) return;
     const players = serializeActivePlayers(options.world);
     nextSnapshotId += 1;

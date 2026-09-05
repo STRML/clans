@@ -16,13 +16,23 @@ describe('handshake codec', () => {
     expect(decodeJoin(encodeJoin())).toEqual({ type: MessageType.Join });
   });
 
-  it('round-trips a Welcome message', () => {
-    const bytes = encodeWelcome({ playerId: 5, team: 2, tickMs: 32 });
+  it('round-trips a Welcome message, including the spawn point', () => {
+    const bytes = encodeWelcome({
+      playerId: 5,
+      team: 2,
+      tickMs: 32,
+      spawnX: 10,
+      spawnY: 1,
+      spawnZ: -20,
+    });
     expect(decodeWelcome(bytes)).toEqual({
       type: MessageType.Welcome,
       playerId: 5,
       team: 2,
       tickMs: 32,
+      spawnX: 10,
+      spawnY: 1,
+      spawnZ: -20,
     });
   });
 
@@ -49,5 +59,19 @@ describe('handshake codec', () => {
 
   it('rejects decoding bytes tagged as the wrong message type', () => {
     expect(() => decodeAck(encodeJoin())).toThrow(RangeError);
+  });
+
+  it('rejects an Input message carrying a non-finite move axis', () => {
+    // Codex round 1 (PR #4): an unvalidated NaN or Infinity axis would otherwise reach
+    // the movement sim and poison the authoritative player's position and velocity.
+    const message: Omit<InputMessage, 'type'> = {
+      sequence: 1,
+      samples: [
+        { moveX: Number.NaN, moveZ: 0, yaw: 0, jump: false, jet: false },
+        { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false },
+        { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false },
+      ],
+    };
+    expect(() => decodeInput(encodeInput(message))).toThrow(RangeError);
   });
 });

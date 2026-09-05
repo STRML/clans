@@ -41,6 +41,11 @@ function readSample(cursor: Cursor): NetInputSample {
   const moveZ = readF32(cursor);
   const yaw = readF32(cursor);
   const flags = readU8(cursor);
+  // A NaN or Infinity move axis (a malformed or adversarial packet) would otherwise
+  // propagate straight into the movement sim and poison the authoritative player state.
+  if (!Number.isFinite(moveX) || !Number.isFinite(moveZ) || !Number.isFinite(yaw)) {
+    throw new RangeError('Input sample must be finite');
+  }
   return { moveX, moveZ, yaw, jump: (flags & 1) !== 0, jet: (flags & 2) !== 0 };
 }
 
@@ -56,11 +61,14 @@ export function decodeJoin(bytes: Uint8Array): JoinMessage {
 }
 
 export function encodeWelcome(message: Omit<WelcomeMessage, 'type'>): Uint8Array {
-  const cursor = createWriter(6);
+  const cursor = createWriter(18);
   writeU8(cursor, MessageType.Welcome);
   writeU16(cursor, message.playerId);
   writeU8(cursor, message.team);
   writeU16(cursor, message.tickMs);
+  writeF32(cursor, message.spawnX);
+  writeF32(cursor, message.spawnY);
+  writeF32(cursor, message.spawnZ);
   return bytesOf(cursor);
 }
 export function decodeWelcome(bytes: Uint8Array): WelcomeMessage {
@@ -71,6 +79,9 @@ export function decodeWelcome(bytes: Uint8Array): WelcomeMessage {
     playerId: readU16(cursor),
     team: readU8(cursor),
     tickMs: readU16(cursor),
+    spawnX: readF32(cursor),
+    spawnY: readF32(cursor),
+    spawnZ: readF32(cursor),
   };
 }
 

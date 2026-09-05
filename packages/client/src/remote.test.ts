@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { PlayerSnapshotData } from '@clans/sim';
 import { RemoteBuffer, syncRemoteMeshes } from './remote.js';
 
@@ -51,5 +51,27 @@ describe('syncRemoteMeshes', () => {
     buffers.delete(1);
     syncRemoteMeshes(scene, meshes, buffers, 100);
     expect(scene.children).toHaveLength(0);
+  });
+
+  it('disposes a pruned mesh geometry and material instead of leaking them', () => {
+    // Codex round 1 (PR #4): pruning only removed the mesh from the scene and map;
+    // geometry and material created for it stayed allocated, so a disconnect/rejoin
+    // cycle across a match leaked GPU resources the garbage collector never reclaims.
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    const buffers = new Map<number, RemoteBuffer>([[1, new RemoteBuffer()]]);
+    buffers.get(1)?.push(0, sample(3, 0));
+    syncRemoteMeshes(scene, meshes, buffers, 100);
+
+    const mesh = meshes.get(1);
+    if (!mesh || Array.isArray(mesh.material)) throw new Error('expected a single-material mesh');
+    const geometryDispose = vi.spyOn(mesh.geometry, 'dispose');
+    const materialDispose = vi.spyOn(mesh.material, 'dispose');
+
+    buffers.delete(1);
+    syncRemoteMeshes(scene, meshes, buffers, 100);
+
+    expect(geometryDispose).toHaveBeenCalledOnce();
+    expect(materialDispose).toHaveBeenCalledOnce();
   });
 });

@@ -12,7 +12,13 @@ import {
   type RandomState,
   type World,
 } from '@clans/sim';
-import { MessageType, SNAPSHOT_EVERY_N_TICKS, decodeInput, encodeSnapshot } from '@clans/protocol';
+import {
+  MessageType,
+  SNAPSHOT_EVERY_N_TICKS,
+  decodeInput,
+  encodeSnapshot,
+  encodeWelcome,
+} from '@clans/protocol';
 import { NetClient } from './netclient.js';
 import type { Transport } from './transport.js';
 
@@ -45,14 +51,21 @@ function makeLink(random: RandomState) {
 }
 function makeTransport(
   uplink: ReturnType<typeof makeLink>,
-): Transport & { pump: (incoming: Uint8Array[]) => void } {
+): Transport & { pump: (incoming: Uint8Array[]) => void; setOpen: (open: boolean) => void } {
   let handler: ((bytes: Uint8Array) => void) | null = null;
+  let open = true;
   return {
     send: (bytes) => uplink.send(bytes),
     onMessage: (h) => {
       handler = h;
     },
-    close: () => {},
+    close: () => {
+      open = false;
+    },
+    isOpen: () => open,
+    setOpen: (value) => {
+      open = value;
+    },
     pump: (incoming) => {
       for (const bytes of incoming) handler?.(bytes);
     },
@@ -139,6 +152,37 @@ describe('NetClient', () => {
     expect(worst).toBeLessThan(0.5);
   });
 
+  it('decodes a delta baselined on an older snapshot still in its history (a lost ack)', () => {
+    // Codex round 1 (PR #4): the client kept only the newest decoded snapshot as its
+    // baseline candidate. Repro from the finding: full 1 arrives, delta 2 arrives and its
+    // ack is lost, then delta 3 arrives baselined on 1 (the server never learned the
+    // client had moved past it). The old code rejected 3 until the 1 s full fallback.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 8 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    const base = {
+      id: 0,
+      team: 1,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      onGround: 1 as const,
+      ski: 0 as const,
+    };
+    const state1 = { ...base, x: 1, z: 0 };
+    const state2 = { ...base, x: 2, z: 0 };
+    const state3 = { ...base, x: 3, z: 0 };
+    transport.pump([encodeSnapshot(1, 0, 0, [state1], null)]);
+    transport.pump([encodeSnapshot(2, 2, 0, [state2], { snapshotId: 1, players: [state1] })]);
+    transport.pump([encodeSnapshot(3, 4, 0, [state3], { snapshotId: 1, players: [state1] })]);
+    expect(client.stats.packetLossEstimate).toBe(0);
+    expect(client.world.players.position[0]).toBe(3);
+  });
+
   it('drops a delta whose baseline it never received and keeps running', () => {
     clock.ms = 0;
     const transport = makeTransport(makeLink({ value: 9 }));
@@ -195,5 +239,76 @@ describe('NetClient', () => {
 
     expect(client.stats.predictionErrorM).toBeGreaterThan(0);
     expect(client.world.players.position[0]).toBe(0);
+  });
+
+  it('stops growing its input backlog once the transport closes', () => {
+    // Codex round 1 (PR #4): a closed transport silently drops sends, but tick() kept
+    // appending to pendingInputs/inputSentAt regardless, and nothing else ever prunes
+    // them once no more snapshots arrive to reconcile against.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 3 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    const skiInput: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: true, jet: false };
+    for (let i = 0; i < 5; i += 1) client.tick(skiInput);
+    const pending = (client as unknown as { pendingInputs: unknown[] }).pendingInputs;
+    expect(pending.length).toBe(5);
+
+    transport.setOpen(false);
+    for (let i = 0; i < 200; i += 1) client.tick(skiInput);
+    expect(pending.length).toBe(5);
+    // Local prediction still runs even though nothing is tracked for reconciliation.
+    expect(client.world.players.position[2] ?? 0).toBeGreaterThan(0);
+  });
+
+  it('applies the real mission spawn from Welcome instead of defaulting to the world origin', () => {
+    // Codex round 1 (PR #4): deserializePlayer never touches spawn, and the local world
+    // is built with spawn (0,0,0) before Welcome arrives. A client that fell below the
+    // kill plane before its first snapshot reset to the origin, not the mission spawn
+    // the server would place it at.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 7 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    transport.pump([
+      encodeWelcome({
+        playerId: 2,
+        team: 1,
+        tickMs: FIXED_TICK_MS,
+        spawnX: 500,
+        spawnY: 10,
+        spawnZ: 500,
+      }),
+    ]);
+    expect(client.playerId).toBe(2);
+    expect([...client.world.players.spawn.slice(0, 3)]).toEqual([500, 10, 500]);
+  });
+
+  it('syncs wasGrounded from the server snapshot during reconciliation', () => {
+    // Codex round 1 (PR #4): deserializePlayer does not touch wasGrounded/wasJumpHeld,
+    // so a reconcile replayed pending inputs against this client's own stale pre-reconcile
+    // jump-edge state instead of the server's.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 6 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    client.world.players.wasGrounded[0] = 1;
+    client.world.players.wasJumpHeld[0] = 1;
+    const serverState = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      onGround: 0 as const,
+      ski: 0 as const,
+    };
+    transport.pump([encodeSnapshot(1, 0, 0, [serverState], null)]);
+    expect(client.world.players.wasGrounded[0]).toBe(0);
+    expect(client.world.players.wasJumpHeld[0]).toBe(0);
   });
 });

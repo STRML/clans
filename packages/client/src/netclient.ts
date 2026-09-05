@@ -10,11 +10,13 @@ import {
 } from '@clans/sim';
 import {
   MessageType,
+  SNAPSHOT_HISTORY_DEPTH,
   decodeSnapshot,
   decodeWelcome,
   encodeAck,
   encodeInput,
   encodeJoin,
+  peekSnapshotHeader,
 } from '@clans/protocol';
 import type { SnapshotBaseline } from '@clans/protocol';
 import type { Transport } from './transport.js';
@@ -56,7 +58,11 @@ export class NetClient {
   private readonly now: () => number;
   private sequence = 0;
   private pendingInputs: PendingInput[] = [];
-  private lastSnapshot: SnapshotBaseline | null = null;
+  // The server deltas against the client's last ACKED snapshot, which can trail the
+  // newest one it sent while an ack is in flight or lost. Keeping only the newest
+  // decoded snapshot meant a lost ack made every following delta undecodable until the
+  // 1 s full-snapshot fallback; a bounded history lets a delta name any recent baseline.
+  private readonly snapshotHistory: SnapshotBaseline[] = [];
   private previousSnapshotId = 0;
   private readonly lossWindow: number[] = [];
   private readonly bytesWindow: Array<{ at: number; bytes: number }> = [];
@@ -75,9 +81,14 @@ export class NetClient {
   }
 
   tick(input: PlayerInput): void {
+    stepWorld(this.world, new Map([[LOCAL_SLOT, input]]));
+    // Once the transport is closed it never delivers another snapshot to reconcile
+    // against or prune these on, so tracking more of them here would only grow forever.
+    // Local prediction keeps running (the stepWorld above); there is just nothing left
+    // to replay it against.
+    if (!this.transport.isOpen()) return;
     this.sequence += 1;
     this.pendingInputs.push({ sequence: this.sequence, input });
-    stepWorld(this.world, new Map([[LOCAL_SLOT, input]]));
     const samples: [PlayerInput, PlayerInput, PlayerInput] = [
       input,
       this.pendingInputs.at(-2)?.input ?? input,
@@ -97,22 +108,36 @@ export class NetClient {
     const welcome = decodeWelcome(bytes);
     this.playerId = welcome.playerId;
     this.team = welcome.team;
+    // Without the real spawn, a client that mispredicts falling below the kill plane
+    // before its first snapshot arrives resets to the local world's default (0,0,0)
+    // instead of the mission spawn the server would reset it to.
+    this.world.players.spawn.set([welcome.spawnX, welcome.spawnY, welcome.spawnZ], LOCAL_SLOT * 3);
+  }
+
+  private pushSnapshotHistory(entry: SnapshotBaseline): void {
+    this.snapshotHistory.push(entry);
+    if (this.snapshotHistory.length > SNAPSHOT_HISTORY_DEPTH) this.snapshotHistory.shift();
   }
 
   private handleSnapshot(bytes: Uint8Array): void {
     this.recordBytes(bytes.byteLength);
+    const header = peekSnapshotHeader(bytes);
+    const baseline = header.isDelta
+      ? (this.snapshotHistory.find((entry) => entry.snapshotId === header.baselineId) ?? null)
+      : null;
     let decoded;
     try {
-      decoded = decodeSnapshot(bytes, this.lastSnapshot);
+      decoded = decodeSnapshot(bytes, baseline);
     } catch {
-      // A delta against a baseline we never received. Count it as loss and do not ack;
-      // the server's 1 s fallback then sends a full snapshot.
+      // A delta against a baseline outside our history (older than SNAPSHOT_HISTORY_DEPTH
+      // sends ago, or one we never received at all). Count it as loss and do not ack; the
+      // server's 1 s fallback then sends a full snapshot.
       this.pushLoss(0);
       return;
     }
     this.recordLoss(decoded.snapshotId);
     this.updatePing(decoded.lastInputSequence);
-    this.lastSnapshot = { snapshotId: decoded.snapshotId, players: decoded.players };
+    this.pushSnapshotHistory({ snapshotId: decoded.snapshotId, players: decoded.players });
     this.transport.send(encodeAck({ snapshotId: decoded.snapshotId }));
 
     const self = decoded.players.find((player) => player.id === this.playerId);
@@ -135,6 +160,13 @@ export class NetClient {
     const beforeX = this.world.players.position[0] ?? 0;
     const beforeZ = this.world.players.position[2] ?? 0;
     deserializePlayer(this.world, { ...serverState, id: LOCAL_SLOT });
+    // The wire snapshot has no wasJumpHeld field, and deserializePlayer does not touch
+    // spawn/wasGrounded/wasJumpHeld at all, so without this the replay below starts from
+    // this client's own stale pre-reconcile jump-edge state rather than the server's.
+    // onGround is on the wire; wasJumpHeld is not, so treat the jump key as freshly
+    // pressed rather than trust a held-jump state the server never confirmed.
+    this.world.players.wasGrounded[LOCAL_SLOT] = serverState.onGround;
+    this.world.players.wasJumpHeld[LOCAL_SLOT] = 0;
     this.world.tick = serverTick;
     this.pendingInputs = this.pendingInputs.filter(
       (pending) => pending.sequence > lastInputSequence,

@@ -106,6 +106,12 @@ export function createCapsule(): THREE.Mesh {
   return mesh;
 }
 
+function disposeMesh(mesh: THREE.Mesh): void {
+  mesh.geometry.dispose();
+  const material = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  for (const entry of material) entry.dispose();
+}
+
 function pruneMissing(
   scene: THREE.Scene,
   meshes: Map<number, THREE.Mesh>,
@@ -114,7 +120,13 @@ function pruneMissing(
   for (const id of [...meshes.keys()]) {
     if (buffers.has(id)) continue;
     const mesh = meshes.get(id);
-    if (mesh) scene.remove(mesh);
+    if (mesh) {
+      scene.remove(mesh);
+      // Every mesh here owns geometry and a material created just for it (createCapsule);
+      // removing it from the scene alone leaves both allocated, so a disconnect/rejoin
+      // cycle across a match leaks WebGL resources the GC never reclaims.
+      disposeMesh(mesh);
+    }
     meshes.delete(id);
   }
 }

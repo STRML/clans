@@ -2,6 +2,8 @@ export interface Transport {
   send(bytes: Uint8Array): void;
   onMessage(handler: (bytes: Uint8Array) => void): void;
   close(): void;
+  /** False once the connection has closed (or failed to open); never reopens. */
+  isOpen(): boolean;
 }
 
 export class WebSocketTransport implements Transport {
@@ -31,6 +33,12 @@ export class WebSocketTransport implements Transport {
   send(bytes: Uint8Array): void {
     if (this.socket.readyState === WebSocket.OPEN) this.socket.send(bytes);
     else if (this.socket.readyState === WebSocket.CONNECTING) this.outgoing.push(bytes);
+  }
+
+  isOpen(): boolean {
+    return (
+      this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING
+    );
   }
 
   onMessage(handler: (bytes: Uint8Array) => void): void {

@@ -52,4 +52,14 @@ describe('WebSocketTransport', () => {
     expect(received).toEqual([[9, 8, 7]]);
     transport.close();
   });
+
+  it('reports open while connecting and closed after close(), and never reopens', async () => {
+    const transport = new WebSocketTransport(`ws://127.0.0.1:${String(PORT)}`);
+    expect(transport.isOpen()).toBe(true); // still CONNECTING
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(transport.isOpen()).toBe(true); // now OPEN
+    transport.close();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(transport.isOpen()).toBe(false);
+  });
 });
