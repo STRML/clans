@@ -7,6 +7,7 @@ export default defineConfig({
   use: {
     baseURL: 'http://127.0.0.1:5173',
     headless: true,
+    channel: 'chromium',
     launchOptions: {
       args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'],
     },
