@@ -110,6 +110,20 @@ describe('Light movement', () => {
     expect(world.players.ski[id]).toBe(0);
   });
 
+  it('fires a held jump on the tick after landing (the ski hop)', () => {
+    // Spawned 0.1 m above flat ground with Space already held, as the client does.
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 10, y: 0.1, z: 10 });
+    let ticks = 0;
+    while (world.players.onGround[id] === 0 && ticks < 20) {
+      stepWorld(world, inputMap(id, { jump: true }));
+      ticks += 1;
+    }
+    expect(world.players.onGround[id]).toBe(1);
+    stepWorld(world, inputMap(id, { jump: true }));
+    expect(world.players.velocity[id * 3 + 1]).toBeGreaterThan(5);
+  });
+
   it('stops from run speed in under 0.5 seconds', () => {
     const world = createWorld(flat, 1);
     const id = addPlayer(world, { x: 10, y: 0, z: 10 });

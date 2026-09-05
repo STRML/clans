@@ -224,13 +224,16 @@ function writeState(
   body: Body,
   contact: Contact,
   input: PlayerInput,
-  skiing: boolean,
+  ctx: TickContext,
 ): void {
   writeBody(players, id, body);
   if (contact.landingSpeed >= 0) players.landingSpeed[id] = contact.landingSpeed;
   players.onGround[id] = contact.grounded ? 1 : 0;
-  players.ski[id] = skiing ? 1 : 0;
-  players.wasGrounded[id] = contact.grounded ? 1 : 0;
+  players.ski[id] = ctx.skiing ? 1 : 0;
+  // The jump edge compares against the grounded state at the start of this tick, not the
+  // contact result, so the tick after a landing still sees the air-to-ground transition
+  // and a held jump fires on landing (the T2 ski hop).
+  players.wasGrounded[id] = ctx.grounded ? 1 : 0;
   players.wasJumpHeld[id] = input.jump ? 1 : 0;
 }
 
@@ -259,7 +262,7 @@ function stepPlayer(
   applyResistance(body, armor, dt);
   const contact = integrate(world, body, ctx.grounded, forces.jumped || forces.jetted, dt);
   if (body.y < world.killY) resetToSpawn(players, id, body);
-  writeState(players, id, body, contact, input, ctx.skiing);
+  writeState(players, id, body, contact, input, ctx);
 }
 
 export function stepPlayers(
