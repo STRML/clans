@@ -145,18 +145,16 @@ function parseHeader(cursor: Cursor): { classToken: Token; name: string | null }
   return { classToken, name };
 }
 
+/** A property value is exactly one token followed by a semicolon. Mission files always quote values. */
 function parsePropertyValue(cursor: Cursor, classToken: Token): string {
-  const parts: string[] = [];
-  while (cursor.peek() && !isDelimiter(cursor.peek(), ';')) {
-    const token = cursor.take();
-    if (!token.quoted && (token.value === 'new' || token.value === '}')) {
-      throw new SyntaxError(`Expected ; before ${token.value} at line ${String(token.line)}`);
-    }
-    parts.push(token.value);
+  assertNotEof(cursor, classToken);
+  const token = cursor.take();
+  if (!token.quoted && (token.value === 'new' || token.value === '}' || token.value === ';')) {
+    throw new SyntaxError(`Expected a value before ${token.value} at line ${String(token.line)}`);
   }
   assertNotEof(cursor, classToken);
   cursor.take(';');
-  return parts.join(' ');
+  return token.value;
 }
 
 function parseBody(cursor: Cursor, classToken: Token, object: MissionObject): void {

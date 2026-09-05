@@ -39,9 +39,18 @@ describe('parseMission', () => {
     );
   });
 
+  it('rejects a missing semicolon between two properties instead of merging them', () => {
+    expect(() => parseMission('new A(X) {\n key = "v" other = "w";\n};')).toThrow(
+      'Expected ; at line 2',
+    );
+    expect(() => parseMission('new A(X) {\n key = ;\n};')).toThrow(
+      'Expected a value before ; at line 2',
+    );
+  });
+
   it('rejects a property value that runs into a nested object instead of dropping it', () => {
     expect(() => parseMission('new A(X) {\n key = value new B(Y) {\n };\n};')).toThrow(
-      'Expected ; before new at line 2',
+      'Expected ; at line 2',
     );
   });
 

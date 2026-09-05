@@ -63,10 +63,20 @@ function required(found: LocatedObject | undefined, className: string): LocatedO
   return found;
 }
 
+/** An explicit team property must be a non-negative integer; a bad value is an error, never a fallback. */
+function teamProperty(parent: MissionObject): number {
+  const value = scalar(parent.props.team, `${parent.class}.team`);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new TypeError(
+      `Expected a non-negative integer for ${parent.class}.team, got "${String(parent.props.team)}"`,
+    );
+  }
+  return value;
+}
+
 function teamFor(ancestors: MissionObject[]): number {
   for (const parent of [...ancestors].reverse()) {
-    const property = Number(parent.props.team);
-    if (Number.isInteger(property)) return property;
+    if (parent.props.team !== undefined) return teamProperty(parent);
     const match = /^Team(\d+)$/i.exec(parent.name ?? '');
     if (match) return Number(match[1]);
   }

@@ -37,4 +37,16 @@ describe('scene extraction', () => {
       'Expected a finite number for TerrainBlock.squareSize, got "eight"',
     );
   });
+
+  it('rejects an explicit team property that is not an integer instead of falling back to the group name', () => {
+    const source =
+      'new SimGroup(Team1) {\n team = "not-a-number";\n new SpawnSphere(S) { position = "0 0 0"; radius = "5"; };\n};\n' +
+      'new TerrainBlock(T) { terrainFile = "k.ter"; squareSize = "8"; position = "0 0 0"; };\n' +
+      'new Sun() { direction = "0 0 -1"; color = "1 1 1 1"; ambient = "0 0 0 1"; };\n' +
+      'new Sky(Sky) { visibleDistance = "500"; fogDistance = "400"; fogColor = "0 0 0 1"; materialList = "x"; };\n' +
+      'new MissionArea(M) { area = "0 0 1 1"; };';
+    expect(() => extractScene(parseMission(source))).toThrow(
+      'Expected a finite number for SimGroup.team, got "not-a-number"',
+    );
+  });
 });
