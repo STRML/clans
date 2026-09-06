@@ -198,6 +198,21 @@ export interface FireEvent {
   hitPlayerId: number;
   hitPoint: Vec3 | null;
   /**
+   * The id of the projectile this event spawned in the projectile store (projectiles.ts's
+   * spawnStored), or -1 for a shot that never got one -- a genuinely hitscan weapon (the
+   * Laser Rifle, which has no projectile at all), or a store-full shot whose ammo was
+   * refunded instead. Set at the same point spawnStored allocates the slot, so it's
+   * available by the time this event reaches world.lastFireEvents.
+   *
+   * Exists so server/net.ts's applyLagCompensatedHits can free the exact tracer this event
+   * spawned once a rewound recheck determines it would have hit: without a way to name that
+   * projectile, a Chaingun shot corrected by lag comp keeps its still-flying Tracer object
+   * alive and traveling, and that tracer can go on to score a second, independent hit on a
+   * later tick's stepProjectiles pass -- one non-penetrating shot damaging two players
+   * (Codex review round 5, finding 1).
+   */
+  projectileId: number;
+  /**
    * True once this event's authoritative same-tick hit-test has actually run and produced
    * hitPlayerId/hitPoint -- resolveHitscan for the Laser Rifle, or the immediate
    * stepLinearOrTracer call for the Chaingun's Tracer (projectiles.ts). Defaults to false at
@@ -358,6 +373,7 @@ function tryFireWeapon(world: World, id: number, input: PlayerInput): void {
     energyScale,
     hitPlayerId: -1,
     hitPoint: null,
+    projectileId: -1,
     resolved: false,
   });
 }
@@ -378,6 +394,7 @@ function tryThrowGrenade(world: World, id: number, input: PlayerInput): void {
     energyScale: 1,
     hitPlayerId: -1,
     hitPoint: null,
+    projectileId: -1,
     resolved: false,
   });
 }

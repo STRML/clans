@@ -9,6 +9,7 @@ import {
   WeaponId,
   addPlayer,
   applyDamage,
+  deactivateProjectile,
   dueForRespawn,
   hitTestFireEvent,
   playerHitbox,
@@ -418,7 +419,14 @@ function buildExtras(world: World): WorldExtras {
 function respawnDuePlayers(world: World, spawns: SceneSpawn[], history: PositionHistory): void {
   for (const id of dueForRespawn(world)) {
     const team = world.players.team[id] ?? 1;
-    const [x, y, z] = spawnPointFor(world.terrain, spawns, team, teamCount(world, team));
+    // handleJoin picks an initial spawn using the team's count BEFORE that player is added
+    // (teamCount is read before addPlayer runs), i.e. a count that never includes the
+    // player being placed. dueForRespawn's id is already active (death only clears
+    // `alive`, never `active`), so teamCount(world, team) here already counts it -- the
+    // -1 restores the same "count of everyone else on the team" convention join uses, so
+    // a player's very first respawn picks the same spawn their initial join would have
+    // (Codex review round 5, finding 2).
+    const [x, y, z] = spawnPointFor(world.terrain, spawns, team, teamCount(world, team) - 1);
     respawnPlayer(world, id, { x, y, z });
     clearHistory(history, id);
   }
@@ -529,6 +537,11 @@ function applyLagCompensatedHits(
     event.hitPlayerId = result.hitPlayerId;
     event.hitPoint = result.hitPoint;
     applyDamage(world, result.hitPlayerId, damage, event.playerId, LIGHT_ARMOR);
+    // Consume the still-flying Tracer this event spawned so it can't score a second,
+    // independent hit on a later tick -- see FireEvent.projectileId and
+    // deactivateProjectile's own comments (Codex review round 5, finding 1). A no-op for
+    // the Laser Rifle, which never spawns a projectile at all (projectileId stays -1).
+    deactivateProjectile(world, event.projectileId);
     if (!world.players.alive[result.hitPlayerId]) dropFlagsCarriedBy(world, result.hitPlayerId);
   }
 }

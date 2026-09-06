@@ -193,6 +193,9 @@ function spawnStored(
   store.position.set([event.origin.x, event.origin.y, event.origin.z], id * 3);
   const velocity = velocityFor(event.direction, speed, event.shooterVelocity, velInherit);
   store.velocity.set([velocity.x, velocity.y, velocity.z], id * 3);
+  // Correlates this event back to the exact projectile it spawned -- see FireEvent.projectileId
+  // for why server/net.ts's lag-comp correction needs this (Codex review round 5, finding 1).
+  event.projectileId = id;
   return id;
 }
 
@@ -631,6 +634,26 @@ export function hitTestFireEvent(world: World, event: FireEvent, dt: number): Hi
   if (data.projectile === null) return hitTestHitscan(world, event, data);
   if (data.projectile === ProjectileType.Tracer) return hitTestTracer(world, event, data, dt);
   return NO_HIT;
+}
+
+/**
+ * Frees a specific still-flying projectile by id -- exported for server/net.ts's
+ * applyLagCompensatedHits, which calls this once a rewound recheck (hitTestFireEvent above)
+ * determines a live-missed Chaingun/Tracer shot would have hit under lag compensation. That
+ * correction applies damage directly via applyDamage, entirely outside this file's normal
+ * resolveImpact path, so without an explicit deactivation the tracer stays active and keeps
+ * traveling: a miss only advances a projectile's lifetime, it never despawns one. Left alone,
+ * that live projectile can go on to score a second, independent hit on a later tick's
+ * stepProjectiles pass -- one non-penetrating shot damaging two players (Codex review round
+ * 5, finding 1).
+ *
+ * A no-op for an id that's out of range or already inactive (already resolved its own live
+ * hit or terrain contact, expired, or simply never spawned -- FireEvent.projectileId defaults
+ * to -1), so a caller never needs to check that first.
+ */
+export function deactivateProjectile(world: World, id: number): void {
+  if (id < 0 || id >= world.projectiles.active.length || !world.projectiles.active[id]) return;
+  free(world.projectiles, id);
 }
 
 function spawnFromEvent(world: World, event: FireEvent, dt: number): void {

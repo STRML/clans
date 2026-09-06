@@ -28,6 +28,7 @@ function fire(world: ReturnType<typeof createWorld>, event: Partial<FireEvent>):
       energyScale: 1,
       hitPlayerId: -1,
       hitPoint: null,
+      projectileId: -1,
       resolved: false,
       ...event,
     },

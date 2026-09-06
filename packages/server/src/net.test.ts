@@ -1023,6 +1023,87 @@ describe('startNetServer', () => {
     lagServer.close();
   });
 
+  it('consumes the lag-comp-corrected Chaingun tracer so it cannot score a second hit later (Codex review round 5, finding 1)', async () => {
+    // The live, same-tick tracer step inside stepWorld tests against TRUE positions and
+    // misses both targets here: targetA has since moved away, and targetB sits beyond the
+    // first tick's travel distance. applyLagCompensatedHits then reruns that exact same
+    // first-tick segment against targetA's REWOUND position, finds a hit, and applies
+    // damage directly via applyDamage -- entirely outside projectiles.ts's own
+    // resolveImpact path. Without also consuming the tracer there, it stays active and
+    // keeps traveling: the very next tick's ordinary stepProjectiles pass carries it
+    // straight into targetB's true (never-rewound) position, landing a second, independent
+    // hit for the one shot that fired.
+    let clock = 0;
+    const lagServer = startNetServer({ world, spawns, port: TEST_PORT + 10, now: () => clock });
+    await lagServer.ready;
+    // Chaingun speed is 425 m/s at a 32 ms tick, so one tick of travel covers 13.6 m.
+    const targetA = addPlayer(world, { x: 0, y: 0, z: 8 }, 2); // inside the first 0-13.6 m segment
+    const targetB = addPlayer(world, { x: 0, y: 0, z: 20 }, 2); // inside the second 13.6-27.2 m segment
+
+    const shooter = await connect(TEST_PORT + 10);
+    const welcomePromise = receive(shooter);
+    shooter.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    world.players.position.set([0, 0, 0], welcome.playerId * 3);
+
+    // Establish a 150ms ping: send a snapshot, ack it 150ms of server-clock time later.
+    const firstPromise = receive(shooter);
+    lagServer.tick(2);
+    const first = decodeSnapshot(await firstPromise, null);
+    clock = 150;
+    shooter.send(encodeAck({ snapshotId: first.snapshotId }));
+    await wait(20);
+
+    const idle: NetInputSample = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    // Walk targetA across the shot line for a few ticks (recorded into lag-comp history),
+    // then jump it far away right before the shot -- the laggy shooter's screen still shows
+    // it in the old spot. targetB never moves, so rewinding it (it's not excluded either)
+    // only ever substitutes its own unchanged true position -- it plays no part in the
+    // correction itself, only in the live hit-test on the tick after.
+    for (let step = 0; step < 5; step += 1) {
+      world.players.position.set([0, 0, 8], targetA * 3);
+      lagServer.tick(3 + step);
+    }
+    world.players.position.set([500, 0, 500], targetA * 3);
+
+    shooter.send(
+      encodeInput({
+        sequence: 1,
+        samples: [
+          { ...idle, slot: 2 },
+          { ...idle, slot: 2 },
+          { ...idle, slot: 2 },
+        ],
+      }),
+    );
+    await wait(20);
+    lagServer.tick(20); // slot switch to Chaingun only, still Ready, no shot yet
+
+    const fire: NetInputSample = { ...idle, slot: 2, fire: true };
+    shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
+    await wait(20);
+    lagServer.tick(21); // live miss, then the lag-comp correction lands on targetA
+
+    expect(world.players.damage[targetA]).toBeGreaterThan(0);
+    expect(world.players.damage[targetB]).toBe(0); // not reached by the tracer's first segment
+
+    lagServer.tick(22); // the tracer would travel its second 13.6 m here if still alive
+
+    expect(world.players.damage[targetB]).toBe(0); // consumed: no second hit
+    shooter.close();
+    lagServer.close();
+  });
+
   it('does not respawn a due player on the tick the match ends (Codex round 4, finding 6)', () => {
     // stepWorld freezes the sim once world.gameOver is true, but that flag can flip to true
     // partway through the very stepWorld call that sets it (here, the time limit landing on
@@ -1041,5 +1122,47 @@ describe('startNetServer', () => {
 
     expect(world.gameOver).toBe(true);
     expect(world.players.alive[deadId]).toBe(0);
+  });
+
+  it('respawn picks a spawn using the same team-count convention as initial join (Codex review round 5, finding 2)', async () => {
+    // handleJoin computes the spawn index from teamCount BEFORE addPlayer runs, so a lone
+    // joiner is always counted as "0 others already on the team" and lands on spawn index
+    // 0. dueForRespawn's id stays active while dead (death only clears `alive`, never
+    // `active`), so without the same -1 correction, respawnDuePlayers counts that same
+    // player as already present on their own team and picks spawn index 1 instead --
+    // landing a lone player's very first respawn on a DIFFERENT spawn than their own
+    // initial join chose, even though the team's population never actually changed.
+    const twoSpawnsPerTeam: SceneSpawn[] = [
+      { name: null, team: 1, position: [0, 0, 0], radius: 5 },
+      { name: null, team: 1, position: [40, 0, 40], radius: 5 },
+      { name: null, team: 2, position: [1, 0, 1], radius: 5 },
+      { name: null, team: 2, position: [41, 0, 41], radius: 5 },
+    ];
+    const spawnWorld = createWorld(terrain, 1, 8);
+    const spawnServer = startNetServer({
+      world: spawnWorld,
+      spawns: twoSpawnsPerTeam,
+      port: TEST_PORT + 11,
+    });
+    await spawnServer.ready;
+
+    const client = await connect(TEST_PORT + 11);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    expect(welcome.team).toBe(1); // the sole joiner: team 1 is always the (tied) smaller team
+    expect(welcome.spawnX).toBeCloseTo(0); // team 1's spawn index 0
+    expect(welcome.spawnZ).toBeCloseTo(0);
+
+    spawnWorld.players.alive[welcome.playerId] = 0;
+    spawnWorld.players.respawnAt[welcome.playerId] = 0; // already due
+    spawnServer.tick(1);
+
+    const base = welcome.playerId * 3;
+    expect(spawnWorld.players.position[base]).toBeCloseTo(welcome.spawnX);
+    expect(spawnWorld.players.position[base + 2]).toBeCloseTo(welcome.spawnZ);
+
+    client.close();
+    spawnServer.close();
   });
 });
