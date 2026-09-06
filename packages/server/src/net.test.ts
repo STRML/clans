@@ -11,11 +11,13 @@ import {
   type World,
 } from '@clans/sim';
 import {
+  decodeEvent,
   decodeSnapshot,
   decodeWelcome,
   encodeAck,
   encodeInput,
   encodeJoin,
+  EventKind,
   MessageType,
   type NetInputSample,
 } from '@clans/protocol';
@@ -667,5 +669,133 @@ describe('startNetServer', () => {
     expect(world.players.damage[targetId]).toBeGreaterThan(0);
     shooter.close();
     lagServer.close();
+  });
+
+  it('resyncs a carried flag to its true position after a lag-comp rewind (Codex PR #9 round 2, finding 2)', async () => {
+    // stepFlags already syncs a carried flag's rendered position to its carrier's CURRENT
+    // player position every tick, but during the rewind window that "current" position is
+    // the carrier's historical (rewound) one, not their true one. restorePositions only
+    // fixes player positions back up afterward -- without also re-syncing the flag, a
+    // stale, rewound flag position survives into that tick's outgoing snapshot.
+    createFlags(world, [
+      { team: 1, position: { x: 0, y: 0, z: 0 } },
+      { team: 2, position: { x: 8, y: 0, z: 8 } },
+    ]);
+    let clock = 0;
+    const flagServer = startNetServer({ world, spawns, port: TEST_PORT + 6, now: () => clock });
+    await flagServer.ready;
+    const carrierId = addPlayer(world, { x: 0, y: 0, z: 8 }, 2);
+    world.flags.carrierId[0] = carrierId; // team 1's flag, carried by a team-2 player
+    world.flags.state[0] = FlagState.Carried;
+    world.flags.returnAt[0] = -1;
+
+    const shooter = await connect(TEST_PORT + 6);
+    const welcomePromise = receive(shooter);
+    shooter.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    world.players.position.set([0, 0, 0], welcome.playerId * 3);
+
+    // Establish a 150ms ping so the coming shot triggers a rewind.
+    const firstPromise = receive(shooter);
+    flagServer.tick(2);
+    const first = decodeSnapshot(await firstPromise, null);
+    clock = 150;
+    shooter.send(encodeAck({ snapshotId: first.snapshotId }));
+    await wait(20);
+
+    const idle: NetInputSample = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    // The carrier holds the shot line for a few ticks, recorded into lag-comp history...
+    for (let step = 0; step < 5; step += 1) {
+      world.players.position.set([0, 0, 8], carrierId * 3);
+      flagServer.tick(3 + step);
+    }
+    // ...then moves far away right before the shot resolves: its true current position.
+    world.players.position.set([500, 0, 500], carrierId * 3);
+
+    shooter.send(
+      encodeInput({
+        sequence: 1,
+        samples: [
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+        ],
+      }),
+    );
+    await wait(20);
+    flagServer.tick(20); // slot switch only, no shot yet
+
+    const fire: NetInputSample = { ...idle, slot: 4, fire: true };
+    shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
+    await wait(20);
+    flagServer.tick(21); // fires: the carrier is rewound for hit resolution, then restored
+
+    // The flag must reflect the carrier's true, restored position, not the rewound one
+    // stepFlags synced it to mid-tick, before restorePositions undid the rewind.
+    expect(world.flags.position[0]).toBeCloseTo(500);
+    expect(world.flags.position[2]).toBeCloseTo(500);
+    shooter.close();
+    flagServer.close();
+  });
+
+  it('broadcasts a LaserFired event for a shot resolved this tick (Codex PR #9 round 2, finding 5)', async () => {
+    // Round 1 added world.lastFireEvents specifically so server code could still read a
+    // tick's fire events after stepProjectiles clears pendingFireEvents, but net.ts's
+    // laserEvents was never switched over: it kept reading pendingFireEvents, which is
+    // always empty by the time net.ts looks at it, so a landed Laser Rifle shot never
+    // produced a LaserFired broadcast.
+    const client = await connect(TEST_PORT);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    const messages: Uint8Array[] = [];
+    client.on('message', (data) => messages.push(new Uint8Array(data as Uint8Array)));
+
+    const idle: NetInputSample = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    client.send(
+      encodeInput({
+        sequence: 1,
+        samples: [
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+        ],
+      }),
+    );
+    await wait(20);
+    server.tick(2); // applies the Laser Rifle slot switch only, still Ready, no shot yet
+
+    const fire: NetInputSample = { ...idle, slot: 4, fire: true };
+    client.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
+    await wait(20);
+    server.tick(3); // fires: must broadcast a LaserFired event this same tick
+    await wait(20); // the broadcast is delivered over the socket asynchronously
+
+    const events = messages
+      .filter((bytes) => bytes[0] === MessageType.Event)
+      .map((bytes) => decodeEvent(bytes));
+    expect(events.some((event) => event.kind === EventKind.LaserFired)).toBe(true);
+    client.close();
   });
 });

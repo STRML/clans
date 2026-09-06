@@ -12,6 +12,7 @@ import {
   playerHitbox,
   raySphereDistance,
   removePlayer,
+  resyncCarriedFlagPositions,
   respawnPlayer,
   sampleTerrain,
   serializeActivePlayers,
@@ -41,7 +42,14 @@ import {
   type WorldExtras,
 } from '@clans/protocol';
 import { isClientOverloaded } from './backpressure-policy.js';
-import { createPositionHistory, recordHistory, restorePositions, rewindOthers } from './lagcomp.js';
+import {
+  clearHistory,
+  createPositionHistory,
+  recordHistory,
+  restorePositions,
+  rewindOthers,
+  type PositionHistory,
+} from './lagcomp.js';
 import { applyInputMessage, createSession, recordAck, type Session } from './session.js';
 import { needsFullSnapshot } from './snapshot-policy.js';
 import { smallerTeam, spawnPointFor, teamCount, type SceneSpawn } from './world.js';
@@ -277,6 +285,7 @@ function handleClose(
   world: World,
   clients: Map<WebSocket, ClientEntry>,
   godPlayers: Set<number>,
+  history: PositionHistory,
   socket: WebSocket,
 ): void {
   const entry = clients.get(socket);
@@ -284,6 +293,13 @@ function handleClose(
   dropFlagsCarriedBy(world, entry.session.playerId);
   removePlayer(world, entry.session.playerId);
   godPlayers.delete(entry.session.playerId);
+  // Codex PR #9 round 2, finding 7: recordHistory only forgets an id once it notices that
+  // id is no longer active, on its next call for every currently active player -- an id
+  // reused by a new Join before that next tick otherwise still carries the previous
+  // occupant's recorded trail, and a hitscan shot at another player that tick could rewind
+  // the new occupant onto it for one tick. Clearing it here, synchronously on disconnect,
+  // closes that window instead of waiting on a future tick to overwrite it naturally.
+  clearHistory(history, entry.session.playerId);
   clients.delete(socket);
 }
 
@@ -463,7 +479,13 @@ function findLaserHit(world: World, event: FireEvent): number {
 }
 
 function laserEvents(world: World): EventMessage[] {
-  return world.pendingFireEvents
+  // Codex PR #9 round 2, finding 5: projectiles.ts's stepProjectiles clears
+  // pendingFireEvents before stepWorld returns and copies it into lastFireEvents
+  // specifically so server code can still read this tick's fire events afterward.
+  // Reading pendingFireEvents here always saw an already-emptied array, so a Laser
+  // Rifle shot was simulated (the damage landed) but its LaserFired event never
+  // reached any client -- a shot with a hit and no muzzle flash or beam on the wire.
+  return world.lastFireEvents
     .filter((event) => event.weaponId === WeaponId.LaserRifle && !event.isAltFire)
     .map((event) => ({
       type: MessageType.Event as const,
@@ -585,7 +607,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
     });
     socket.on('close', () => {
       clearTimeout(joinTimeout);
-      handleClose(options.world, clients, godPlayers, socket);
+      handleClose(options.world, clients, godPlayers, history, socket);
     });
     // A malformed frame at the WebSocket protocol level itself (an invalid raw frame,
     // e.g. an unmasked client frame) fires 'error' on the socket before 'message' ever
@@ -594,7 +616,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
     // the process; this absorbs it the same way the server-level handler below does.
     socket.on('error', () => {
       clearTimeout(joinTimeout);
-      handleClose(options.world, clients, godPlayers, socket);
+      handleClose(options.world, clients, godPlayers, history, socket);
     });
   });
 
@@ -635,7 +657,16 @@ export function startNetServer(options: NetServerOptions): NetServer {
     const flagsBefore = snapshotFlags(options.world);
 
     stepWorld(options.world, inputs);
-    if (rewindHandle) restorePositions(options.world, rewindHandle);
+    if (rewindHandle) {
+      restorePositions(options.world, rewindHandle);
+      // Codex PR #9 round 2, finding 2: stepFlags already synced each carried flag's
+      // position to its carrier's CURRENT player position this tick, but for a
+      // just-rewound carrier "current" meant their historical, rewound position, not
+      // their true one. restorePositions only fixes player positions back up -- redoing
+      // the flag sync now, against those corrected positions, keeps a stale rewound
+      // position from surviving into this tick's outgoing snapshot.
+      resyncCarriedFlagPositions(options.world);
+    }
     respawnDuePlayers(options.world, options.spawns);
     applyGodMode(options.world, godPlayers);
 

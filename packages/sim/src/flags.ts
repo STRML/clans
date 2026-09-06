@@ -176,6 +176,21 @@ function syncCarriedPositions(world: World): void {
   }
 }
 
+/**
+ * Re-syncs every carried flag's rendered position to its carrier's CURRENT player position.
+ * `stepFlags` already does this once per tick via `syncCarriedPositions` above, but that sync
+ * runs inside `stepWorld`, before the server's lag-compensation rewind for this tick has been
+ * undone -- so a flag carried by a player who was rewound for hit resolution gets synced to
+ * that player's stale, rewound position, and nothing else in the tick fixes it back up.
+ *
+ * Exported so server/net.ts can call this again, right after it restores the rewound
+ * players' true positions, so the flag position sent in that tick's snapshot always reflects
+ * the carrier's real, non-rewound position (Codex PR #9 round 2, finding 2).
+ */
+export function resyncCarriedFlagPositions(world: World): void {
+  syncCarriedPositions(world);
+}
+
 function handleTouchesAndCaptures(world: World): void {
   for (let playerId = 0; playerId < world.players.count; playerId += 1) {
     if (!world.players.active[playerId] || !world.players.alive[playerId]) continue;

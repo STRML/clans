@@ -18,6 +18,18 @@ export function createPositionHistory(capacity = HISTORY_TICKS): PositionHistory
   return { capacity, samples: new Map() };
 }
 
+/**
+ * Drops a player id's recorded position history immediately, e.g. on disconnect.
+ * `recordHistory` already deletes an inactive id's entry, but only the next time it runs
+ * for every currently-active player -- it never touches an id that has already been
+ * reused by a new player before that next call. Without this, an id reused right after a
+ * disconnect could get rewound onto the previous occupant's recorded trail for up to one
+ * tick (Codex PR #9 round 2, finding 7).
+ */
+export function clearHistory(history: PositionHistory, playerId: number): void {
+  history.samples.delete(playerId);
+}
+
 export function recordHistory(history: PositionHistory, world: World): void {
   for (let id = 0; id < world.players.count; id += 1) {
     if (!world.players.active[id]) {
