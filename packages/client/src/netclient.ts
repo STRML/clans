@@ -118,7 +118,15 @@ export class NetClient {
     // against or prune these on, so tracking more of them here would only grow forever.
     // Local prediction keeps running (the stepWorld above); there is just nothing left
     // to replay it against.
-    if (!this.transport.isOpen()) return;
+    //
+    // Codex round 14 (PR #4): isOpen() is also true while still CONNECTING, so a slow
+    // handshake let this advance the wire sequence number every tick before a single byte
+    // had actually been sent. A fresh server session expects a client's first real message
+    // near sequence 1; a handshake slow enough to run this past MAX_SEQUENCE_JUMP first
+    // (about 5m20s at FIXED_TICK_MS) made every subsequent input rejected forever. Gating
+    // on isConnected() instead means the sequence only starts counting once real
+    // communication begins, however long the handshake took to get there.
+    if (!this.transport.isConnected()) return;
     this.sequence += 1;
     this.pendingInputs.push({ sequence: this.sequence, input });
     // A live but stalled connection (socket still OPEN, server or network just stopped

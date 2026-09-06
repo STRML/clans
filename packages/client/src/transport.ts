@@ -4,6 +4,15 @@ export interface Transport {
   close(): void;
   /** False once the connection has closed (or failed to open); never reopens. */
   isOpen(): boolean;
+  /**
+   * True only once the handshake has actually completed -- unlike isOpen(), false while
+   * still CONNECTING. A caller that advances a wire sequence number per call (NetClient's
+   * tick()) must gate on this, not isOpen(): the server's fresh session always expects a
+   * client's first real message to start near sequence 1, and isOpen() being true for a
+   * merely-attempting connection let that counter run up during however long the
+   * handshake took, sometimes past MAX_SEQUENCE_JUMP before a single byte was ever sent.
+   */
+  isConnected(): boolean;
 }
 
 // Bounds the pre-open send queue below. A socket that never finishes connecting (a
@@ -58,6 +67,10 @@ export class WebSocketTransport implements Transport {
     return (
       this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING
     );
+  }
+
+  isConnected(): boolean {
+    return this.socket.readyState === WebSocket.OPEN;
   }
 
   onMessage(handler: (bytes: Uint8Array) => void): void {

@@ -64,6 +64,18 @@ describe('WebSocketTransport', () => {
     expect(transport.isOpen()).toBe(false);
   });
 
+  it('distinguishes isConnected() (true only once open) from isOpen() (true while connecting too)', async () => {
+    // Codex round 14 (PR #4): NetClient.tick() gated advancing its wire sequence number
+    // on isOpen(), which is also true while merely CONNECTING. isConnected() exists so a
+    // caller can tell "the handshake actually completed" apart from "still attempting".
+    const transport = new WebSocketTransport(`ws://127.0.0.1:${String(PORT)}`);
+    expect(transport.isOpen()).toBe(true); // still CONNECTING
+    expect(transport.isConnected()).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(transport.isConnected()).toBe(true); // now OPEN
+    transport.close();
+  });
+
   it('bounds the pre-open send queue on a socket that never finishes connecting', async () => {
     // Codex round 3 (PR #4): the queue of bytes held for a still-CONNECTING socket had
     // no limit, so a black-holed connection (accepted at the TCP level but never

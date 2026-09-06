@@ -49,11 +49,14 @@ function makeLink(random: RandomState) {
     },
   };
 }
-function makeTransport(
-  uplink: ReturnType<typeof makeLink>,
-): Transport & { pump: (incoming: Uint8Array[]) => void; setOpen: (open: boolean) => void } {
+function makeTransport(uplink: ReturnType<typeof makeLink>): Transport & {
+  pump: (incoming: Uint8Array[]) => void;
+  setOpen: (open: boolean) => void;
+  setConnected: (connected: boolean) => void;
+} {
   let handler: ((bytes: Uint8Array) => void) | null = null;
   let open = true;
+  let connected = true;
   return {
     send: (bytes) => uplink.send(bytes),
     onMessage: (h) => {
@@ -63,8 +66,14 @@ function makeTransport(
       open = false;
     },
     isOpen: () => open,
+    // Mirrors WebSocketTransport: CLOSED (open false) is never "connected" regardless of
+    // the connected flag, which otherwise distinguishes CONNECTING from OPEN.
+    isConnected: () => open && connected,
     setOpen: (value) => {
       open = value;
+    },
+    setConnected: (value) => {
+      connected = value;
     },
     pump: (incoming) => {
       for (const bytes of incoming) handler?.(bytes);
@@ -270,6 +279,25 @@ describe('NetClient', () => {
     const sentAt = (client as unknown as { inputSentAt: Map<number, number> }).inputSentAt;
     expect(pending.length).toBe(120);
     expect(sentAt.size).toBeLessThanOrEqual(120);
+  });
+
+  it('does not advance the wire sequence while still connecting, only once truly open', () => {
+    // Codex round 14 (PR #4): isOpen() is true for both CONNECTING and OPEN, so a slow
+    // handshake let tick() advance this.sequence every tick before a single byte had
+    // actually been sent. A fresh server session expects a client's first real message
+    // near sequence 1; a handshake slow enough to run this past MAX_SEQUENCE_JUMP first
+    // (about 5m20s at FIXED_TICK_MS) made every subsequent input rejected forever.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 16 }));
+    transport.setConnected(false); // still CONNECTING: isOpen() is true, isConnected() is not
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    const idleInput: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
+    for (let i = 0; i < 20_000; i += 1) client.tick(idleInput);
+    expect((client as unknown as { sequence: number }).sequence).toBe(0);
+
+    transport.setConnected(true); // the handshake finally completes
+    client.tick(idleInput);
+    expect((client as unknown as { sequence: number }).sequence).toBe(1);
   });
 
   it('drops a delta whose baseline it never received and keeps running', () => {

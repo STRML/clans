@@ -18,6 +18,7 @@ import {
   SNAPSHOT_HISTORY_DEPTH,
   type SnapshotBaseline,
 } from '@clans/protocol';
+import { isClientOverloaded } from './backpressure-policy.js';
 import { applyInputMessage, createSession, recordAck, type Session } from './session.js';
 import { needsFullSnapshot } from './snapshot-policy.js';
 import { smallerTeam, spawnPointFor, teamCount, type SceneSpawn } from './world.js';
@@ -271,6 +272,15 @@ export function startNetServer(options: NetServerOptions): NetServer {
     // Report options.world.tick (the value stepWorld just produced), not the loop's own
     // tickNumber argument (the pre-step value): see issue #6.
     for (const entry of clients.values()) {
+      // Codex round 14 (PR #4): sending unconditionally let a slow or unresponsive
+      // client's outgoing backlog grow forever, since nothing here ever checked it.
+      // Closing an overloaded client instead of queuing yet another write onto its pile
+      // bounds server memory to a handful of connected clients' worth, not one client's
+      // worth of every snapshot it never read.
+      if (isClientOverloaded(entry.socket.bufferedAmount)) {
+        entry.socket.close();
+        continue;
+      }
       sendSnapshot(entry, nextSnapshotId, options.world.tick, players);
     }
   }
