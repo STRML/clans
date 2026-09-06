@@ -1,3 +1,4 @@
+import { LIGHT_ARMOR } from './armor.js';
 import { stepPlayers } from './movement.js';
 import type { Heightfield } from './terrain.js';
 import type { PlayerInput, Vec3, World } from './types.js';
@@ -38,6 +39,9 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
     killY: lowestTerrainHeight(terrain) - KILL_DEPTH,
     players: {
       count: 0,
+      freeIds: [],
+      active: new Uint8Array(capacity),
+      team: new Uint8Array(capacity),
       position: new Float64Array(capacity * 3),
       spawn: new Float64Array(capacity * 3),
       velocity: new Float64Array(capacity * 3),
@@ -52,14 +56,45 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
   };
 }
 
-export function addPlayer(world: World, spawn: Vec3): number {
-  const id = world.players.count;
-  if (id >= world.players.energy.length) throw new RangeError('Player capacity exceeded');
-  world.players.count += 1;
-  world.players.position.set([spawn.x, spawn.y, spawn.z], id * 3);
-  world.players.spawn.set([spawn.x, spawn.y, spawn.z], id * 3);
-  world.players.energy[id] = 60;
+/**
+ * Resets one player's simulated state (position, velocity, energy, ground contact, ...)
+ * to what a freshly spawned player would have. Shared by addPlayer and by a net client
+ * correcting its locally-predicted player once the server's real spawn is known: both
+ * cases need the same fresh-player state, not just position, or stale prediction (moving
+ * velocity, drained energy, mid-jump flags) survives into a state that no spawn ever had.
+ */
+export function resetPlayerToSpawn(world: World, id: number, spawn: Vec3): void {
+  const players = world.players;
+  players.position.set([spawn.x, spawn.y, spawn.z], id * 3);
+  players.spawn.set([spawn.x, spawn.y, spawn.z], id * 3);
+  players.velocity.set([0, 0, 0], id * 3);
+  players.yaw[id] = 0;
+  players.energy[id] = LIGHT_ARMOR.maxEnergy;
+  players.onGround[id] = 0;
+  players.ski[id] = 0;
+  players.wasGrounded[id] = 0;
+  players.wasJumpHeld[id] = 0;
+  players.landingSpeed[id] = 0;
+}
+
+export function addPlayer(world: World, spawn: Vec3, team = 0): number {
+  const players = world.players;
+  const id = players.freeIds.pop() ?? players.count;
+  if (id >= players.energy.length) throw new RangeError('Player capacity exceeded');
+  if (id === players.count) players.count += 1;
+  players.active[id] = 1;
+  players.team[id] = team;
+  resetPlayerToSpawn(world, id, spawn);
   return id;
+}
+
+export function removePlayer(world: World, id: number): void {
+  const players = world.players;
+  if (id < 0 || id >= players.count || !players.active[id]) {
+    throw new RangeError(`Cannot remove inactive player ${String(id)}`);
+  }
+  players.active[id] = 0;
+  players.freeIds.push(id);
 }
 
 export function stepWorld(

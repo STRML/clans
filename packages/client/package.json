@@ -10,12 +10,15 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@clans/protocol": "workspace:*",
     "@clans/sim": "workspace:*",
     "lil-gui": "^0.21.0",
     "three": "^0.185.1"
   },
   "devDependencies": {
     "@types/three": "^0.185.4",
-    "vite": "^7.3.6"
+    "@types/ws": "8.18.1",
+    "vite": "^7.3.6",
+    "ws": "8.21.3"
   }
 }
