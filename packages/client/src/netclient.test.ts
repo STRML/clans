@@ -766,6 +766,8 @@ describe('NetClient', () => {
         },
       ],
       flags: [{ id: 0, team: 1, state: 1, x: 5, y: 0, z: 5, carrierId: 0, returnInS: -1 }],
+      baseObjects: [],
+      turrets: [],
       teamScores: [100, 0],
       gameOver: false,
       winnerTeam: 0,
@@ -795,6 +797,8 @@ describe('NetClient', () => {
     const extras: WorldExtras = {
       projectiles: [],
       flags: [],
+      baseObjects: [],
+      turrets: [],
       teamScores: [3, 1],
       gameOver: true,
       winnerTeam: 1,
@@ -885,6 +889,8 @@ describe('NetClient', () => {
     const extras: WorldExtras = {
       projectiles: [],
       flags: [],
+      baseObjects: [],
+      turrets: [],
       teamScores: [3, 1],
       gameOver: true,
       winnerTeam: 1,
@@ -955,6 +961,8 @@ describe('NetClient', () => {
     const extras: WorldExtras = {
       projectiles: [],
       flags: [],
+      baseObjects: [],
+      turrets: [],
       teamScores: [0, 0],
       gameOver: false,
       winnerTeam: 0,

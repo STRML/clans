@@ -16,9 +16,11 @@ import {
   type Cursor,
 } from './codec.js';
 import {
+  MAX_SNAPSHOT_BASE_OBJECTS,
   MAX_SNAPSHOT_FLAGS,
   MAX_SNAPSHOT_PLAYERS,
   MAX_SNAPSHOT_PROJECTILES,
+  MAX_SNAPSHOT_TURRETS,
   MessageType,
 } from './messages.js';
 
@@ -59,9 +61,25 @@ export interface FlagSnapshotData {
   carrierId: number; // -1 if not carried
   returnInS: number; // -1 if not counting down
 }
+export interface BaseObjectSnapshotData {
+  id: number;
+  damage: number;
+  destroyed: 0 | 1;
+  powered: 0 | 1;
+}
+export interface TurretSnapshotData {
+  id: number;
+  damage: number;
+  destroyed: 0 | 1;
+  powered: 0 | 1;
+  targetId: number; // -1 = none
+  state: number; // TurretState from @clans/sim
+}
 export interface WorldExtras {
   projectiles: ProjectileSnapshotData[];
   flags: FlagSnapshotData[];
+  baseObjects: BaseObjectSnapshotData[];
+  turrets: TurretSnapshotData[];
   teamScores: [number, number]; // [team1, team2]
   gameOver: boolean;
   winnerTeam: number;
@@ -72,6 +90,8 @@ export function emptyExtras(): WorldExtras {
   return {
     projectiles: [],
     flags: [],
+    baseObjects: [],
+    turrets: [],
     teamScores: [0, 0],
     gameOver: false,
     winnerTeam: 0,
@@ -88,6 +108,8 @@ export interface DecodedSnapshot {
   removedIds: number[];
   projectiles: ProjectileSnapshotData[];
   flags: FlagSnapshotData[];
+  baseObjects: BaseObjectSnapshotData[];
+  turrets: TurretSnapshotData[];
   teamScores: [number, number];
   gameOver: boolean;
   winnerTeam: number;
@@ -130,6 +152,8 @@ const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 4 + 1 + 4 
 // id, type, weaponId, 6 f32 (pos+vel), ownerId, armed (round 15, PR #9, finding 2).
 const PROJECTILE_BYTES = 2 + 1 + 1 + 4 * 6 + 2 + 1;
 const FLAG_BYTES = 1 + 1 + 1 + 4 * 3 + 2 + 4; // id, team, state, 3 f32 (pos), carrierId i16, returnInS f32
+const BASE_OBJECT_BYTES = 2 + 4 + 1 + 1; // id, damage f32, destroyed, powered
+const TURRET_BYTES = 2 + 4 + 1 + 1 + 2 + 1; // id, damage f32, destroyed, powered, targetId i16, state
 const DELTA_FLAG = 1;
 const DIRTY_TRANSFORM = 1;
 const DIRTY_ENERGY = 2;
@@ -342,11 +366,48 @@ function readFlag(cursor: Cursor): FlagSnapshotData {
   return { id, team, state, x, y, z, carrierId, returnInS };
 }
 
+function writeBaseObject(cursor: Cursor, o: BaseObjectSnapshotData): void {
+  writeU16(cursor, o.id);
+  writeF32(cursor, o.damage);
+  writeU8(cursor, o.destroyed);
+  writeU8(cursor, o.powered);
+}
+function readBaseObject(cursor: Cursor): BaseObjectSnapshotData {
+  const id = readU16(cursor);
+  const damage = readF32(cursor);
+  assertFinite([damage]);
+  const destroyed = (readU8(cursor) ? 1 : 0) as 0 | 1;
+  const powered = (readU8(cursor) ? 1 : 0) as 0 | 1;
+  return { id, damage, destroyed, powered };
+}
+function writeTurret(cursor: Cursor, t: TurretSnapshotData): void {
+  writeU16(cursor, t.id);
+  writeF32(cursor, t.damage);
+  writeU8(cursor, t.destroyed);
+  writeU8(cursor, t.powered);
+  writeI16(cursor, t.targetId);
+  writeU8(cursor, t.state);
+}
+function readTurret(cursor: Cursor): TurretSnapshotData {
+  const id = readU16(cursor);
+  const damage = readF32(cursor);
+  assertFinite([damage]);
+  const destroyed = (readU8(cursor) ? 1 : 0) as 0 | 1;
+  const powered = (readU8(cursor) ? 1 : 0) as 0 | 1;
+  const targetId = readI16(cursor);
+  const state = readU8(cursor);
+  return { id, damage, destroyed, powered, targetId, state };
+}
+
 function writeExtras(cursor: Cursor, extras: WorldExtras): void {
   writeU16(cursor, extras.projectiles.length);
   for (const p of extras.projectiles) writeProjectile(cursor, p);
   writeU8(cursor, extras.flags.length);
   for (const f of extras.flags) writeFlag(cursor, f);
+  writeU8(cursor, extras.baseObjects.length);
+  for (const o of extras.baseObjects) writeBaseObject(cursor, o);
+  writeU8(cursor, extras.turrets.length);
+  for (const t of extras.turrets) writeTurret(cursor, t);
   writeU16(cursor, extras.teamScores[0]);
   writeU16(cursor, extras.teamScores[1]);
   writeU8(cursor, extras.gameOver ? 1 : 0);
@@ -369,13 +430,31 @@ function readExtras(cursor: Cursor): WorldExtras {
   assertPlausibleExtrasCount(flagCount, MAX_SNAPSHOT_FLAGS, 'flag');
   const flags: FlagSnapshotData[] = [];
   for (let i = 0; i < flagCount; i += 1) flags.push(readFlag(cursor));
+  const baseObjectCount = readU8(cursor);
+  assertPlausibleExtrasCount(baseObjectCount, MAX_SNAPSHOT_BASE_OBJECTS, 'baseObject');
+  const baseObjects: BaseObjectSnapshotData[] = [];
+  for (let i = 0; i < baseObjectCount; i += 1) baseObjects.push(readBaseObject(cursor));
+  const turretCount = readU8(cursor);
+  assertPlausibleExtrasCount(turretCount, MAX_SNAPSHOT_TURRETS, 'turret');
+  const turrets: TurretSnapshotData[] = [];
+  for (let i = 0; i < turretCount; i += 1) turrets.push(readTurret(cursor));
   const teamScores: [number, number] = [readU16(cursor), readU16(cursor)];
   const gameOver = readU8(cursor) !== 0;
   const winnerTeam = readU8(cursor);
   const timeRemainingS = readF32(cursor);
   const gameOverReason = readU8(cursor);
   assertFinite([timeRemainingS]);
-  return { projectiles, flags, teamScores, gameOver, winnerTeam, timeRemainingS, gameOverReason };
+  return {
+    projectiles,
+    flags,
+    baseObjects,
+    turrets,
+    teamScores,
+    gameOver,
+    winnerTeam,
+    timeRemainingS,
+    gameOverReason,
+  };
 }
 function extrasByteLength(extras: WorldExtras): number {
   return (
@@ -383,6 +462,10 @@ function extrasByteLength(extras: WorldExtras): number {
     extras.projectiles.length * PROJECTILE_BYTES +
     1 +
     extras.flags.length * FLAG_BYTES +
+    1 +
+    extras.baseObjects.length * BASE_OBJECT_BYTES +
+    1 +
+    extras.turrets.length * TURRET_BYTES +
     2 +
     2 +
     1 +

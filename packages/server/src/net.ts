@@ -417,6 +417,9 @@ function buildExtras(world: World): WorldExtras {
   return {
     projectiles: snapshotActiveProjectiles(world),
     flags: snapshotWorldFlags(world),
+    // Placeholder until Task 10 wires the real base-object/turret snapshot builders.
+    baseObjects: [],
+    turrets: [],
     teamScores: [world.teamScores[1] ?? 0, world.teamScores[2] ?? 0],
     gameOver: world.gameOver,
     winnerTeam: world.winnerTeam,

@@ -97,6 +97,8 @@ describe('snapshot codec', () => {
         { id: 0, team: 1, state: 0, x: 0, y: 0, z: 0, carrierId: -1, returnInS: -1 },
         { id: 1, team: 2, state: 0, x: 10, y: 0, z: 0, carrierId: -1, returnInS: -1 },
       ],
+      baseObjects: [],
+      turrets: [],
       teamScores: [300, 100],
       gameOver: true,
       winnerTeam: 1,
@@ -182,6 +184,8 @@ describe('snapshot codec', () => {
     const bytes = encodeSnapshot(1, 0, 0, [], null, {
       projectiles,
       flags,
+      baseObjects: [],
+      turrets: [],
       teamScores: [100, 200],
       gameOver: true,
       winnerTeam: 1,
@@ -599,5 +603,37 @@ describe('snapshot codec', () => {
     expect(() => decodeSnapshot(deltaBytes, { snapshotId: 1, players: baselinePlayers })).toThrow(
       RangeError,
     );
+  });
+});
+
+describe('WorldExtras: baseObjects and turrets', () => {
+  it('emptyExtras includes empty baseObjects/turrets arrays', () => {
+    const extras = emptyExtras();
+    expect(extras.baseObjects).toEqual([]);
+    expect(extras.turrets).toEqual([]);
+  });
+  it('a full snapshot round-trips baseObjects and turrets exactly', () => {
+    const extras = {
+      ...emptyExtras(),
+      baseObjects: [{ id: 0, damage: 0.5, destroyed: 0 as const, powered: 1 as const }],
+      turrets: [
+        { id: 3, damage: 0, destroyed: 0 as const, powered: 1 as const, targetId: 7, state: 1 },
+      ],
+    };
+    const bytes = encodeSnapshot(1, 100, 5, [], null, extras);
+    const decoded = decodeSnapshot(bytes, null);
+    expect(decoded.baseObjects).toEqual(extras.baseObjects);
+    expect(decoded.turrets).toEqual(extras.turrets);
+  });
+  it('a destroyed turret carries destroyed: 1 and an unset target', () => {
+    const extras = {
+      ...emptyExtras(),
+      turrets: [
+        { id: 0, damage: 1.25, destroyed: 1 as const, powered: 0 as const, targetId: -1, state: 0 },
+      ],
+    };
+    const bytes = encodeSnapshot(1, 0, 0, [], null, extras);
+    const decoded = decodeSnapshot(bytes, null);
+    expect(decoded.turrets[0]).toEqual(extras.turrets[0]);
   });
 });
