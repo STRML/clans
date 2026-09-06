@@ -282,6 +282,11 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
     grenadeCooldown,
     score,
     godMode,
+    // Not yet on the wire -- armor/hasRepairPack selection is a Task 7 (protocol) concern in
+    // the M4 plan, which lands the Loadout message and the full wire encoding for both
+    // fields. Every player defaults to Light/no-pack until then.
+    armor: 0,
+    hasRepairPack: 0,
   };
 }
 

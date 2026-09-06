@@ -1,4 +1,4 @@
-import { LIGHT_ARMOR } from './armor.js';
+import { ARMORS, armorFor, type ArmorId } from './armor.js';
 import type { PlayerStore, World } from './types.js';
 import { ammoIndex, WeaponId } from './weapons.js';
 
@@ -70,6 +70,11 @@ export interface PlayerSnapshotData {
    *  on every snapshot for the networked god-mode fix (see netclient.ts's setGodMode,
    *  Codex review round 14, finding 2). */
   godMode: 0 | 1;
+  /** PlayerStore.armor (ArmorId) -- see armor.ts's armorFor for why every per-player
+   *  calculation reads this instead of a hardcoded constant. */
+  armor: number;
+  /** PlayerStore.hasRepairPack -- the only pack modeled this milestone (Task 6). */
+  hasRepairPack: 0 | 1;
   /**
    * PlayerStore.wasJumpHeld -- movement.ts's jumpEdge check
    * (`input.jump && (!players.wasJumpHeld[id] || !players.wasGrounded[id])`) reads this to
@@ -107,7 +112,7 @@ export function serializePlayer(world: World, id: number): PlayerSnapshotData {
     vz: num(p.velocity, base + 2),
     yaw: num(p.yaw, id),
     energy: num(p.energy, id),
-    health: LIGHT_ARMOR.maxDamage - num(p.damage, id),
+    health: armorFor(world, id).maxDamage - num(p.damage, id),
     weaponSlot: num(p.weaponSlot, id),
     onGround: bit(p.onGround, id),
     ski: bit(p.ski, id),
@@ -122,6 +127,8 @@ export function serializePlayer(world: World, id: number): PlayerSnapshotData {
     grenadeCooldown: num(p.grenadeCooldown, id),
     score: num(p.score, id),
     godMode: bit(p.godMode, id),
+    armor: num(p.armor, id),
+    hasRepairPack: bit(p.hasRepairPack, id),
     wasJumpHeld: bit(p.wasJumpHeld, id),
   };
 }
@@ -153,7 +160,9 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   players.velocity.set([data.vx, data.vy, data.vz], data.id * 3);
   players.yaw[data.id] = data.yaw;
   players.energy[data.id] = data.energy;
-  players.damage[data.id] = LIGHT_ARMOR.maxDamage - data.health;
+  players.armor[data.id] = data.armor;
+  players.hasRepairPack[data.id] = data.hasRepairPack;
+  players.damage[data.id] = ARMORS[data.armor as ArmorId].maxDamage - data.health;
   players.alive[data.id] = data.health > 0 ? 1 : 0;
   // A live decoded player is never due for a respawn. `respawnAt` isn't itself on the wire
   // (a dead player's local countdown is set separately, see netclient.ts's death detection),

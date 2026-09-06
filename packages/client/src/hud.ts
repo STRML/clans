@@ -2,9 +2,9 @@ import {
   FIXED_DT,
   FlagState,
   GameOverReason,
-  LIGHT_ARMOR,
   WeaponId,
   ammoIndex,
+  armorFor,
   type World,
 } from '@clans/sim';
 import { EventKind, type EventMessage, type FlagSnapshotData } from '@clans/protocol';
@@ -50,13 +50,15 @@ function percent(value: number, max: number): number {
 }
 
 function healthRow(source: HudSource): HudRow {
-  const health = LIGHT_ARMOR.maxDamage - (source.world.players.damage[source.playerId] ?? 0);
-  return { id: 'hud-health', text: `${String(percent(health, LIGHT_ARMOR.maxDamage))}%` };
+  const armor = armorFor(source.world, source.playerId);
+  const health = armor.maxDamage - (source.world.players.damage[source.playerId] ?? 0);
+  return { id: 'hud-health', text: `${String(percent(health, armor.maxDamage))}%` };
 }
 
 function energyRow(source: HudSource): HudRow {
+  const armor = armorFor(source.world, source.playerId);
   const energy = source.world.players.energy[source.playerId] ?? 0;
-  return { id: 'hud-energy', text: `${String(percent(energy, LIGHT_ARMOR.maxEnergy))}%` };
+  return { id: 'hud-energy', text: `${String(percent(energy, armor.maxEnergy))}%` };
 }
 
 function weaponAmmoRows(source: HudSource): HudRow[] {

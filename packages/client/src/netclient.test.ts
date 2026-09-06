@@ -235,6 +235,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     const state1 = { ...base, x: 1, z: 0 };
     const state2 = { ...base, x: 2, z: 0 };
@@ -422,6 +424,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     const delta = encodeSnapshot(
       7,
@@ -484,6 +488,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(() =>
@@ -545,6 +551,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
 
@@ -648,6 +656,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
     expect(client.world.players.wasGrounded[0]).toBe(0);
@@ -713,6 +723,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 1 as const, // the server also saw this as a continued hold, not a fresh press
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     // lastInputSequence 0: the server has not acked sequence 1 yet, so reconcile() replays it.
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
@@ -856,6 +868,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     const extras: WorldExtras = {
       projectiles: [],
@@ -924,6 +938,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     const extras: WorldExtras = {
       projectiles: [],
@@ -990,6 +1006,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(client.localHealth).toBeCloseTo(0.4);
@@ -1111,6 +1129,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -1177,6 +1197,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [alive], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -1248,6 +1270,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [fullHealth], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -1334,6 +1358,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 5, 2, [serverState], null, emptyExtras())]);
 
@@ -1407,6 +1433,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
 
@@ -1495,6 +1523,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
 
@@ -1550,6 +1580,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -1653,6 +1685,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     const dead = { ...alive, health: 0 };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);

@@ -1,4 +1,4 @@
-import { LIGHT_ARMOR } from './armor.js';
+import { ARMORS, ArmorId, armorFor } from './armor.js';
 import { GameOverReason, stepFlags, TIME_LIMIT_TICKS } from './flags.js';
 import { stepPlayers } from './movement.js';
 import { createProjectileStore, stepProjectiles } from './projectiles.js';
@@ -68,6 +68,8 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
       ammo: new Int16Array(capacity * WEAPON_COUNT),
       grenades: new Uint8Array(capacity),
       respawnSeq: new Uint16Array(capacity),
+      armor: new Uint8Array(capacity),
+      hasRepairPack: new Uint8Array(capacity),
     },
     projectiles: createProjectileStore(),
     pendingDeaths: [],
@@ -103,7 +105,7 @@ export function resetPlayerToSpawn(world: World, id: number, spawn: Vec3): void 
   players.spawn.set([spawn.x, spawn.y, spawn.z], id * 3);
   players.velocity.set([0, 0, 0], id * 3);
   players.yaw[id] = 0;
-  players.energy[id] = LIGHT_ARMOR.maxEnergy;
+  players.energy[id] = armorFor(world, id).maxEnergy;
   players.onGround[id] = 0;
   players.ski[id] = 0;
   players.wasGrounded[id] = 0;
@@ -111,13 +113,15 @@ export function resetPlayerToSpawn(world: World, id: number, spawn: Vec3): void 
   players.landingSpeed[id] = 0;
 }
 
-export function addPlayer(world: World, spawn: Vec3, team = 0): number {
+export function addPlayer(world: World, spawn: Vec3, team = 0, armor = ArmorId.Light): number {
   const players = world.players;
   const id = players.freeIds.pop() ?? players.count;
   if (id >= players.energy.length) throw new RangeError('Player capacity exceeded');
   if (id === players.count) players.count += 1;
   players.active[id] = 1;
   players.team[id] = team;
+  players.armor[id] = armor;
+  players.hasRepairPack[id] = 0;
   players.damage[id] = 0;
   // A reused id (see removePlayer's own reused-id comment) must not inherit whatever the
   // previous occupant's god-mode toggle -- or respawn count -- was left at.
@@ -127,7 +131,7 @@ export function addPlayer(world: World, spawn: Vec3, team = 0): number {
   players.respawnSeq[id] = 0;
   players.score[id] = 0;
   resetPlayerToSpawn(world, id, spawn);
-  resetLoadout(world, id, LIGHT_ARMOR);
+  resetLoadout(world, id, ARMORS[armor]);
   return id;
 }
 

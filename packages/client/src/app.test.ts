@@ -83,6 +83,8 @@ const snapshot: PlayerSnapshotData = {
   score: 0,
   godMode: 0 as const,
   wasJumpHeld: 0 as const,
+  armor: 0,
+  hasRepairPack: 0 as const,
 };
 
 describe('updateRemotes', () => {
@@ -448,6 +450,8 @@ describe('positionOfPlayer', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     const net: Pick<NetClient, 'playerId' | 'remotePlayers'> = {
       playerId: localId,

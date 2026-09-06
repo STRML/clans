@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ArmorId, HEAVY_ARMOR } from './armor.js';
 import {
   FIXED_DT,
   addPlayer,
@@ -45,6 +46,19 @@ describe('Light movement', () => {
     expect(
       Math.hypot(world.players.velocity[id * 3] ?? 0, world.players.velocity[id * 3 + 2] ?? 0),
     ).toBeCloseTo(15, 1);
+  });
+
+  it('a Heavy player accelerates toward 7 m/s forward, not the Light 15 m/s cap', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 }, 1, ArmorId.Heavy);
+    const forward: PlayerInput = { ...idle, moveZ: 1 };
+    for (let tick = 0; tick < 200; tick += 1) stepWorld(world, new Map([[id, forward]]));
+    const speed = Math.hypot(
+      world.players.velocity[id * 3] ?? 0,
+      world.players.velocity[id * 3 + 2] ?? 0,
+    );
+    expect(speed).toBeLessThanOrEqual(HEAVY_ARMOR.maxForwardSpeed + 0.01);
+    expect(speed).toBeGreaterThan(6);
   });
 
   it('strafes right (-X at yaw 0) on positive moveX, matching the camera basis', () => {

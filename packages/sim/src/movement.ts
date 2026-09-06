@@ -1,4 +1,4 @@
-import { LIGHT_ARMOR, type ArmorData } from './armor.js';
+import { armorFor, type ArmorData } from './armor.js';
 import { applyDamage, applyFallDamage } from './damage.js';
 import { sampleTerrain, type TerrainSample } from './terrain.js';
 import type { PlayerInput, PlayerStore, World } from './types.js';
@@ -365,6 +365,6 @@ export function stepPlayers(
   for (let id = 0; id < world.players.count; id += 1) {
     if (!world.players.active[id] || !world.players.alive[id]) continue;
     const input = inputs.get(id) ?? { ...IDLE, yaw: world.players.yaw[id] ?? 0 };
-    stepPlayer(world, id, input, LIGHT_ARMOR, dt);
+    stepPlayer(world, id, input, armorFor(world, id), dt);
   }
 }

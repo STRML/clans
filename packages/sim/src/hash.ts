@@ -95,6 +95,8 @@ function mixPlayer(hash: number, players: World['players'], id: number): number 
   // precision than a correct encode/decode round trip can actually reproduce, a false
   // mismatch the wire was never designed to avoid.
   h = mix(h, num(players.respawnSeq, id) & 0xff);
+  h = mix(h, num(players.armor, id));
+  h = mix(h, num(players.hasRepairPack, id));
   return h;
 }
 

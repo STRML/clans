@@ -61,6 +61,12 @@ export interface PlayerStore {
    *  the narrower width is still safe. Reset to 0 by addPlayer on every join, including a
    *  reused id; never reset by anything else. */
   respawnSeq: Uint16Array;
+  /** ArmorId (armor.ts). Set by addPlayer/respawnPlayer/a station loadout change; every
+   *  system that used to hardcode LIGHT_ARMOR reads this through armor.ts's armorFor(world,
+   *  id) instead -- see the M4 plan's Global Constraints. */
+  armor: Uint8Array; // ArmorId
+  /** 0/1. Set by a Loadout request (Task 6); the only pack modeled this milestone. */
+  hasRepairPack: Uint8Array;
 }
 /** One id freed by `free()`, held out of `freeIds` until it has sat unallocated for at
  *  least PROJECTILE_ID_REUSE_DELAY_TICKS calls to `stepProjectiles` -- see that constant
