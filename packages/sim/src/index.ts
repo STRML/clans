@@ -27,6 +27,7 @@ export * from './projectiles.js';
 export * from './random.js';
 export * from './snapshot.js';
 export * from './terrain.js';
+export * from './turrets.js';
 export * from './types.js';
 export * from './weapons.js';
 export * from './world.js';

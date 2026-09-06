@@ -129,6 +129,8 @@ export interface World {
   interiors: import('./interiors.js').InteriorInstance[];
   baseObjects: import('./baseObjects.js').BaseObjectStore;
   forceFields: import('./baseObjects.js').ForceFieldGeometry[];
+  turrets: import('./turrets.js').TurretStore;
+  pendingTurretFireEvents: import('./turrets.js').TurretFireEvent[];
   players: PlayerStore;
   projectiles: ProjectileStore;
   pendingDeaths: Array<{ id: number; attackerId: number }>;

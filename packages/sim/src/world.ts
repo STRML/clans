@@ -5,6 +5,7 @@ import { stepPlayers } from './movement.js';
 import { createProjectileStore, stepProjectiles } from './projectiles.js';
 import type { Heightfield } from './terrain.js';
 import type { PlayerInput, Vec3, World } from './types.js';
+import { createEmptyTurrets } from './turrets.js';
 import { resetLoadout, stepWeapons, WEAPON_COUNT } from './weapons.js';
 
 export const FIXED_TICK_MS = 32;
@@ -44,6 +45,8 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
     interiors: [],
     baseObjects: createEmptyBaseObjects(),
     forceFields: [],
+    turrets: createEmptyTurrets(),
+    pendingTurretFireEvents: [],
     players: {
       count: 0,
       freeIds: [],
