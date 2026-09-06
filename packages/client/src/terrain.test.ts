@@ -26,6 +26,7 @@ const data = {
     },
     missionArea: { minX: 0, minZ: 0, width: 16, depth: 16 },
     spawns: [],
+    flagStands: [],
   },
   heights: new Uint16Array(9),
   materials: new Uint8Array(9),

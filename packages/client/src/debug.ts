@@ -1,6 +1,14 @@
 import GUI from 'lil-gui';
 import type { App } from './app.js';
-import { describePlayer } from './stats.js';
+import { activeProjectileCount, describeEvent, describePlayer, type DebugExtra } from './stats.js';
+
+function extraFor(app: App): DebugExtra {
+  const lastEvent = app.net?.recentEvents.at(-1);
+  return {
+    projectileCount: app.net ? app.net.projectiles.length : activeProjectileCount(app.world),
+    lastEvent: lastEvent ? describeEvent(lastEvent) : 'none',
+  };
+}
 
 /**
  * F1 toggles the overlay. The stats element updates every frame even while hidden so
@@ -12,7 +20,7 @@ export function createDebug(app: App, container: HTMLElement): { update(): void 
   stats.hidden = true;
   container.appendChild(stats);
   const rows = new Map<string, HTMLElement>();
-  for (const row of describePlayer(app.world, app.playerId, app.stats)) {
+  for (const row of describePlayer(app.world, app.playerId, app.stats, extraFor(app))) {
     const line = document.createElement('div');
     line.id = row.id;
     line.dataset['label'] = row.label;
@@ -27,6 +35,9 @@ export function createDebug(app: App, container: HTMLElement): { update(): void 
   gui.add(app, 'freeCam').onChange((on: boolean) => {
     if (on) app.freeCamPosition.copy(app.camera.position);
   });
+  gui.add(app, 'godMode').onChange((enabled: boolean) => {
+    app.net?.setGodMode(enabled);
+  });
   gui.hide();
 
   window.addEventListener('keydown', (event) => {
@@ -39,7 +50,7 @@ export function createDebug(app: App, container: HTMLElement): { update(): void 
 
   return {
     update(): void {
-      for (const row of describePlayer(app.world, app.playerId, app.stats)) {
+      for (const row of describePlayer(app.world, app.playerId, app.stats, extraFor(app))) {
         const line = rows.get(row.id);
         if (!line) continue;
         line.textContent = `${row.label}: ${row.text}`;

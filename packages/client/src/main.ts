@@ -1,11 +1,18 @@
 import { createApp } from './app.js';
 import { createDebug } from './debug.js';
 
+declare global {
+  interface Window {
+    __clansDebug?: { teleportToFlag(team: number): void };
+  }
+}
+
 const container = document.getElementById('app');
 if (!container) throw new Error('#app missing');
 
 const serverUrl = new URLSearchParams(location.search).get('server');
 const app = await createApp(container, { serverUrl });
+window.__clansDebug = { teleportToFlag: (team) => app.debugTeleportToFlag(team) };
 const debug = createDebug(app, document.body);
 let last = performance.now();
 const tick = (now: number): void => {

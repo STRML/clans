@@ -1,9 +1,28 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
-import type { PlayerSnapshotData } from '@clans/sim';
-import { updateRemotes } from './app.js';
+import {
+  addPlayer,
+  createFlags,
+  createWorld,
+  FIXED_DT,
+  GameOverReason,
+  type Heightfield,
+  type PlayerSnapshotData,
+} from '@clans/sim';
+import { hudSourceFrom, positionOfPlayer, teleportPlayerToFlag, updateRemotes } from './app.js';
+import { flagsFromWorld } from './flag-view.js';
 import { RemoteBuffer } from './remote.js';
 import type { NetClient, RemoteSnapshot } from './netclient.js';
+
+const flat: Heightfield = {
+  gridSize: 2,
+  squareSize: 8,
+  originX: 0,
+  originY: 0,
+  originZ: 8,
+  heightScale: 1,
+  heights: new Uint16Array(4),
+};
 
 const snapshot: PlayerSnapshotData = {
   id: 1,
@@ -99,5 +118,147 @@ describe('updateRemotes', () => {
     // treats equal timestamps as a single sample) still jumped straight to the newest
     // instead of ever bracketing between them.
     expect(samples[0]?.atMs).not.toBe(samples[1]?.atMs);
+  });
+});
+
+describe('teleportPlayerToFlag', () => {
+  it('moves the player to the given team flag current position', () => {
+    const world = createWorld(flat, 1);
+    createFlags(world, [
+      { team: 1, position: { x: 1, y: 2, z: 3 } },
+      { team: 2, position: { x: 4, y: 5, z: 6 } },
+    ]);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+
+    teleportPlayerToFlag(world, id, 2);
+
+    expect([...world.players.position.slice(id * 3, id * 3 + 3)]).toEqual([4, 5, 6]);
+  });
+
+  it('reads the flag current position, not its stand, after it has moved', () => {
+    const world = createWorld(flat, 1);
+    createFlags(world, [{ team: 1, position: { x: 1, y: 2, z: 3 } }]);
+    world.flags.position.set([9, 8, 7], 0); // flag 0 was picked up and dragged elsewhere
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+
+    teleportPlayerToFlag(world, id, 1);
+
+    expect([...world.players.position.slice(id * 3, id * 3 + 3)]).toEqual([9, 8, 7]);
+  });
+
+  it('is a no-op when no flag belongs to the requested team', () => {
+    const world = createWorld(flat, 1);
+    createFlags(world, [{ team: 1, position: { x: 1, y: 2, z: 3 } }]);
+    const id = addPlayer(world, { x: 5, y: 5, z: 5 });
+
+    teleportPlayerToFlag(world, id, 2);
+
+    expect([...world.players.position.slice(id * 3, id * 3 + 3)]).toEqual([5, 5, 5]);
+  });
+});
+
+describe('positionOfPlayer', () => {
+  it('returns null when there is no net client (single-player has no remote roster)', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 1, y: 2, z: 3 });
+    expect(positionOfPlayer(world, null, id)).toBeNull();
+  });
+
+  it('reads the local player from world state, not the remote roster', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 1, y: 2, z: 3 });
+    const net: Pick<NetClient, 'playerId' | 'remotePlayers'> = {
+      playerId: id,
+      remotePlayers: new Map(),
+    };
+    expect(positionOfPlayer(world, net, id)).toEqual({ x: 1, y: 2, z: 3 });
+  });
+
+  it('reads a remote player from the net client roster', () => {
+    const world = createWorld(flat, 1);
+    const localId = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const remote: PlayerSnapshotData = {
+      id: 7,
+      team: 2,
+      x: 10,
+      y: 11,
+      z: 12,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 0,
+      health: 0,
+      weaponSlot: 0,
+      onGround: 0,
+      ski: 0,
+    };
+    const net: Pick<NetClient, 'playerId' | 'remotePlayers'> = {
+      playerId: localId,
+      remotePlayers: new Map([[7, remote]]),
+    };
+    expect(positionOfPlayer(world, net, 7)).toEqual({ x: 10, y: 11, z: 12 });
+  });
+
+  it('returns null for an id absent from both the local slot and the remote roster', () => {
+    const world = createWorld(flat, 1);
+    const localId = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const net: Pick<NetClient, 'playerId' | 'remotePlayers'> = {
+      playerId: localId,
+      remotePlayers: new Map(),
+    };
+    expect(positionOfPlayer(world, net, 99)).toBeNull();
+  });
+});
+
+describe('hudSourceFrom', () => {
+  it('derives single-player HUD state straight from the sim world when there is no net client', () => {
+    const world = createWorld(flat, 1);
+    createFlags(world, [{ team: 1, position: { x: 1, y: 2, z: 3 } }]);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    world.teamScores[1] = 2;
+    world.teamScores[2] = 1;
+    world.tick = 10;
+
+    const source = hudSourceFrom(world, id, null);
+
+    expect(source.teamScores).toEqual([2, 1]);
+    expect(source.flags).toEqual(flagsFromWorld(world));
+    expect(source.gameOver).toBe(world.gameOver);
+    expect(source.winnerTeam).toBe(world.winnerTeam);
+    expect(source.gameOverReason).toBe(world.gameOverReason);
+    expect(source.recentEvents).toEqual([]);
+    expect(source.timeRemainingS).toBeCloseTo((world.timeLimitTicks - world.tick) * FIXED_DT);
+  });
+
+  it('takes CTF and clock state from the net client when one is connected', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const net: Pick<
+      NetClient,
+      | 'teamScores'
+      | 'flags'
+      | 'gameOver'
+      | 'winnerTeam'
+      | 'timeRemainingS'
+      | 'gameOverReason'
+      | 'recentEvents'
+    > = {
+      teamScores: [3, 4],
+      flags: [],
+      gameOver: true,
+      winnerTeam: 2,
+      timeRemainingS: 42,
+      gameOverReason: GameOverReason.TimeLimit,
+      recentEvents: [],
+    };
+
+    const source = hudSourceFrom(world, id, net);
+
+    expect(source.teamScores).toBe(net.teamScores);
+    expect(source.gameOver).toBe(true);
+    expect(source.winnerTeam).toBe(2);
+    expect(source.timeRemainingS).toBe(42);
+    expect(source.gameOverReason).toBe(GameOverReason.TimeLimit);
   });
 });

@@ -3,6 +3,7 @@ import {
   FIXED_DT,
   FIXED_TICK_MS,
   addPlayer,
+  createFlags,
   createWorld,
   sampleTerrain,
   stepWorld,
@@ -10,13 +11,24 @@ import {
   type PlayerInput,
   type World,
 } from '@clans/sim';
+import type { EventMessage, ProjectileSnapshotData } from '@clans/protocol';
 import { loadKatabatic, type KatabaticAssets } from './assets.js';
+import { flagsFromWorld, syncFlagMeshes } from './flag-view.js';
+import { createHud, type HudSource } from './hud.js';
 import { Input } from './input.js';
 import { advance, type Accumulator } from './loop.js';
 import { NetClient, type RemoteSnapshot } from './netclient.js';
 import { RemoteBuffer, syncRemoteMeshes } from './remote.js';
 import { addEnvironment, createTerrain } from './terrain.js';
 import { WebSocketTransport } from './transport.js';
+import {
+  projectilesFromWorld,
+  spawnExplosionsForExpired,
+  spawnLaserBeams,
+  syncProjectileMeshes,
+  updateEffects,
+  type Effect,
+} from './weapons-view.js';
 
 // Light armor is 2.3 m tall; the camera sits just below the top of the bounding box.
 const EYE_HEIGHT = 2.0;
@@ -48,6 +60,7 @@ export interface AppStats {
 export interface App {
   world: World;
   playerId: number;
+  net: NetClient | null;
   input: Input;
   assets: KatabaticAssets;
   camera: THREE.PerspectiveCamera;
@@ -67,8 +80,10 @@ export interface App {
   stepOnce: boolean;
   freeCam: boolean;
   freeCamPosition: THREE.Vector3;
+  godMode: boolean;
   stats: AppStats;
   frame(dtSeconds: number): void;
+  debugTeleportToFlag(team: number): void;
 }
 
 function toHeightfield(assets: KatabaticAssets): Heightfield {
@@ -183,6 +198,50 @@ function stepSinglePlayer(world: World, playerId: number, input: PlayerInput, st
   for (let step = 0; step < steps; step += 1) stepWorld(world, inputs);
 }
 
+/** God mode (single-player only; networked toggles server-side via NetClient.setGodMode) zeroes
+ * damage every tick and, if that death already landed, revives the player on the spot rather
+ * than waiting out the respawn timer. */
+function applyGodMode(world: World, playerId: number): void {
+  world.players.damage[playerId] = 0;
+  if (!world.players.alive[playerId]) {
+    world.players.alive[playerId] = 1;
+    world.players.respawnAt[playerId] = -1;
+  }
+}
+
+/** Syncs projectile/flag/laser-beam meshes and the HUD to the latest sim or net state. Pulled
+ * out of `frame` to keep its own branching (net vs. single-player, free cam, god mode) under
+ * the project's complexity budget. */
+function syncWorldView(
+  world: World,
+  playerId: number,
+  net: NetClient | null,
+  scene: THREE.Scene,
+  hud: { update(source: HudSource): void },
+  effects: Effect[],
+  projectileMeshes: Map<number, THREE.Mesh>,
+  previousProjectiles: Map<number, ProjectileSnapshotData>,
+  flagMeshes: Map<number, THREE.Group>,
+  seenEventCount: { count: number },
+  dtSeconds: number,
+): void {
+  const projectiles = net ? net.projectiles : projectilesFromWorld(world);
+  spawnExplosionsForExpired(scene, effects, previousProjectiles, projectiles);
+  syncProjectileMeshes(scene, projectileMeshes, projectiles);
+  previousProjectiles.clear();
+  for (const projectile of projectiles) previousProjectiles.set(projectile.id, projectile);
+
+  syncFlagMeshes(scene, flagMeshes, net ? net.flags : flagsFromWorld(world));
+
+  const allEvents: EventMessage[] = net ? net.recentEvents : [];
+  const newEvents = allEvents.slice(seenEventCount.count);
+  seenEventCount.count = allEvents.length;
+  spawnLaserBeams(scene, effects, newEvents, (id) => positionOfPlayer(world, net, id));
+  updateEffects(scene, effects, dtSeconds);
+
+  hud.update(hudSourceFrom(world, playerId, net));
+}
+
 function stepNetworked(
   net: NetClient,
   stats: AppStats,
@@ -264,12 +323,106 @@ export function updateRemotes(
   syncRemoteMeshes(targetScene, meshes, buffers, nowMs);
 }
 
+/**
+ * Exported for a focused unit test. Single-player has no remote roster, so `net` is null there
+ * and every id but the local player is unresolvable; networked, the local id reads world state
+ * (this client's own predicted position) while any other id reads the last decoded snapshot.
+ */
+export function positionOfPlayer(
+  world: World,
+  net: Pick<NetClient, 'playerId' | 'remotePlayers'> | null,
+  id: number,
+): { x: number; y: number; z: number } | null {
+  if (!net) return null;
+  if (id === net.playerId) {
+    return {
+      x: world.players.position[0] ?? 0,
+      y: world.players.position[1] ?? 0,
+      z: world.players.position[2] ?? 0,
+    };
+  }
+  const remote = net.remotePlayers.get(id);
+  return remote ? { x: remote.x, y: remote.y, z: remote.z } : null;
+}
+
+/** Exported for a focused unit test. Single-player has no server-authoritative CTF/clock state,
+ * so it derives the same shape straight from the sim world (Task 7's loadKatabaticWorld plus
+ * the server's own tick loop compute the networked equivalents). */
+export function hudSourceFrom(
+  world: World,
+  playerId: number,
+  net: Pick<
+    NetClient,
+    | 'teamScores'
+    | 'flags'
+    | 'gameOver'
+    | 'winnerTeam'
+    | 'timeRemainingS'
+    | 'gameOverReason'
+    | 'recentEvents'
+  > | null,
+): HudSource {
+  return net
+    ? {
+        world,
+        playerId,
+        teamScores: net.teamScores,
+        flags: net.flags,
+        gameOver: net.gameOver,
+        winnerTeam: net.winnerTeam,
+        timeRemainingS: net.timeRemainingS,
+        gameOverReason: net.gameOverReason,
+        recentEvents: net.recentEvents,
+      }
+    : {
+        world,
+        playerId,
+        teamScores: [world.teamScores[1] ?? 0, world.teamScores[2] ?? 0],
+        flags: flagsFromWorld(world),
+        gameOver: world.gameOver,
+        winnerTeam: world.winnerTeam,
+        timeRemainingS: Math.max(0, (world.timeLimitTicks - world.tick) * FIXED_DT),
+        gameOverReason: world.gameOverReason,
+        recentEvents: [],
+      };
+}
+
+/**
+ * Exported for a focused unit test. Reads the team's flag *current* position (not a hardcoded
+ * map coordinate or its home stand), so it stays correct after the flag has been picked up,
+ * dropped, or returned, and regardless of where Katabatic's real flag stands end up landing.
+ */
+export function teleportPlayerToFlag(world: World, playerId: number, team: number): void {
+  const flagId = [...world.flags.team].findIndex((candidate) => candidate === team);
+  if (flagId < 0) return;
+  const base = flagId * 3;
+  world.players.position.set(
+    [
+      world.flags.position[base] ?? 0,
+      world.flags.position[base + 1] ?? 0,
+      world.flags.position[base + 2] ?? 0,
+    ],
+    playerId * 3,
+  );
+}
+
 export async function createApp(container: HTMLElement, options: AppOptions = {}): Promise<App> {
   const assets = await loadKatabatic();
   const terrain = toHeightfield(assets);
   const net = createNetClient(options.serverUrl, terrain);
   const world = net ? net.world : createWorld(terrain, 1);
   const playerId = net ? 0 : addPlayer(world, spawnPoint(assets, terrain));
+  // Single-player has no server; seed CTF locally from the same scene data the server would
+  // read (Task 7's loadKatabaticWorld does the equivalent for the networked path).
+  if (!net) {
+    createFlags(
+      world,
+      assets.scene.flagStands.map(({ team, position: [x, y, z] }) => ({
+        team,
+        position: { x, y, z },
+      })),
+    );
+  }
 
   const scene = new THREE.Scene();
   addEnvironment(scene, assets);
@@ -292,10 +445,17 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const remoteMeshes = new Map<number, THREE.Mesh>();
   const remoteBuffers = new Map<number, RemoteBuffer>();
   const fps: FpsWindow = { windowStart: performance.now(), frames: 0 };
+  const projectileMeshes = new Map<number, THREE.Mesh>();
+  const previousProjectiles = new Map<number, ProjectileSnapshotData>();
+  const flagMeshes = new Map<number, THREE.Group>();
+  const effects: Effect[] = [];
+  const seenEventCount = { count: 0 };
+  const hud = createHud(document.body, hudSourceFrom(world, playerId, net));
 
   const app: App = {
     world,
     playerId,
+    net,
     input,
     assets,
     camera,
@@ -306,6 +466,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     stepOnce: false,
     freeCam: false,
     freeCamPosition: new THREE.Vector3(),
+    godMode: false,
     stats: {
       fps: 0,
       frameMs: 0,
@@ -315,6 +476,9 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       packetLossEstimate: 0,
       predictionErrorM: 0,
       entityCount: 1,
+    },
+    debugTeleportToFlag(team: number): void {
+      teleportPlayerToFlag(world, playerId, team);
     },
     frame(dtSeconds: number): void {
       const frameStart = performance.now();
@@ -331,8 +495,24 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         stepNetworked(net, app.stats, currentInput, steps, scene, remoteMeshes, remoteBuffers);
       } else {
         stepSinglePlayer(world, playerId, currentInput, steps);
+        if (app.godMode) applyGodMode(world, playerId);
       }
       app.stats.simMs = performance.now() - simStart;
+
+      syncWorldView(
+        world,
+        playerId,
+        net,
+        scene,
+        hud,
+        effects,
+        projectileMeshes,
+        previousProjectiles,
+        flagMeshes,
+        seenEventCount,
+        dtSeconds,
+      );
+
       if (app.freeCam) moveFreeCam(app, dtSeconds);
       placeCamera(app, sky);
       renderer.render(scene, camera);
