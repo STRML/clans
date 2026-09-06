@@ -1,7 +1,7 @@
 import net from 'node:net';
 import { WebSocket } from 'ws';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createWorld, type Heightfield, type PlayerInput, type World } from '@clans/sim';
+import { addPlayer, createWorld, type Heightfield, type PlayerInput, type World } from '@clans/sim';
 import {
   decodeSnapshot,
   decodeWelcome,
@@ -9,6 +9,7 @@ import {
   encodeInput,
   encodeJoin,
   MessageType,
+  type NetInputSample,
 } from '@clans/protocol';
 import { startNetServer, type NetServer } from './net.js';
 import type { SceneSpawn } from './world.js';
@@ -521,5 +522,109 @@ describe('startNetServer', () => {
     expect(client.readyState).toBe(WebSocket.OPEN);
     client.close();
     timeoutServer.close();
+  });
+
+  it("a fired disc drops a bot target's health (headless disc-kill test)", async () => {
+    const targetId = addPlayer(world, { x: 0, y: 0, z: 20 }, 2);
+    const shooter = await connect(TEST_PORT);
+    const welcomePromise = receive(shooter);
+    shooter.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    world.players.position.set([0, 0, 0], welcome.playerId * 3);
+
+    const fire: NetInputSample = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: true,
+      altFire: false,
+      slot: 1,
+    };
+    shooter.send(encodeInput({ sequence: 1, samples: [fire, fire, fire] }));
+    await wait(20);
+    for (let tickNumber = 2; tickNumber < 30; tickNumber += 1) server.tick(tickNumber);
+
+    expect(world.players.damage[targetId]).toBeGreaterThan(0);
+    shooter.close();
+  });
+
+  it('lag compensation: a 150ms-ping shooter still hits a target that has since moved away', async () => {
+    let clock = 0;
+    const lagServer = startNetServer({
+      world,
+      spawns,
+      port: TEST_PORT + 1,
+      now: () => clock,
+    });
+    await lagServer.ready;
+    const targetId = addPlayer(world, { x: 0, y: 0, z: 8 }, 2);
+    const shooter = await connect(TEST_PORT + 1);
+    const welcomePromise = receive(shooter);
+    shooter.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    world.players.position.set([0, 0, 0], welcome.playerId * 3);
+
+    // Establish a 150ms ping: send a snapshot, ack it 150ms of server-clock time later.
+    const firstPromise = receive(shooter);
+    lagServer.tick(2);
+    const first = decodeSnapshot(await firstPromise, null);
+    clock = 150;
+    shooter.send(encodeAck({ snapshotId: first.snapshotId }));
+    await wait(20);
+
+    const idle: NetInputSample = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    // Walk the target across the shot line for a few ticks (recorded into lag-comp history),
+    // then jump it far away right before the shot — the laggy shooter's screen still shows
+    // it in the old spot.
+    for (let step = 0; step < 5; step += 1) {
+      world.players.position.set([0, 0, 8], targetId * 3);
+      lagServer.tick(3 + step);
+    }
+    world.players.position.set([500, 0, 500], targetId * 3);
+
+    // Slot 4 is the Laser Rifle: the sim's only true same-tick hitscan (WEAPON_DATA's
+    // projectile: null resolves inside the same stepWorld call). The Chaingun (slot 2) is
+    // also in HITSCAN_WEAPONS for rewind purposes, but it fires a Tracer projectile, and
+    // projectiles.ts's stepProjectiles has a documented one-tick spawn latency: a shot
+    // fired this tick isn't moved or collision-checked until the *next* stepProjectiles
+    // call, by which point restorePositions has already undone this tick's rewind. Net.ts
+    // cannot paper over that without calling stepProjectiles directly, which the plan's
+    // Global Constraints forbid (stepWorld is sim's only public entry point) — so this test
+    // exercises the rewind/restore mechanism with the weapon that actually resolves within
+    // the tick it fires.
+    shooter.send(
+      encodeInput({
+        sequence: 1,
+        samples: [
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+        ],
+      }),
+    );
+    await wait(20);
+    lagServer.tick(20); // applies the Laser Rifle slot switch only, still Ready, no shot yet
+
+    const fire: NetInputSample = { ...idle, slot: 4, fire: true };
+    shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
+    await wait(20);
+    lagServer.tick(21); // fires with the target rewound ~150ms back onto the shot line
+
+    expect(world.players.damage[targetId]).toBeGreaterThan(0);
+    shooter.close();
+    lagServer.close();
   });
 });

@@ -75,7 +75,7 @@ function dropFlag(world: World, flagId: number, at: Vec3): void {
 }
 
 function dropCarriedFlagsOnDeath(world: World): void {
-  for (const deadId of world.pendingDeaths) {
+  for (const { id: deadId } of world.pendingDeaths) {
     for (let flagId = 0; flagId < FLAG_COUNT; flagId += 1) {
       if (world.flags.carrierId[flagId] !== deadId) continue;
       const base = deadId * 3;

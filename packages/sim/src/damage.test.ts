@@ -52,7 +52,7 @@ describe('applyDamage and death', () => {
     applyDamage(world, id, 0.02, -1, LIGHT_ARMOR);
     expect(world.players.alive[id]).toBe(0);
     expect(world.players.respawnAt[id]).toBe(RESPAWN_TICKS);
-    expect(world.pendingDeaths).toEqual([id]);
+    expect(world.pendingDeaths).toEqual([{ id, attackerId: -1 }]);
     expect(dueForRespawn(world)).toEqual([]);
     world.tick = RESPAWN_TICKS;
     expect(dueForRespawn(world)).toEqual([id]);

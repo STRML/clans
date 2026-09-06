@@ -1,26 +1,45 @@
 import { WebSocketServer, type WebSocket } from 'ws';
 import {
+  FIXED_DT,
   FIXED_TICK_MS,
+  FlagState,
+  LIGHT_ARMOR,
+  WEAPON_DATA,
+  WeaponId,
   addPlayer,
+  dueForRespawn,
+  playerHitbox,
+  raySphereDistance,
   removePlayer,
+  respawnPlayer,
   serializeActivePlayers,
   stepWorld,
+  type FireEvent,
   type PlayerInput,
   type World,
 } from '@clans/sim';
 import {
+  EventKind,
   MessageType,
-  WelcomeStatus,
-  decodeAck,
-  decodeInput,
-  emptyExtras,
-  encodeSnapshot,
-  encodeWelcome,
+  PROTOCOL_VERSION,
   SNAPSHOT_EVERY_N_TICKS,
   SNAPSHOT_HISTORY_DEPTH,
+  WelcomeStatus,
+  decodeAck,
+  decodeGod,
+  decodeInput,
+  decodeJoin,
+  encodeEvent,
+  encodeSnapshot,
+  encodeWelcome,
+  type EventMessage,
+  type FlagSnapshotData,
+  type ProjectileSnapshotData,
   type SnapshotBaseline,
+  type WorldExtras,
 } from '@clans/protocol';
 import { isClientOverloaded } from './backpressure-policy.js';
+import { createPositionHistory, recordHistory, restorePositions, rewindOthers } from './lagcomp.js';
 import { applyInputMessage, createSession, recordAck, type Session } from './session.js';
 import { needsFullSnapshot } from './snapshot-policy.js';
 import { smallerTeam, spawnPointFor, teamCount, type SceneSpawn } from './world.js';
@@ -31,6 +50,8 @@ export interface NetServerOptions {
   port: number;
   /** How long an accepted socket may stay unjoined before it is closed. */
   joinTimeoutMs?: number;
+  /** Clock used for ping/ack timing. Defaults to `Date.now`; tests inject a fake clock. */
+  now?: () => number;
 }
 export interface NetServer {
   ready: Promise<void>;
@@ -42,10 +63,13 @@ interface QueuedInput {
   sequence: number;
   input: PlayerInput;
 }
+interface SentSnapshot extends SnapshotBaseline {
+  sentAt: number;
+}
 interface ClientEntry {
   socket: WebSocket;
   session: Session;
-  sent: SnapshotBaseline[];
+  sent: SentSnapshot[];
   /**
    * Input samples not yet applied to a simulation tick, oldest first. A single Input
    * message can carry catch-up samples for more than one missed tick (the redundant
@@ -55,6 +79,12 @@ interface ClientEntry {
    */
   pendingInputs: QueuedInput[];
   lastInput: PlayerInput;
+  /** Round-trip time to this client, in ms, from its most recent ack. Drives lag comp. */
+  pingMs: number;
+}
+interface FlagSnapshotForDiff {
+  state: number;
+  carrierId: number;
 }
 
 /** The baseline for the next delta is the snapshot the client last acked, never one merely sent. */
@@ -89,17 +119,36 @@ const IDLE_INPUT: PlayerInput = {
 // message's redundant catch-up window (that only ever covers the most recent 2 ticks).
 // A burst this size is ordinary during a tick-loop stall, not just adversarial traffic.
 const MAX_PENDING_INPUTS = 128;
+const REWIND_CAP_MS = 200; // Spec: lag compensation is capped at 200 ms.
+const HITSCAN_WEAPONS = new Set<WeaponId>([WeaponId.Chaingun, WeaponId.LaserRifle]);
 
 function handleJoin(
   world: World,
   spawns: SceneSpawn[],
   clients: Map<WebSocket, ClientEntry>,
+  now: () => number,
   socket: WebSocket,
+  bytes: Uint8Array,
 ): void {
   // A second Join on a socket that already joined must not spawn a second player: that
   // player would never be removed (handleClose only knows the latest session per socket)
   // and would sit there forever, eventually exhausting world capacity.
   if (clients.has(socket)) return;
+  const join = decodeJoin(bytes);
+  if (join.version !== PROTOCOL_VERSION) {
+    socket.send(
+      encodeWelcome({
+        playerId: 0,
+        team: 0,
+        tickMs: FIXED_TICK_MS,
+        status: WelcomeStatus.VersionMismatch,
+        spawnX: 0,
+        spawnY: 0,
+        spawnZ: 0,
+      }),
+    );
+    return;
+  }
   const team = smallerTeam(world);
   const [x, y, z] = spawnPointFor(world.terrain, spawns, team, teamCount(world, team));
   let playerId: number;
@@ -115,10 +164,11 @@ function handleJoin(
   }
   clients.set(socket, {
     socket,
-    session: createSession(playerId, team, Date.now()),
+    session: createSession(playerId, team, now()),
     sent: [],
     pendingInputs: [],
     lastInput: IDLE_INPUT,
+    pingMs: 0,
   });
   socket.send(
     encodeWelcome({
@@ -153,6 +203,7 @@ function handleInput(
 
 function handleAck(
   clients: Map<WebSocket, ClientEntry>,
+  now: () => number,
   socket: WebSocket,
   bytes: Uint8Array,
 ): void {
@@ -163,27 +214,50 @@ function handleAck(
   // not move the acked baseline: recordAck's monotonic check alone lets any larger id
   // through, and an id with no matching sent snapshot makes every future delta baseline
   // lookup fail, permanently forcing full snapshots.
-  if (!entry.sent.some((sent) => sent.snapshotId === snapshotId)) return;
-  recordAck(entry.session, snapshotId, Date.now());
+  const sent = entry.sent.find((candidate) => candidate.snapshotId === snapshotId);
+  if (!sent) return;
+  recordAck(entry.session, snapshotId, now());
+  entry.pingMs = now() - sent.sentAt;
+}
+
+function handleGod(
+  clients: Map<WebSocket, ClientEntry>,
+  godPlayers: Set<number>,
+  socket: WebSocket,
+  bytes: Uint8Array,
+): void {
+  const entry = clients.get(socket);
+  if (!entry) return;
+  if (decodeGod(bytes).enabled) godPlayers.add(entry.session.playerId);
+  else godPlayers.delete(entry.session.playerId);
 }
 
 function handleMessage(
   world: World,
   spawns: SceneSpawn[],
   clients: Map<WebSocket, ClientEntry>,
+  godPlayers: Set<number>,
+  now: () => number,
   socket: WebSocket,
   bytes: Uint8Array,
 ): void {
   const type = bytes[0];
-  if (type === MessageType.Join) handleJoin(world, spawns, clients, socket);
+  if (type === MessageType.Join) handleJoin(world, spawns, clients, now, socket, bytes);
   else if (type === MessageType.Input) handleInput(clients, socket, bytes);
-  else if (type === MessageType.Ack) handleAck(clients, socket, bytes);
+  else if (type === MessageType.Ack) handleAck(clients, now, socket, bytes);
+  else if (type === MessageType.God) handleGod(clients, godPlayers, socket, bytes);
 }
 
-function handleClose(world: World, clients: Map<WebSocket, ClientEntry>, socket: WebSocket): void {
+function handleClose(
+  world: World,
+  clients: Map<WebSocket, ClientEntry>,
+  godPlayers: Set<number>,
+  socket: WebSocket,
+): void {
   const entry = clients.get(socket);
   if (!entry) return;
   removePlayer(world, entry.session.playerId);
+  godPlayers.delete(entry.session.playerId);
   clients.delete(socket);
 }
 
@@ -192,25 +266,24 @@ function sendSnapshot(
   nextSnapshotId: number,
   tickNumber: number,
   players: ReturnType<typeof serializeActivePlayers>,
+  extras: WorldExtras,
+  now: () => number,
 ): void {
   const useFull = needsFullSnapshot(
     entry.session.lastAckedSnapshotId,
     entry.session.lastAckedAt,
-    Date.now(),
+    now(),
   );
   const baseline = useFull ? null : ackedBaseline(entry);
-  // TODO(Task 7): wire real projectiles/flags/scores/game-over into WorldExtras here.
-  // The World doesn't carry pendingFireEvents/flags/CTF state wiring into net.ts yet,
-  // so this sends the wire-compatible empty extras block until that task lands.
   const bytes = encodeSnapshot(
     nextSnapshotId,
     tickNumber,
     entry.session.lastSimulatedSequence,
     players,
     baseline,
-    emptyExtras(),
+    extras,
   );
-  entry.sent.push({ snapshotId: nextSnapshotId, players });
+  entry.sent.push({ snapshotId: nextSnapshotId, players, sentAt: now() });
   if (entry.sent.length > SNAPSHOT_HISTORY_DEPTH) entry.sent.shift();
   entry.socket.send(bytes);
 }
@@ -233,6 +306,212 @@ function collectTickInputs(clients: Map<WebSocket, ClientEntry>): Map<number, Pl
   return inputs;
 }
 
+function snapshotProjectile(world: World, id: number): ProjectileSnapshotData {
+  const base = id * 3;
+  return {
+    id,
+    type: world.projectiles.type[id] ?? 0,
+    weaponId: world.projectiles.weaponId[id] ?? 0,
+    x: world.projectiles.position[base] ?? 0,
+    y: world.projectiles.position[base + 1] ?? 0,
+    z: world.projectiles.position[base + 2] ?? 0,
+    vx: world.projectiles.velocity[base] ?? 0,
+    vy: world.projectiles.velocity[base + 1] ?? 0,
+    vz: world.projectiles.velocity[base + 2] ?? 0,
+    ownerId: world.projectiles.ownerId[id] ?? -1,
+  };
+}
+
+function snapshotActiveProjectiles(world: World): ProjectileSnapshotData[] {
+  const projectiles: ProjectileSnapshotData[] = [];
+  for (let id = 0; id < world.projectiles.count; id += 1) {
+    if (world.projectiles.active[id]) projectiles.push(snapshotProjectile(world, id));
+  }
+  return projectiles;
+}
+
+function snapshotWorldFlag(world: World, id: number): FlagSnapshotData {
+  const base = id * 3;
+  const returnAt = world.flags.returnAt[id] ?? -1;
+  return {
+    id,
+    team: world.flags.team[id] ?? 0,
+    state: world.flags.state[id] ?? 0,
+    x: world.flags.position[base] ?? 0,
+    y: world.flags.position[base + 1] ?? 0,
+    z: world.flags.position[base + 2] ?? 0,
+    carrierId: world.flags.carrierId[id] ?? -1,
+    returnInS: returnAt < 0 ? -1 : (returnAt - world.tick) * FIXED_DT,
+  };
+}
+
+function snapshotWorldFlags(world: World): FlagSnapshotData[] {
+  const flags: FlagSnapshotData[] = [];
+  for (let id = 0; id < world.flags.state.length; id += 1) flags.push(snapshotWorldFlag(world, id));
+  return flags;
+}
+
+function buildExtras(world: World): WorldExtras {
+  return {
+    projectiles: snapshotActiveProjectiles(world),
+    flags: snapshotWorldFlags(world),
+    teamScores: [world.teamScores[1] ?? 0, world.teamScores[2] ?? 0],
+    gameOver: world.gameOver,
+    winnerTeam: world.winnerTeam,
+    timeRemainingS: Math.max(0, (world.timeLimitTicks - world.tick) * FIXED_DT),
+    gameOverReason: world.gameOverReason,
+  };
+}
+
+function respawnDuePlayers(world: World, spawns: SceneSpawn[]): void {
+  for (const id of dueForRespawn(world)) {
+    const team = world.players.team[id] ?? 1;
+    const [x, y, z] = spawnPointFor(world.terrain, spawns, team, teamCount(world, team));
+    respawnPlayer(world, id, { x, y, z });
+  }
+}
+
+/** God-mode wire mechanism (ours, see the plan's numbers table): zero damage and revive after
+ * `stepWorld` runs, rather than threading a flag through the deterministic sim. */
+function applyGodMode(world: World, godPlayers: Set<number>): void {
+  for (const id of godPlayers) {
+    if (!world.players.active[id]) continue;
+    world.players.damage[id] = 0;
+    if (!world.players.alive[id]) {
+      world.players.alive[id] = 1;
+      world.players.respawnAt[id] = -1;
+    }
+  }
+}
+
+function hitscanShooters(world: World, inputs: ReadonlyMap<number, PlayerInput>): number[] {
+  const shooters: number[] = [];
+  for (const [playerId, input] of inputs) {
+    if (!input.fire || !world.players.active[playerId]) continue;
+    if (HITSCAN_WEAPONS.has(world.players.weaponSlot[playerId] as WeaponId))
+      shooters.push(playerId);
+  }
+  return shooters;
+}
+
+/** One global rewind-ms for the whole tick (ours — see the plan's numbers table), not a
+ * per-shooter-per-target rewind: the max ping among this tick's hitscan/tracer shooters. */
+function rewindMsForShooters(clients: Map<WebSocket, ClientEntry>, shooterIds: number[]): number {
+  let maxPing = 0;
+  for (const entry of clients.values()) {
+    if (shooterIds.includes(entry.session.playerId)) maxPing = Math.max(maxPing, entry.pingMs);
+  }
+  return Math.min(maxPing, REWIND_CAP_MS);
+}
+
+function killEvents(world: World): EventMessage[] {
+  return world.pendingDeaths.map(({ id, attackerId }) => ({
+    type: MessageType.Event as const,
+    kind: EventKind.PlayerKilled,
+    a: attackerId,
+    b: id,
+  }));
+}
+
+/** Redoes the Laser Rifle's own nearest-hit search (Task 3's `resolveHitscan`) purely to
+ * report a target id on the wire; the authoritative damage already landed inside `stepWorld`. */
+function findLaserHit(world: World, event: FireEvent): number {
+  const data = WEAPON_DATA[WeaponId.LaserRifle];
+  let nearestId = -1;
+  let nearestDistance = Infinity;
+  for (let playerId = 0; playerId < world.players.count; playerId += 1) {
+    if (
+      !world.players.active[playerId] ||
+      !world.players.alive[playerId] ||
+      playerId === event.playerId
+    )
+      continue;
+    const hitbox = playerHitbox(world, playerId, LIGHT_ARMOR);
+    const distance = raySphereDistance(event.origin, event.direction, hitbox);
+    if (distance !== null && distance <= (data.maxRange ?? 0) && distance < nearestDistance) {
+      nearestId = playerId;
+      nearestDistance = distance;
+    }
+  }
+  return nearestId;
+}
+
+function laserEvents(world: World): EventMessage[] {
+  return world.pendingFireEvents
+    .filter((event) => event.weaponId === WeaponId.LaserRifle && !event.isAltFire)
+    .map((event) => ({
+      type: MessageType.Event as const,
+      kind: EventKind.LaserFired,
+      a: event.playerId,
+      b: findLaserHit(world, event),
+    }));
+}
+
+function snapshotFlags(world: World): FlagSnapshotForDiff[] {
+  const out: FlagSnapshotForDiff[] = [];
+  for (let id = 0; id < world.flags.state.length; id += 1) {
+    out.push({ state: world.flags.state[id] ?? 0, carrierId: world.flags.carrierId[id] ?? -1 });
+  }
+  return out;
+}
+
+/** Diffs flag state around `stepWorld` rather than adding a pending-events array to `flags.ts`
+ * (Task 4 stays untouched): a touch is carrierId -1 -> set, a capture is state Carried -> Home
+ * (a timer return or an own-flag return both pass through Dropped first, never Carried). */
+function touchEvent(
+  flagId: number,
+  previous: FlagSnapshotForDiff,
+  carrierId: number,
+): EventMessage | null {
+  if (previous.carrierId !== -1 || carrierId === -1) return null;
+  return { type: MessageType.Event, kind: EventKind.FlagTouched, a: carrierId, b: flagId };
+}
+
+function captureEvent(
+  world: World,
+  flagId: number,
+  previous: FlagSnapshotForDiff,
+  state: number,
+): EventMessage | null {
+  if (previous.state !== FlagState.Carried || state !== FlagState.Home) return null;
+  const capturingTeam = (world.flags.team[flagId] ?? 0) === 1 ? 2 : 1;
+  return {
+    type: MessageType.Event,
+    kind: EventKind.FlagCaptured,
+    a: capturingTeam,
+    b: previous.carrierId,
+  };
+}
+
+/** Both event kinds this flag transitioned through this tick, if any. */
+function eventsForFlag(
+  world: World,
+  flagId: number,
+  previous: FlagSnapshotForDiff,
+): EventMessage[] {
+  const carrierId = world.flags.carrierId[flagId] ?? -1;
+  const state = world.flags.state[flagId] ?? 0;
+  const events = [
+    touchEvent(flagId, previous, carrierId),
+    captureEvent(world, flagId, previous, state),
+  ];
+  return events.filter((event): event is EventMessage => event !== null);
+}
+
+function flagEvents(world: World, before: FlagSnapshotForDiff[]): EventMessage[] {
+  const events: EventMessage[] = [];
+  for (let id = 0; id < world.flags.state.length; id += 1) {
+    const previous = before[id];
+    if (previous) events.push(...eventsForFlag(world, id, previous));
+  }
+  return events;
+}
+
+function broadcastEvent(clients: Map<WebSocket, ClientEntry>, event: EventMessage): void {
+  const bytes = encodeEvent(event);
+  for (const entry of clients.values()) entry.socket.send(bytes);
+}
+
 export function startNetServer(options: NetServerOptions): NetServer {
   const wss = new WebSocketServer({ port: options.port });
   // A bind failure (e.g. the port is already in use) must reject `ready`, not leave the
@@ -248,6 +527,9 @@ export function startNetServer(options: NetServerOptions): NetServer {
     console.error('[clans-server] websocket server error:', error);
   });
   const clients = new Map<WebSocket, ClientEntry>();
+  const godPlayers = new Set<number>();
+  const history = createPositionHistory();
+  const now = options.now ?? (() => Date.now());
   let nextSnapshotId = 1;
   const joinTimeoutMs = options.joinTimeoutMs ?? DEFAULT_JOIN_TIMEOUT_MS;
 
@@ -263,6 +545,8 @@ export function startNetServer(options: NetServerOptions): NetServer {
           options.world,
           options.spawns,
           clients,
+          godPlayers,
+          now,
           socket,
           new Uint8Array(data as Uint8Array),
         );
@@ -275,7 +559,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
     });
     socket.on('close', () => {
       clearTimeout(joinTimeout);
-      handleClose(options.world, clients, socket);
+      handleClose(options.world, clients, godPlayers, socket);
     });
     // A malformed frame at the WebSocket protocol level itself (an invalid raw frame,
     // e.g. an unmasked client frame) fires 'error' on the socket before 'message' ever
@@ -284,17 +568,14 @@ export function startNetServer(options: NetServerOptions): NetServer {
     // the process; this absorbs it the same way the server-level handler below does.
     socket.on('error', () => {
       clearTimeout(joinTimeout);
-      handleClose(options.world, clients, socket);
+      handleClose(options.world, clients, godPlayers, socket);
     });
   });
 
-  function tick(tickNumber: number): void {
-    stepWorld(options.world, collectTickInputs(clients));
-    if (tickNumber % SNAPSHOT_EVERY_N_TICKS !== 0) return;
+  function sendAllSnapshots(): void {
     const players = serializeActivePlayers(options.world);
+    const extras = buildExtras(options.world);
     nextSnapshotId += 1;
-    // Report options.world.tick (the value stepWorld just produced), not the loop's own
-    // tickNumber argument (the pre-step value): see issue #6.
     for (const entry of clients.values()) {
       // Codex round 14 (PR #4): sending unconditionally let a slow or unresponsive
       // client's outgoing backlog grow forever, since nothing here ever checked it.
@@ -312,8 +593,38 @@ export function startNetServer(options: NetServerOptions): NetServer {
         entry.socket.terminate();
         continue;
       }
-      sendSnapshot(entry, nextSnapshotId, options.world.tick, players);
+      // Report options.world.tick (the value stepWorld just produced), not the loop's own
+      // tickNumber argument (the pre-step value): see issue #6.
+      sendSnapshot(entry, nextSnapshotId, options.world.tick, players, extras, now);
     }
+  }
+
+  function runOneTick(inputs: Map<number, PlayerInput>): void {
+    recordHistory(history, options.world);
+    const shooters = hitscanShooters(options.world, inputs);
+    const rewindTicks =
+      shooters.length > 0 ? Math.round(rewindMsForShooters(clients, shooters) / FIXED_TICK_MS) : 0;
+    const rewindHandle =
+      rewindTicks > 0 ? rewindOthers(options.world, history, shooters, rewindTicks) : null;
+    const flagsBefore = snapshotFlags(options.world);
+
+    stepWorld(options.world, inputs);
+    if (rewindHandle) restorePositions(options.world, rewindHandle);
+    respawnDuePlayers(options.world, options.spawns);
+    applyGodMode(options.world, godPlayers);
+
+    for (const event of killEvents(options.world)) broadcastEvent(clients, event);
+    for (const event of flagEvents(options.world, flagsBefore)) broadcastEvent(clients, event);
+    for (const event of laserEvents(options.world)) broadcastEvent(clients, event);
+  }
+
+  // Game over freezes the sim: no more stepWorld, no more respawns or events, but snapshots
+  // keep going out on the normal cadence so every client sees the frozen final state.
+  function tick(tickNumber: number): void {
+    const inputs = collectTickInputs(clients);
+    if (!options.world.gameOver) runOneTick(inputs);
+    if (tickNumber % SNAPSHOT_EVERY_N_TICKS !== 0) return;
+    sendAllSnapshots();
   }
 
   function close(): void {

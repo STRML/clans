@@ -1,13 +1,24 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { addPlayer, createWorld, sampleTerrain, type Heightfield, type World } from '@clans/sim';
+import {
+  addPlayer,
+  createFlags,
+  createWorld,
+  sampleTerrain,
+  type Heightfield,
+  type World,
+} from '@clans/sim';
 
 export interface SceneSpawn {
   name: string | null;
   team: number;
   position: [number, number, number];
   radius: number;
+}
+export interface SceneFlagStand {
+  team: number;
+  position: [number, number, number];
 }
 interface TerrainManifest {
   gridSize: number;
@@ -19,6 +30,7 @@ interface TerrainManifest {
 }
 interface SceneData {
   spawns: SceneSpawn[];
+  flagStands: SceneFlagStand[];
 }
 
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -52,7 +64,12 @@ export async function loadKatabaticWorld(
     heights,
     emptySquares: new Set(manifest.emptySquares),
   };
-  return { world: createWorld(terrain, seed, WORLD_CAPACITY), spawns: scene.spawns };
+  const world = createWorld(terrain, seed, WORLD_CAPACITY);
+  createFlags(
+    world,
+    scene.flagStands.map(({ team, position: [x, y, z] }) => ({ team, position: { x, y, z } })),
+  );
+  return { world, spawns: scene.spawns };
 }
 
 export function teamCount(world: World, team: number): number {

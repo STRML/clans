@@ -85,7 +85,7 @@ export function applyDamage(
   if ((players.damage[id] ?? 0) < armor.maxDamage) return;
   players.alive[id] = 0;
   players.respawnAt[id] = world.tick + RESPAWN_TICKS;
-  world.pendingDeaths.push(id);
+  world.pendingDeaths.push({ id, attackerId });
   scoreForDeath(world, id, attackerId);
 }
 

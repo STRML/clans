@@ -32,6 +32,7 @@ describe('server world bootstrap', () => {
     expect(world.terrain.gridSize).toBe(256);
     expect(spawns.filter((s) => s.team === 1)).toHaveLength(2);
     expect(spawns.filter((s) => s.team === 2)).toHaveLength(2);
+    expect(world.flags.state.length).toBe(2);
   });
 
   it('picks the team with fewer active players, team 1 on a tie', () => {

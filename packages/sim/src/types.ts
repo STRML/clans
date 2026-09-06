@@ -77,7 +77,7 @@ export interface World {
   killY: number;
   players: PlayerStore;
   projectiles: ProjectileStore;
-  pendingDeaths: number[];
+  pendingDeaths: Array<{ id: number; attackerId: number }>;
   pendingFireEvents: import('./weapons.js').FireEvent[];
   flags: FlagStore;
   teamScores: Uint16Array;
