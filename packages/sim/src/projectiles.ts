@@ -542,6 +542,10 @@ function nearestHitscanTarget(
 }
 
 function resolveHitscan(world: World, event: FireEvent, data: WeaponData): void {
+  // The hit-test runs right here, whether or not it finds a target -- so `resolved` is set
+  // unconditionally, before the miss branch can return early. See FireEvent.resolved (Codex
+  // review round 4, finding 3).
+  event.resolved = true;
   const nearest = nearestHitscanTarget(world, event, data.maxRange ?? 0);
   if (!nearest) return;
   const hitbox = playerHitbox(world, nearest.playerId, LIGHT_ARMOR);
@@ -662,6 +666,11 @@ function spawnFromEvent(world: World, event: FireEvent, dt: number): void {
     const result = stepLinearOrTracer(world, id, dt);
     event.hitPlayerId = result.hitPlayerId;
     event.hitPoint = result.hitPoint;
+    // Only reached when spawnStored actually allocated a slot above -- a full store returns
+    // id === null and refunds the ammo instead, leaving `resolved` at its false default so a
+    // caller can tell "never fired into the world" apart from "fired and missed". See
+    // FireEvent.resolved (Codex review round 4, finding 3).
+    event.resolved = true;
   }
 }
 

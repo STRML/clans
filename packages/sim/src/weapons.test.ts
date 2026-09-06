@@ -244,6 +244,26 @@ describe('projectile-capacity exhaustion refunds the shot one tick later', () =>
     stepWeapons(world, new Map([[id, IDLE]]), FIXED_DT);
     expect(world.players.grenades[id]).toBe(grenadesBefore);
   });
+
+  it('a Chaingun shot that fails to allocate leaves its FireEvent unresolved -- not indistinguishable from a genuine miss (Codex review round 4, finding 3)', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    world.projectiles.count = PROJECTILE_CAPACITY; // store full: spawnStored can't allocate
+    fireOnce(world, id, WeaponId.Chaingun);
+    stepProjectiles(world, FIXED_DT); // fails to allocate; the same-tick hit-test never runs
+    expect(world.lastFireEvents).toHaveLength(1);
+    // Before the fix, resolved didn't exist and a caller (server/net.ts's
+    // applyLagCompensatedHits) could only see hitPlayerId === -1 here -- the same value a
+    // shot that fired, resolved, and genuinely missed would also leave behind. That let it
+    // rerun a lag-compensated hit-test for a shot that structurally never existed, and apply
+    // real damage on top of the ammo refund below.
+    expect(world.lastFireEvents[0]?.resolved).toBe(false);
+    expect(world.lastFireEvents[0]?.hitPlayerId).toBe(-1);
+    // The ammo refund still happens one tick later, same as the existing disc/grenade cases.
+    const ammoBefore = world.players.ammo[ammoIndex(id, WeaponId.Chaingun)]!;
+    stepWeapons(world, new Map([[id, IDLE]]), FIXED_DT);
+    expect(world.players.ammo[ammoIndex(id, WeaponId.Chaingun)]).toBe(ammoBefore + 1);
+  });
 });
 
 describe('respawnPlayer resets the loadout', () => {

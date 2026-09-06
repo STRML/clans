@@ -28,6 +28,7 @@ function fire(world: ReturnType<typeof createWorld>, event: Partial<FireEvent>):
       energyScale: 1,
       hitPlayerId: -1,
       hitPoint: null,
+      resolved: false,
       ...event,
     },
   ];
@@ -430,9 +431,10 @@ describe('FireEvent.hitPlayerId/hitPoint: the authoritative hit-test records its
     // enters its hit sphere -- not exactly at z=10, and no longer the segment endpoint either.
     expect(event?.hitPoint?.z).toBeGreaterThan(9);
     expect(event?.hitPoint?.z).toBeLessThan(10);
+    expect(event?.resolved).toBe(true);
   });
 
-  it('a Laser Rifle miss leaves hitPlayerId at -1 and hitPoint at null', () => {
+  it('a Laser Rifle miss leaves hitPlayerId at -1 and hitPoint at null, but still records that the hit-test ran (Codex review round 4, finding 3)', () => {
     const world = createWorld(flat, 1);
     fire(world, {
       playerId: -1,
@@ -445,6 +447,7 @@ describe('FireEvent.hitPlayerId/hitPoint: the authoritative hit-test records its
     const event = world.lastFireEvents[0];
     expect(event?.hitPlayerId).toBe(-1);
     expect(event?.hitPoint).toBeNull();
+    expect(event?.resolved).toBe(true);
   });
 
   it('a Chaingun hit resolves in the same tick and sets hitPlayerId/hitPoint too, since round 1 made it resolve synchronously', () => {
@@ -463,9 +466,10 @@ describe('FireEvent.hitPlayerId/hitPoint: the authoritative hit-test records its
     // enters its hit sphere -- not exactly at z=10, and no longer the segment endpoint either.
     expect(event?.hitPoint?.z).toBeGreaterThan(9);
     expect(event?.hitPoint?.z).toBeLessThan(10);
+    expect(event?.resolved).toBe(true);
   });
 
-  it('a Spinfusor shot -- resolved on a later tick, not this one -- leaves hitPlayerId/hitPoint at their unresolved defaults', () => {
+  it('a Spinfusor shot -- resolved on a later tick, not this one -- leaves hitPlayerId/hitPoint at their unresolved defaults, and resolved false', () => {
     const world = createWorld(flat, 1);
     addPlayer(world, { x: 0, y: 0, z: 10 });
     fire(world, {
@@ -477,5 +481,6 @@ describe('FireEvent.hitPlayerId/hitPoint: the authoritative hit-test records its
     const event = world.lastFireEvents[0];
     expect(event?.hitPlayerId).toBe(-1);
     expect(event?.hitPoint).toBeNull();
+    expect(event?.resolved).toBe(false);
   });
 });

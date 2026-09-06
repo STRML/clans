@@ -197,6 +197,26 @@ export interface FireEvent {
    */
   hitPlayerId: number;
   hitPoint: Vec3 | null;
+  /**
+   * True once this event's authoritative same-tick hit-test has actually run and produced
+   * hitPlayerId/hitPoint -- resolveHitscan for the Laser Rifle, or the immediate
+   * stepLinearOrTracer call for the Chaingun's Tracer (projectiles.ts). Defaults to false at
+   * construction and stays false for anything that never resolves same-tick (Spinfusor,
+   * Mortar, a thrown grenade) as well as for a Chaingun/Laser shot whose 256-slot projectile
+   * store was full: spawnStored returns null, the ammo is scheduled for refund via
+   * world.pendingAmmoRefunds, and the hit-test never runs at all.
+   *
+   * Exists because hitPlayerId alone can't tell a caller "this never resolved" apart from
+   * "this resolved and found no one": both leave hitPlayerId at its -1 default. Without this
+   * field, server/net.ts's applyLagCompensatedHits (round 3) treated a shot that never
+   * actually fired into the world the same as a genuine live miss, and reran a
+   * lag-compensated hit-test for it anyway -- letting a "shot" that structurally never
+   * existed land real damage on top of its own ammo refund (Codex review round 4, finding
+   * 3). A caller should only recheck an event where `resolved === true && hitPlayerId ===
+   * -1`: a real miss worth rechecking, not a shot that was never resolved in the first
+   * place.
+   */
+  resolved: boolean;
 }
 
 /**
@@ -338,6 +358,7 @@ function tryFireWeapon(world: World, id: number, input: PlayerInput): void {
     energyScale,
     hitPlayerId: -1,
     hitPoint: null,
+    resolved: false,
   });
 }
 
@@ -357,6 +378,7 @@ function tryThrowGrenade(world: World, id: number, input: PlayerInput): void {
     energyScale: 1,
     hitPlayerId: -1,
     hitPoint: null,
+    resolved: false,
   });
 }
 

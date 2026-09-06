@@ -119,6 +119,11 @@ export function respawnPlayer(world: World, id: number, spawn: Vec3): void {
   players.damage[id] = 0;
   players.respawnAt[id] = -1;
   players.position.set([spawn.x, spawn.y, spawn.z], id * 3);
+  // movement.ts's kill-plane fallback (resetToSpawn) reads players.spawn, not players.position,
+  // when a player falls out of the world -- so this has to move too, or a player who respawns
+  // somewhere new and later falls out lands all the way back at their original spawn instead
+  // of the one they just respawned at (Codex review round 4, finding 7).
+  players.spawn.set([spawn.x, spawn.y, spawn.z], id * 3);
   players.velocity.set([0, 0, 0], id * 3);
   // Codex review round 2, finding 4: this reset health/position/velocity but left energy,
   // ground contact, and jump-edge state exactly where death interrupted them, so a player

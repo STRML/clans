@@ -191,6 +191,27 @@ describe('respawnPlayer and dueForRespawn', () => {
     expect(world.players.wasGrounded[id]).toBe(0);
     expect(world.players.wasJumpHeld[id]).toBe(0);
   });
+
+  it('updates players.spawn to the new respawn point, so a later fall-out returns there instead of the original spawn (Codex review round 4, finding 7)', () => {
+    // A terrain hole (emptySquares), not just a low y: on solid ground movement.ts's own
+    // ground-contact resolution snaps a falling player back onto the surface before the
+    // kill-plane check ever runs, so exercising that check for real needs a square with
+    // nothing under it at all -- see movement.ts's integrate/classify (empty -> no snap).
+    const holeFlat: Heightfield = { ...flat, emptySquares: new Set([0]) };
+    const world = createWorld(holeFlat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    respawnPlayer(world, id, { x: 42, y: 5, z: 7 });
+    expect(world.players.spawn[id * 3]).toBe(42);
+    expect(world.players.spawn[id * 3 + 1]).toBe(5);
+    expect(world.players.spawn[id * 3 + 2]).toBe(7);
+    // Send the player far below the kill plane and step the sim: movement.ts's fall-out
+    // handling (resetToSpawn) reads players.spawn, not the original addPlayer position.
+    world.players.position.set([42, world.killY - 100, 7], id * 3);
+    stepWorld(world, new Map([[id, idle]]));
+    expect(world.players.position[id * 3]).toBe(42);
+    expect(world.players.position[id * 3 + 1]).toBe(5);
+    expect(world.players.position[id * 3 + 2]).toBe(7);
+  });
 });
 
 describe('playerHitbox and raySphereDistance', () => {
