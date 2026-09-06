@@ -4,6 +4,7 @@ import {
   FIXED_TICK_MS,
   LIGHT_ARMOR,
   RESPAWN_TICKS,
+  TIME_LIMIT_TICKS,
   WeaponId,
   WeaponState,
   addPlayer,
@@ -172,15 +173,16 @@ describe('NetClient', () => {
       if (arrived > 0) serverAt.set(arrived, positionOf(server));
       if (tick % SNAPSHOT_EVERY_N_TICKS === 0) {
         const players = serializeActivePlayers(server);
+        // Mirror the real server's WorldExtras.timeRemainingS (packages/server/src/net.ts's
+        // buildExtras), not emptyExtras()'s placeholder 0: since this client now derives
+        // world.timeLimitTicks from timeRemainingS every snapshot (Codex review round 13,
+        // finding P2), a snapshot's placeholder 0 mid-match would collapse the client's
+        // local time limit down to the current tick and freeze prediction immediately.
         serverToClient.send(
-          encodeSnapshot(
-            nextSnapshotId,
-            server.tick,
-            lastInputSequence,
-            players,
-            null,
-            emptyExtras(),
-          ),
+          encodeSnapshot(nextSnapshotId, server.tick, lastInputSequence, players, null, {
+            ...emptyExtras(),
+            timeRemainingS: Math.max(0, (server.timeLimitTicks - server.tick) * FIXED_DT),
+          }),
         );
         nextSnapshotId += 1;
       }
@@ -773,6 +775,85 @@ describe('NetClient', () => {
     expect(client.world.players.position[0]).toBe(0);
     expect(client.world.players.position[2]).toBe(0);
     expect(client.world.tick).toBe(1);
+  });
+
+  it('derives world.timeLimitTicks from timeRemainingS so local prediction matches a server running a custom time limit (Codex review round 13, finding P2)', () => {
+    // createFlags (packages/sim/src/flags.ts) accepts a configurable timeLimitTicks, so a
+    // server is not obligated to run the sim's default match length. This client's local
+    // world is created with that default, and until this fix nothing ever corrected it, so
+    // local prediction's checkTimeLimit compared world.tick against the wrong limit and
+    // could end the match locally well before the server did. Repro: server configured
+    // with TIME_LIMIT_TICKS + 1000 (a higher limit than default), both sides at
+    // TIME_LIMIT_TICKS - 1 ticks -- one client-side prediction tick must NOT flip
+    // world.gameOver, because the server (checking against its own higher limit) would not
+    // have either.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 41 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+
+    const serverTimeLimitTicks = TIME_LIMIT_TICKS + 1000;
+    const serverTick = TIME_LIMIT_TICKS - 1;
+    // Same forward calculation the server uses in packages/server/src/net.ts's buildExtras:
+    // timeRemainingS = (timeLimitTicks - tick) * FIXED_DT.
+    const timeRemainingS = (serverTimeLimitTicks - serverTick) * FIXED_DT;
+
+    const serverState = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60,
+      weaponSlot: 4,
+      onGround: 1 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+    };
+    const extras: WorldExtras = {
+      projectiles: [],
+      flags: [],
+      teamScores: [0, 0],
+      gameOver: false,
+      winnerTeam: 0,
+      timeRemainingS,
+      gameOverReason: 0,
+    };
+    transport.pump([encodeSnapshot(1, serverTick, 0, [serverState], null, extras)]);
+
+    expect(client.world.tick).toBe(serverTick);
+    expect(client.world.timeLimitTicks).toBe(serverTimeLimitTicks);
+    expect(client.world.gameOver).toBe(false);
+
+    // One local-prediction tick crosses the sim's DEFAULT time limit (TIME_LIMIT_TICKS)
+    // but must stay well under the server's actual, higher configured limit.
+    client.tick({
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    });
+
+    expect(client.world.tick).toBe(serverTick + 1);
+    expect(client.world.gameOver).toBe(false);
   });
 
   it('reads localHealth off the reconciled snapshot for the local player', () => {

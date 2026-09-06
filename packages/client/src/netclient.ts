@@ -3,6 +3,7 @@ import {
   createProjectileStore,
   createWorld,
   deserializePlayer,
+  FIXED_DT,
   LIGHT_ARMOR,
   resetLoadout,
   resetPlayerToSpawn,
@@ -296,8 +297,7 @@ export class NetClient {
     // every frame regardless of the fields below, so without mirroring the snapshot onto
     // the world object itself, this client's local world never learns the match ended and
     // keeps predicting movement/weapon timers/ammo and replaying unacknowledged inputs
-    // after the server has already frozen. timeRemainingS has no World-side counterpart
-    // (world.timeLimitTicks is fixed at match start), so it stays a NetClient-only field.
+    // after the server has already frozen.
     //
     // Codex review round 3 (PR #9), residual of the above: this assignment must also
     // happen before reconcile() below, not after. reconcile() replays any pending
@@ -313,6 +313,20 @@ export class NetClient {
     this.world.gameOver = decoded.gameOver;
     this.world.winnerTeam = decoded.winnerTeam;
     this.world.gameOverReason = decoded.gameOverReason;
+    // Codex review round 13 (PR #9), finding P2: createFlags (packages/sim/src/flags.ts)
+    // takes a configurable timeLimitTicks, so a server can run with a non-default match
+    // length. This client's local world was created with the sim's DEFAULT
+    // timeLimitTicks, so local prediction's checkTimeLimit (packages/sim/src/flags.ts)
+    // compared against the wrong limit and could call the match over before the server
+    // did. There is no wire field for the raw tick count, and none is needed: the server
+    // derives timeRemainingS from timeLimitTicks as
+    // `(timeLimitTicks - tick) * FIXED_DT` (packages/server/src/net.ts, buildExtras), so
+    // the inverse below re-derives timeLimitTicks from data already on the wire. decoded.tick
+    // is the same world.tick the server used for that calculation (reconcile() below hasn't
+    // yet advanced this.world.tick to it), so this stays consistent with the server's rounding
+    // and tick reference point. Running this every snapshot self-heals local prediction to
+    // whatever limit the server is actually configured with.
+    this.world.timeLimitTicks = decoded.tick + Math.round(decoded.timeRemainingS / FIXED_DT);
 
     const self = decoded.players.find((player) => player.id === this.playerId);
     if (self) {
