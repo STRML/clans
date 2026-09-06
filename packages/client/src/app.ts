@@ -43,6 +43,15 @@ export interface App {
   camera: THREE.PerspectiveCamera;
   scene: THREE.Scene;
   renderer: THREE.WebGLRenderer;
+  /**
+   * WONTFIX (PR #4, M2 status table): only reachable through the F1 debug panel
+   * (debug.ts), never during normal play. Codex round 15 found that running this above
+   * 1 in networked mode calls net.tick() faster than the server's fixed-rate queue can
+   * drain, silently evicting older queued inputs once the per-client backlog exceeds
+   * MAX_PENDING_INPUTS and desyncing that player's own prediction. It affects only the
+   * player who opens the debug panel and moves this slider, with no effect on server
+   * stability or other players, so this is an accepted debug-tool caveat, not a defect.
+   */
   timeScale: number;
   paused: boolean;
   stepOnce: boolean;

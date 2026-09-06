@@ -76,6 +76,26 @@ describe('WebSocketTransport', () => {
     transport.close();
   });
 
+  it('closes an open socket instead of growing an unbounded backlog once the peer stops draining', async () => {
+    // Codex round 15 (PR #4), the client-side sibling of the server's
+    // backpressure-policy.ts: socket.send() queued unconditionally once OPEN, with
+    // nothing checking bufferedAmount. A server (or the network path to it) that stops
+    // draining after the handshake completes would otherwise let this tab's own outgoing
+    // backlog grow forever.
+    const transport = new WebSocketTransport(`ws://127.0.0.1:${String(PORT)}`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(transport.isConnected()).toBe(true);
+
+    const socket = (transport as unknown as { socket: WebSocket }).socket;
+    Object.defineProperty(socket, 'bufferedAmount', { value: 2_000_000, configurable: true });
+    const closed = new Promise<void>((resolve) => {
+      socket.addEventListener('close', () => resolve(), { once: true });
+    });
+    transport.send(Uint8Array.of(1, 2, 3));
+    await closed;
+    expect(transport.isConnected()).toBe(false);
+  });
+
   it('bounds the pre-open send queue on a socket that never finishes connecting', async () => {
     // Codex round 3 (PR #4): the queue of bytes held for a still-CONNECTING socket had
     // no limit, so a black-holed connection (accepted at the TCP level but never

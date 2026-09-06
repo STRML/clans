@@ -19,6 +19,12 @@ export interface Transport {
 // black-holed network path, a server that never accepts) would otherwise let this grow
 // forever, since nothing ever flushes or trims it except a successful 'open'.
 const MAX_QUEUED_BEFORE_OPEN = 128;
+// Codex round 15 (PR #4), the client-side sibling of the server's backpressure-policy.ts:
+// socket.send() queued unconditionally once OPEN, with nothing checking bufferedAmount.
+// A server (or the network path to it) that stops draining after the handshake completes
+// -- not just during CONNECTING, which MAX_QUEUED_BEFORE_OPEN already bounds -- let this
+// tab's own outgoing backlog grow forever. 1 MB mirrors the server's bound.
+const MAX_BUFFERED_BYTES = 1_000_000;
 
 export class WebSocketTransport implements Transport {
   private readonly socket: WebSocket;
@@ -46,6 +52,13 @@ export class WebSocketTransport implements Transport {
 
   send(bytes: Uint8Array): void {
     if (this.socket.readyState === WebSocket.OPEN) {
+      // An unresponsive peer isn't worth continuing to queue writes for it may never
+      // read; closing bounds this tab's own memory the same way the server bounds a
+      // slow client's, rather than growing an unbounded backlog silently.
+      if (this.socket.bufferedAmount > MAX_BUFFERED_BYTES) {
+        this.socket.close();
+        return;
+      }
       this.socket.send(bytes);
       return;
     }
