@@ -913,4 +913,49 @@ describe('NetClient', () => {
     const god = sent.find((bytes) => bytes[0] === MessageType.God);
     expect(god && decodeGod(god)).toEqual({ type: MessageType.God, enabled: true });
   });
+
+  it('resets the predicted weapon loadout and clears predicted projectiles on a delayed Welcome (Codex review round 4, finding 8)', () => {
+    // tick() runs local prediction every frame regardless of whether the join handshake has
+    // completed, so firing before Welcome arrives both spends predicted ammo and spawns a
+    // predicted projectile the server never authorized -- it did not even know about this
+    // player yet. handleWelcome already resets movement/position/velocity/energy (see the
+    // two tests above); it must also reset the loadout and clear the projectile store.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 15 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    const fireSpinfusor: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: true,
+      altFire: false,
+      slot: 1, // Spinfusor
+    };
+    client.tick(fireSpinfusor); // fire before Welcome ever arrives
+
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBeLessThan(15);
+    expect(client.world.projectiles.count).toBeGreaterThan(0);
+    expect(Array.from(client.world.projectiles.active)).toContain(1);
+
+    transport.pump([
+      encodeWelcome({
+        playerId: 0,
+        team: 1,
+        tickMs: FIXED_TICK_MS,
+        status: WelcomeStatus.Ok,
+        spawnX: 500,
+        spawnY: 10,
+        spawnZ: 500,
+      }),
+    ]);
+
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Blaster);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
+    expect(client.world.projectiles.count).toBe(0);
+    expect(Array.from(client.world.projectiles.active).every((flag) => flag === 0)).toBe(true);
+  });
 });

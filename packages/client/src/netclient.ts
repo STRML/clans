@@ -1,5 +1,6 @@
 import {
   addPlayer,
+  createProjectileStore,
   createWorld,
   deserializePlayer,
   LIGHT_ARMOR,
@@ -228,6 +229,18 @@ export class NetClient {
       y: welcome.spawnY,
       z: welcome.spawnZ,
     });
+    // Codex review round 4, finding 8 (PR #9): tick() runs local prediction every frame
+    // regardless of whether this handshake has completed, so firing before Welcome arrives
+    // both spends predicted ammo and spawns predicted projectiles the server never
+    // authorized -- it did not even know about this player yet. resetPlayerToSpawn above
+    // does not touch the weapon loadout or the projectile store, so without this a pre-join
+    // shot left the HUD showing spent ammo and stale projectiles still flying after the
+    // player actually joined. resetLoadout is the same reset a real respawn uses (round 1's
+    // syncRespawnState fix below already relies on it); the projectile store has no partial
+    // reset of its own, so it is replaced wholesale the same way createWorld builds a fresh
+    // one.
+    resetLoadout(this.world, LOCAL_SLOT, LIGHT_ARMOR);
+    this.world.projectiles = createProjectileStore();
   }
 
   private pushSnapshotHistory(entry: SnapshotBaseline): void {

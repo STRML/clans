@@ -2,11 +2,15 @@ import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import {
   addPlayer,
+  applyDamage,
   createFlags,
   createWorld,
   FIXED_DT,
   GameOverReason,
+  LIGHT_ARMOR,
+  RESPAWN_TICKS,
   type Heightfield,
+  type PlayerInput,
   type PlayerSnapshotData,
 } from '@clans/sim';
 import { EventKind, MessageType } from '@clans/protocol';
@@ -14,12 +18,26 @@ import {
   drainNewEvents,
   hudSourceFrom,
   positionOfPlayer,
+  setLocalGodMode,
+  stepSinglePlayer,
   teleportPlayerToFlag,
   updateRemotes,
 } from './app.js';
 import { flagsFromWorld } from './flag-view.js';
 import { RemoteBuffer } from './remote.js';
 import type { NetClient, RemoteSnapshot, TimestampedEvent } from './netclient.js';
+
+const IDLE_INPUT: PlayerInput = {
+  moveX: 0,
+  moveZ: 0,
+  yaw: 0,
+  pitch: 0,
+  jump: false,
+  jet: false,
+  fire: false,
+  altFire: false,
+  slot: 0,
+};
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -161,6 +179,74 @@ describe('teleportPlayerToFlag', () => {
     teleportPlayerToFlag(world, id, 2);
 
     expect([...world.players.position.slice(id * 3, id * 3 + 3)]).toEqual([5, 5, 5]);
+  });
+});
+
+describe('stepSinglePlayer (Codex review round 4, finding 1)', () => {
+  it('respawns a dead single-player once the timer elapses, instead of leaving them dead forever', () => {
+    // Codex review round 4, finding 1 (PR #9): single-player has no server, and nothing else
+    // called dueForRespawn/respawnPlayer the way packages/server/src/net.ts's own tick loop
+    // does, so a single-player death never respawned even though the 5 s timer expired.
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    applyDamage(world, id, LIGHT_ARMOR.maxDamage, -1, LIGHT_ARMOR);
+    expect(world.players.alive[id]).toBe(0);
+
+    const spawn = { x: 5, y: 0, z: 5 };
+    stepSinglePlayer(world, id, IDLE_INPUT, RESPAWN_TICKS + 1, spawn);
+
+    expect(world.players.alive[id]).toBe(1);
+    expect([...world.players.position.slice(id * 3, id * 3 + 3)]).toEqual([5, 0, 5]);
+  });
+
+  it('leaves a player dead until their own respawn timer actually elapses', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    applyDamage(world, id, LIGHT_ARMOR.maxDamage, -1, LIGHT_ARMOR);
+
+    stepSinglePlayer(world, id, IDLE_INPUT, 1, { x: 5, y: 0, z: 5 });
+
+    expect(world.players.alive[id]).toBe(0);
+  });
+});
+
+describe('setLocalGodMode (Codex review round 4, finding 5)', () => {
+  it('sets the sim godMode flag directly', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+
+    setLocalGodMode(world, id, true);
+    expect(world.players.godMode[id]).toBe(1);
+
+    setLocalGodMode(world, id, false);
+    expect(world.players.godMode[id]).toBe(0);
+  });
+
+  it('is proactive: a lethal hit taken while it is on cannot drop a carried flag', () => {
+    // Codex review round 4, finding 5 (PR #9): the old app.ts ran stepWorld first and only
+    // afterward reactively zeroed damage and revived the player. stepWorld runs stepPlayers
+    // -> stepWeapons -> stepProjectiles -> stepFlags in one synchronous pass, so a lethal hit
+    // that reached applyDamage had already dropped a carried flag (stepFlags reacting to the
+    // death recorded in world.pendingDeaths) before any post-hoc revive could undo it.
+    // Calling setLocalGodMode up front, before the hit and the step that follows it, mirrors
+    // the proactive fix: applyDamage no-ops before stepFlags ever sees a death.
+    const world = createWorld(flat, 1);
+    createFlags(world, [
+      { team: 1, position: { x: 0, y: 0, z: 0 } },
+      { team: 2, position: { x: 100, y: 0, z: 0 } },
+    ]);
+    const attacker = addPlayer(world, { x: 100, y: 0, z: 0 }, 1);
+    // Touch and carry team 2's flag.
+    stepSinglePlayer(world, attacker, IDLE_INPUT, 1, { x: 100, y: 0, z: 0 });
+    expect(world.flags.carrierId[1]).toBe(attacker);
+
+    setLocalGodMode(world, attacker, true);
+    applyDamage(world, attacker, LIGHT_ARMOR.maxDamage, -1, LIGHT_ARMOR); // would otherwise be lethal
+    stepSinglePlayer(world, attacker, IDLE_INPUT, 1, { x: 100, y: 0, z: 0 });
+
+    expect(world.players.alive[attacker]).toBe(1);
+    expect(world.players.damage[attacker]).toBe(0);
+    expect(world.flags.carrierId[1]).toBe(attacker); // never dropped
   });
 });
 

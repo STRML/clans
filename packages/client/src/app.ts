@@ -5,7 +5,10 @@ import {
   addPlayer,
   createFlags,
   createWorld,
+  dueForRespawn,
+  respawnPlayer,
   sampleTerrain,
+  setGodMode,
   stepWorld,
   type Heightfield,
   type PlayerInput,
@@ -193,20 +196,42 @@ interface FpsWindow {
   frames: number;
 }
 
-function stepSinglePlayer(world: World, playerId: number, input: PlayerInput, steps: number): void {
+/**
+ * Exported for a focused unit test. Codex review round 4, finding 1 (PR #9): single-player has
+ * no server, so nothing else ever called the `dueForRespawn`/`respawnPlayer` pair
+ * packages/server/src/net.ts's own tick loop uses for exactly this purpose -- a single-player
+ * death sat forever once the 5 s respawn timer elapsed, since nothing was watching for it.
+ * Checking every step (not just once after the batch) matches the server's per-tick cadence,
+ * so a death mid-batch still respawns on the same tick its timer expires rather than waiting
+ * for the next call into this function.
+ */
+export function stepSinglePlayer(
+  world: World,
+  playerId: number,
+  input: PlayerInput,
+  steps: number,
+  spawn: { x: number; y: number; z: number },
+): void {
   const inputs = new Map<number, PlayerInput>([[playerId, input]]);
-  for (let step = 0; step < steps; step += 1) stepWorld(world, inputs);
+  for (let step = 0; step < steps; step += 1) {
+    stepWorld(world, inputs);
+    for (const id of dueForRespawn(world)) respawnPlayer(world, id, spawn);
+  }
 }
 
-/** God mode (single-player only; networked toggles server-side via NetClient.setGodMode) zeroes
- * damage every tick and, if that death already landed, revives the player on the spot rather
- * than waiting out the respawn timer. */
-function applyGodMode(world: World, playerId: number): void {
-  world.players.damage[playerId] = 0;
-  if (!world.players.alive[playerId]) {
-    world.players.alive[playerId] = 1;
-    world.players.respawnAt[playerId] = -1;
-  }
+/**
+ * Exported for a focused unit test. Codex review round 4, finding 5 (PR #9): single-player used
+ * to run stepWorld first and only afterward reactively zero damage / revive on the spot -- the
+ * same class of bug Codex review round 3 fixed server-side by moving invulnerability into the
+ * sim itself (PlayerStore.godMode, checked at the top of applyDamage, via setGodMode). stepWorld
+ * runs stepPlayers -> stepWeapons -> stepProjectiles -> stepFlags in one synchronous pass, so a
+ * lethal hit that reached applyDamage had already dropped a carried flag and recorded a
+ * kill/score event before any post-hoc revive could undo it. Setting the sim's flag directly,
+ * once, at the moment the debug UI toggles god mode (mirroring net.ts's handleGod) makes it
+ * proactive here too: applyDamage no-ops before any of that downstream state ever changes.
+ */
+export function setLocalGodMode(world: World, playerId: number, enabled: boolean): void {
+  setGodMode(world, playerId, enabled);
 }
 
 /**
@@ -429,12 +454,16 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const terrain = toHeightfield(assets);
   const net = createNetClient(options.serverUrl, terrain);
   const world = net ? net.world : createWorld(terrain, 1);
+  // Single-player's only spawn point, computed once and reused both for the initial
+  // addPlayer below and for every later respawn (Codex review round 4, finding 1) -- the
+  // same source spawnPoint always drew from, not a new choice.
+  const localSpawn = spawnPoint(assets, terrain);
   // Bug found by Task 14's e2e capture test: addPlayer defaults to team 0 when no team is
   // given, which never equals a flag's team (1 or 2) in flags.ts's isOwnFlag/tryCapture checks.
   // That let single-player pick up either flag (both looked "enemy") but never capture one
   // (its "own" flag never matched), silently breaking CTF in single-player. spawnPoint already
   // picks the team 1 spawn, so team 1 here is the fix, not a new choice.
-  const playerId = net ? 0 : addPlayer(world, spawnPoint(assets, terrain), 1);
+  const playerId = net ? 0 : addPlayer(world, localSpawn, 1);
   // Single-player has no server; seed CTF locally from the same scene data the server would
   // read (Task 7's loadKatabaticWorld does the equivalent for the networked path).
   if (!net) {
@@ -474,6 +503,12 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const effects: Effect[] = [];
   const seenEventSeq = { seq: 0 };
   const hud = createHud(document.body, hudSourceFrom(world, playerId, net));
+  // Backs the `godMode` accessor below. A plain data property here would just record
+  // whatever the debug UI last set, the way it used to, leaving frame() to poll it every
+  // tick and react after the fact (Codex review round 4, finding 5) -- the accessor's
+  // setter instead applies the single-player toggle immediately, once, right where lil-gui
+  // assigns `app.godMode = enabled`.
+  let godModeFlag = false;
 
   const app: App = {
     world,
@@ -489,7 +524,16 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     stepOnce: false,
     freeCam: false,
     freeCamPosition: new THREE.Vector3(),
-    godMode: false,
+    get godMode(): boolean {
+      return godModeFlag;
+    },
+    set godMode(enabled: boolean) {
+      godModeFlag = enabled;
+      // Networked god mode is server-authoritative: debug.ts's own onChange callback sends
+      // the God message via NetClient.setGodMode. Single-player has no server to ask, so
+      // this setter applies it directly and proactively to the local sim world instead.
+      if (!net) setLocalGodMode(world, playerId, enabled);
+    },
     stats: {
       fps: 0,
       frameMs: 0,
@@ -517,8 +561,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       if (net) {
         stepNetworked(net, app.stats, currentInput, steps, scene, remoteMeshes, remoteBuffers);
       } else {
-        stepSinglePlayer(world, playerId, currentInput, steps);
-        if (app.godMode) applyGodMode(world, playerId);
+        stepSinglePlayer(world, playerId, currentInput, steps, localSpawn);
       }
       app.stats.simMs = performance.now() - simStart;
 
