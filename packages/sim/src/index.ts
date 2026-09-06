@@ -1,4 +1,5 @@
 export * from './armor.js';
+export * from './baseObjects.js';
 // damage.js and weapons.js both export a function named `respawnPlayer` (weapons.ts's
 // version wraps damage.ts's to also reset the weapon loadout on respawn), so two
 // unqualified `export *`s here would be an ambiguous re-export TypeScript rejects.

@@ -156,6 +156,21 @@ function mixFlags(hash: number, world: World): number {
   return h;
 }
 
+function mixBaseObjects(hash: number, world: World): number {
+  let h = hash;
+  const store = world.baseObjects;
+  for (let id = 0; id < store.count; id += 1) {
+    h = mix(h, id);
+    h = mix(h, num(store.kind, id));
+    h = mix(h, num(store.team, id));
+    h = mix(h, num(store.damage, id));
+    h = mix(h, num(store.destroyed, id));
+    h = mix(h, num(store.energy, id));
+    h = mix(h, num(store.powered, id));
+  }
+  return h;
+}
+
 /**
  * POLICY (Codex review round 15, PR #9, finding 3c -- closing out five straight review
  * rounds of "hashWorld is missing/including field X"): the spec's Testing section states
@@ -207,5 +222,6 @@ export function hashWorld(world: World): number {
   }
   hash = mixProjectiles(hash, world);
   hash = mixFlags(hash, world);
+  hash = mixBaseObjects(hash, world);
   return hash >>> 0;
 }

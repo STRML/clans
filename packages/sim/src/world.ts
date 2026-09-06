@@ -1,4 +1,5 @@
 import { ARMORS, ArmorId, armorFor } from './armor.js';
+import { createEmptyBaseObjects } from './baseObjects.js';
 import { GameOverReason, stepFlags, TIME_LIMIT_TICKS } from './flags.js';
 import { stepPlayers } from './movement.js';
 import { createProjectileStore, stepProjectiles } from './projectiles.js';
@@ -41,6 +42,8 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
     terrain,
     killY: lowestTerrainHeight(terrain) - KILL_DEPTH,
     interiors: [],
+    baseObjects: createEmptyBaseObjects(),
+    forceFields: [],
     players: {
       count: 0,
       freeIds: [],
