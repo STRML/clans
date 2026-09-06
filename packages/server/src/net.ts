@@ -277,8 +277,15 @@ export function startNetServer(options: NetServerOptions): NetServer {
       // Closing an overloaded client instead of queuing yet another write onto its pile
       // bounds server memory to a handful of connected clients' worth, not one client's
       // worth of every snapshot it never read.
+      //
+      // Codex round 16 (PR #4): socket.close() is a graceful close -- it waits for the
+      // handshake and ws defers destruction to a 30 s timer, so the player stayed a
+      // simulated, broadcast "ghost" other clients could see for up to 30 s after it was
+      // supposedly disconnected. An overloaded client's own backpressure means it cannot
+      // even receive a close frame reliably anyway, so there is nothing a graceful close
+      // buys here; terminate() drops the connection immediately.
       if (isClientOverloaded(entry.socket.bufferedAmount)) {
-        entry.socket.close();
+        entry.socket.terminate();
         continue;
       }
       sendSnapshot(entry, nextSnapshotId, options.world.tick, players);

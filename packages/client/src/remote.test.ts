@@ -35,6 +35,25 @@ describe('RemoteBuffer', () => {
   it('returns null before any sample arrives', () => {
     expect(new RemoteBuffer().positionAt(0)).toBeNull();
   });
+
+  it('snaps instead of smearing a straight line across a teleport (respawn or reused id)', () => {
+    // Codex round 16 (PR #4): a respawn (falling out of the world) or a disconnected
+    // player id reused by a new player before an intervening snapshot appended the new,
+    // unrelated position straight onto the same history as the old one. positionAt()
+    // then interpolated a straight line between them, so an observer saw the player
+    // visibly slide from the old position to the spawn point instead of an instant snap.
+    const buffer = new RemoteBuffer();
+    buffer.push(0, sample(0, 0));
+    buffer.push(50, sample(500, 0)); // far beyond any real movement in one tick
+    expect(buffer.positionAt(60)?.x).toBeCloseTo(500);
+  });
+
+  it('keeps interpolating normally for ordinary movement well under the teleport threshold', () => {
+    const buffer = new RemoteBuffer();
+    buffer.push(0, sample(0, 0));
+    buffer.push(100, sample(1, 0)); // 1 m in 100 ms: ordinary run speed, not a teleport
+    expect(buffer.positionAt(150)?.x).toBeCloseTo(0.5);
+  });
 });
 
 describe('syncRemoteMeshes', () => {

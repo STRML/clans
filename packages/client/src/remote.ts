@@ -6,6 +6,19 @@ export const MAX_EXTRAPOLATE_MS = 50;
 const HISTORY_LENGTH = 8;
 const CAPSULE_RADIUS = 0.6;
 const CAPSULE_HEIGHT = 1.2;
+// A respawn (falling out of the world, or a disconnected id reused by a new player
+// before an intervening snapshot) teleports a player instantly; the snapshot wire format
+// carries no flag for that. Without this, the new position was appended to the same
+// history as the old one, and positionAt() interpolated between them like ordinary
+// movement -- an observer saw the player visibly slide from where they died to the spawn
+// point instead of an instant snap. Max run speed is 15 m/s (armor.ts); even a fast ski
+// run travels well under a meter in one snapshot interval, so any single-sample jump this
+// large can only be a teleport, never legitimate movement.
+const TELEPORT_DISTANCE_M = 15;
+
+function distance(a: PlayerSnapshotData, b: PlayerSnapshotData): number {
+  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+}
 
 interface RemoteSample {
   atMs: number;
@@ -68,6 +81,11 @@ export class RemoteBuffer {
   private samples: RemoteSample[] = [];
 
   push(atMs: number, data: PlayerSnapshotData): void {
+    const previous = this.samples.at(-1);
+    // A jump this large is a teleport (respawn, or a reused id's new player entirely),
+    // not movement: discard the stale history instead of letting interpolate() smear a
+    // straight line between two unrelated positions.
+    if (previous && distance(previous.data, data) > TELEPORT_DISTANCE_M) this.samples.length = 0;
     this.samples.push({ atMs, data });
     if (this.samples.length > HISTORY_LENGTH) this.samples.shift();
   }
