@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   addPlayer,
+  ammoIndex,
   createFlags,
   createWorld,
   deserializePlayer,
@@ -8,6 +9,7 @@ import {
   hashWorld,
   removePlayer,
   serializeActivePlayers,
+  WeaponId,
   type Heightfield,
   type PlayerSnapshotData,
   type World,
@@ -232,6 +234,71 @@ describe('snapshot codec', () => {
       players: decodedBaseline.players,
     });
     expect(decoded.players.find((p) => p.id === id)?.respawnSeq).toBe(1);
+  });
+
+  it('round-trips ammo and grenade counts through a full snapshot', () => {
+    // Codex review round 10, PR #9, finding 1: ammo/grenades were never on the wire at all,
+    // so reconciliation had no authoritative value to correct client-side prediction
+    // against, and a lost or evicted input's ammo drift persisted forever. If these fields
+    // did not survive the wire, that fix would be a no-op.
+    const source = createWorld(terrain, 1);
+    const id = addPlayer(source, { x: 0, y: 0, z: 0 }, 1);
+    source.players.ammo[ammoIndex(id, WeaponId.Spinfusor)] = 12;
+    source.players.ammo[ammoIndex(id, WeaponId.Chaingun)] = 40;
+    source.players.ammo[ammoIndex(id, WeaponId.Mortar)] = 3;
+    source.players.grenades[id] = 2;
+    const players = serializeActivePlayers(source);
+    expect(players[0]).toMatchObject({
+      discAmmo: 12,
+      chaingunAmmo: 40,
+      mortarAmmo: 3,
+      grenades: 2,
+    });
+    const bytes = encodeSnapshot(1, source.tick, 0, players, null, emptyExtras());
+    const decoded = decodeSnapshot(bytes, null);
+    expect(decoded.players[0]).toMatchObject({
+      discAmmo: 12,
+      chaingunAmmo: 40,
+      mortarAmmo: 3,
+      grenades: 2,
+    });
+  });
+
+  it('marks only ammo dirty in a delta when nothing else changed, and round-trips it', () => {
+    const source = createWorld(terrain, 1);
+    const id = addPlayer(source, { x: 0, y: 0, z: 0 }, 1);
+    const baselinePlayers = serializeActivePlayers(source);
+    const baselineBytes = encodeSnapshot(1, source.tick, 0, baselinePlayers, null, emptyExtras());
+    const decodedBaseline = decodeSnapshot(baselineBytes, null);
+
+    // Simulate a shot landing on the server: only the disc ammo pool moves.
+    const discIndex = ammoIndex(id, WeaponId.Spinfusor);
+    source.players.ammo[discIndex] = (source.players.ammo[discIndex] ?? 0) - 1;
+    const nextPlayers = serializeActivePlayers(source);
+    const deltaBytes = encodeSnapshot(
+      2,
+      source.tick,
+      0,
+      nextPlayers,
+      { snapshotId: 1, players: baselinePlayers },
+      emptyExtras(),
+    );
+    const decoded = decodeSnapshot(deltaBytes, {
+      snapshotId: 1,
+      players: decodedBaseline.players,
+    });
+    // Fresh from addPlayer's default LIGHT_ARMOR loadout, minus the one disc just spent --
+    // chaingun/mortar/grenades are untouched, and the delta must still round-trip them
+    // correctly by copying them forward from the (already wire-quantized) baseline.
+    expect(decoded.players).toEqual([
+      {
+        ...decodedBaseline.players[0],
+        discAmmo: 14,
+        chaingunAmmo: 100,
+        mortarAmmo: 0,
+        grenades: 5,
+      },
+    ]);
   });
 
   it('rejects a full snapshot carrying a non-finite transform value', () => {

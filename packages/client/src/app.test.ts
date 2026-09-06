@@ -72,6 +72,10 @@ const snapshot: PlayerSnapshotData = {
   onGround: 1,
   ski: 0,
   respawnSeq: 0,
+  discAmmo: 15,
+  chaingunAmmo: 100,
+  mortarAmmo: 0,
+  grenades: 5,
 };
 
 describe('updateRemotes', () => {
@@ -425,6 +429,10 @@ describe('positionOfPlayer', () => {
       onGround: 0,
       ski: 0,
       respawnSeq: 0,
+      discAmmo: 0,
+      chaingunAmmo: 0,
+      mortarAmmo: 0,
+      grenades: 0,
     };
     const net: Pick<NetClient, 'playerId' | 'remotePlayers'> = {
       playerId: localId,

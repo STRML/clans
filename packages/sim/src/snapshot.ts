@@ -1,5 +1,6 @@
 import { LIGHT_ARMOR } from './armor.js';
 import type { PlayerStore, World } from './types.js';
+import { ammoIndex, WeaponId } from './weapons.js';
 
 export interface PlayerSnapshotData {
   id: number;
@@ -19,9 +20,22 @@ export interface PlayerSnapshotData {
   /** See PlayerStore.respawnSeq (types.ts) -- the authoritative "a respawn just happened"
    *  wire signal a client compares against what the previous snapshot reported. */
   respawnSeq: number;
+  /**
+   * The three finite ammo pools (PlayerStore.ammo, indexed via weapons.ts's ammoIndex) --
+   * the Laser Rifle and Blaster are never sent, since their ammo is permanently -1
+   * (infinite, gated by energy only) and never changes. Wired onto the snapshot so
+   * reconciliation has an authoritative value to correct client-side prediction against on
+   * every snapshot, not just at respawn -- see netclient.ts's reconcile/deserializePlayer.
+   * Codex review round 10 (PR #9), finding 1.
+   */
+  discAmmo: number;
+  chaingunAmmo: number;
+  mortarAmmo: number;
+  /** PlayerStore.grenades -- same self-heal rationale as the ammo fields above. */
+  grenades: number;
 }
 
-function num(arr: Float64Array | Uint8Array | Uint16Array, i: number): number {
+function num(arr: Float64Array | Uint8Array | Uint16Array | Int16Array, i: number): number {
   return arr[i] ?? 0;
 }
 
@@ -48,6 +62,10 @@ export function serializePlayer(world: World, id: number): PlayerSnapshotData {
     onGround: bit(p.onGround, id),
     ski: bit(p.ski, id),
     respawnSeq: num(p.respawnSeq, id),
+    discAmmo: num(p.ammo, ammoIndex(id, WeaponId.Spinfusor)),
+    chaingunAmmo: num(p.ammo, ammoIndex(id, WeaponId.Chaingun)),
+    mortarAmmo: num(p.ammo, ammoIndex(id, WeaponId.Mortar)),
+    grenades: num(p.grenades, id),
   };
 }
 
@@ -84,4 +102,8 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   players.onGround[data.id] = data.onGround;
   players.ski[data.id] = data.ski;
   players.respawnSeq[data.id] = data.respawnSeq;
+  players.ammo[ammoIndex(data.id, WeaponId.Spinfusor)] = data.discAmmo;
+  players.ammo[ammoIndex(data.id, WeaponId.Chaingun)] = data.chaingunAmmo;
+  players.ammo[ammoIndex(data.id, WeaponId.Mortar)] = data.mortarAmmo;
+  players.grenades[data.id] = data.grenades;
 }

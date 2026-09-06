@@ -85,13 +85,19 @@ export interface DecodedSnapshot {
 }
 
 const HEADER_BYTES = 1 + 4 + 4 + 4 + 4 + 1; // type, snapshotId, baselineId, tick, lastInputSequence, flags
-// id, team, 7 f32, energy f32, status byte, health f32, weaponSlot u8, respawnSeq u8.
+// id, team, 7 f32, energy f32, status byte, health f32, weaponSlot u8, respawnSeq u8,
+// discAmmo u8, chaingunAmmo u8, mortarAmmo u8, grenades u8.
 // respawnSeq is a single byte (mod-256 truncation of the sim's Uint16 counter, see
 // sim/types.ts's respawnSeq doc comment) -- a client only ever compares it against what the
 // immediately-previous snapshot IT received reported, so the only way that comparison could
 // miss a change is 256 respawns of the same id landing between two snapshots the client
 // actually got. Not a realistic loss/coalescing scenario at this milestone's scale.
-const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1;
+// The four ammo fields are single bytes each: the spec's largest ammo pool (mortar, up to
+// 200) and grenade count both fit comfortably under 256. Codex review round 10 (PR #9),
+// finding 1: without these on the wire, reconciliation had no authoritative ammo value to
+// correct client-side prediction against, so a lost or evicted input's ammo drift persisted
+// until the player's next death/respawn instead of self-healing on the next snapshot.
+const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4;
 const PROJECTILE_BYTES = 2 + 1 + 1 + 4 * 6 + 2; // id, type, weaponId, 6 f32 (pos+vel), ownerId
 const FLAG_BYTES = 1 + 1 + 1 + 4 * 3 + 2 + 4; // id, team, state, 3 f32 (pos), carrierId i16, returnInS f32
 const DELTA_FLAG = 1;
@@ -102,6 +108,12 @@ const DIRTY_TEAM = 8;
 const DIRTY_HEALTH = 16;
 const DIRTY_WEAPON = 32;
 const DIRTY_RESPAWN = 64;
+// The last bit available in the dirty-mask byte, so the four ammo/grenade fields share one
+// bit rather than each claiming its own (there is no room left for that) -- consistent with
+// DIRTY_TRANSFORM already batching seven fields under one bit. They change together often
+// enough (any shot or grenade throw touches at least one) that splitting them would rarely
+// save bytes anyway.
+const DIRTY_AMMO = 128;
 const EPSILON = 1e-4;
 
 interface SnapshotHeader {
@@ -161,6 +173,10 @@ function writePlayerFull(cursor: Cursor, data: PlayerSnapshotData): void {
   writeF32(cursor, data.health);
   writeU8(cursor, data.weaponSlot);
   writeU8(cursor, data.respawnSeq);
+  writeU8(cursor, data.discAmmo);
+  writeU8(cursor, data.chaingunAmmo);
+  writeU8(cursor, data.mortarAmmo);
+  writeU8(cursor, data.grenades);
 }
 function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const id = readU16(cursor);
@@ -177,6 +193,10 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const health = readF32(cursor);
   const weaponSlot = readU8(cursor);
   const respawnSeq = readU8(cursor);
+  const discAmmo = readU8(cursor);
+  const chaingunAmmo = readU8(cursor);
+  const mortarAmmo = readU8(cursor);
+  const grenades = readU8(cursor);
   assertFinite([x, y, z, vx, vy, vz, yaw, energy, health]);
   return {
     id,
@@ -194,6 +214,10 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
     health,
     weaponSlot,
     respawnSeq,
+    discAmmo,
+    chaingunAmmo,
+    mortarAmmo,
+    grenades,
   };
 }
 
@@ -346,6 +370,16 @@ function weaponChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
 function respawnSeqChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
   return a.respawnSeq !== b.respawnSeq;
 }
+// Exact equality, like respawnSeqChanged above: these are integer ammo counts, not floats,
+// so any difference at all is a real change worth sending.
+function ammoChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
+  return (
+    a.discAmmo !== b.discAmmo ||
+    a.chaingunAmmo !== b.chaingunAmmo ||
+    a.mortarAmmo !== b.mortarAmmo ||
+    a.grenades !== b.grenades
+  );
+}
 function dirtyMask(current: PlayerSnapshotData, previous: PlayerSnapshotData): number {
   let mask = 0;
   if (transformChanged(current, previous)) mask |= DIRTY_TRANSFORM;
@@ -355,6 +389,7 @@ function dirtyMask(current: PlayerSnapshotData, previous: PlayerSnapshotData): n
   if (healthChanged(current, previous)) mask |= DIRTY_HEALTH;
   if (weaponChanged(current, previous)) mask |= DIRTY_WEAPON;
   if (respawnSeqChanged(current, previous)) mask |= DIRTY_RESPAWN;
+  if (ammoChanged(current, previous)) mask |= DIRTY_AMMO;
   return mask;
 }
 
@@ -392,6 +427,7 @@ function changedRecordBytes(mask: number): number {
   if (mask & DIRTY_HEALTH) bytes += 4;
   if (mask & DIRTY_WEAPON) bytes += 1;
   if (mask & DIRTY_RESPAWN) bytes += 1;
+  if (mask & DIRTY_AMMO) bytes += 4;
   return bytes;
 }
 function writeChangedTransform(cursor: Cursor, data: PlayerSnapshotData): void {
@@ -403,6 +439,12 @@ function writeChangedTransform(cursor: Cursor, data: PlayerSnapshotData): void {
   writeF32(cursor, data.vz);
   writeF32(cursor, data.yaw);
 }
+function writeChangedAmmo(cursor: Cursor, data: PlayerSnapshotData): void {
+  writeU8(cursor, data.discAmmo);
+  writeU8(cursor, data.chaingunAmmo);
+  writeU8(cursor, data.mortarAmmo);
+  writeU8(cursor, data.grenades);
+}
 function writeChangedPlayer(cursor: Cursor, data: PlayerSnapshotData, mask: number): void {
   writeU16(cursor, data.id);
   writeU8(cursor, mask);
@@ -413,6 +455,7 @@ function writeChangedPlayer(cursor: Cursor, data: PlayerSnapshotData, mask: numb
   if (mask & DIRTY_HEALTH) writeF32(cursor, data.health);
   if (mask & DIRTY_WEAPON) writeU8(cursor, data.weaponSlot);
   if (mask & DIRTY_RESPAWN) writeU8(cursor, data.respawnSeq);
+  if (mask & DIRTY_AMMO) writeChangedAmmo(cursor, data);
 }
 
 function encodeDeltaSnapshot(
@@ -519,6 +562,12 @@ function readChangedHealth(cursor: Cursor, next: PlayerSnapshotData): void {
   assertFinite([health]);
   next.health = health;
 }
+function readChangedAmmo(cursor: Cursor, next: PlayerSnapshotData): void {
+  next.discAmmo = readU8(cursor);
+  next.chaingunAmmo = readU8(cursor);
+  next.mortarAmmo = readU8(cursor);
+  next.grenades = readU8(cursor);
+}
 function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData>): void {
   const id = readU16(cursor);
   const mask = readU8(cursor);
@@ -532,6 +581,7 @@ function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData
   if (mask & DIRTY_HEALTH) readChangedHealth(cursor, next);
   if (mask & DIRTY_WEAPON) next.weaponSlot = readU8(cursor);
   if (mask & DIRTY_RESPAWN) next.respawnSeq = readU8(cursor);
+  if (mask & DIRTY_AMMO) readChangedAmmo(cursor, next);
   byId.set(id, next);
 }
 

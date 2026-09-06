@@ -341,6 +341,14 @@ export class NetClient {
   ): void {
     const beforeX = this.world.players.position[0] ?? 0;
     const beforeZ = this.world.players.position[2] ?? 0;
+    // Codex review round 10 (PR #9), finding 1: deserializePlayer now also writes the wire's
+    // discAmmo/chaingunAmmo/mortarAmmo/grenades onto this player, unconditionally, every
+    // snapshot -- not just on the respawn transition syncRespawnState detects below. Ammo is
+    // predicted locally (weapons.ts's stepWeapons) same as position, but unlike a respawn,
+    // ordinary prediction drift from a lost or server-evicted input has no other signal to
+    // correct it: nothing here ever detects "an input never landed." Applying the
+    // authoritative value on every snapshot means that drift self-heals within one round trip
+    // instead of persisting until the player's next death/respawn.
     deserializePlayer(this.world, { ...serverState, id: LOCAL_SLOT });
     // The wire snapshot has no wasJumpHeld field, and deserializePlayer does not touch
     // spawn/wasGrounded/wasJumpHeld at all, so without this the replay below starts from

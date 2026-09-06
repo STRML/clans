@@ -222,6 +222,10 @@ describe('NetClient', () => {
       onGround: 1 as const,
       ski: 0 as const,
       respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
     };
     const state1 = { ...base, x: 1, z: 0 };
     const state2 = { ...base, x: 2, z: 0 };
@@ -398,6 +402,10 @@ describe('NetClient', () => {
       onGround: 1 as const,
       ski: 0 as const,
       respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
     };
     const delta = encodeSnapshot(
       7,
@@ -449,6 +457,10 @@ describe('NetClient', () => {
       onGround: 1 as const,
       ski: 0 as const,
       respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(() =>
@@ -499,6 +511,10 @@ describe('NetClient', () => {
       onGround: 1 as const,
       ski: 0 as const,
       respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
 
@@ -591,6 +607,10 @@ describe('NetClient', () => {
       onGround: 0 as const,
       ski: 0 as const,
       respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
     expect(client.world.players.wasGrounded[0]).toBe(0);
@@ -707,6 +727,10 @@ describe('NetClient', () => {
       onGround: 1 as const,
       ski: 0 as const,
       respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
     };
     const extras: WorldExtras = {
       projectiles: [],
@@ -748,6 +772,10 @@ describe('NetClient', () => {
       health: 0.4,
       weaponSlot: 0,
       respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(client.localHealth).toBeCloseTo(0.4);
@@ -858,6 +886,10 @@ describe('NetClient', () => {
       onGround: 1 as const,
       ski: 0 as const,
       respawnSeq: 0,
+      discAmmo: 0,
+      chaingunAmmo: 0,
+      mortarAmmo: 0,
+      grenades: 0,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -913,6 +945,10 @@ describe('NetClient', () => {
       onGround: 1 as const,
       ski: 0 as const,
       respawnSeq: 0,
+      discAmmo: 0,
+      chaingunAmmo: 0,
+      mortarAmmo: 0,
+      grenades: 0,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [alive], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -973,6 +1009,10 @@ describe('NetClient', () => {
       onGround: 1 as const,
       ski: 0 as const,
       respawnSeq: 0,
+      discAmmo: 0,
+      chaingunAmmo: 0,
+      mortarAmmo: 0,
+      grenades: 0,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [fullHealth], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -993,6 +1033,71 @@ describe('NetClient', () => {
     expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
     expect(client.world.players.weaponTimer[0]).toBe(0);
     expect(client.world.players.respawnAt[0]).toBe(-1);
+  });
+
+  it('self-heals a lost-input ammo prediction drift on the next snapshot instead of staying wrong forever (Codex review round 10, PR #9, finding 1)', () => {
+    // The client predicts ammo consumption locally (sim/weapons.ts's stepWeapons), same as
+    // position. Before this fix the wire snapshot carried no ammo field at all, so if the
+    // fire input that caused a local decrement never actually reached the server -- lost
+    // beyond the 3-sample input redundancy window (protocol/handshake.ts), or evicted from
+    // the server's own input queue under backpressure (server/net.ts) -- nothing on the
+    // wire could ever correct the client's now-permanently-wrong local ammo count, short of
+    // the player's next death/respawn (which resets the whole loadout via resetLoadout, an
+    // unrelated round 1/8 mechanism).
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 30 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    client.world.players.weaponSlot[0] = WeaponId.Spinfusor;
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+
+    const fireInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: true,
+      altFire: false,
+      slot: 0,
+    };
+    client.tick(fireInput); // sequence 1: predicts a Spinfusor shot, decrementing local ammo
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(14);
+
+    const idleInput: PlayerInput = { ...fireInput, fire: false };
+    client.tick(idleInput); // sequence 2: an ordinary follow-up tick
+
+    // The server's authoritative snapshot: sequence 1 (the fire input) never reached it --
+    // lost or evicted -- so its ammo never moved, and lastInputSequence of 2 means the
+    // server has already simulated past sequence 1 without ever seeing it, so reconcile
+    // will not replay it back on top of the corrected baseline below.
+    const serverState = {
+      id: 0,
+      team: 0,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60,
+      weaponSlot: WeaponId.Spinfusor,
+      onGround: 0 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+    };
+    transport.pump([encodeSnapshot(1, 5, 2, [serverState], null, emptyExtras())]);
+
+    // Self-healed to the server's authoritative value on this very next snapshot, instead
+    // of staying stuck at the wrongly-predicted 14 until the player's next death.
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
   });
 
   it('updates the local spawn point on a networked respawn (Codex review round 5, finding 2)', () => {
@@ -1022,6 +1127,10 @@ describe('NetClient', () => {
       onGround: 1 as const,
       ski: 0 as const,
       respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -1107,6 +1216,10 @@ describe('NetClient', () => {
       onGround: 1 as const,
       ski: 0 as const,
       respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
     };
     const dead = { ...alive, health: 0 };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);

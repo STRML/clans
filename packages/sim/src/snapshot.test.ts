@@ -10,7 +10,7 @@ import {
   serializePlayer,
   type Heightfield,
 } from './index.js';
-import { WeaponId } from './weapons.js';
+import { ammoIndex, WeaponId } from './weapons.js';
 
 const terrain: Heightfield = {
   gridSize: 2,
@@ -46,6 +46,10 @@ describe('player snapshots', () => {
       onGround: 1,
       ski: 0,
       respawnSeq: 0,
+      discAmmo: LIGHT_ARMOR.discAmmo,
+      chaingunAmmo: LIGHT_ARMOR.chaingunAmmo,
+      mortarAmmo: LIGHT_ARMOR.mortarAmmo,
+      grenades: LIGHT_ARMOR.grenadeCount,
     });
   });
 
@@ -75,6 +79,10 @@ describe('player snapshots', () => {
       onGround: 0,
       ski: 1,
       respawnSeq: 2,
+      discAmmo: 9,
+      chaingunAmmo: 50,
+      mortarAmmo: 4,
+      grenades: 3,
     });
     expect(world.players.count).toBe(4);
     expect(world.players.active[3]).toBe(1);
@@ -94,6 +102,10 @@ describe('player snapshots', () => {
       onGround: 0,
       ski: 1,
       respawnSeq: 2,
+      discAmmo: 9,
+      chaingunAmmo: 50,
+      mortarAmmo: 4,
+      grenades: 3,
     });
   });
 
@@ -109,5 +121,29 @@ describe('player snapshots', () => {
     const target = createWorld(terrain, 1);
     deserializePlayer(target, data);
     expect(target.players.respawnSeq[id]).toBe(2);
+  });
+
+  it('round-trips ammo and grenades through serialize/deserialize', () => {
+    // Codex review round 10, PR #9, finding 1: these must round-trip through the same
+    // serialize/deserialize pair the wire protocol uses, so the client's reconciliation has
+    // a real authoritative value to correct locally-predicted ammo drift against.
+    const world = createWorld(terrain, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    world.players.ammo[ammoIndex(id, WeaponId.Spinfusor)] = 8;
+    world.players.ammo[ammoIndex(id, WeaponId.Chaingun)] = 33;
+    world.players.ammo[ammoIndex(id, WeaponId.Mortar)] = 1;
+    world.players.grenades[id] = 4;
+    const data = serializePlayer(world, id);
+    expect(data.discAmmo).toBe(8);
+    expect(data.chaingunAmmo).toBe(33);
+    expect(data.mortarAmmo).toBe(1);
+    expect(data.grenades).toBe(4);
+
+    const target = createWorld(terrain, 1);
+    deserializePlayer(target, data);
+    expect(target.players.ammo[ammoIndex(id, WeaponId.Spinfusor)]).toBe(8);
+    expect(target.players.ammo[ammoIndex(id, WeaponId.Chaingun)]).toBe(33);
+    expect(target.players.ammo[ammoIndex(id, WeaponId.Mortar)]).toBe(1);
+    expect(target.players.grenades[id]).toBe(4);
   });
 });
