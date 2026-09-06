@@ -13,13 +13,17 @@ import {
   type World,
 } from '@clans/sim';
 import {
+  EventKind,
   MessageType,
   SNAPSHOT_EVERY_N_TICKS,
   WelcomeStatus,
+  decodeGod,
   decodeInput,
   emptyExtras,
+  encodeEvent,
   encodeSnapshot,
   encodeWelcome,
+  type WorldExtras,
 } from '@clans/protocol';
 import { NetClient } from './netclient.js';
 import type { Transport } from './transport.js';
@@ -581,5 +585,81 @@ describe('NetClient', () => {
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
     expect(client.world.players.wasGrounded[0]).toBe(0);
     expect(client.world.players.wasJumpHeld[0]).toBe(0);
+  });
+
+  it('exposes projectiles, flags, team scores, and game over from the snapshot extras', () => {
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 11 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    const extras: WorldExtras = {
+      projectiles: [
+        { id: 0, type: 0, weaponId: 0, x: 1, y: 2, z: 3, vx: 90, vy: 0, vz: 0, ownerId: 0 },
+      ],
+      flags: [{ id: 0, team: 1, state: 1, x: 5, y: 0, z: 5, carrierId: 0, returnInS: -1 }],
+      teamScores: [100, 0],
+      gameOver: false,
+      winnerTeam: 0,
+      timeRemainingS: 1200.5,
+      gameOverReason: 0,
+    };
+    transport.pump([encodeSnapshot(1, 0, 0, [], null, extras)]);
+    expect(client.projectiles).toEqual(extras.projectiles);
+    expect(client.flags).toEqual(extras.flags);
+    expect(client.teamScores).toEqual([100, 0]);
+    expect(client.gameOver).toBe(false);
+    expect(client.timeRemainingS).toBeCloseTo(1200.5, 1);
+    expect(client.gameOverReason).toBe(0);
+  });
+
+  it('reads localHealth off the reconciled snapshot for the local player', () => {
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 12 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    const state = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      onGround: 1 as const,
+      ski: 0 as const,
+      health: 0.4,
+      weaponSlot: 0,
+    };
+    transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
+    expect(client.localHealth).toBeCloseTo(0.4);
+  });
+
+  it('collects incoming Event messages into a bounded rolling history', () => {
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 13 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    transport.pump([encodeEvent({ kind: EventKind.PlayerKilled, a: 1, b: 2 })]);
+    expect(client.recentEvents).toEqual([
+      { type: MessageType.Event, kind: EventKind.PlayerKilled, a: 1, b: 2 },
+    ]);
+  });
+
+  it('sends a God message when setGodMode is called', () => {
+    clock.ms = 0;
+    const link = makeLink({ value: 14 });
+    const sent: Uint8Array[] = [];
+    const rawSend = link.send.bind(link);
+    link.send = (bytes) => {
+      sent.push(bytes);
+      rawSend(bytes);
+    };
+    const transport = makeTransport(link);
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.setGodMode(true);
+    const god = sent.find((bytes) => bytes[0] === MessageType.God);
+    expect(god && decodeGod(god)).toEqual({ type: MessageType.God, enabled: true });
   });
 });

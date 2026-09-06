@@ -2,6 +2,7 @@ import {
   addPlayer,
   createWorld,
   deserializePlayer,
+  LIGHT_ARMOR,
   resetPlayerToSpawn,
   stepWorld,
   type Heightfield,
@@ -12,15 +13,22 @@ import {
 import {
   MessageType,
   SNAPSHOT_HISTORY_DEPTH,
+  decodeEvent,
   decodeSnapshot,
   decodeWelcome,
   encodeAck,
+  encodeGod,
   encodeInput,
   encodeJoin,
   peekSnapshotHeader,
+  type EventMessage,
+  type FlagSnapshotData,
+  type ProjectileSnapshotData,
 } from '@clans/protocol';
 import type { SnapshotBaseline } from '@clans/protocol';
 import type { Transport } from './transport.js';
+
+const EVENT_HISTORY = 100;
 
 const MAX_REPLAY_TICKS = 30;
 // A generous ceiling on the backlog itself, well above MAX_REPLAY_TICKS: reconcile
@@ -74,6 +82,15 @@ export class NetClient {
    * queue empty on every drain, not just read the latest entry.
    */
   remoteSnapshots: RemoteSnapshot[] = [];
+  projectiles: ProjectileSnapshotData[] = [];
+  flags: FlagSnapshotData[] = [];
+  teamScores: [number, number] = [0, 0];
+  gameOver = false;
+  winnerTeam = 0;
+  timeRemainingS = 0;
+  gameOverReason = 0;
+  localHealth = LIGHT_ARMOR.maxDamage;
+  recentEvents: EventMessage[] = [];
   stats: NetClientStats = {
     ping: 0,
     bytesPerSecond: 0,
@@ -146,6 +163,10 @@ export class NetClient {
     this.transport.send(encodeInput({ sequence: this.sequence, samples }));
   }
 
+  setGodMode(enabled: boolean): void {
+    this.transport.send(encodeGod({ enabled }));
+  }
+
   private handleMessage(bytes: Uint8Array): void {
     const type = bytes[0];
     try {
@@ -155,9 +176,15 @@ export class NetClient {
       // non-finite-spawn Welcome throw straight out of the transport's message handler.
       if (type === MessageType.Welcome) this.handleWelcome(bytes);
       else if (type === MessageType.Snapshot) this.handleSnapshot(bytes);
+      else if (type === MessageType.Event) this.handleEvent(bytes);
     } catch {
       // Malformed frame: drop it. There is nothing to ack or reconcile against.
     }
+  }
+
+  private handleEvent(bytes: Uint8Array): void {
+    this.recentEvents.push(decodeEvent(bytes));
+    if (this.recentEvents.length > EVENT_HISTORY) this.recentEvents.shift();
   }
 
   private handleWelcome(bytes: Uint8Array): void {
@@ -207,13 +234,23 @@ export class NetClient {
     this.transport.send(encodeAck({ snapshotId: decoded.snapshotId }));
 
     const self = decoded.players.find((player) => player.id === this.playerId);
-    if (self) this.reconcile(self, decoded.tick, decoded.lastInputSequence);
+    if (self) {
+      this.reconcile(self, decoded.tick, decoded.lastInputSequence);
+      this.localHealth = self.health;
+    }
 
     this.remotePlayers = new Map(
       decoded.players
         .filter((player) => player.id !== this.playerId)
         .map((player) => [player.id, player]),
     );
+    this.projectiles = decoded.projectiles;
+    this.flags = decoded.flags;
+    this.teamScores = decoded.teamScores;
+    this.gameOver = decoded.gameOver;
+    this.winnerTeam = decoded.winnerTeam;
+    this.timeRemainingS = decoded.timeRemainingS;
+    this.gameOverReason = decoded.gameOverReason;
     this.remoteTick = decoded.tick;
     this.remoteSnapshots.push({ tick: decoded.tick, players: this.remotePlayers });
     if (this.remoteSnapshots.length > MAX_REMOTE_SNAPSHOT_QUEUE) this.remoteSnapshots.shift();
