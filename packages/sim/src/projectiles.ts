@@ -98,6 +98,20 @@ function writeVec3(arr: Float64Array, base: number, v: Vec3): void {
   arr[base + 2] = v.z;
 }
 
+/** The actual point `distance` meters along the previous->current segment -- NOT the segment's
+ *  raw endpoint, which is what a fast projectile's swept-hit distance used to be resolved
+ *  against instead (Codex review round 3, finding 3). A zero-length segment (previous ===
+ *  current) has no direction to interpolate along, so it just returns that shared point. */
+function pointAlongSegment(previous: Vec3, current: Vec3, distance: number): Vec3 {
+  const dx = current.x - previous.x,
+    dy = current.y - previous.y,
+    dz = current.z - previous.z;
+  const length = Math.hypot(dx, dy, dz);
+  if (length === 0) return current;
+  const t = distance / length;
+  return { x: previous.x + dx * t, y: previous.y + dy * t, z: previous.z + dz * t };
+}
+
 /** A player counts as a valid hit target when it's alive and isn't the one who fired the
  *  shot -- shared by the direct-hit, grenade-contact, and hitscan target searches so the
  *  "skip inactive/dead/self" rule lives in exactly one place. */
@@ -273,7 +287,12 @@ function sphereContactDistance(
  *  (previous === current, or the point already overlaps at the segment's very start) makes
  *  it resolve to "no hit" for every point strictly inside the sphere, since its t comes out
  *  negative -- so sphereContactDistance's direct overlap check stays alongside the sweep. */
-function grenadeHitPlayer(world: World, id: number, previous: Vec3, current: Vec3): number | null {
+function grenadeHitPlayer(
+  world: World,
+  id: number,
+  previous: Vec3,
+  current: Vec3,
+): { playerId: number; distance: number } | null {
   const store = world.projectiles;
   const ownerId = store.ownerId[id] ?? -1;
   const dx = current.x - previous.x,
@@ -281,17 +300,40 @@ function grenadeHitPlayer(world: World, id: number, previous: Vec3, current: Vec
     dz = current.z - previous.z;
   const length = Math.hypot(dx, dy, dz);
   const direction = length > 0 ? { x: dx / length, y: dy / length, z: dz / length } : null;
-  let nearestId: number | null = null;
-  let nearestDistance = Infinity;
+  let nearest: { playerId: number; distance: number } | null = null;
   for (let playerId = 0; playerId < world.players.count; playerId += 1) {
     if (!isValidTarget(world, playerId, ownerId)) continue;
     const hitbox = playerHitbox(world, playerId, LIGHT_ARMOR);
     const distance = sphereContactDistance(previous, current, direction, length, hitbox);
-    if (distance === null || distance >= nearestDistance) continue;
-    nearestId = playerId;
-    nearestDistance = distance;
+    if (distance === null || (nearest && distance >= nearest.distance)) continue;
+    nearest = { playerId, distance };
   }
-  return nearestId;
+  return nearest;
+}
+
+/** Picks whichever of a terrain hit or a player hit is nearer along the previous->current
+ *  segment, and resolves to that hit's OWN point -- not always the terrain point, which is
+ *  what an armed grenade used to resolve at unconditionally whenever a terrain hit existed
+ *  on the segment at all, regardless of whether a player was actually contacted first. This
+ *  mirrors the terrain-vs-player distance comparison stepLinearOrTracer's own hit-test
+ *  already makes (Codex review round 2, finding 1); grenades never got the same treatment
+ *  until now (Codex review round 3, finding 3). Returns null when the segment hit neither. */
+function nearerGrenadeContact(
+  previous: Vec3,
+  current: Vec3,
+  terrainHit: { distance: number; point: Vec3 } | null,
+  hitPlayer: { playerId: number; distance: number } | null,
+): { point: Vec3; playerId: number | null } | null {
+  if (terrainHit && (!hitPlayer || terrainHit.distance <= hitPlayer.distance)) {
+    return { point: terrainHit.point, playerId: null };
+  }
+  if (hitPlayer) {
+    return {
+      point: pointAlongSegment(previous, current, hitPlayer.distance),
+      playerId: hitPlayer.playerId,
+    };
+  }
+  return null;
 }
 
 function resolveImpact(
@@ -332,13 +374,24 @@ function expireOneTick(store: ProjectileStore, id: number, lifetimeSeconds: numb
   return elapsed >= Math.round(lifetimeSeconds / FIXED_DT);
 }
 
+/** The authoritative hit-test's own result for one tick of a synchronously-resolving
+ *  projectile -- see FireEvent's hitPlayerId/hitPoint for why this exists and what the
+ *  no-hit defaults mean. */
+interface HitResult {
+  hitPlayerId: number;
+  hitPoint: Vec3 | null;
+}
+const NO_HIT: HitResult = { hitPlayerId: -1, hitPoint: null };
+
 /** Steps one non-grenade projectile (Linear or Tracer) a tick and resolves whichever it hits
  *  first along the previous->current segment: terrain or a player. Both checks run every
  *  tick and the closer of the two wins -- checking player-hit alone and only falling back to
  *  terrain on a miss (this used to) let a shot that crossed a ridge first still detonate on
  *  a player standing behind it, since the player-hit check never knew the ridge was in the
- *  way (Codex review round 2, finding 1). */
-function stepLinearOrTracer(world: World, id: number, dt: number): void {
+ *  way (Codex review round 2, finding 1). Returns this tick's HitResult so spawnFromEvent's
+ *  same-tick Tracer resolution can record it onto the FireEvent that spawned it; the normal
+ *  per-tick loop in stepProjectiles ignores the return value. */
+function stepLinearOrTracer(world: World, id: number, dt: number): HitResult {
   const store = world.projectiles;
   const base = id * 3;
   const previous = readVec3(store.position, base);
@@ -354,13 +407,20 @@ function stepLinearOrTracer(world: World, id: number, dt: number): void {
   const terrainHit = terrainHitAlongSegment(world.terrain, previous, current);
   if (terrainHit && (!directHit || terrainHit.distance <= directHit.distance)) {
     resolveImpact(world, id, data, terrainHit.point, null);
-    return;
+    return NO_HIT;
   }
   if (directHit) {
-    resolveImpact(world, id, data, current, directHit.playerId);
-    return;
+    // The actual point of contact along the segment, NOT the segment's raw endpoint -- a
+    // fast projectile (a 90+ m/s Spinfusor disc, say) can travel several meters past the
+    // hit distance in a single 32 ms tick, so resolving at `current` instead put radius
+    // falloff and kickback several meters from where the collision geometrically happened
+    // (Codex review round 3, finding 3).
+    const hitPoint = pointAlongSegment(previous, current, directHit.distance);
+    resolveImpact(world, id, data, hitPoint, directHit.playerId);
+    return { hitPlayerId: directHit.playerId, hitPoint };
   }
   if (expireOneTick(store, id, data.lifetime)) free(store, id);
+  return NO_HIT;
 }
 
 function grenadeArmTicks(isMortar: boolean): number {
@@ -431,8 +491,9 @@ function stepGrenade(world: World, id: number, dt: number): void {
   const armed = store.armed[id] === 1;
   const hitPlayer = armed ? grenadeHitPlayer(world, id, previous, current) : null;
   const data: ImpactData = isMortar ? WEAPON_DATA[WeaponId.Mortar] : GRENADE_DATA;
-  if (armed && (terrainHit || hitPlayer !== null)) {
-    resolveImpact(world, id, data, terrainHit ? terrainHit.point : current, hitPlayer);
+  const contact = armed ? nearerGrenadeContact(previous, current, terrainHit, hitPlayer) : null;
+  if (contact) {
+    resolveImpact(world, id, data, contact.point, contact.playerId);
     return;
   }
   if (terrainHit) {
@@ -470,8 +531,12 @@ function resolveHitscan(world: World, event: FireEvent, data: WeaponData): void 
   const nearest = nearestHitscanTarget(world, event, data.maxRange ?? 0);
   if (!nearest) return;
   const hitbox = playerHitbox(world, nearest.playerId, LIGHT_ARMOR);
-  const hitY = event.origin.y + event.direction.y * nearest.distance;
-  const multiplier = hitY >= hitbox.headY ? (data.headMultiplier ?? 1) : 1;
+  const hitPoint: Vec3 = {
+    x: event.origin.x + event.direction.x * nearest.distance,
+    y: event.origin.y + event.direction.y * nearest.distance,
+    z: event.origin.z + event.direction.z * nearest.distance,
+  };
+  const multiplier = hitPoint.y >= hitbox.headY ? (data.headMultiplier ?? 1) : 1;
   applyDamage(
     world,
     nearest.playerId,
@@ -479,6 +544,12 @@ function resolveHitscan(world: World, event: FireEvent, data: WeaponData): void 
     event.playerId,
     LIGHT_ARMOR,
   );
+  // Same-tick resolution: this weapon (the Laser Rifle) is one of the two hitscan/tracer
+  // cases FireEvent's hitPlayerId/hitPoint comment calls out, so world.lastFireEvents can
+  // carry the sim's own authoritative hit straight through to server/net.ts's laser-beam
+  // broadcast (Codex review round 3, finding 4).
+  event.hitPlayerId = nearest.playerId;
+  event.hitPoint = hitPoint;
 }
 
 function spawnFromEvent(world: World, event: FireEvent, dt: number): void {
@@ -507,8 +578,14 @@ function spawnFromEvent(world: World, event: FireEvent, dt: number): void {
   // that test only after positions were already restored, missing the rewind window
   // entirely and defeating the whole point of marking it for lag comp. Stepping it once,
   // immediately, in the same tick it spawns resolves it while the rewind is still active,
-  // exactly like the Laser Rifle's resolveHitscan call above already does.
-  if (id !== null && data.projectile === ProjectileType.Tracer) stepLinearOrTracer(world, id, dt);
+  // exactly like the Laser Rifle's resolveHitscan call above already does. The Chaingun is
+  // FireEvent's other same-tick case: record whatever this resolved onto the event so
+  // world.lastFireEvents carries it too (Codex review round 3, finding 4).
+  if (id !== null && data.projectile === ProjectileType.Tracer) {
+    const result = stepLinearOrTracer(world, id, dt);
+    event.hitPlayerId = result.hitPlayerId;
+    event.hitPoint = result.hitPoint;
+  }
 }
 
 /**

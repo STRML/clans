@@ -52,6 +52,22 @@ export interface WeaponData {
 const DRY_FIRE_SECONDS = 0.2; // Ours: a brief empty-click before the persistent NoAmmo state.
 export const MUZZLE_HEIGHT = 1.6; // Ours: roughly chest height on Light's 2.3 m capsule.
 
+// Mirrors movement.ts's own IDLE: a player active in the world but missing from this
+// tick's input map (a dropped packet, say) should be treated as holding no keys at all,
+// not skipped outright -- see stepWeapons's own comment for why skipping instead froze
+// every weapon timer solid.
+const IDLE_INPUT: PlayerInput = {
+  moveX: 0,
+  moveZ: 0,
+  yaw: 0,
+  pitch: 0,
+  jump: false,
+  jet: false,
+  fire: false,
+  altFire: false,
+  slot: 0,
+};
+
 // Spec's Weapon numbers table, used exactly. Chaingun's spinDownTime (1.0 s) is kept for the
 // client's future barrel-spin visual but does not gate fire logic this milestone — see the
 // spin-up test for the gating we do implement.
@@ -161,6 +177,26 @@ export interface FireEvent {
   direction: Vec3;
   shooterVelocity: Vec3;
   energyScale: number; // 1 for every weapon except the Laser Rifle
+  /**
+   * The authoritative hit-test's own result, filled in by projectiles.ts -- the SAME
+   * code path already used to apply real damage -- at the point of resolution, NOT here at
+   * fire time. Both fields start at their unresolved defaults (-1 / null) and only a weapon
+   * that resolves synchronously within the SAME tick it fires (the Laser Rifle's hitscan,
+   * and the Chaingun's Tracer, stepped immediately in spawnFromEvent) ever gets them
+   * updated before world.lastFireEvents is read back out. A weapon that instead spawns a
+   * traveling projectile resolved on a LATER tick (Spinfusor, Mortar, a thrown grenade)
+   * leaves them at these defaults for the tick recorded in lastFireEvents -- by design, not
+   * a bug; those don't need the same-tick broadcast-immediacy this exists for.
+   *
+   * hitPlayerId is -1 when that resolution found no player (a clean miss, or a terrain
+   * hit) -- hitPoint stays null in that same case and is only ever set alongside a real
+   * hitPlayerId, to the exact point of contact. This exists so server/net.ts's own separate
+   * hit-test for the laser-beam broadcast (findLaserHit, which doesn't account for terrain
+   * occlusion and can disagree with the damage the sim actually applied) can be replaced by
+   * reading this already-authoritative result instead. Codex review round 3, finding 4.
+   */
+  hitPlayerId: number;
+  hitPoint: Vec3 | null;
 }
 
 /**
@@ -300,6 +336,8 @@ function tryFireWeapon(world: World, id: number, input: PlayerInput): void {
     direction: fireDirection(input.yaw, input.pitch),
     shooterVelocity: shooterVelocity(world, id),
     energyScale,
+    hitPlayerId: -1,
+    hitPoint: null,
   });
 }
 
@@ -317,6 +355,8 @@ function tryThrowGrenade(world: World, id: number, input: PlayerInput): void {
     direction: fireDirection(input.yaw, input.pitch),
     shooterVelocity: shooterVelocity(world, id),
     energyScale: 1,
+    hitPlayerId: -1,
+    hitPoint: null,
   });
 }
 
@@ -365,6 +405,15 @@ function applyPendingAmmoRefunds(world: World): void {
   world.pendingAmmoRefunds = [];
 }
 
+/**
+ * Falls back to an idle input for an active player missing from `inputs`, the same way
+ * stepPlayers (movement.ts) already does for movement -- a tick with no input entry for a
+ * connected player (a dropped packet, not a disconnect) still has to advance that player's
+ * reload/spin-up/grenade-cooldown timers, not freeze them. Skipping the player outright (this
+ * used to) left a weapon stuck in Firing/Reload forever the instant one tick's input went
+ * missing, since nothing ever called advanceTimer for it again. Codex review round 3,
+ * finding 2.
+ */
 export function stepWeapons(
   world: World,
   inputs: ReadonlyMap<number, PlayerInput>,
@@ -374,8 +423,8 @@ export function stepWeapons(
   world.pendingFireEvents = [];
   for (let id = 0; id < world.players.count; id += 1) {
     if (!world.players.active[id] || !world.players.alive[id]) continue;
-    const input = inputs.get(id);
-    if (input) stepOnePlayer(world, id, input, dt);
+    const input = inputs.get(id) ?? IDLE_INPUT;
+    stepOnePlayer(world, id, input, dt);
   }
 }
 

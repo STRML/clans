@@ -103,6 +103,30 @@ describe('stepWeapons: Spinfusor timing (fire 1.25 s, reload 0.5 s)', () => {
   });
 });
 
+describe('stepWeapons: idle fallback for a tick with no input entry at all (Codex review round 3, finding 2)', () => {
+  it('keeps the reload timer advancing through Firing and Reload even when inputs has no entry for the player', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    fireOnce(world, id, WeaponId.Spinfusor);
+    expect(world.players.weaponState[id]).toBe(WeaponState.Firing);
+    // stepPlayers (movement.ts) already falls back to an idle input for an active player
+    // missing from the map; stepWeapons used to just skip the player outright instead,
+    // freezing weaponTimer/weaponState solid for as long as a tick's input entry was
+    // missing. An empty map -- not even an idle entry -- for the full 1.75 s firing+reload
+    // cycle below reproduces that.
+    for (let tick = 0; tick < ticksFor(1.25) - 1; tick += 1) {
+      stepWeapons(world, new Map(), FIXED_DT);
+    }
+    expect(world.players.weaponState[id]).toBe(WeaponState.Reload);
+    for (let tick = 0; tick < ticksFor(0.5) - 1; tick += 1) {
+      stepWeapons(world, new Map(), FIXED_DT);
+    }
+    expect(world.players.weaponState[id]).toBe(WeaponState.Ready);
+    stepWeapons(world, new Map([[id, { ...IDLE, fire: true }]]), FIXED_DT);
+    expect(world.pendingFireEvents).toHaveLength(1);
+  });
+});
+
 describe('stepWeapons: Chaingun spin-up (0.5 s once, then 0.15 s per shot while held)', () => {
   it('the first shot of a burst costs spinUp + fireTime; a held burst then costs only fireTime', () => {
     const world = createWorld(flat, 1);

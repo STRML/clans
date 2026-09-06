@@ -34,6 +34,11 @@ export interface PlayerStore {
   wasJumpHeld: Uint8Array;
   landingSpeed: Float64Array;
   damage: Float64Array;
+  /** 1 while the player is invulnerable (server admin toggle). Checked at the top of
+   *  applyDamage, before any damage/death/score/flag-drop side effect can happen -- see
+   *  that function's comment for why this has to live in the sim rather than be zeroed
+   *  reactively after the fact by the server. */
+  godMode: Uint8Array;
   alive: Uint8Array;
   respawnAt: Float64Array;
   score: Int16Array;

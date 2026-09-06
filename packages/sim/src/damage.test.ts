@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { LIGHT_ARMOR } from './armor.js';
-import { addPlayer, createWorld, stepWorld, type Heightfield, type PlayerInput } from './index.js';
+import {
+  addPlayer,
+  createWorld,
+  setGodMode,
+  stepWorld,
+  type Heightfield,
+  type PlayerInput,
+} from './index.js';
 import {
   applyDamage,
   applyFallDamage,
@@ -12,6 +19,7 @@ import {
   respawnPlayer,
   RESPAWN_TICKS,
 } from './damage.js';
+import { createFlags, FlagState, stepFlags } from './flags.js';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -91,6 +99,42 @@ describe('applyDamage and death', () => {
     const damageBefore = world.players.damage[id];
     applyDamage(world, id, 0.5, -1, LIGHT_ARMOR);
     expect(world.players.damage[id]).toBe(damageBefore);
+  });
+});
+
+describe('godMode (Codex review round 3, finding 1)', () => {
+  it('applyDamage no-ops while godMode is set, the same way it already no-ops for an inactive or dead player', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    setGodMode(world, id, true);
+    applyDamage(world, id, LIGHT_ARMOR.maxDamage, -1, LIGHT_ARMOR);
+    expect(world.players.damage[id]).toBe(0);
+    expect(world.players.alive[id]).toBe(1);
+    expect(world.pendingDeaths).toEqual([]);
+  });
+
+  it('turning godMode back off lets damage apply again', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    setGodMode(world, id, true);
+    setGodMode(world, id, false);
+    applyDamage(world, id, LIGHT_ARMOR.maxDamage, -1, LIGHT_ARMOR);
+    expect(world.players.alive[id]).toBe(0);
+  });
+
+  it('a flag carrier in god mode keeps the flag and the attacker keeps no score for lethal damage -- the reactive post-hoc zeroing this replaces ran too late to stop the flag drop and score event stepWorld already produced in the same call', () => {
+    const world = createWorld(flat, 1);
+    const carrier = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const attacker = addPlayer(world, { x: 5, y: 0, z: 5 }, 2);
+    createFlags(world, [{ team: 2, position: { x: 0, y: 0, z: 0 } }]);
+    world.flags.state[0] = FlagState.Carried;
+    world.flags.carrierId[0] = carrier;
+    setGodMode(world, carrier, true);
+    applyDamage(world, carrier, LIGHT_ARMOR.maxDamage, attacker, LIGHT_ARMOR);
+    stepFlags(world, 32 / 1000); // this is what drops a carried flag on a pending death
+    expect(world.flags.state[0]).toBe(FlagState.Carried);
+    expect(world.flags.carrierId[0]).toBe(carrier);
+    expect(world.players.score[attacker]).toBe(0);
   });
 });
 

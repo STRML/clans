@@ -26,6 +26,8 @@ function fire(world: ReturnType<typeof createWorld>, event: Partial<FireEvent>):
       direction: { x: 0, y: 0, z: 1 },
       shooterVelocity: { x: 0, y: 0, z: 0 },
       energyScale: 1,
+      hitPlayerId: -1,
+      hitPoint: null,
       ...event,
     },
   ];
@@ -341,5 +343,139 @@ describe('grenade altFire', () => {
     const id = firstProjectile(world);
     expect(world.projectiles.type[id]).toBe(2); // ProjectileType.Grenade
     expect(world.projectiles.velocity[id * 3 + 2]).toBeCloseTo(25 + 10); // direction.z=1 * speed(25) + shooterVelocity.z(10) * velInherit(1)
+  });
+});
+
+describe('detonation point: a direct hit resolves at the actual point of contact, not the swept segment endpoint (Codex review round 3, finding 3)', () => {
+  it('a disc that overshoots the target by tens of meters in one tick still splashes it, because the explosion happens where the hit occurred, not where the disc ended up', () => {
+    const world = createWorld(flat, 1);
+    // Target's hitbox center sits at y = position.y + height/2 = 0 + 1.15; the disc travels
+    // at that same height so the ray-sphere test lines up through the hitbox center.
+    const target = addPlayer(world, { x: 0, y: 0, z: 50 });
+    fire(world, {
+      playerId: -1,
+      origin: { x: 0, y: 1.15, z: 0 },
+      direction: { x: 0, y: 0, z: 1 },
+    });
+    stepProjectiles(world, FIXED_DT); // spawn only
+    const id = firstProjectile(world);
+    // One tick's travel of 96 m: the segment crosses the target around z=49.4, but its raw
+    // endpoint (z=96) sits 46 m past it -- well outside the Spinfusor's 7.5 m splash radius.
+    // Resolving at the endpoint (the bug) gives the target zero falloff and zero damage;
+    // resolving at the actual hit point gives it splash damage close to full radius falloff.
+    world.projectiles.position.set([0, 1.15, 0], id * 3);
+    world.projectiles.velocity.set([0, 0, 3000], id * 3);
+    stepProjectiles(world, FIXED_DT);
+    expect(world.players.damage[target]).toBeGreaterThan(0);
+  });
+});
+
+const farWallGrid: Heightfield = {
+  gridSize: 5,
+  squareSize: 40,
+  originX: 0,
+  originY: 0,
+  originZ: 0,
+  heightScale: 1,
+  // Same construction as ridgeGrid above, just scaled up: row 0 is flat until column 1
+  // (x >= 40), where it ramps up toward a 2000 m wall at column 2's corner (x = 80).
+  heights: (() => {
+    const h = new Uint16Array(25);
+    h[2] = 2000;
+    h[3] = 2000;
+    return h;
+  })(),
+};
+
+describe("grenade/mortar detonation: the nearer of terrain or a player wins, at that hit's own point (Codex review round 3, finding 3)", () => {
+  it('detonates on a player crossed early in the sweep instead of at a terrain hit tens of meters further along the same segment', () => {
+    const world = createWorld(farWallGrid, 1);
+    const target = addPlayer(world, { x: 5, y: 0, z: 0 });
+    fire(world, {
+      playerId: -1,
+      isAltFire: true,
+      origin: { x: 0, y: 1.15, z: 0 },
+      direction: { x: 1, y: 0, z: 0 },
+      shooterVelocity: { x: 0, y: 0, z: 0 },
+    });
+    stepProjectiles(world, FIXED_DT); // spawn only
+    const id = firstProjectile(world);
+    world.projectiles.armed[id] = 1; // skip the arm delay -- priority is orthogonal to it
+    // One tick's sweep crosses the player at x=5 tens of meters before it ever reaches the
+    // wall around x=40. The old code always resolved at the terrain point whenever a
+    // terrain hit existed on the segment at all, regardless of which was actually nearer,
+    // so it detonated far outside the player's splash radius and dealt no damage.
+    world.projectiles.position.set([0, 1.15, 0], id * 3);
+    world.projectiles.velocity.set([2000, 0, 0], id * 3);
+    stepProjectiles(world, FIXED_DT);
+    expect(world.players.damage[target]).toBeGreaterThan(0);
+  });
+});
+
+describe('FireEvent.hitPlayerId/hitPoint: the authoritative hit-test records its own result (Codex review round 3, finding 4)', () => {
+  it('a Laser Rifle hit sets hitPlayerId and hitPoint on the event recorded in world.lastFireEvents', () => {
+    const world = createWorld(flat, 1);
+    const target = addPlayer(world, { x: 0, y: 0, z: 10 });
+    fire(world, {
+      playerId: -1,
+      weaponId: WeaponId.LaserRifle,
+      origin: { x: 0, y: 1.6, z: 0 },
+      direction: { x: 0, y: 0, z: 1 },
+      energyScale: 1,
+    });
+    stepProjectiles(world, FIXED_DT);
+    const event = world.lastFireEvents[0];
+    expect(event?.hitPlayerId).toBe(target);
+    // The hit point sits just short of the target's center (z=10), where the ray actually
+    // enters its hit sphere -- not exactly at z=10, and no longer the segment endpoint either.
+    expect(event?.hitPoint?.z).toBeGreaterThan(9);
+    expect(event?.hitPoint?.z).toBeLessThan(10);
+  });
+
+  it('a Laser Rifle miss leaves hitPlayerId at -1 and hitPoint at null', () => {
+    const world = createWorld(flat, 1);
+    fire(world, {
+      playerId: -1,
+      weaponId: WeaponId.LaserRifle,
+      origin: { x: 0, y: 1.6, z: 0 },
+      direction: { x: 0, y: 0, z: 1 },
+      energyScale: 1,
+    });
+    stepProjectiles(world, FIXED_DT);
+    const event = world.lastFireEvents[0];
+    expect(event?.hitPlayerId).toBe(-1);
+    expect(event?.hitPoint).toBeNull();
+  });
+
+  it('a Chaingun hit resolves in the same tick and sets hitPlayerId/hitPoint too, since round 1 made it resolve synchronously', () => {
+    const world = createWorld(flat, 1);
+    const target = addPlayer(world, { x: 0, y: 0, z: 10 });
+    fire(world, {
+      playerId: -1,
+      weaponId: WeaponId.Chaingun,
+      origin: { x: 0, y: 1.6, z: 0 },
+      direction: { x: 0, y: 0, z: 1 },
+    });
+    stepProjectiles(world, FIXED_DT);
+    const event = world.lastFireEvents[0];
+    expect(event?.hitPlayerId).toBe(target);
+    // The hit point sits just short of the target's center (z=10), where the ray actually
+    // enters its hit sphere -- not exactly at z=10, and no longer the segment endpoint either.
+    expect(event?.hitPoint?.z).toBeGreaterThan(9);
+    expect(event?.hitPoint?.z).toBeLessThan(10);
+  });
+
+  it('a Spinfusor shot -- resolved on a later tick, not this one -- leaves hitPlayerId/hitPoint at their unresolved defaults', () => {
+    const world = createWorld(flat, 1);
+    addPlayer(world, { x: 0, y: 0, z: 10 });
+    fire(world, {
+      playerId: -1,
+      origin: { x: 0, y: 1.6, z: 0 },
+      direction: { x: 0, y: 0, z: 1 },
+    });
+    stepProjectiles(world, FIXED_DT); // spawn only: a Linear projectile resolves next tick
+    const event = world.lastFireEvents[0];
+    expect(event?.hitPlayerId).toBe(-1);
+    expect(event?.hitPoint).toBeNull();
   });
 });

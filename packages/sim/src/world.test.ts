@@ -5,6 +5,7 @@ import {
   createWorld,
   nextRandom,
   removePlayer,
+  setGodMode,
   stepWorld,
   type Heightfield,
 } from './index.js';
@@ -82,6 +83,20 @@ describe('fixed world', () => {
     const a = addPlayer(world, { x: 0, y: 0, z: 0 });
     removePlayer(world, a);
     expect(() => removePlayer(world, a)).toThrow(RangeError);
+  });
+
+  it("setGodMode toggles the flag, and a reused id does not inherit the previous occupant's setting", () => {
+    const world = createWorld(terrain, 1);
+    const a = addPlayer(world, { x: 0, y: 0, z: 0 });
+    setGodMode(world, a, true);
+    expect(world.players.godMode[a]).toBe(1);
+    setGodMode(world, a, false);
+    expect(world.players.godMode[a]).toBe(0);
+    setGodMode(world, a, true);
+    removePlayer(world, a);
+    const b = addPlayer(world, { x: 1, y: 0, z: 1 });
+    expect(b).toBe(a);
+    expect(world.players.godMode[b]).toBe(0);
   });
 
   it('drops a pending ammo refund for a removed player so a reused id cannot inherit it (Codex review round 2, finding 7)', () => {

@@ -56,6 +56,7 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
       wasJumpHeld: new Uint8Array(capacity),
       landingSpeed: new Float64Array(capacity),
       damage: new Float64Array(capacity),
+      godMode: new Uint8Array(capacity),
       alive: new Uint8Array(capacity),
       respawnAt: new Float64Array(capacity),
       score: new Int16Array(capacity),
@@ -117,6 +118,9 @@ export function addPlayer(world: World, spawn: Vec3, team = 0): number {
   players.active[id] = 1;
   players.team[id] = team;
   players.damage[id] = 0;
+  // A reused id (see removePlayer's own reused-id comment) must not inherit whatever the
+  // previous occupant's god-mode toggle was left at.
+  players.godMode[id] = 0;
   players.alive[id] = 1;
   players.respawnAt[id] = -1;
   players.score[id] = 0;
@@ -139,6 +143,17 @@ export function removePlayer(world: World, id: number): void {
   // not touch the deeper reused-id identity problem (stale projectile ownerId self-exclusion),
   // which is already tracked separately at github.com/STRML/clans/issues/8.
   world.pendingAmmoRefunds = world.pendingAmmoRefunds.filter((refund) => refund.playerId !== id);
+}
+
+/**
+ * Toggles a player's invulnerability proactively, at the sim level, rather than the reactive
+ * post-hoc approach it replaces (a server-side set that zeroed damage back to full AFTER
+ * stepWorld had already run -- see applyDamage's godMode guard for why that was too late to
+ * stop a flag drop or score event). Server code calling this is the ONLY thing that should
+ * ever flip the flag; the sim itself never sets it on its own.
+ */
+export function setGodMode(world: World, id: number, enabled: boolean): void {
+  world.players.godMode[id] = enabled ? 1 : 0;
 }
 
 export function stepWorld(

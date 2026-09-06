@@ -88,7 +88,13 @@ export function applyDamage(
   armor: ArmorData,
 ): void {
   const players = world.players;
-  if (amount <= 0 || !players.active[id] || !players.alive[id]) return;
+  // God mode has to stop damage here, before anything downstream runs: stepWorld calls
+  // stepPlayers -> stepWeapons -> stepProjectiles -> stepFlags in one synchronous pass (the
+  // sim's Global Constraint -- stepWorld is the only public entry point), so a lethal hit
+  // that reached this far would already have dropped a carried flag and recorded a
+  // kill/score event before any reactive, post-hoc zeroing elsewhere could undo it. Codex
+  // review round 3, finding 1.
+  if (amount <= 0 || !players.active[id] || !players.alive[id] || players.godMode[id]) return;
   players.damage[id] = (players.damage[id] ?? 0) + amount;
   if ((players.damage[id] ?? 0) < armor.maxDamage) return;
   players.alive[id] = 0;
