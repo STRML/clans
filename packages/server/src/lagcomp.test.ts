@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { addPlayer, createWorld, removePlayer, type Heightfield } from '@clans/sim';
+import {
+  addPlayer,
+  createWorld,
+  removePlayer,
+  respawnPlayer,
+  stepWorld,
+  type Heightfield,
+} from '@clans/sim';
 import {
   clearHistory,
   createPositionHistory,
@@ -17,6 +24,23 @@ const flat: Heightfield = {
   originZ: 1000,
   heightScale: 1,
   heights: new Uint16Array(4),
+};
+
+// A 3x3 grid of points (2x2 squares): every corner is 0 except the very last one, so
+// square (col0,row0) -- (x, z) in [0,10] x [10,20] -- is perfectly flat (normal straight
+// up), while square (col1,row1) -- (x, z) in [10,20] x [0,10] -- ramps up to height 90 at
+// its (20, 0) corner. Used to prove a rewound *position* drags a steep, wrong terrain
+// normal into stepWorld's ground-contact physics for a player who never actually left the
+// flat square (Codex PR #9 round 3, P1 finding 1).
+const bumpySquareSize = 10;
+const bumpy: Heightfield = {
+  gridSize: 3,
+  squareSize: bumpySquareSize,
+  originX: 0,
+  originY: 0,
+  originZ: 20,
+  heightScale: 1,
+  heights: Uint16Array.from([0, 0, 0, 0, 0, 0, 0, 0, 90]),
 };
 
 describe('recordHistory and positionAtTick', () => {
@@ -111,5 +135,93 @@ describe('clearHistory', () => {
 
     const sample = positionAtTick(history, newPlayer, world.tick - 1);
     expect(sample?.z).toBe(500); // the old occupant's location, not the new one's
+  });
+});
+
+describe('rewinding a position before stepWorld corrupts everything else it touches (Codex PR #9 round 3, P1 finding 1)', () => {
+  // Both tests share this setup: a player resting exactly on the ground, holding no keys,
+  // once at their TRUE position (flat square, normal straight up) and once at a recorded
+  // HISTORICAL position (the far corner of the sloped square). Idle input makes applyRun a
+  // no-op in both cases, so any velocity change comes only from applyGround's slope-gravity
+  // term -- which depends on nothing but the terrain normal under the player's feet.
+  const truePosition = { x: 1, y: 0, z: 19 }; // deep in the flat square: height 0, normal (0,1,0)
+  const historicalPosition = { x: 19, y: 81, z: 1 }; // deep in the sloped square, on the ramp
+
+  it('documents the bug: stepWorld run against a rewound position leaves a lasting velocity that restoring position afterward never undoes', () => {
+    const world = createWorld(bumpy, 1);
+    const bystander = addPlayer(world, truePosition);
+    const history = createPositionHistory();
+    // This player really was standing at historicalPosition a few ticks ago.
+    history.samples.set(bystander, [{ tick: 0, ...historicalPosition }]);
+
+    // The exact pattern net.ts used to run: rewind first, run the FULL simulation against
+    // the rewound position, restore position afterward -- and nothing else.
+    const handle = rewindOthers(world, history, [], 5);
+    stepWorld(world, new Map());
+    restorePositions(world, handle);
+
+    // Position is back to normal...
+    expect(world.players.position[bystander * 3]).toBeCloseTo(truePosition.x);
+    expect(world.players.position[bystander * 3 + 2]).toBeCloseTo(truePosition.z);
+    // ...but velocity was computed against the sloped terrain at historicalPosition, and
+    // restorePositions has no way to know that needed undoing too: a player who never left
+    // flat ground now carries a slope-induced push that will move them next tick.
+    expect(world.players.velocity[bystander * 3 + 1]).toBeLessThan(-0.1);
+    expect(world.players.velocity[bystander * 3 + 2]).toBeGreaterThan(0.01);
+  });
+
+  it('the fix: stepWorld always runs against the true position, so no rewind can leave this residue', () => {
+    const world = createWorld(bumpy, 1);
+    const bystander = addPlayer(world, truePosition);
+
+    // No rewind before or during stepWorld -- this is what net.ts's runOneTick does now.
+    stepWorld(world, new Map());
+
+    // Flat ground, idle, resting: velocity is untouched, exactly.
+    expect(world.players.velocity[bystander * 3]).toBe(0);
+    expect(world.players.velocity[bystander * 3 + 1]).toBe(0);
+    expect(world.players.velocity[bystander * 3 + 2]).toBe(0);
+  });
+});
+
+describe('clearHistory on respawn (Codex PR #9 round 3, P1 finding 2)', () => {
+  it("drops a respawned player's pre-death trail so a shot arriving right after finds nothing to rewind onto", () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const history = createPositionHistory();
+    // The corpse's trail: this player's position right before dying.
+    for (let step = 0; step < 5; step += 1) {
+      world.players.position.set([0, 0, 500], id * 3);
+      world.tick = step;
+      recordHistory(history, world);
+    }
+    // net.ts's respawnDuePlayers calls respawnPlayer then clearHistory, in that order, for
+    // every id dueForRespawn reports each tick -- reproduced directly here since
+    // respawnDuePlayers itself isn't exported.
+    respawnPlayer(world, id, { x: 0, y: 0, z: 10 }); // the fresh spawn point
+    clearHistory(history, id); // the fix
+
+    world.tick = 6; // shortly after respawn, well within the ~1s history window
+    // No sample recorded yet since the respawn -- a shot arriving now has nothing to
+    // rewind this id onto at all. rewindOthers leaves an untouched (true, current)
+    // position whenever positionAtTick returns null; see its own source.
+    expect(positionAtTick(history, id, world.tick - 1)).toBeNull();
+  });
+
+  it('without clearing on respawn, a shot shortly after respawn still finds the corpse (documents the bug)', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const history = createPositionHistory();
+    for (let step = 0; step < 5; step += 1) {
+      world.players.position.set([0, 0, 500], id * 3);
+      world.tick = step;
+      recordHistory(history, world);
+    }
+    respawnPlayer(world, id, { x: 0, y: 0, z: 10 });
+    // No clearHistory call: reproduces the pre-fix behavior.
+
+    world.tick = 6;
+    const sample = positionAtTick(history, id, world.tick - 1);
+    expect(sample?.z).toBe(500); // the corpse's old position, not the new spawn's
   });
 });

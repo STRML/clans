@@ -8,16 +8,18 @@ import {
   WEAPON_DATA,
   WeaponId,
   addPlayer,
+  applyDamage,
   dueForRespawn,
+  hitTestFireEvent,
   playerHitbox,
-  raySphereDistance,
   removePlayer,
-  resyncCarriedFlagPositions,
   respawnPlayer,
   sampleTerrain,
   serializeActivePlayers,
+  setGodMode,
   stepWorld,
   type FireEvent,
+  type HitResult,
   type PlayerInput,
   type World,
 } from '@clans/sim';
@@ -230,23 +232,27 @@ function handleAck(
   entry.pingMs = now() - sent.sentAt;
 }
 
+/** Toggles a player's invulnerability directly at the sim level, once per God message,
+ * rather than the reactive per-tick approach it replaces (a server-side Set the tick loop
+ * re-applied to every player in it, zeroing damage back to full AFTER stepWorld had already
+ * run -- see `applyDamage`'s godMode guard in `@clans/sim` for why that was too late to stop
+ * a flag drop or score event, and `setGodMode`'s own comment for why the sim itself never
+ * flips this bit on its own). Codex PR #9 round 3: dead weight now that `setGodMode` exists. */
 function handleGod(
+  world: World,
   clients: Map<WebSocket, ClientEntry>,
-  godPlayers: Set<number>,
   socket: WebSocket,
   bytes: Uint8Array,
 ): void {
   const entry = clients.get(socket);
   if (!entry) return;
-  if (decodeGod(bytes).enabled) godPlayers.add(entry.session.playerId);
-  else godPlayers.delete(entry.session.playerId);
+  setGodMode(world, entry.session.playerId, decodeGod(bytes).enabled);
 }
 
 function handleMessage(
   world: World,
   spawns: SceneSpawn[],
   clients: Map<WebSocket, ClientEntry>,
-  godPlayers: Set<number>,
   now: () => number,
   socket: WebSocket,
   bytes: Uint8Array,
@@ -255,7 +261,7 @@ function handleMessage(
   if (type === MessageType.Join) handleJoin(world, spawns, clients, now, socket, bytes);
   else if (type === MessageType.Input) handleInput(clients, socket, bytes);
   else if (type === MessageType.Ack) handleAck(clients, now, socket, bytes);
-  else if (type === MessageType.God) handleGod(clients, godPlayers, socket, bytes);
+  else if (type === MessageType.God) handleGod(world, clients, socket, bytes);
 }
 
 /**
@@ -284,7 +290,6 @@ function dropFlagsCarriedBy(world: World, playerId: number): void {
 function handleClose(
   world: World,
   clients: Map<WebSocket, ClientEntry>,
-  godPlayers: Set<number>,
   history: PositionHistory,
   socket: WebSocket,
 ): void {
@@ -292,7 +297,8 @@ function handleClose(
   if (!entry) return;
   dropFlagsCarriedBy(world, entry.session.playerId);
   removePlayer(world, entry.session.playerId);
-  godPlayers.delete(entry.session.playerId);
+  // God mode lives on world.players.godMode now (setGodMode), and addPlayer already zeroes
+  // that bit for a reused id -- no separate godPlayers Set to clean up here anymore.
   // Codex PR #9 round 2, finding 7: recordHistory only forgets an id once it notices that
   // id is no longer active, on its next call for every currently active player -- an id
   // reused by a new Join before that next tick otherwise still carries the previous
@@ -405,45 +411,17 @@ function buildExtras(world: World): WorldExtras {
   };
 }
 
-function respawnDuePlayers(world: World, spawns: SceneSpawn[]): void {
+/** Clears a respawned id's position history the same way disconnect already does (see
+ * `handleClose`'s own comment): without this, a high-latency shooter firing within the
+ * history window's ~1 s of a respawn could still rewind the fresh spawn back onto wherever
+ * that id's corpse stood before the respawn (Codex PR #9 round 3, P1 finding 2). */
+function respawnDuePlayers(world: World, spawns: SceneSpawn[], history: PositionHistory): void {
   for (const id of dueForRespawn(world)) {
     const team = world.players.team[id] ?? 1;
     const [x, y, z] = spawnPointFor(world.terrain, spawns, team, teamCount(world, team));
     respawnPlayer(world, id, { x, y, z });
+    clearHistory(history, id);
   }
-}
-
-/** God-mode wire mechanism (ours, see the plan's numbers table): zero damage and revive after
- * `stepWorld` runs, rather than threading a flag through the deterministic sim. */
-function applyGodMode(world: World, godPlayers: Set<number>): void {
-  for (const id of godPlayers) {
-    if (!world.players.active[id]) continue;
-    world.players.damage[id] = 0;
-    if (!world.players.alive[id]) {
-      world.players.alive[id] = 1;
-      world.players.respawnAt[id] = -1;
-    }
-  }
-}
-
-function hitscanShooters(world: World, inputs: ReadonlyMap<number, PlayerInput>): number[] {
-  const shooters: number[] = [];
-  for (const [playerId, input] of inputs) {
-    if (!input.fire || !world.players.active[playerId]) continue;
-    if (HITSCAN_WEAPONS.has(world.players.weaponSlot[playerId] as WeaponId))
-      shooters.push(playerId);
-  }
-  return shooters;
-}
-
-/** One global rewind-ms for the whole tick (ours — see the plan's numbers table), not a
- * per-shooter-per-target rewind: the max ping among this tick's hitscan/tracer shooters. */
-function rewindMsForShooters(clients: Map<WebSocket, ClientEntry>, shooterIds: number[]): number {
-  let maxPing = 0;
-  for (const entry of clients.values()) {
-    if (shooterIds.includes(entry.session.playerId)) maxPing = Math.max(maxPing, entry.pingMs);
-  }
-  return Math.min(maxPing, REWIND_CAP_MS);
 }
 
 function killEvents(world: World): EventMessage[] {
@@ -455,29 +433,6 @@ function killEvents(world: World): EventMessage[] {
   }));
 }
 
-/** Redoes the Laser Rifle's own nearest-hit search (Task 3's `resolveHitscan`) purely to
- * report a target id on the wire; the authoritative damage already landed inside `stepWorld`. */
-function findLaserHit(world: World, event: FireEvent): number {
-  const data = WEAPON_DATA[WeaponId.LaserRifle];
-  let nearestId = -1;
-  let nearestDistance = Infinity;
-  for (let playerId = 0; playerId < world.players.count; playerId += 1) {
-    if (
-      !world.players.active[playerId] ||
-      !world.players.alive[playerId] ||
-      playerId === event.playerId
-    )
-      continue;
-    const hitbox = playerHitbox(world, playerId, LIGHT_ARMOR);
-    const distance = raySphereDistance(event.origin, event.direction, hitbox);
-    if (distance !== null && distance <= (data.maxRange ?? 0) && distance < nearestDistance) {
-      nearestId = playerId;
-      nearestDistance = distance;
-    }
-  }
-  return nearestId;
-}
-
 function laserEvents(world: World): EventMessage[] {
   // Codex PR #9 round 2, finding 5: projectiles.ts's stepProjectiles clears
   // pendingFireEvents before stepWorld returns and copies it into lastFireEvents
@@ -485,14 +440,82 @@ function laserEvents(world: World): EventMessage[] {
   // Reading pendingFireEvents here always saw an already-emptied array, so a Laser
   // Rifle shot was simulated (the damage landed) but its LaserFired event never
   // reached any client -- a shot with a hit and no muzzle flash or beam on the wire.
+  //
+  // Codex PR #9 round 3: `b` now reads world.lastFireEvents' own hitPlayerId directly --
+  // the SAME authoritative hit-test that applied the damage (and, when it ran, the same
+  // lag-compensated correction below) -- instead of net.ts redoing an imperfect copy of
+  // that search (the deleted `findLaserHit`) that ignored terrain and ran after the fact.
   return world.lastFireEvents
     .filter((event) => event.weaponId === WeaponId.LaserRifle && !event.isAltFire)
     .map((event) => ({
       type: MessageType.Event as const,
       kind: EventKind.LaserFired,
       a: event.playerId,
-      b: findLaserHit(world, event),
+      b: event.hitPlayerId,
     }));
+}
+
+/** This tick's ping for `playerId`, or 0 if they're not currently connected (a shot credited
+ * to an id whose socket just closed gets no lag compensation, same as any other unconnected
+ * id). Linear over `clients` rather than a dedicated by-id index: a tick has at most a
+ * handful of hitscan/tracer shooters to look up, never every connected client. */
+function pingForPlayer(clients: Map<WebSocket, ClientEntry>, playerId: number): number {
+  for (const entry of clients.values()) {
+    if (entry.session.playerId === playerId) return entry.pingMs;
+  }
+  return 0;
+}
+
+/** The damage a lag-compensated correction hit deals, computed while the target's position
+ * is still substituted with its rewound value (the Laser Rifle's headshot check reads that
+ * position's hitbox). Mirrors `resolveHitscan`'s own head-multiplier math for the Laser
+ * Rifle; the Chaingun's live `resolveImpact` never applies one, so this doesn't either. */
+function correctionDamage(world: World, event: FireEvent, result: HitResult): number {
+  const data = WEAPON_DATA[event.weaponId];
+  if (data.projectile !== null || result.hitPlayerId < 0) return data.directDamage;
+  const hitbox = playerHitbox(world, result.hitPlayerId, LIGHT_ARMOR);
+  const multiplier =
+    result.hitPoint && result.hitPoint.y >= hitbox.headY ? (data.headMultiplier ?? 1) : 1;
+  return data.directDamage * event.energyScale * multiplier;
+}
+
+/**
+ * The architectural fix (Codex PR #9 round 3, all three P1s): `stepWorld` above this already
+ * ran once, completely, against every player's TRUE position -- no rewind, so nothing it
+ * touched (energy, ammo, velocity, fall damage, ...) was ever corrupted, and
+ * `world.lastFireEvents` already carries the live, non-lag-compensated hit-test result for
+ * every same-tick hitscan/tracer shot fired this tick. This function's only job is a narrow,
+ * side-effect-free RECHECK of those specific events: for each one the live sim did NOT
+ * register a hit on, and whose shooter has meaningful ping, substitute (position only --
+ * nothing else) every other active player's position with their recorded value from
+ * `rewindTicks` ago, redo just the hit-test via `@clans/sim`'s `hitTestFireEvent`, and
+ * restore true positions immediately after. A hit this recheck finds that the live
+ * simulation didn't is applied directly via `applyDamage` as a legitimate server-side
+ * correction; a hit the live simulation already registered is never revisited or undone --
+ * lag compensation is only ever generous to the shooter (P1 finding 3: eligibility here is
+ * driven by `world.lastFireEvents`, i.e. a shot with real game effect, never raw
+ * `input.fire`, which used to trigger a rewind on every held-trigger tick regardless of
+ * reload/ammo/death state).
+ */
+function applyLagCompensatedHits(
+  world: World,
+  clients: Map<WebSocket, ClientEntry>,
+  history: PositionHistory,
+): void {
+  for (const event of world.lastFireEvents) {
+    if (!HITSCAN_WEAPONS.has(event.weaponId) || event.hitPlayerId !== -1) continue;
+    const pingMs = pingForPlayer(clients, event.playerId);
+    const rewindTicks = Math.round(Math.min(pingMs, REWIND_CAP_MS) / FIXED_TICK_MS);
+    if (rewindTicks <= 0) continue;
+    const handle = rewindOthers(world, history, [event.playerId], rewindTicks);
+    const result = hitTestFireEvent(world, event, FIXED_DT);
+    const damage = correctionDamage(world, event, result);
+    restorePositions(world, handle);
+    if (result.hitPlayerId < 0) continue;
+    event.hitPlayerId = result.hitPlayerId;
+    event.hitPoint = result.hitPoint;
+    applyDamage(world, result.hitPlayerId, damage, event.playerId, LIGHT_ARMOR);
+  }
 }
 
 function snapshotFlags(world: World): FlagSnapshotForDiff[] {
@@ -575,7 +598,6 @@ export function startNetServer(options: NetServerOptions): NetServer {
     console.error('[clans-server] websocket server error:', error);
   });
   const clients = new Map<WebSocket, ClientEntry>();
-  const godPlayers = new Set<number>();
   const history = createPositionHistory();
   const now = options.now ?? (() => Date.now());
   let nextSnapshotId = 1;
@@ -593,7 +615,6 @@ export function startNetServer(options: NetServerOptions): NetServer {
           options.world,
           options.spawns,
           clients,
-          godPlayers,
           now,
           socket,
           new Uint8Array(data as Uint8Array),
@@ -607,7 +628,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
     });
     socket.on('close', () => {
       clearTimeout(joinTimeout);
-      handleClose(options.world, clients, godPlayers, history, socket);
+      handleClose(options.world, clients, history, socket);
     });
     // A malformed frame at the WebSocket protocol level itself (an invalid raw frame,
     // e.g. an unmasked client frame) fires 'error' on the socket before 'message' ever
@@ -616,7 +637,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
     // the process; this absorbs it the same way the server-level handler below does.
     socket.on('error', () => {
       clearTimeout(joinTimeout);
-      handleClose(options.world, clients, godPlayers, history, socket);
+      handleClose(options.world, clients, history, socket);
     });
   });
 
@@ -649,26 +670,15 @@ export function startNetServer(options: NetServerOptions): NetServer {
 
   function runOneTick(inputs: Map<number, PlayerInput>): void {
     recordHistory(history, options.world);
-    const shooters = hitscanShooters(options.world, inputs);
-    const rewindTicks =
-      shooters.length > 0 ? Math.round(rewindMsForShooters(clients, shooters) / FIXED_TICK_MS) : 0;
-    const rewindHandle =
-      rewindTicks > 0 ? rewindOthers(options.world, history, shooters, rewindTicks) : null;
     const flagsBefore = snapshotFlags(options.world);
 
+    // stepWorld always runs against every player's TRUE position now -- see
+    // applyLagCompensatedHits's own comment for why. Its own hit-test result on
+    // world.lastFireEvents is therefore already fully correct and uncorrupted; lag
+    // compensation is a narrow recheck layered on AFTER, never a substitution before.
     stepWorld(options.world, inputs);
-    if (rewindHandle) {
-      restorePositions(options.world, rewindHandle);
-      // Codex PR #9 round 2, finding 2: stepFlags already synced each carried flag's
-      // position to its carrier's CURRENT player position this tick, but for a
-      // just-rewound carrier "current" meant their historical, rewound position, not
-      // their true one. restorePositions only fixes player positions back up -- redoing
-      // the flag sync now, against those corrected positions, keeps a stale rewound
-      // position from surviving into this tick's outgoing snapshot.
-      resyncCarriedFlagPositions(options.world);
-    }
-    respawnDuePlayers(options.world, options.spawns);
-    applyGodMode(options.world, godPlayers);
+    respawnDuePlayers(options.world, options.spawns, history);
+    applyLagCompensatedHits(options.world, clients, history);
 
     for (const event of killEvents(options.world)) broadcastEvent(clients, event);
     for (const event of flagEvents(options.world, flagsBefore)) broadcastEvent(clients, event);

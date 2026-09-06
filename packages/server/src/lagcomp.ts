@@ -36,6 +36,14 @@ export function recordHistory(history: PositionHistory, world: World): void {
       history.samples.delete(id);
       continue;
     }
+    // A dead player doesn't move, so recording their frozen position here would just pad
+    // the history with "corpse" samples. Left unfiltered, those corpse samples are still
+    // within the ~1 s window by the time the id respawns, and a high-latency shooter firing
+    // shortly after could rewind the new spawn back onto them (Codex PR #9 round 3, P1
+    // finding 2). net.ts's respawnDuePlayers also calls clearHistory on respawn so no
+    // pre-death sample -- corpse or otherwise -- survives into the new life at all; this
+    // stops new ones from accumulating in the first place.
+    if (!world.players.alive[id]) continue;
     const base = id * 3;
     const list = history.samples.get(id) ?? [];
     list.push({
@@ -71,8 +79,12 @@ export interface RewindHandle {
 
 /**
  * Moves every active player except `excludeIds` back to its recorded position
- * `rewindTicks` ago, for this tick's hit resolution. `restorePositions` must run right
- * after `stepWorld`, in the same tick — see the note there for what this costs.
+ * `rewindTicks` ago. Callers use this for a narrow, position-only recheck of a single
+ * already-resolved fire event's hit-test AFTER `stepWorld` has already run to completion
+ * against everyone's true position -- never to substitute positions before or during
+ * `stepWorld` itself, which is what corrupted unrelated player state (energy, ammo,
+ * velocity, ...) in the design this replaced (Codex PR #9 round 3, P1 finding 1).
+ * `restorePositions` must run immediately after the recheck, in the same tick.
  */
 export function rewindOthers(
   world: World,
@@ -98,12 +110,10 @@ export function rewindOthers(
 }
 
 /**
- * Restores the true position `rewindOthers` saved. A rewound player does not advance this
- * tick — the movement `stepWorld` computed for them from the borrowed position is discarded
- * along with it. This is a known one-tick freeze for whichever players a hitscan/tracer shot
- * rewound that tick; it is invisible client-side because the server position is authoritative
- * and the very next tick moves them normally again. Accepted for this milestone, same spirit
- * as Task 3's tunneling note.
+ * Restores the true position `rewindOthers` saved. Because the substitution now only ever
+ * brackets a narrow, side-effect-free hit-test recheck run after `stepWorld` has already
+ * completed against true positions, nothing else needs restoring and no tick is lost: the
+ * player already moved normally this tick before their position was ever borrowed.
  */
 export function restorePositions(world: World, handle: RewindHandle): void {
   for (const entry of handle.saved) {

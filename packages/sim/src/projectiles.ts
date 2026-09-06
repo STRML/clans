@@ -232,10 +232,15 @@ function explode(
  *  Returns the distance alongside the id so stepLinearOrTracer can compare it against a
  *  terrain hit on the same segment (Codex review round 2, finding 1): resolving this before
  *  checking terrain let a shot that crossed a ridge first still detonate on a player standing
- *  on the far side, instead of stopping at the ridge it should have hit first. */
-function findDirectHit(
+ *  on the far side, instead of stopping at the ridge it should have hit first.
+ *
+ *  Takes `ownerId` directly rather than a live projectile's id so `hitTestTracer`'s
+ *  side-effect-free recheck can run this exact same search against a hypothetical
+ *  (event-described, not-yet-spawned) segment, with no projectile store entry to read an
+ *  ownerId back out of; `findDirectHit` below is the live-projectile wrapper over this. */
+function findDirectHitFrom(
   world: World,
-  id: number,
+  ownerId: number,
   previous: Vec3,
   current: Vec3,
 ): { playerId: number; distance: number } | null {
@@ -244,7 +249,6 @@ function findDirectHit(
     dz = current.z - previous.z;
   const length = Math.hypot(dx, dy, dz) || 1;
   const direction = { x: dx / length, y: dy / length, z: dz / length };
-  const ownerId = world.projectiles.ownerId[id] ?? -1;
   let nearest: { playerId: number; distance: number } | null = null;
   for (let playerId = 0; playerId < world.players.count; playerId += 1) {
     if (!isValidTarget(world, playerId, ownerId)) continue;
@@ -255,6 +259,15 @@ function findDirectHit(
     nearest = { playerId, distance };
   }
   return nearest;
+}
+
+function findDirectHit(
+  world: World,
+  id: number,
+  previous: Vec3,
+  current: Vec3,
+): { playerId: number; distance: number } | null {
+  return findDirectHitFrom(world, world.projectiles.ownerId[id] ?? -1, previous, current);
 }
 
 /** Distance to hitbox contact this tick: 0 if `current` already overlaps it, else the swept
@@ -376,8 +389,9 @@ function expireOneTick(store: ProjectileStore, id: number, lifetimeSeconds: numb
 
 /** The authoritative hit-test's own result for one tick of a synchronously-resolving
  *  projectile -- see FireEvent's hitPlayerId/hitPoint for why this exists and what the
- *  no-hit defaults mean. */
-interface HitResult {
+ *  no-hit defaults mean. Exported so `hitTestFireEvent`'s callers (server/net.ts's narrow
+ *  lag-compensation recheck) can type its result without reaching into this file's internals. */
+export interface HitResult {
   hitPlayerId: number;
   hitPoint: Vec3 | null;
 }
@@ -550,6 +564,69 @@ function resolveHitscan(world: World, event: FireEvent, data: WeaponData): void 
   // broadcast (Codex review round 3, finding 4).
   event.hitPlayerId = nearest.playerId;
   event.hitPoint = hitPoint;
+}
+
+/** `hitTestFireEvent`'s Laser Rifle case: identical search to `resolveHitscan`'s own, minus
+ *  applying damage or mutating `event` -- this is the whole point of the split, see
+ *  `hitTestFireEvent`'s own doc comment. */
+function hitTestHitscan(world: World, event: FireEvent, data: WeaponData): HitResult {
+  const nearest = nearestHitscanTarget(world, event, data.maxRange ?? 0);
+  if (!nearest) return NO_HIT;
+  return {
+    hitPlayerId: nearest.playerId,
+    hitPoint: {
+      x: event.origin.x + event.direction.x * nearest.distance,
+      y: event.origin.y + event.direction.y * nearest.distance,
+      z: event.origin.z + event.direction.z * nearest.distance,
+    },
+  };
+}
+
+/** `hitTestFireEvent`'s Chaingun case: rebuilds the exact one-tick travel segment
+ *  `spawnFromEvent`'s immediate `stepLinearOrTracer` call resolves a live Tracer against
+ *  (same `velocityFor` inputs, same `dt`), then redoes just that segment's terrain-vs-player
+ *  hit-test -- terrain wins ties, matching `stepLinearOrTracer` -- without ever spawning a
+ *  projectile or applying damage. */
+function hitTestTracer(world: World, event: FireEvent, data: WeaponData, dt: number): HitResult {
+  const velocity = velocityFor(event.direction, data.speed, event.shooterVelocity, data.velInherit);
+  const current: Vec3 = {
+    x: event.origin.x + velocity.x * dt,
+    y: event.origin.y + velocity.y * dt,
+    z: event.origin.z + velocity.z * dt,
+  };
+  const terrainHit = terrainHitAlongSegment(world.terrain, event.origin, current);
+  const directHit = findDirectHitFrom(world, event.playerId, event.origin, current);
+  if (!directHit || (terrainHit && terrainHit.distance <= directHit.distance)) return NO_HIT;
+  return {
+    hitPlayerId: directHit.playerId,
+    hitPoint: pointAlongSegment(event.origin, current, directHit.distance),
+  };
+}
+
+/**
+ * Non-mutating hit-test for a same-tick-resolving fire event (the Laser Rifle's hitscan, or
+ * the Chaingun's Tracer), re-run against whatever positions currently sit in
+ * `world.players.position`. Applies no damage, spawns no projectile, and never mutates
+ * `event`. Exists so a caller -- server/net.ts's narrow lag-compensation recheck -- can
+ * temporarily substitute a target's rewound position into `world.players.position`, call
+ * this, and restore the true position right after, without re-running any part of
+ * `stepWorld`. This is the design `stepWorld` itself replaced: rewinding positions and
+ * running the FULL simulation against them corrupted everything else that tick's simulation
+ * touched for the rewound player -- energy, ammo, velocity, even fall damage -- because only
+ * position ever got restored afterward (Codex PR #9 round 3, P1 finding 1). This function is
+ * the narrow alternative: it touches nothing but the hit-test itself.
+ *
+ * Any other weapon (a Spinfusor disc, a Mortar shell, a thrown grenade, or an alt-fire) never
+ * resolves within the tick it fires -- see FireEvent's hitPlayerId/hitPoint comment -- so
+ * this always reports no hit for one; there is nothing yet to recheck a lag-compensated
+ * position against.
+ */
+export function hitTestFireEvent(world: World, event: FireEvent, dt: number): HitResult {
+  if (event.isAltFire) return NO_HIT;
+  const data = WEAPON_DATA[event.weaponId];
+  if (data.projectile === null) return hitTestHitscan(world, event, data);
+  if (data.projectile === ProjectileType.Tracer) return hitTestTracer(world, event, data, dt);
+  return NO_HIT;
 }
 
 function spawnFromEvent(world: World, event: FireEvent, dt: number): void {

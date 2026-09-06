@@ -671,6 +671,87 @@ describe('startNetServer', () => {
     lagServer.close();
   });
 
+  it('does not keep rewinding or re-hitting a target merely because fire is held through reload (Codex PR #9 round 3, P1 finding 3)', async () => {
+    // Eligibility for the lag-comp recheck now comes from world.lastFireEvents -- an
+    // actual same-tick hitscan/tracer shot -- not raw input.fire and weapon slot. The old
+    // hitscanShooters checked only those two, so a held trigger rewound (and could
+    // re-correct damage onto) every other player on every tick the button stayed down,
+    // including the ~1 s the Laser Rifle spends in Firing/Reload where tryFireWeapon's own
+    // Ready/NoAmmo gate refuses to produce a second shot at all.
+    let clock = 0;
+    const lagServer = startNetServer({
+      world,
+      spawns,
+      port: TEST_PORT + 7,
+      now: () => clock,
+    });
+    await lagServer.ready;
+    const targetId = addPlayer(world, { x: 0, y: 0, z: 8 }, 2);
+    const shooter = await connect(TEST_PORT + 7);
+    const welcomePromise = receive(shooter);
+    shooter.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    world.players.position.set([0, 0, 0], welcome.playerId * 3);
+
+    const firstPromise = receive(shooter);
+    lagServer.tick(2);
+    const first = decodeSnapshot(await firstPromise, null);
+    clock = 150;
+    shooter.send(encodeAck({ snapshotId: first.snapshotId }));
+    await wait(20);
+
+    const idle: NetInputSample = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    for (let step = 0; step < 5; step += 1) {
+      world.players.position.set([0, 0, 8], targetId * 3);
+      lagServer.tick(3 + step);
+    }
+    world.players.position.set([500, 0, 500], targetId * 3);
+
+    shooter.send(
+      encodeInput({
+        sequence: 1,
+        samples: [
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+        ],
+      }),
+    );
+    await wait(20);
+    lagServer.tick(20); // slot switch only, still Ready, no shot yet
+
+    const fire: NetInputSample = { ...idle, slot: 4, fire: true };
+    shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
+    await wait(20);
+    lagServer.tick(21); // fires: the one legitimate, lag-compensated hit lands
+    const damageAfterFirstShot = world.players.damage[targetId];
+    expect(damageAfterFirstShot).toBeGreaterThan(0);
+
+    // Keep holding the trigger through the Laser Rifle's ~1 s Firing+Reload cycle (fireTime
+    // 0.5 s + reloadTime 0.5 s, ~31 ticks): tryFireWeapon never runs again until the weapon
+    // is back to Ready, so world.lastFireEvents stays empty on every one of these ticks and
+    // the target -- still far from the shot line -- must take no further damage.
+    for (let tick = 22; tick < 30; tick += 1) {
+      shooter.send(encodeInput({ sequence: tick, samples: [fire, fire, fire] }));
+      lagServer.tick(tick);
+    }
+    await wait(20);
+
+    expect(world.players.damage[targetId]).toBe(damageAfterFirstShot);
+    shooter.close();
+    lagServer.close();
+  });
+
   it('resyncs a carried flag to its true position after a lag-comp rewind (Codex PR #9 round 2, finding 2)', async () => {
     // stepFlags already syncs a carried flag's rendered position to its carrier's CURRENT
     // player position every tick, but during the rewind window that "current" position is
