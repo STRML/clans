@@ -429,8 +429,16 @@ function buildExtras(world: World): WorldExtras {
  * history window's ~1 s of a respawn could still rewind the fresh spawn back onto wherever
  * that id's corpse stood before the respawn (Codex PR #9 round 3, P1 finding 2). */
 function respawnDuePlayers(world: World, spawns: SceneSpawn[], history: PositionHistory): void {
+  // Codex review round 16, finding 3: dead players stay `active` (death only clears `alive`),
+  // so teamCount(world, team) reads the same value for every id processed in this same pass --
+  // two teammates due on the same tick both computed index `teamCount - 1` and landed on the
+  // identical spawn point. Track how many respawns this pass has already placed per team and
+  // add that offset, so simultaneous same-team respawns fan out across the team's spawn list
+  // instead of stacking on one point.
+  const respawnedThisPass = new Map<number, number>();
   for (const id of dueForRespawn(world)) {
     const team = world.players.team[id] ?? 1;
+    const alreadyPlaced = respawnedThisPass.get(team) ?? 0;
     // handleJoin picks an initial spawn using the team's count BEFORE that player is added
     // (teamCount is read before addPlayer runs), i.e. a count that never includes the
     // player being placed. dueForRespawn's id is already active (death only clears
@@ -438,9 +446,15 @@ function respawnDuePlayers(world: World, spawns: SceneSpawn[], history: Position
     // -1 restores the same "count of everyone else on the team" convention join uses, so
     // a player's very first respawn picks the same spawn their initial join would have
     // (Codex review round 5, finding 2).
-    const [x, y, z] = spawnPointFor(world.terrain, spawns, team, teamCount(world, team) - 1);
+    const [x, y, z] = spawnPointFor(
+      world.terrain,
+      spawns,
+      team,
+      teamCount(world, team) - 1 + alreadyPlaced,
+    );
     respawnPlayer(world, id, { x, y, z });
     clearHistory(history, id);
+    respawnedThisPass.set(team, alreadyPlaced + 1);
   }
 }
 
@@ -538,7 +552,13 @@ function applyLagCompensatedHits(
     // apply damage from a "shot" that structurally never existed.
     if (!HITSCAN_WEAPONS.has(event.weaponId) || !event.resolved || event.hitPlayerId !== -1)
       continue;
-    const pingMs = pingForPlayer(clients, event.playerId);
+    // Codex review round 16, finding 2: pingMs is measured snapshot-send to ack-receive, a
+    // full round trip -- but what the shooter's screen actually shows is delayed by only the
+    // one-way leg (server-to-client), so the rewind amount must be half the RTT, not the whole
+    // thing. Rewinding by the full RTT overshoots the shooter's real view by ~2x, moving
+    // targets further back than their screen ever showed and both granting hits that were
+    // never earned and (via REWIND_CAP_MS) capping out at half the intended reach.
+    const pingMs = pingForPlayer(clients, event.playerId) / 2;
     const rewindTicks = Math.round(Math.min(pingMs, REWIND_CAP_MS) / FIXED_TICK_MS);
     if (rewindTicks <= 0) continue;
     const handle = rewindOthers(world, history, [event.playerId], rewindTicks);

@@ -632,12 +632,14 @@ describe('startNetServer', () => {
     };
     // Walk the target across the shot line for a few ticks (recorded into lag-comp history),
     // then jump it far away right before the shot — the laggy shooter's screen still shows
-    // it in the old spot.
+    // it in the old spot. Codex review round 16, finding 2: the rewind amount is half the
+    // measured round-trip time (one-way latency), not the whole RTT, so the "still on the
+    // line" history sample the rewind needs to reach must sit within that shorter window —
+    // moved here to right before the firing tick itself, rather than several ticks earlier.
     for (let step = 0; step < 5; step += 1) {
       world.players.position.set([0, 0, 8], targetId * 3);
       lagServer.tick(3 + step);
     }
-    world.players.position.set([500, 0, 500], targetId * 3);
 
     // Slot 4 is the Laser Rifle: the sim's only true same-tick hitscan (WEAPON_DATA's
     // projectile: null resolves inside the same stepWorld call). The Chaingun (slot 2) is
@@ -661,11 +663,12 @@ describe('startNetServer', () => {
     );
     await wait(20);
     lagServer.tick(20); // applies the Laser Rifle slot switch only, still Ready, no shot yet
+    world.players.position.set([500, 0, 500], targetId * 3); // jumps away right before firing
 
     const fire: NetInputSample = { ...idle, slot: 4, fire: true };
     shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
     await wait(20);
-    lagServer.tick(21); // fires with the target rewound ~150ms back onto the shot line
+    lagServer.tick(21); // fires with the target rewound ~75ms (half the 150ms RTT) back onto the shot line
 
     expect(world.players.damage[targetId]).toBeGreaterThan(0);
     shooter.close();
@@ -716,7 +719,6 @@ describe('startNetServer', () => {
       world.players.position.set([0, 0, 8], targetId * 3);
       lagServer.tick(3 + step);
     }
-    world.players.position.set([500, 0, 500], targetId * 3);
 
     shooter.send(
       encodeInput({
@@ -730,6 +732,9 @@ describe('startNetServer', () => {
     );
     await wait(20);
     lagServer.tick(20); // slot switch only, still Ready, no shot yet
+    // Codex review round 16, finding 2: the rewind amount is half the measured RTT (one-way
+    // latency), so the jump-away must happen right before firing, not several ticks earlier.
+    world.players.position.set([500, 0, 500], targetId * 3);
 
     const fire: NetInputSample = { ...idle, slot: 4, fire: true };
     shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
@@ -931,7 +936,6 @@ describe('startNetServer', () => {
       world.players.position.set([0, 0, 8], carrierId * 3);
       lagServer.tick(3 + step);
     }
-    world.players.position.set([500, 0, 500], carrierId * 3);
     // Just under lethal: the recheck's one Laser Rifle hit is what finishes them off.
     world.players.damage[carrierId] = LIGHT_ARMOR.maxDamage - 0.01;
 
@@ -947,6 +951,9 @@ describe('startNetServer', () => {
     );
     await wait(20);
     lagServer.tick(20); // slot switch only, still Ready, no shot yet
+    // Codex review round 16, finding 2: the rewind amount is half the measured RTT (one-way
+    // latency), so the jump-away must happen right before firing, not several ticks earlier.
+    world.players.position.set([500, 0, 500], carrierId * 3);
 
     const fire: NetInputSample = { ...idle, slot: 4, fire: true };
     shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
@@ -1074,7 +1081,6 @@ describe('startNetServer', () => {
       world.players.position.set([0, 0, 8], targetA * 3);
       lagServer.tick(3 + step);
     }
-    world.players.position.set([500, 0, 500], targetA * 3);
 
     shooter.send(
       encodeInput({
@@ -1088,6 +1094,9 @@ describe('startNetServer', () => {
     );
     await wait(20);
     lagServer.tick(20); // slot switch to Chaingun only, still Ready, no shot yet
+    // Codex review round 16, finding 2: the rewind amount is half the measured RTT (one-way
+    // latency), so the jump-away must happen right before firing, not several ticks earlier.
+    world.players.position.set([500, 0, 500], targetA * 3);
 
     const fire: NetInputSample = { ...idle, slot: 2, fire: true };
     shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
@@ -1252,5 +1261,126 @@ describe('startNetServer', () => {
 
     shooter.close();
     lagServer.close();
+  });
+
+  it('rewinds by half the measured round-trip time, not the full RTT (Codex review round 16, finding 2)', async () => {
+    // pingMs is measured snapshot-send to ack-receive -- a full round trip -- but what the
+    // shooter's own screen showed at the moment they fired is delayed by only the one-way
+    // (server-to-client) leg, roughly half of that. Rewinding by the whole RTT looks twice as
+    // far into the past as the shooter's real view justifies.
+    //
+    // Each server.tick() call is exactly one simulation step; recordHistory runs at the START
+    // of that step, so the Nth tick() call (1-indexed) records history tagged with the
+    // pre-increment tick value (N-1). This test makes 8 tick() calls total, keeping the
+    // target on the shot line for calls 1-4 (history ticks 0-3) and off the line from call 5
+    // onward (history ticks 4-7). By the firing call (the 8th), world.tick is 8: an un-halved
+    // 150ms ping rewinds 5 ticks, landing on tick 3 (on the line -- a false hit); a correctly
+    // halved 75ms rewinds 2 ticks, landing on tick 6 (already moved away -- a correct miss).
+    const rttSpawns: SceneSpawn[] = [
+      { name: null, team: 1, position: [0, 0, 0], radius: 5 },
+      { name: null, team: 2, position: [0, 0, 8], radius: 5 },
+    ];
+    let clock = 0;
+    const rttWorld = createWorld(terrain, 1, 8);
+    const rttServer = startNetServer({
+      world: rttWorld,
+      spawns: rttSpawns,
+      port: TEST_PORT + 13,
+      now: () => clock,
+    });
+    await rttServer.ready;
+    const targetId = addPlayer(rttWorld, { x: 0, y: 0, z: 8 }, 2); // on the shot line by default
+
+    const shooter = await connect(TEST_PORT + 13);
+    const welcomePromise = receive(shooter);
+    shooter.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    rttWorld.players.position.set([0, 0, 0], welcome.playerId * 3);
+
+    // Call 1: establish a 150ms measured RTT (send a snapshot, ack it 150ms later).
+    // Records history@0 = on the line (the target's default position).
+    const firstPromise = receive(shooter);
+    rttServer.tick(2);
+    const first = decodeSnapshot(await firstPromise, null);
+    clock = 150;
+    shooter.send(encodeAck({ snapshotId: first.snapshotId }));
+    await wait(20);
+
+    const idle: NetInputSample = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    rttServer.tick(3); // call 2: history@1 = on the line
+    rttServer.tick(4); // call 3: history@2 = on the line
+    rttServer.tick(5); // call 4: history@3 = on the line
+    rttWorld.players.position.set([500, 0, 500], targetId * 3); // moves away
+    rttServer.tick(6); // call 5: history@4 = moved away
+    rttServer.tick(7); // call 6: history@5 = moved away
+
+    shooter.send(
+      encodeInput({
+        sequence: 1,
+        samples: [
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+        ],
+      }),
+    );
+    await wait(20);
+    rttServer.tick(20); // call 7: history@6 = moved away; applies the Laser Rifle slot switch
+
+    const fire: NetInputSample = { ...idle, slot: 4, fire: true };
+    shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
+    await wait(20);
+    rttServer.tick(21); // call 8: fires -- live miss; the halved-rewind recheck must also miss
+
+    expect(rttWorld.players.damage[targetId]).toBe(0);
+    shooter.close();
+    rttServer.close();
+  });
+
+  it('assigns simultaneous same-team respawns to different spawn points (Codex review round 16, finding 3)', () => {
+    // Death only clears `alive`, never `active` -- a dead player still counts in
+    // teamCount(world, team) for the rest of this tick's loop. Two teammates due for
+    // respawn on the same tick both computed the same `teamCount(world, team) - 1` index
+    // before this fix, landing on the identical spawn point instead of fanning out across
+    // the team's spawn list.
+    const twoSpawnsPerTeam: SceneSpawn[] = [
+      { name: null, team: 1, position: [0, 0, 0], radius: 5 },
+      { name: null, team: 1, position: [40, 0, 40], radius: 5 },
+    ];
+    const collideWorld = createWorld(terrain, 1, 8);
+    const a = addPlayer(collideWorld, { x: 0, y: 0, z: 0 }, 1);
+    const b = addPlayer(collideWorld, { x: 40, y: 0, z: 40 }, 1);
+    for (const id of [a, b]) {
+      collideWorld.players.alive[id] = 0;
+      collideWorld.players.respawnAt[id] = 0; // both due on the same tick
+    }
+    const collideServer = startNetServer({
+      world: collideWorld,
+      spawns: twoSpawnsPerTeam,
+      port: TEST_PORT + 14,
+    });
+    const baseA = a * 3;
+    const baseB = b * 3;
+    collideServer.tick(1);
+    const posA: [number, number] = [
+      collideWorld.players.position[baseA] ?? 0,
+      collideWorld.players.position[baseA + 2] ?? 0,
+    ];
+    const posB: [number, number] = [
+      collideWorld.players.position[baseB] ?? 0,
+      collideWorld.players.position[baseB + 2] ?? 0,
+    ];
+    expect(posA).not.toEqual(posB);
+    collideServer.close();
   });
 });
