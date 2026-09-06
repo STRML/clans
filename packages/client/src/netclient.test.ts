@@ -220,6 +220,7 @@ describe('NetClient', () => {
       weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
+      respawnSeq: 0,
     };
     const state1 = { ...base, x: 1, z: 0 };
     const state2 = { ...base, x: 2, z: 0 };
@@ -395,6 +396,7 @@ describe('NetClient', () => {
       weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
+      respawnSeq: 0,
     };
     const delta = encodeSnapshot(
       7,
@@ -445,6 +447,7 @@ describe('NetClient', () => {
       weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
+      respawnSeq: 0,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(() =>
@@ -494,6 +497,7 @@ describe('NetClient', () => {
       weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
+      respawnSeq: 0,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
 
@@ -585,6 +589,7 @@ describe('NetClient', () => {
       weaponSlot: 4,
       onGround: 0 as const,
       ski: 0 as const,
+      respawnSeq: 0,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
     expect(client.world.players.wasGrounded[0]).toBe(0);
@@ -700,6 +705,7 @@ describe('NetClient', () => {
       weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
+      respawnSeq: 0,
     };
     const extras: WorldExtras = {
       projectiles: [],
@@ -740,6 +746,7 @@ describe('NetClient', () => {
       ski: 0 as const,
       health: 0.4,
       weaponSlot: 0,
+      respawnSeq: 0,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(client.localHealth).toBeCloseTo(0.4);
@@ -849,13 +856,14 @@ describe('NetClient', () => {
       weaponSlot: WeaponId.Spinfusor,
       onGround: 1 as const,
       ski: 0 as const,
+      respawnSeq: 0,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
     // Ammo/grenades must not be touched by death alone -- only a later respawn resets them.
     expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(0);
 
-    const respawned = { ...dead, health: 60, weaponSlot: WeaponId.Blaster };
+    const respawned = { ...dead, health: 60, weaponSlot: WeaponId.Blaster, respawnSeq: 1 };
     transport.pump([encodeSnapshot(2, 20, 0, [respawned], null, emptyExtras())]);
 
     expect(client.world.players.alive[0]).toBe(1);
@@ -903,6 +911,7 @@ describe('NetClient', () => {
       weaponSlot: WeaponId.Spinfusor,
       onGround: 1 as const,
       ski: 0 as const,
+      respawnSeq: 0,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [alive], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -911,8 +920,69 @@ describe('NetClient', () => {
 
     // The server killed and fully respawned this player entirely between snapshot 1 and
     // this one -- this next snapshot is the only thing the client ever sees of it.
-    const respawned = { ...alive, health: 60, weaponSlot: WeaponId.Blaster };
+    const respawned = { ...alive, health: 60, weaponSlot: WeaponId.Blaster, respawnSeq: 1 };
     transport.pump([encodeSnapshot(2, 20, 0, [respawned], null, emptyExtras())]);
+
+    expect(client.world.players.alive[0]).toBe(1);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Chaingun)]).toBe(100);
+    expect(client.world.players.grenades[0]).toBe(5);
+    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Blaster);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
+    expect(client.world.players.weaponTimer[0]).toBe(0);
+    expect(client.world.players.respawnAt[0]).toBe(-1);
+  });
+
+  it('resets the loadout on a full-health-to-full-health respawn that no health/alive signal can ever detect on its own (Codex review round 8, PR #9)', () => {
+    // Round 7 (the test above) closed the gap where the dead snapshot itself never reaches
+    // the client, by comparing against what the PREVIOUS received snapshot itself reported.
+    // But there is a case even that comparison cannot resolve: if the last snapshot this
+    // client actually received showed the player alive at FULL health, and the player then
+    // died and fully respawned entirely BETWEEN two received snapshots (the dead tick's
+    // snapshot skipped/dropped/coalesced, same as round 7, but this time landing between two
+    // full-health readings), the next snapshot ALSO reports full health and alive --
+    // identical to the previous one. `isAlive` never flips and `reportedHealth > wasHealth`
+    // never fires, because neither field moved at all. From health/alive data alone this is
+    // genuinely indistinguishable from "nothing happened" -- this repro used to pass through
+    // the old detector as a no-op, leaving stale, consumed ammo. Only respawnSeq (Codex review
+    // round 8) can catch it.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 26 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+
+    // Spend every disc and grenade before the baseline snapshot, as the repro describes.
+    client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)] = 0;
+    client.world.players.weaponSlot[0] = WeaponId.Spinfusor;
+    client.world.players.grenades[0] = 0;
+
+    const fullHealth = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60, // full health, alive -- indistinguishable from the post-respawn snapshot below
+      weaponSlot: WeaponId.Spinfusor,
+      onGround: 1 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+    };
+    transport.pump([encodeSnapshot(1, 10, 0, [fullHealth], null, emptyExtras())]);
+    expect(client.world.players.alive[0]).toBe(1);
+    // This baseline snapshot alone (no death observed, health unchanged) must not touch ammo.
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(0);
+
+    // The server killed and fully respawned this player entirely between snapshot 1 and this
+    // one. health and alive read identically to the previous snapshot -- only respawnSeq
+    // moved, which is exactly the scenario neither old signal could ever resolve.
+    const respawnedSameHealth = { ...fullHealth, respawnSeq: 1 };
+    transport.pump([encodeSnapshot(2, 20, 0, [respawnedSameHealth], null, emptyExtras())]);
 
     expect(client.world.players.alive[0]).toBe(1);
     expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
@@ -952,13 +1022,14 @@ describe('NetClient', () => {
       weaponSlot: WeaponId.Blaster,
       onGround: 1 as const,
       ski: 0 as const,
+      respawnSeq: 0,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
 
     // The server respawns this player far from the origin -- a different spot than the
     // join spawn (which defaults to the world origin in this test's client construction).
-    const respawned = { ...dead, x: 500, y: 10, z: 500, health: 60 };
+    const respawned = { ...dead, x: 500, y: 10, z: 500, health: 60, respawnSeq: 1 };
     transport.pump([encodeSnapshot(2, 20, 0, [respawned], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
 
@@ -1013,6 +1084,7 @@ describe('NetClient', () => {
       weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
+      respawnSeq: 0,
     };
     const dead = { ...alive, health: 0 };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);

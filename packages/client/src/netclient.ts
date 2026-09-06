@@ -135,6 +135,12 @@ export class NetClient {
   // a spurious respawn.
   private lastSnapshotAlive = true;
   private lastSnapshotHealth = Number.POSITIVE_INFINITY;
+  // Codex review round 8 (PR #9): what syncRespawnState compares respawnSeq against. Same
+  // "only ever moves on data actually received from the wire" contract as the two fields
+  // above. Initialized to 0 to match a freshly-joined player's sim-side respawnSeq (addPlayer
+  // always starts it at 0), so the very first real snapshot cannot itself read as a spurious
+  // respawn.
+  private lastSnapshotRespawnSeq = 0;
   private readonly lossWindow: number[] = [];
   private readonly bytesWindow: Array<{ at: number; bytes: number }> = [];
   private readonly inputSentAt = new Map<number, number>();
@@ -344,7 +350,7 @@ export class NetClient {
     this.world.players.wasGrounded[LOCAL_SLOT] = serverState.onGround;
     this.world.players.wasJumpHeld[LOCAL_SLOT] = 0;
     this.world.tick = serverTick;
-    this.syncRespawnState(serverState.health);
+    this.syncRespawnState(serverState.health, serverState.respawnSeq);
     this.pendingInputs = this.pendingInputs.filter(
       (pending) => pending.sequence > lastInputSequence,
     );
@@ -393,12 +399,29 @@ export class NetClient {
    * respawn and health only otherwise falls while alive (no regen in this sim), so any
    * health increase over what the previous snapshot reported is itself proof a respawn
    * happened, with or without an observed dead edge in between.
+   *
+   * Codex review round 8 (PR #9): round 7's fix still has one gap neither signal above can
+   * close. If the last snapshot this client actually received showed the player alive at
+   * FULL health, and the player then died and fully respawned entirely BETWEEN two received
+   * snapshots (the dead tick's snapshot skipped/dropped/coalesced, same failure mode as
+   * round 7, but this time landing between two full-health readings), the next snapshot
+   * ALSO reports full health and alive -- identical to the previous one. `isAlive` never
+   * flips (both snapshots say alive) and `reportedHealth > wasHealth` never fires (both say
+   * the same full health), so from health/alive data alone this is genuinely
+   * indistinguishable from "nothing happened." `respawnSeq` (protocol/snapshot.ts, wired
+   * from sim/types.ts's PlayerStore.respawnSeq) is the fix: an explicit counter
+   * damage.ts's respawnPlayer increments on every respawn and nothing else ever touches, so
+   * ANY change from what the previous snapshot reported -- compared with `!==`, not `>`,
+   * since the wire truncates it to a single byte and can wrap -- is unambiguous proof a
+   * respawn happened, independent of what health/alive say. It is authoritative; the
+   * health/alive check stays alongside it as a redundant safety net, not a replacement.
    */
-  private syncRespawnState(reportedHealth: number): void {
+  private syncRespawnState(reportedHealth: number, reportedRespawnSeq: number): void {
     const isAlive = reportedHealth > 0;
     const wasAlive = this.lastSnapshotAlive;
     const wasHealth = this.lastSnapshotHealth;
-    const respawned = isAlive && (!wasAlive || reportedHealth > wasHealth);
+    const respawnSeqChanged = reportedRespawnSeq !== this.lastSnapshotRespawnSeq;
+    const respawned = respawnSeqChanged || (isAlive && (!wasAlive || reportedHealth > wasHealth));
     if (respawned) {
       resetLoadout(this.world, LOCAL_SLOT, LIGHT_ARMOR);
       this.world.players.respawnAt[LOCAL_SLOT] = -1;
@@ -424,6 +447,7 @@ export class NetClient {
     }
     this.lastSnapshotAlive = isAlive;
     this.lastSnapshotHealth = reportedHealth;
+    this.lastSnapshotRespawnSeq = reportedRespawnSeq;
   }
 
   private recordLoss(snapshotId: number): void {

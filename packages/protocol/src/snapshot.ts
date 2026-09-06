@@ -85,7 +85,13 @@ export interface DecodedSnapshot {
 }
 
 const HEADER_BYTES = 1 + 4 + 4 + 4 + 4 + 1; // type, snapshotId, baselineId, tick, lastInputSequence, flags
-const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1; // id, team, 7 f32, energy f32, status byte, health f32, weaponSlot u8
+// id, team, 7 f32, energy f32, status byte, health f32, weaponSlot u8, respawnSeq u8.
+// respawnSeq is a single byte (mod-256 truncation of the sim's Uint16 counter, see
+// sim/types.ts's respawnSeq doc comment) -- a client only ever compares it against what the
+// immediately-previous snapshot IT received reported, so the only way that comparison could
+// miss a change is 256 respawns of the same id landing between two snapshots the client
+// actually got. Not a realistic loss/coalescing scenario at this milestone's scale.
+const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1;
 const PROJECTILE_BYTES = 2 + 1 + 1 + 4 * 6 + 2; // id, type, weaponId, 6 f32 (pos+vel), ownerId
 const FLAG_BYTES = 1 + 1 + 1 + 4 * 3 + 2 + 4; // id, team, state, 3 f32 (pos), carrierId i16, returnInS f32
 const DELTA_FLAG = 1;
@@ -95,6 +101,7 @@ const DIRTY_STATUS = 4;
 const DIRTY_TEAM = 8;
 const DIRTY_HEALTH = 16;
 const DIRTY_WEAPON = 32;
+const DIRTY_RESPAWN = 64;
 const EPSILON = 1e-4;
 
 interface SnapshotHeader {
@@ -153,6 +160,7 @@ function writePlayerFull(cursor: Cursor, data: PlayerSnapshotData): void {
   writeU8(cursor, statusByte(data));
   writeF32(cursor, data.health);
   writeU8(cursor, data.weaponSlot);
+  writeU8(cursor, data.respawnSeq);
 }
 function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const id = readU16(cursor);
@@ -168,6 +176,7 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const flags = readU8(cursor);
   const health = readF32(cursor);
   const weaponSlot = readU8(cursor);
+  const respawnSeq = readU8(cursor);
   assertFinite([x, y, z, vx, vy, vz, yaw, energy, health]);
   return {
     id,
@@ -184,6 +193,7 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
     ski: flags & 2 ? 1 : 0,
     health,
     weaponSlot,
+    respawnSeq,
   };
 }
 
@@ -330,6 +340,12 @@ function healthChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
 function weaponChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
   return a.weaponSlot !== b.weaponSlot;
 }
+// Exact equality, not the EPSILON comparison the float fields above use: respawnSeq is an
+// integer counter, so any difference at all -- including the mod-256 wraparound the wire
+// truncation can produce -- is itself a real change worth sending.
+function respawnSeqChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
+  return a.respawnSeq !== b.respawnSeq;
+}
 function dirtyMask(current: PlayerSnapshotData, previous: PlayerSnapshotData): number {
   let mask = 0;
   if (transformChanged(current, previous)) mask |= DIRTY_TRANSFORM;
@@ -338,6 +354,7 @@ function dirtyMask(current: PlayerSnapshotData, previous: PlayerSnapshotData): n
   if (teamChanged(current, previous)) mask |= DIRTY_TEAM;
   if (healthChanged(current, previous)) mask |= DIRTY_HEALTH;
   if (weaponChanged(current, previous)) mask |= DIRTY_WEAPON;
+  if (respawnSeqChanged(current, previous)) mask |= DIRTY_RESPAWN;
   return mask;
 }
 
@@ -374,6 +391,7 @@ function changedRecordBytes(mask: number): number {
   if (mask & DIRTY_TEAM) bytes += 1;
   if (mask & DIRTY_HEALTH) bytes += 4;
   if (mask & DIRTY_WEAPON) bytes += 1;
+  if (mask & DIRTY_RESPAWN) bytes += 1;
   return bytes;
 }
 function writeChangedTransform(cursor: Cursor, data: PlayerSnapshotData): void {
@@ -394,6 +412,7 @@ function writeChangedPlayer(cursor: Cursor, data: PlayerSnapshotData, mask: numb
   if (mask & DIRTY_TEAM) writeU8(cursor, data.team);
   if (mask & DIRTY_HEALTH) writeF32(cursor, data.health);
   if (mask & DIRTY_WEAPON) writeU8(cursor, data.weaponSlot);
+  if (mask & DIRTY_RESPAWN) writeU8(cursor, data.respawnSeq);
 }
 
 function encodeDeltaSnapshot(
@@ -512,6 +531,7 @@ function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData
   if (mask & DIRTY_TEAM) next.team = readU8(cursor);
   if (mask & DIRTY_HEALTH) readChangedHealth(cursor, next);
   if (mask & DIRTY_WEAPON) next.weaponSlot = readU8(cursor);
+  if (mask & DIRTY_RESPAWN) next.respawnSeq = readU8(cursor);
   byId.set(id, next);
 }
 

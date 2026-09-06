@@ -49,6 +49,18 @@ export interface PlayerStore {
   grenadeCooldown: Float64Array;
   ammo: Int16Array;
   grenades: Uint8Array;
+  /** Increments by 1 every time this player id respawns (damage.ts's respawnPlayer is the
+   *  only writer). A wire-authoritative "a respawn just happened" signal: health/alive
+   *  alone cannot tell a full-health-to-full-health respawn apart from "nothing happened"
+   *  when the dead tick's snapshot never reaches the client (dropped, coalesced, or just
+   *  not sent that cadence) and both the last-seen and the new snapshot report the same
+   *  full health -- neither signal moves, so no heuristic over those two fields alone can
+   *  close it (Codex review round 8, PR #9). Uint16 in the sim itself: a whole 25-minute
+   *  match's worth of respawns for one id never gets remotely close to wrapping. The wire
+   *  format (protocol/snapshot.ts) truncates it to a single byte -- see that file for why
+   *  the narrower width is still safe. Reset to 0 by addPlayer on every join, including a
+   *  reused id; never reset by anything else. */
+  respawnSeq: Uint16Array;
 }
 /** One id freed by `free()`, held out of `freeIds` until it has sat unallocated for at
  *  least PROJECTILE_ID_REUSE_DELAY_TICKS calls to `stepProjectiles` -- see that constant

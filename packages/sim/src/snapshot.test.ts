@@ -5,6 +5,7 @@ import {
   createWorld,
   deserializePlayer,
   removePlayer,
+  respawnPlayer,
   serializeActivePlayers,
   serializePlayer,
   type Heightfield,
@@ -44,6 +45,7 @@ describe('player snapshots', () => {
       weaponSlot: WeaponId.Blaster,
       onGround: 1,
       ski: 0,
+      respawnSeq: 0,
     });
   });
 
@@ -72,6 +74,7 @@ describe('player snapshots', () => {
       weaponSlot: WeaponId.Blaster,
       onGround: 0,
       ski: 1,
+      respawnSeq: 2,
     });
     expect(world.players.count).toBe(4);
     expect(world.players.active[3]).toBe(1);
@@ -90,6 +93,21 @@ describe('player snapshots', () => {
       weaponSlot: WeaponId.Blaster,
       onGround: 0,
       ski: 1,
+      respawnSeq: 2,
     });
+  });
+
+  it('round-trips respawnSeq through serialize/deserialize', () => {
+    const world = createWorld(terrain, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    respawnPlayer(world, id, { x: 1, y: 0, z: 1 });
+    respawnPlayer(world, id, { x: 2, y: 0, z: 2 });
+    expect(world.players.respawnSeq[id]).toBe(2);
+    const data = serializePlayer(world, id);
+    expect(data.respawnSeq).toBe(2);
+
+    const target = createWorld(terrain, 1);
+    deserializePlayer(target, data);
+    expect(target.players.respawnSeq[id]).toBe(2);
   });
 });

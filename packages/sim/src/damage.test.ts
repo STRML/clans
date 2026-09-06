@@ -239,6 +239,21 @@ describe('respawnPlayer and dueForRespawn', () => {
     expect(world.players.position[id * 3 + 1]).toBe(5);
     expect(world.players.position[id * 3 + 2]).toBe(7);
   });
+
+  it('increments respawnSeq on every respawn, starting from 0 (Codex review round 8, PR #9)', () => {
+    // health/alive alone cannot tell a full-health-to-full-health respawn apart from
+    // "nothing happened" when the dead snapshot is skipped -- see netclient.ts's
+    // syncRespawnState. respawnSeq is the explicit counter that closes that gap; it has to
+    // increment on every single call, unconditionally, or a respawn could still go unseen.
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    expect(world.players.respawnSeq[id]).toBe(0);
+    respawnPlayer(world, id, { x: 0, y: 0, z: 0 });
+    expect(world.players.respawnSeq[id]).toBe(1);
+    respawnPlayer(world, id, { x: 0, y: 0, z: 0 });
+    respawnPlayer(world, id, { x: 0, y: 0, z: 0 });
+    expect(world.players.respawnSeq[id]).toBe(3);
+  });
 });
 
 describe('playerHitbox and raySphereDistance', () => {

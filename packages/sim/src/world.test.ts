@@ -99,6 +99,17 @@ describe('fixed world', () => {
     expect(world.players.godMode[b]).toBe(0);
   });
 
+  it("addPlayer starts respawnSeq at 0, and a reused id does not inherit the previous occupant's count (Codex review round 8, PR #9)", () => {
+    const world = createWorld(terrain, 1);
+    const a = addPlayer(world, { x: 0, y: 0, z: 0 });
+    expect(world.players.respawnSeq[a]).toBe(0);
+    world.players.respawnSeq[a] = 5; // simulate several respawns before this player leaves
+    removePlayer(world, a);
+    const b = addPlayer(world, { x: 1, y: 0, z: 1 });
+    expect(b).toBe(a);
+    expect(world.players.respawnSeq[b]).toBe(0);
+  });
+
   it('drops a pending ammo refund for a removed player so a reused id cannot inherit it (Codex review round 2, finding 7)', () => {
     const world = createWorld(terrain, 1);
     const a = addPlayer(world, { x: 0, y: 0, z: 0 });

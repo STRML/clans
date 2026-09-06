@@ -16,9 +16,12 @@ export interface PlayerSnapshotData {
   weaponSlot: number;
   onGround: 0 | 1;
   ski: 0 | 1;
+  /** See PlayerStore.respawnSeq (types.ts) -- the authoritative "a respawn just happened"
+   *  wire signal a client compares against what the previous snapshot reported. */
+  respawnSeq: number;
 }
 
-function num(arr: Float64Array | Uint8Array, i: number): number {
+function num(arr: Float64Array | Uint8Array | Uint16Array, i: number): number {
   return arr[i] ?? 0;
 }
 
@@ -44,6 +47,7 @@ export function serializePlayer(world: World, id: number): PlayerSnapshotData {
     weaponSlot: num(p.weaponSlot, id),
     onGround: bit(p.onGround, id),
     ski: bit(p.ski, id),
+    respawnSeq: num(p.respawnSeq, id),
   };
 }
 
@@ -79,4 +83,5 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   players.weaponSlot[data.id] = data.weaponSlot;
   players.onGround[data.id] = data.onGround;
   players.ski[data.id] = data.ski;
+  players.respawnSeq[data.id] = data.respawnSeq;
 }

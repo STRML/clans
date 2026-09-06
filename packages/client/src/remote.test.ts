@@ -18,6 +18,7 @@ const sample = (x: number, vx: number): PlayerSnapshotData => ({
   weaponSlot: 4,
   onGround: 1,
   ski: 0,
+  respawnSeq: 0,
 });
 
 describe('RemoteBuffer', () => {

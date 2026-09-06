@@ -195,6 +195,45 @@ describe('snapshot codec', () => {
     expect(decoded.gameOverReason).toBe(0);
   });
 
+  it('round-trips respawnSeq through a full snapshot', () => {
+    // Codex review round 8, PR #9: respawnSeq is the authoritative wire signal netclient.ts's
+    // syncRespawnState now relies on to catch a full-health-to-full-health respawn that
+    // health/alive alone cannot detect. If it did not survive the wire, that fix would be a
+    // no-op.
+    const source = createWorld(terrain, 1);
+    const id = addPlayer(source, { x: 0, y: 0, z: 0 }, 1);
+    source.players.respawnSeq[id] = 7;
+    const players = serializeActivePlayers(source);
+    expect(players[0]?.respawnSeq).toBe(7);
+    const bytes = encodeSnapshot(1, source.tick, 0, players, null, emptyExtras());
+    const decoded = decodeSnapshot(bytes, null);
+    expect(decoded.players[0]?.respawnSeq).toBe(7);
+  });
+
+  it('marks only respawnSeq dirty in a delta when nothing else changed, and round-trips it', () => {
+    const source = createWorld(terrain, 1);
+    const id = addPlayer(source, { x: 0, y: 0, z: 0 }, 1);
+    const baselinePlayers = serializeActivePlayers(source);
+    const baselineBytes = encodeSnapshot(1, source.tick, 0, baselinePlayers, null, emptyExtras());
+    const decodedBaseline = decodeSnapshot(baselineBytes, null);
+
+    source.players.respawnSeq[id] = 1; // simulate a respawn; nothing else about this player moved
+    const nextPlayers = serializeActivePlayers(source);
+    const deltaBytes = encodeSnapshot(
+      2,
+      source.tick,
+      0,
+      nextPlayers,
+      { snapshotId: 1, players: baselinePlayers },
+      emptyExtras(),
+    );
+    const decoded = decodeSnapshot(deltaBytes, {
+      snapshotId: 1,
+      players: decodedBaseline.players,
+    });
+    expect(decoded.players.find((p) => p.id === id)?.respawnSeq).toBe(1);
+  });
+
   it('rejects a full snapshot carrying a non-finite transform value', () => {
     // Codex round 2 (PR #4): snapshot floats were accepted with no finiteness check and
     // written straight into prediction state, so a NaN x from a corrupted or adversarial

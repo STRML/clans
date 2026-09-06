@@ -155,6 +155,12 @@ export function respawnPlayer(world: World, id: number, spawn: Vec3): void {
   players.onGround[id] = 0;
   players.wasGrounded[id] = 0;
   players.wasJumpHeld[id] = 0;
+  // Codex review round 8, PR #9: health/alive alone cannot tell a full-health-to-full-health
+  // respawn apart from "nothing happened" when the dead tick's snapshot never reaches a
+  // client. This counter is the explicit, always-correct signal that closes that gap -- see
+  // types.ts's respawnSeq doc comment. A plain typed-array write, not `+= 1`, so it wraps at
+  // 65536 the same way every other Uint16Array field here does rather than overflowing to NaN.
+  players.respawnSeq[id] = (players.respawnSeq[id] ?? 0) + 1;
 }
 
 export function dueForRespawn(world: World): number[] {

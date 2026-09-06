@@ -67,6 +67,7 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
       grenadeCooldown: new Float64Array(capacity),
       ammo: new Int16Array(capacity * WEAPON_COUNT),
       grenades: new Uint8Array(capacity),
+      respawnSeq: new Uint16Array(capacity),
     },
     projectiles: createProjectileStore(),
     pendingDeaths: [],
@@ -119,10 +120,11 @@ export function addPlayer(world: World, spawn: Vec3, team = 0): number {
   players.team[id] = team;
   players.damage[id] = 0;
   // A reused id (see removePlayer's own reused-id comment) must not inherit whatever the
-  // previous occupant's god-mode toggle was left at.
+  // previous occupant's god-mode toggle -- or respawn count -- was left at.
   players.godMode[id] = 0;
   players.alive[id] = 1;
   players.respawnAt[id] = -1;
+  players.respawnSeq[id] = 0;
   players.score[id] = 0;
   resetPlayerToSpawn(world, id, spawn);
   resetLoadout(world, id, LIGHT_ARMOR);
