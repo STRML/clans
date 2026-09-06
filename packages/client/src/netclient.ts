@@ -3,7 +3,9 @@ import {
   createWorld,
   deserializePlayer,
   LIGHT_ARMOR,
+  resetLoadout,
   resetPlayerToSpawn,
+  RESPAWN_TICKS,
   stepWorld,
   type Heightfield,
   type PlayerInput,
@@ -13,6 +15,7 @@ import {
 import {
   MessageType,
   SNAPSHOT_HISTORY_DEPTH,
+  WelcomeStatus,
   decodeEvent,
   decodeSnapshot,
   decodeWelcome,
@@ -55,6 +58,16 @@ export interface RemoteSnapshot {
   tick: number;
   players: Map<number, PlayerSnapshotData>;
 }
+/**
+ * An Event message tagged with a receipt-order sequence number. recentEvents is a rolling
+ * buffer that evicts its oldest entry past EVENT_HISTORY, so a consumer tracking "what's
+ * new since last frame" by array index breaks forever once eviction starts shifting
+ * everything down. seq is assigned once, at receipt, is never reused, and survives
+ * eviction, so "new" is `seq > lastSeenSeq` rather than a position in the live array.
+ */
+export interface TimestampedEvent extends EventMessage {
+  seq: number;
+}
 export interface NetClientStats {
   ping: number;
   bytesPerSecond: number;
@@ -90,7 +103,7 @@ export class NetClient {
   timeRemainingS = 0;
   gameOverReason = 0;
   localHealth = LIGHT_ARMOR.maxDamage;
-  recentEvents: EventMessage[] = [];
+  recentEvents: TimestampedEvent[] = [];
   stats: NetClientStats = {
     ping: 0,
     bytesPerSecond: 0,
@@ -111,6 +124,9 @@ export class NetClient {
   private readonly lossWindow: number[] = [];
   private readonly bytesWindow: Array<{ at: number; bytes: number }> = [];
   private readonly inputSentAt = new Map<number, number>();
+  // Never reset, independent of recentEvents' own eviction: the counter, not the array
+  // position, is what a consumer's "new since last frame" cursor has to survive on.
+  private eventSequence = 0;
 
   constructor(
     private readonly transport: Transport,
@@ -183,12 +199,22 @@ export class NetClient {
   }
 
   private handleEvent(bytes: Uint8Array): void {
-    this.recentEvents.push(decodeEvent(bytes));
+    this.eventSequence += 1;
+    this.recentEvents.push({ ...decodeEvent(bytes), seq: this.eventSequence });
     if (this.recentEvents.length > EVENT_HISTORY) this.recentEvents.shift();
   }
 
   private handleWelcome(bytes: Uint8Array): void {
     const welcome = decodeWelcome(bytes);
+    // A VersionMismatch (or any future non-Ok status) Welcome still names a playerId/team,
+    // but they are not this client's -- the server is refusing the join, not granting it.
+    // Treat it as a failed join through the same mechanism callers already watch
+    // (transport.isOpen(), surfaced via the `connected` getter) rather than inventing a
+    // parallel error channel: leave playerId/team unassigned and close the connection.
+    if (welcome.status !== WelcomeStatus.Ok) {
+      this.transport.close();
+      return;
+    }
     this.playerId = welcome.playerId;
     this.team = welcome.team;
     // The local player is created at (0,0,0) in the constructor, before any Welcome can
@@ -264,6 +290,7 @@ export class NetClient {
   ): void {
     const beforeX = this.world.players.position[0] ?? 0;
     const beforeZ = this.world.players.position[2] ?? 0;
+    const wasAlive = this.world.players.alive[LOCAL_SLOT] === 1;
     deserializePlayer(this.world, { ...serverState, id: LOCAL_SLOT });
     // The wire snapshot has no wasJumpHeld field, and deserializePlayer does not touch
     // spawn/wasGrounded/wasJumpHeld at all, so without this the replay below starts from
@@ -273,6 +300,7 @@ export class NetClient {
     this.world.players.wasGrounded[LOCAL_SLOT] = serverState.onGround;
     this.world.players.wasJumpHeld[LOCAL_SLOT] = 0;
     this.world.tick = serverTick;
+    this.syncRespawnState(wasAlive);
     this.pendingInputs = this.pendingInputs.filter(
       (pending) => pending.sequence > lastInputSequence,
     );
@@ -292,6 +320,28 @@ export class NetClient {
     this.stats.predictionErrorM = 0;
     for (const pending of this.pendingInputs)
       stepWorld(this.world, new Map([[LOCAL_SLOT, pending.input]]));
+  }
+
+  /**
+   * Codex review round 1, finding 1 (PR #9): ammo, grenades, weapon timers, and respawnAt
+   * are not on the wire snapshot, so a real server-side respawn (full ammo again) never
+   * reached this client's own prediction state or the HUD -- it kept dry-firing on
+   * whatever ammo it had at the moment of death, and the HUD countdown read a `respawnAt`
+   * that was never set locally in the first place. Detect the transition from data that
+   * *is* on the wire (the health/alive edge deserializePlayer just wrote) and mirror what
+   * a real respawn does: reset the loadout on the dead-to-alive edge with the same
+   * `resetLoadout` the server's own respawnPlayer wrapper uses (not hand-rolled defaults),
+   * and stamp a local respawnAt on the alive-to-dead edge so hud.ts's countdown has
+   * something real to count down from instead of reading 0 forever.
+   */
+  private syncRespawnState(wasAlive: boolean): void {
+    const isAlive = this.world.players.alive[LOCAL_SLOT] === 1;
+    if (!wasAlive && isAlive) {
+      resetLoadout(this.world, LOCAL_SLOT, LIGHT_ARMOR);
+      this.world.players.respawnAt[LOCAL_SLOT] = -1;
+    } else if (wasAlive && !isAlive) {
+      this.world.players.respawnAt[LOCAL_SLOT] = this.world.tick + RESPAWN_TICKS;
+    }
   }
 
   private recordLoss(snapshotId: number): void {

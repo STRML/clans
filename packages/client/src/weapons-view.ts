@@ -23,6 +23,17 @@ export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.
   return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color }));
 }
 
+// Same convention as remote.ts's disposeMesh and flag-view.ts's disposeFlagGroup: every
+// mesh/line here owns geometry and a material created just for it (createProjectileMesh,
+// createFlash, createLaserBeam), so removing it from the scene alone leaves both
+// allocated -- a match with any sustained weapons fire leaks WebGL resources the garbage
+// collector never reclaims.
+function disposeMesh(target: THREE.Mesh | THREE.Line): void {
+  target.geometry.dispose();
+  const material = Array.isArray(target.material) ? target.material : [target.material];
+  for (const entry of material) entry.dispose();
+}
+
 function pruneProjectileMeshes(
   scene: THREE.Scene,
   meshes: Map<number, THREE.Mesh>,
@@ -31,7 +42,10 @@ function pruneProjectileMeshes(
   for (const id of [...meshes.keys()]) {
     if (liveIds.has(id)) continue;
     const mesh = meshes.get(id);
-    if (mesh) scene.remove(mesh);
+    if (mesh) {
+      scene.remove(mesh);
+      disposeMesh(mesh);
+    }
     meshes.delete(id);
   }
 }
@@ -152,6 +166,12 @@ export function updateEffects(scene: THREE.Scene, effects: Effect[], dtSeconds: 
     effect.ttl -= dtSeconds;
     if (effect.ttl <= 0) {
       scene.remove(effect.mesh);
+      // Effect.mesh is every explosion flash (createFlash: a Mesh) and laser beam
+      // (createLaserBeam: a Line) this module creates -- both own disposable geometry
+      // and material, unlike an arbitrary Object3D.
+      if (effect.mesh instanceof THREE.Mesh || effect.mesh instanceof THREE.Line) {
+        disposeMesh(effect.mesh);
+      }
       effects.splice(i, 1);
     }
   }

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { EventKind, type EventMessage, type ProjectileSnapshotData } from '@clans/protocol';
 import {
   createLaserBeam,
@@ -32,6 +32,27 @@ describe('syncProjectileMeshes', () => {
     expect(meshes.get(1)?.position.x).toBe(5);
     syncProjectileMeshes(scene, meshes, []);
     expect(scene.children).toHaveLength(0);
+  });
+
+  it('disposes a pruned projectile mesh geometry and material instead of leaking them', () => {
+    // Codex review round 1, finding 11 (PR #9): pruning only removed the mesh from the
+    // scene and map; geometry and material created for it (createProjectileMesh) stayed
+    // allocated, unlike the established convention elsewhere (remote.ts's disposeMesh,
+    // flag-view.ts's disposeFlagGroup) -- a match with any sustained weapons fire leaks
+    // WebGL resources the garbage collector never reclaims.
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    syncProjectileMeshes(scene, meshes, [disc(1, 5)]);
+
+    const mesh = meshes.get(1);
+    if (!mesh || Array.isArray(mesh.material)) throw new Error('expected a single-material mesh');
+    const geometryDispose = vi.spyOn(mesh.geometry, 'dispose');
+    const materialDispose = vi.spyOn(mesh.material, 'dispose');
+
+    syncProjectileMeshes(scene, meshes, []);
+
+    expect(geometryDispose).toHaveBeenCalledOnce();
+    expect(materialDispose).toHaveBeenCalledOnce();
   });
 });
 
@@ -96,5 +117,43 @@ describe('updateEffects', () => {
     updateEffects(scene, effects, 0.03);
     expect(effects).toHaveLength(0);
     expect(scene.children).toHaveLength(0);
+  });
+
+  it('disposes an expired laser-beam effect instead of leaking its geometry and material', () => {
+    // Codex review round 1, finding 11 (PR #9): same leak as the projectile mesh case,
+    // for the other removal site in this file -- an expired effect (a laser beam Line, or
+    // an explosion flash Mesh) left the scene but kept its GPU resources allocated.
+    const scene = new THREE.Scene();
+    const mesh = createLaserBeam({ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 });
+    scene.add(mesh);
+    if (Array.isArray(mesh.material)) throw new Error('expected a single-material line');
+    const geometryDispose = vi.spyOn(mesh.geometry, 'dispose');
+    const materialDispose = vi.spyOn(mesh.material, 'dispose');
+
+    const effects: Effect[] = [{ mesh, ttl: 0.01 }];
+    updateEffects(scene, effects, 0.03);
+
+    expect(geometryDispose).toHaveBeenCalledOnce();
+    expect(materialDispose).toHaveBeenCalledOnce();
+  });
+
+  it('disposes an expired explosion-flash effect instead of leaking its geometry and material', () => {
+    const scene = new THREE.Scene();
+    const effects: Effect[] = [];
+    const previous = new Map([[1, disc(1, 5)]]);
+    spawnExplosionsForExpired(scene, effects, previous, []);
+    const flash = effects[0];
+    if (!flash || !(flash.mesh instanceof THREE.Mesh) || Array.isArray(flash.mesh.material)) {
+      throw new Error('expected a single-material flash mesh');
+    }
+    const mesh = flash.mesh;
+    const geometryDispose = vi.spyOn(mesh.geometry, 'dispose');
+    const materialDispose = vi.spyOn(mesh.material, 'dispose');
+
+    flash.ttl = 0.01;
+    updateEffects(scene, effects, 0.03);
+
+    expect(geometryDispose).toHaveBeenCalledOnce();
+    expect(materialDispose).toHaveBeenCalledOnce();
   });
 });

@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   FIXED_DT,
   FIXED_TICK_MS,
+  RESPAWN_TICKS,
+  WeaponId,
+  WeaponState,
   addPlayer,
+  ammoIndex,
   createWorld,
   nextRandom,
   serializeActivePlayers,
@@ -643,8 +647,151 @@ describe('NetClient', () => {
     const client = new NetClient(transport, terrain, { now: () => clock.ms });
     transport.pump([encodeEvent({ kind: EventKind.PlayerKilled, a: 1, b: 2 })]);
     expect(client.recentEvents).toEqual([
-      { type: MessageType.Event, kind: EventKind.PlayerKilled, a: 1, b: 2 },
+      { type: MessageType.Event, kind: EventKind.PlayerKilled, a: 1, b: 2, seq: 1 },
     ]);
+  });
+
+  it('tags each event with a never-reused, ever-increasing sequence number', () => {
+    // Codex review round 1, finding 14 (PR #9): a consumer tracking "new since last
+    // frame" by array index into this rolling buffer breaks once the buffer's own
+    // eviction (past its 100-event cap) shifts everything down. seq is assigned once, at
+    // receipt, and never reused, so it survives eviction where an index cannot.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 17 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    for (let i = 0; i < 105; i += 1) {
+      transport.pump([encodeEvent({ kind: EventKind.PlayerKilled, a: 0, b: i })]);
+    }
+    expect(client.recentEvents).toHaveLength(100);
+    const seqs = client.recentEvents.map((event) => event.seq);
+    expect(seqs[0]).toBe(6); // the first 5 (seq 1..5) were evicted past the 100-event cap
+    expect(seqs.at(-1)).toBe(105);
+    expect(new Set(seqs).size).toBe(100); // every retained seq is unique
+  });
+
+  it('rejects a VersionMismatch Welcome instead of joining as if it had succeeded', () => {
+    // Codex review round 1, finding 13 (PR #9): the handler ignored welcome.status
+    // entirely and always assigned playerId/team, so a version-mismatch rejection from
+    // the server still left the client reporting a live playerId and sending input until
+    // the server eventually timed it out.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 18 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    transport.pump([
+      encodeWelcome({
+        playerId: 5,
+        team: 1,
+        tickMs: FIXED_TICK_MS,
+        status: WelcomeStatus.VersionMismatch,
+        spawnX: 500,
+        spawnY: 10,
+        spawnZ: 500,
+      }),
+    ]);
+    expect(client.playerId).toBe(-1);
+    expect(client.team).toBe(0);
+    // Failed joins are surfaced through the same mechanism callers already watch
+    // (transport.isOpen(), via the `connected` getter) rather than a parallel channel.
+    expect(client.connected).toBe(false);
+  });
+
+  it('accepts an Ok Welcome exactly as before', () => {
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 19 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    transport.pump([
+      encodeWelcome({
+        playerId: 3,
+        team: 2,
+        tickMs: FIXED_TICK_MS,
+        status: WelcomeStatus.Ok,
+        spawnX: 100,
+        spawnY: 5,
+        spawnZ: 100,
+      }),
+    ]);
+    expect(client.playerId).toBe(3);
+    expect(client.team).toBe(2);
+    expect(client.connected).toBe(true);
+  });
+
+  it('resets ammo, grenades, and weapon state on a locally-observed respawn transition', () => {
+    // Codex review round 1, finding 1 (PR #9): ammo/grenades/weaponSlot/weaponState/
+    // weaponTimer are not on the wire snapshot, so a real server-side respawn (a fresh
+    // 15 discs) never reached this client's own prediction state -- it kept predicting
+    // dry-fire from whatever ammo it had at the moment of death.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 20 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+
+    // Spend every disc and grenade before dying, as the repro describes.
+    client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)] = 0;
+    client.world.players.weaponSlot[0] = WeaponId.Spinfusor;
+    client.world.players.grenades[0] = 0;
+
+    const dead = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 0,
+      weaponSlot: WeaponId.Spinfusor,
+      onGround: 1 as const,
+      ski: 0 as const,
+    };
+    transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
+    expect(client.world.players.alive[0]).toBe(0);
+    // Ammo/grenades must not be touched by death alone -- only a later respawn resets them.
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(0);
+
+    const respawned = { ...dead, health: 60, weaponSlot: WeaponId.Blaster };
+    transport.pump([encodeSnapshot(2, 20, 0, [respawned], null, emptyExtras())]);
+
+    expect(client.world.players.alive[0]).toBe(1);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Chaingun)]).toBe(100);
+    expect(client.world.players.grenades[0]).toBe(5);
+    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Blaster);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
+    expect(client.world.players.weaponTimer[0]).toBe(0);
+    expect(client.world.players.respawnAt[0]).toBe(-1);
+  });
+
+  it('sets a local respawnAt on death so the HUD countdown does not read stale/zero time', () => {
+    // Codex review round 1, finding 1 (PR #9): respawnAt is not on the wire snapshot and
+    // the local world never runs a real death for a remotely-inflicted kill, so hud.ts's
+    // countdown read whatever stale value was already there (often 0), showing "0s" for
+    // the entire respawn wait instead of a real countdown.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 21 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    const alive = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60,
+      weaponSlot: 4,
+      onGround: 1 as const,
+      ski: 0 as const,
+    };
+    const dead = { ...alive, health: 0 };
+    transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
+    expect(client.world.players.respawnAt[0]).toBe(10 + RESPAWN_TICKS);
   });
 
   it('sends a God message when setGodMode is called', () => {

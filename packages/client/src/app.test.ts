@@ -9,10 +9,17 @@ import {
   type Heightfield,
   type PlayerSnapshotData,
 } from '@clans/sim';
-import { hudSourceFrom, positionOfPlayer, teleportPlayerToFlag, updateRemotes } from './app.js';
+import { EventKind, MessageType } from '@clans/protocol';
+import {
+  drainNewEvents,
+  hudSourceFrom,
+  positionOfPlayer,
+  teleportPlayerToFlag,
+  updateRemotes,
+} from './app.js';
 import { flagsFromWorld } from './flag-view.js';
 import { RemoteBuffer } from './remote.js';
-import type { NetClient, RemoteSnapshot } from './netclient.js';
+import type { NetClient, RemoteSnapshot, TimestampedEvent } from './netclient.js';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -260,5 +267,48 @@ describe('hudSourceFrom', () => {
     expect(source.winnerTeam).toBe(2);
     expect(source.timeRemainingS).toBe(42);
     expect(source.gameOverReason).toBe(GameOverReason.TimeLimit);
+  });
+});
+
+describe('drainNewEvents', () => {
+  const event = (seq: number): TimestampedEvent => ({
+    type: MessageType.Event,
+    kind: EventKind.PlayerKilled,
+    a: 0,
+    b: seq,
+    seq,
+  });
+
+  it('keeps returning newly arrived events after the rolling buffer evicts old ones', () => {
+    // Codex review round 1, finding 14 (PR #9): netclient.ts's recentEvents evicts its
+    // oldest entry past its own cap, so tracking "new since last frame" via a slice(index)
+    // into that same mutating array desyncs forever once eviction starts -- the index no
+    // longer lines up with any live position, and every later event silently stops
+    // rendering. A seq-based cursor is immune, since seq is assigned once at receipt and
+    // never reused or shifted by eviction.
+    const cursor = { seq: 0 };
+    // A rolling buffer capped at 3, standing in for netclient's real 100-event cap --
+    // the property under test does not depend on the cap's size.
+    let buffer: TimestampedEvent[] = [event(1), event(2), event(3), event(4), event(5)].slice(-3);
+
+    const firstDrain = drainNewEvents(buffer, cursor);
+    expect(firstDrain.map((e) => e.seq)).toEqual([3, 4, 5]);
+
+    buffer = [...buffer, event(6), event(7)].slice(-3);
+    const secondDrain = drainNewEvents(buffer, cursor);
+    expect(secondDrain.map((e) => e.seq)).toEqual([6, 7]);
+  });
+
+  it('returns nothing new when no event has arrived since the last drain', () => {
+    const cursor = { seq: 0 };
+    const buffer = [event(1), event(2)];
+    drainNewEvents(buffer, cursor);
+    expect(drainNewEvents(buffer, cursor)).toEqual([]);
+  });
+
+  it('returns every event on the first drain when the cursor starts at zero', () => {
+    const cursor = { seq: 0 };
+    const buffer = [event(1), event(2), event(3)];
+    expect(drainNewEvents(buffer, cursor).map((e) => e.seq)).toEqual([1, 2, 3]);
   });
 });

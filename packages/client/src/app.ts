@@ -11,13 +11,13 @@ import {
   type PlayerInput,
   type World,
 } from '@clans/sim';
-import type { EventMessage, ProjectileSnapshotData } from '@clans/protocol';
+import type { ProjectileSnapshotData } from '@clans/protocol';
 import { loadKatabatic, type KatabaticAssets } from './assets.js';
 import { flagsFromWorld, syncFlagMeshes } from './flag-view.js';
 import { createHud, type HudSource } from './hud.js';
 import { Input } from './input.js';
 import { advance, type Accumulator } from './loop.js';
-import { NetClient, type RemoteSnapshot } from './netclient.js';
+import { NetClient, type RemoteSnapshot, type TimestampedEvent } from './netclient.js';
 import { RemoteBuffer, syncRemoteMeshes } from './remote.js';
 import { addEnvironment, createTerrain } from './terrain.js';
 import { WebSocketTransport } from './transport.js';
@@ -209,6 +209,25 @@ function applyGodMode(world: World, playerId: number): void {
   }
 }
 
+/**
+ * Exported for a focused unit test. Codex review round 1, finding 14 (PR #9): netclient.ts's
+ * recentEvents is a rolling buffer that evicts its oldest entry past its cap, so tracking
+ * "new since last frame" via a `slice(index)` into that same mutating array breaks forever
+ * once eviction starts -- the index no longer lines up with any live position, and every
+ * event after that point silently stops rendering. TimestampedEvent's `seq` is assigned
+ * once, at receipt, and is never reused or shifted, so comparing against it survives
+ * eviction; the 100-event cap on the buffer itself is unrelated and stays as-is.
+ */
+export function drainNewEvents(
+  events: readonly TimestampedEvent[],
+  cursor: { seq: number },
+): TimestampedEvent[] {
+  const newEvents = events.filter((event) => event.seq > cursor.seq);
+  const newest = events.at(-1);
+  if (newest) cursor.seq = newest.seq;
+  return newEvents;
+}
+
 /** Syncs projectile/flag/laser-beam meshes and the HUD to the latest sim or net state. Pulled
  * out of `frame` to keep its own branching (net vs. single-player, free cam, god mode) under
  * the project's complexity budget. */
@@ -222,7 +241,7 @@ function syncWorldView(
   projectileMeshes: Map<number, THREE.Mesh>,
   previousProjectiles: Map<number, ProjectileSnapshotData>,
   flagMeshes: Map<number, THREE.Group>,
-  seenEventCount: { count: number },
+  seenEventSeq: { seq: number },
   dtSeconds: number,
 ): void {
   const projectiles = net ? net.projectiles : projectilesFromWorld(world);
@@ -233,9 +252,8 @@ function syncWorldView(
 
   syncFlagMeshes(scene, flagMeshes, net ? net.flags : flagsFromWorld(world));
 
-  const allEvents: EventMessage[] = net ? net.recentEvents : [];
-  const newEvents = allEvents.slice(seenEventCount.count);
-  seenEventCount.count = allEvents.length;
+  const allEvents: TimestampedEvent[] = net ? net.recentEvents : [];
+  const newEvents = drainNewEvents(allEvents, seenEventSeq);
   spawnLaserBeams(scene, effects, newEvents, (id) => positionOfPlayer(world, net, id));
   updateEffects(scene, effects, dtSeconds);
 
@@ -454,7 +472,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const previousProjectiles = new Map<number, ProjectileSnapshotData>();
   const flagMeshes = new Map<number, THREE.Group>();
   const effects: Effect[] = [];
-  const seenEventCount = { count: 0 };
+  const seenEventSeq = { seq: 0 };
   const hud = createHud(document.body, hudSourceFrom(world, playerId, net));
 
   const app: App = {
@@ -514,7 +532,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         projectileMeshes,
         previousProjectiles,
         flagMeshes,
-        seenEventCount,
+        seenEventSeq,
         dtSeconds,
       );
 
