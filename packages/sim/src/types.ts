@@ -61,6 +61,14 @@ export interface ProjectileStore {
   expiresAtTick: Float64Array;
   armed: Uint8Array;
 }
+export interface FlagStore {
+  team: Uint8Array;
+  state: Uint8Array;
+  position: Float64Array;
+  standPosition: Float64Array;
+  carrierId: Int16Array;
+  returnAt: Float64Array;
+}
 export interface World {
   tick: number;
   random: RandomState;
@@ -71,4 +79,10 @@ export interface World {
   projectiles: ProjectileStore;
   pendingDeaths: number[];
   pendingFireEvents: import('./weapons.js').FireEvent[];
+  flags: FlagStore;
+  teamScores: Uint16Array;
+  gameOver: boolean;
+  winnerTeam: number;
+  timeLimitTicks: number;
+  gameOverReason: import('./flags.js').GameOverReason;
 }

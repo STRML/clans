@@ -1,4 +1,5 @@
 import { LIGHT_ARMOR } from './armor.js';
+import { GameOverReason, stepFlags, TIME_LIMIT_TICKS } from './flags.js';
 import { stepPlayers } from './movement.js';
 import { createProjectileStore, stepProjectiles } from './projectiles.js';
 import type { Heightfield } from './terrain.js';
@@ -69,6 +70,19 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
     projectiles: createProjectileStore(),
     pendingDeaths: [],
     pendingFireEvents: [],
+    flags: {
+      team: new Uint8Array(0),
+      state: new Uint8Array(0),
+      position: new Float64Array(0),
+      standPosition: new Float64Array(0),
+      carrierId: new Int16Array(0),
+      returnAt: new Float64Array(0),
+    },
+    teamScores: new Uint16Array(3),
+    gameOver: false,
+    winnerTeam: 0,
+    timeLimitTicks: TIME_LIMIT_TICKS,
+    gameOverReason: GameOverReason.CaptureLimit,
   };
 }
 
@@ -128,5 +142,6 @@ export function stepWorld(
   stepPlayers(world, inputs, dt);
   stepWeapons(world, inputs, dt);
   stepProjectiles(world, dt);
+  stepFlags(world, dt);
   world.tick += 1;
 }

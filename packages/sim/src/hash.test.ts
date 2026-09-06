@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   addPlayer,
+  createFlags,
   createWorld,
   deserializePlayer,
+  FlagState,
+  GameOverReason,
   hashWorld,
   serializeActivePlayers,
   type Heightfield,
@@ -50,5 +53,63 @@ describe('hashWorld', () => {
     target.tick = source.tick;
     for (const player of serializeActivePlayers(source)) deserializePlayer(target, player);
     expect(hashWorld(target)).toBe(hashWorld(source));
+  });
+
+  it('changes when a projectile is added', () => {
+    const world = createWorld(terrain, 1);
+    const before = hashWorld(world);
+    world.projectiles.active[0] = 1;
+    world.projectiles.count = 1;
+    world.projectiles.type[0] = 0;
+    world.projectiles.position.set([1, 2, 3], 0);
+    expect(hashWorld(world)).not.toBe(before);
+  });
+
+  it('changes when a flag changes state', () => {
+    const world = createWorld(terrain, 1);
+    createFlags(world, [
+      { team: 1, position: { x: 0, y: 0, z: 0 } },
+      { team: 2, position: { x: 10, y: 0, z: 0 } },
+    ]);
+    const before = hashWorld(world);
+    world.flags.state[0] = FlagState.Dropped;
+    expect(hashWorld(world)).not.toBe(before);
+  });
+
+  it('changes when a team score changes', () => {
+    const world = createWorld(terrain, 1);
+    const before = hashWorld(world);
+    world.teamScores[1] = 100;
+    expect(hashWorld(world)).not.toBe(before);
+  });
+
+  it('changes when the match tick advances', () => {
+    const world = createWorld(terrain, 1);
+    const before = hashWorld(world);
+    world.tick += 1;
+    expect(hashWorld(world)).not.toBe(before);
+  });
+
+  it('changes when the match ends', () => {
+    const world = createWorld(terrain, 1);
+    const before = hashWorld(world);
+    world.gameOver = true;
+    world.winnerTeam = 1;
+    world.gameOverReason = GameOverReason.TimeLimit;
+    expect(hashWorld(world)).not.toBe(before);
+  });
+
+  it('matches for two independently built worlds with identical CTF state', () => {
+    const stands = [
+      { team: 1, position: { x: 0, y: 0, z: 0 } },
+      { team: 2, position: { x: 10, y: 0, z: 0 } },
+    ];
+    const a = createWorld(terrain, 1);
+    createFlags(a, stands, 500);
+    a.teamScores[1] = 300;
+    const b = createWorld(terrain, 2); // different seed, identical CTF state
+    createFlags(b, stands, 500);
+    b.teamScores[1] = 300;
+    expect(hashWorld(a)).toBe(hashWorld(b));
   });
 });

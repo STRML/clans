@@ -6,7 +6,9 @@ const FNV_PRIME = 0x01000193;
  * Folds one number into the running hash. Positions and velocities are rounded to the
  * millimetre before mixing: the wire format quantizes them to f32, and at the map's
  * largest coordinates f32 round trip error stays under 0.001 m, so this rounding survives
- * an encode/decode cycle without changing the hash.
+ * an encode/decode cycle without changing the hash. The same rounding is harmless for the
+ * plain integers mixed below (ids, states, team numbers) -- scaling an exact integer by 1000
+ * is still an exact, deterministic function of it.
  */
 function mix(hash: number, value: number): number {
   // All four bytes of the millimetre integer: positions reach 1024 m (20 bits).
@@ -19,7 +21,7 @@ function mix(hash: number, value: number): number {
   return h;
 }
 
-function num(arr: Float64Array | Uint8Array, i: number): number {
+function num(arr: Float64Array | Uint8Array | Uint16Array | Int16Array, i: number): number {
   return arr[i] ?? 0;
 }
 
@@ -40,13 +42,54 @@ function mixPlayer(hash: number, players: World['players'], id: number): number 
   return h;
 }
 
+function mixProjectiles(hash: number, world: World): number {
+  let h = hash;
+  for (let id = 0; id < world.projectiles.count; id += 1) {
+    if (!world.projectiles.active[id]) continue;
+    const base = id * 3;
+    h = mix(h, id);
+    h = mix(h, num(world.projectiles.type, id));
+    h = mix(h, num(world.projectiles.weaponId, id));
+    h = mix(h, num(world.projectiles.position, base));
+    h = mix(h, num(world.projectiles.position, base + 1));
+    h = mix(h, num(world.projectiles.position, base + 2));
+    h = mix(h, num(world.projectiles.velocity, base));
+    h = mix(h, num(world.projectiles.velocity, base + 1));
+    h = mix(h, num(world.projectiles.velocity, base + 2));
+    h = mix(h, num(world.projectiles.ownerId, id));
+  }
+  return h;
+}
+
+function mixFlags(hash: number, world: World): number {
+  let h = hash;
+  for (let id = 0; id < world.flags.state.length; id += 1) {
+    const base = id * 3;
+    h = mix(h, id);
+    h = mix(h, num(world.flags.team, id));
+    h = mix(h, num(world.flags.state, id));
+    h = mix(h, num(world.flags.carrierId, id));
+    h = mix(h, num(world.flags.position, base));
+    h = mix(h, num(world.flags.position, base + 1));
+    h = mix(h, num(world.flags.position, base + 2));
+  }
+  return h;
+}
+
 export function hashWorld(world: World): number {
   let hash = 0x811c9dc5;
   hash = mix(hash, world.tick);
+  hash = mix(hash, world.gameOver ? 1 : 0);
+  hash = mix(hash, world.winnerTeam);
+  hash = mix(hash, world.gameOverReason);
+  hash = mix(hash, num(world.teamScores, 1));
+  hash = mix(hash, num(world.teamScores, 2));
   const p = world.players;
   for (let id = 0; id < p.count; id += 1) {
     if (!p.active[id]) continue;
     hash = mixPlayer(hash, p, id);
   }
+  hash = mixProjectiles(hash, world);
+  hash = mixFlags(hash, world);
   return hash >>> 0;
 }
