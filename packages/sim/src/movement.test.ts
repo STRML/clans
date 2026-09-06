@@ -18,7 +18,17 @@ const flat: Heightfield = {
   heightScale: 1,
   heights: new Uint16Array(4),
 };
-const idle: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
+const idle: PlayerInput = {
+  moveX: 0,
+  moveZ: 0,
+  yaw: 0,
+  pitch: 0,
+  jump: false,
+  jet: false,
+  fire: false,
+  altFire: false,
+  slot: 0,
+};
 const inputMap = (id: number, input: Partial<PlayerInput>) =>
   new Map([[id, { ...idle, ...input }]]);
 

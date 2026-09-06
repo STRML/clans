@@ -37,12 +37,47 @@ describe('handshake codec', () => {
   });
 
   it('round-trips an Input message with three distinct redundant samples', () => {
+    // pitch/fire/altFire/slot are all defaults here: PlayerInput grew these fields in the
+    // sim's weapons task, but the Input codec itself doesn't carry them on the wire yet
+    // (that lands in the protocol task that follows), so readSample always reports the
+    // inert defaults regardless of what's encoded. A "meaningful" non-default value on
+    // one of these would make this round trip fail until that later task wires them up.
     const message: Omit<InputMessage, 'type'> = {
       sequence: 42,
       samples: [
-        { moveX: 1, moveZ: -1, yaw: 0.5, jump: true, jet: false },
-        { moveX: 0, moveZ: 1, yaw: 0.25, jump: false, jet: true },
-        { moveX: -1, moveZ: 0, yaw: -0.5, jump: false, jet: false },
+        {
+          moveX: 1,
+          moveZ: -1,
+          yaw: 0.5,
+          pitch: 0,
+          jump: true,
+          jet: false,
+          fire: false,
+          altFire: false,
+          slot: 0,
+        },
+        {
+          moveX: 0,
+          moveZ: 1,
+          yaw: 0.25,
+          pitch: 0,
+          jump: false,
+          jet: true,
+          fire: false,
+          altFire: false,
+          slot: 0,
+        },
+        {
+          moveX: -1,
+          moveZ: 0,
+          yaw: -0.5,
+          pitch: 0,
+          jump: false,
+          jet: false,
+          fire: false,
+          altFire: false,
+          slot: 0,
+        },
       ],
     };
     const decoded = decodeInput(encodeInput(message));
@@ -67,9 +102,39 @@ describe('handshake codec', () => {
     const message: Omit<InputMessage, 'type'> = {
       sequence: 1,
       samples: [
-        { moveX: Number.NaN, moveZ: 0, yaw: 0, jump: false, jet: false },
-        { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false },
-        { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false },
+        {
+          moveX: Number.NaN,
+          moveZ: 0,
+          yaw: 0,
+          pitch: 0,
+          jump: false,
+          jet: false,
+          fire: false,
+          altFire: false,
+          slot: 0,
+        },
+        {
+          moveX: 0,
+          moveZ: 0,
+          yaw: 0,
+          pitch: 0,
+          jump: false,
+          jet: false,
+          fire: false,
+          altFire: false,
+          slot: 0,
+        },
+        {
+          moveX: 0,
+          moveZ: 0,
+          yaw: 0,
+          pitch: 0,
+          jump: false,
+          jet: false,
+          fire: false,
+          altFire: false,
+          slot: 0,
+        },
       ],
     };
     expect(() => decodeInput(encodeInput(message))).toThrow(RangeError);
@@ -97,12 +162,52 @@ describe('handshake codec', () => {
     const message: Omit<InputMessage, 'type'> = {
       sequence: 1,
       samples: [
-        { moveX: -100, moveZ: 100, yaw: 0, jump: false, jet: false },
-        { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false },
-        { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false },
+        {
+          moveX: -100,
+          moveZ: 100,
+          yaw: 0,
+          pitch: 0,
+          jump: false,
+          jet: false,
+          fire: false,
+          altFire: false,
+          slot: 0,
+        },
+        {
+          moveX: 0,
+          moveZ: 0,
+          yaw: 0,
+          pitch: 0,
+          jump: false,
+          jet: false,
+          fire: false,
+          altFire: false,
+          slot: 0,
+        },
+        {
+          moveX: 0,
+          moveZ: 0,
+          yaw: 0,
+          pitch: 0,
+          jump: false,
+          jet: false,
+          fire: false,
+          altFire: false,
+          slot: 0,
+        },
       ],
     };
     const decoded = decodeInput(encodeInput(message));
-    expect(decoded.samples[0]).toEqual({ moveX: -1, moveZ: 1, yaw: 0, jump: false, jet: false });
+    expect(decoded.samples[0]).toEqual({
+      moveX: -1,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    });
   });
 });

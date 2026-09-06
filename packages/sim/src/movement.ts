@@ -9,7 +9,17 @@ const GROUND_EPSILON = 0.001;
 // A grounded player who did not jump or jet may drop this far in one tick and stay
 // grounded. Without it a skier leaves the surface every tick the slope falls away.
 const GROUND_SNAP = 1.0;
-const IDLE: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
+const IDLE: PlayerInput = {
+  moveX: 0,
+  moveZ: 0,
+  yaw: 0,
+  pitch: 0,
+  jump: false,
+  jet: false,
+  fire: false,
+  altFire: false,
+  slot: 0,
+};
 
 interface Body {
   x: number;

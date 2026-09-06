@@ -1,4 +1,4 @@
-import type { PlayerSnapshotData } from '@clans/sim';
+import { WeaponId, type PlayerSnapshotData } from '@clans/sim';
 import {
   bytesOf,
   createReader,
@@ -116,6 +116,12 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
     vz,
     yaw,
     energy,
+    // Not on the wire yet: PlayerSnapshotData grew weaponSlot for the sim's weapon state
+    // machines (M3 Task 2), but the snapshot codec only gains a real wire field for it in
+    // the protocol task that follows. Every decoded player reports the same starting
+    // weapon a fresh addPlayer gives them until then, matching health's existing pattern
+    // of defaulting to "as if nothing has happened yet" for a field not yet on the wire.
+    weaponSlot: WeaponId.Blaster,
     onGround: flags & 1 ? 1 : 0,
     ski: flags & 2 ? 1 : 0,
   };

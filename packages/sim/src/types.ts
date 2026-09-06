@@ -10,8 +10,12 @@ export interface PlayerInput {
   moveX: number;
   moveZ: number;
   yaw: number;
+  pitch: number;
   jump: boolean;
   jet: boolean;
+  fire: boolean;
+  altFire: boolean;
+  slot: number; // 0 = no change, 1..5 = select that weapon slot (see weaponIdForSlot)
 }
 export interface PlayerStore {
   count: number;
@@ -33,6 +37,13 @@ export interface PlayerStore {
   alive: Uint8Array;
   respawnAt: Float64Array;
   score: Int16Array;
+  weaponSlot: Uint8Array;
+  weaponState: Uint8Array;
+  weaponTimer: Float64Array;
+  spunUp: Uint8Array;
+  grenadeCooldown: Float64Array;
+  ammo: Int16Array;
+  grenades: Uint8Array;
 }
 export interface World {
   tick: number;
@@ -42,4 +53,5 @@ export interface World {
   killY: number;
   players: PlayerStore;
   pendingDeaths: number[];
+  pendingFireEvents: import('./weapons.js').FireEvent[];
 }

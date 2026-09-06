@@ -22,7 +22,17 @@ const flat: Heightfield = {
   heightScale: 1,
   heights: new Uint16Array(4),
 };
-const idle: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
+const idle: PlayerInput = {
+  moveX: 0,
+  moveZ: 0,
+  yaw: 0,
+  pitch: 0,
+  jump: false,
+  jet: false,
+  fire: false,
+  altFire: false,
+  slot: 0,
+};
 
 describe('radiusFalloff', () => {
   it('is full at the center and zero at the radius', () => {

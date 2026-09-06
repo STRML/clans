@@ -17,6 +17,7 @@ export interface PlayerSnapshotData {
   // the current wire format omits it, and deserializePlayer treats that as full health
   // rather than crediting a nonexistent hit.
   health?: number;
+  weaponSlot: number;
   onGround: 0 | 1;
   ski: 0 | 1;
 }
@@ -44,6 +45,7 @@ export function serializePlayer(world: World, id: number): PlayerSnapshotData {
     yaw: num(p.yaw, id),
     energy: num(p.energy, id),
     health: LIGHT_ARMOR.maxDamage - num(p.damage, id),
+    weaponSlot: num(p.weaponSlot, id),
     onGround: bit(p.onGround, id),
     ski: bit(p.ski, id),
   };
@@ -79,6 +81,7 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   const health = data.health ?? LIGHT_ARMOR.maxDamage;
   players.damage[data.id] = LIGHT_ARMOR.maxDamage - health;
   players.alive[data.id] = health > 0 ? 1 : 0;
+  players.weaponSlot[data.id] = data.weaponSlot;
   players.onGround[data.id] = data.onGround;
   players.ski[data.id] = data.ski;
 }

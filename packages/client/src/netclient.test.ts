@@ -109,9 +109,29 @@ describe('NetClient', () => {
     addPlayer(server, { x: 500, y: 0, z: 500 }, 1);
     let nextSnapshotId = 1;
     let lastInputSequence = 0;
-    const skiInput: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: true, jet: false };
+    const skiInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: true,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     // Like the real server: step with the newest input received, idle until the first arrives.
-    let serverInput: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
+    let serverInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     const totalTicks = Math.ceil(3 / FIXED_DT);
     // Prediction is judged at equal input sequence: the client's position right after it
     // applied input n must match the server's position right after it applied input n.
@@ -179,6 +199,7 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
     };
@@ -245,7 +266,17 @@ describe('NetClient', () => {
     clock.ms = 0;
     const transport = makeTransport(makeLink({ value: 14 }));
     const client = new NetClient(transport, terrain, { now: () => clock.ms });
-    const forward: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: false, jet: false };
+    const forward: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     for (let i = 0; i < 5; i += 1) client.tick(forward);
     expect(client.world.players.velocity[2]).not.toBe(0);
 
@@ -271,7 +302,17 @@ describe('NetClient', () => {
     const transport = makeTransport(makeLink({ value: 11 }));
     const client = new NetClient(transport, terrain, { now: () => clock.ms });
     client.playerId = 0;
-    const skiInput: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: true, jet: false };
+    const skiInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: true,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     // Well past the ceiling (4x MAX_REPLAY_TICKS), and well past the existing "40 ticks,
     // then reconcile hard-snaps" scenario this must not disturb.
     for (let i = 0; i < 500; i += 1) client.tick(skiInput);
@@ -291,7 +332,17 @@ describe('NetClient', () => {
     const transport = makeTransport(makeLink({ value: 16 }));
     transport.setConnected(false); // still CONNECTING: isOpen() is true, isConnected() is not
     const client = new NetClient(transport, terrain, { now: () => clock.ms });
-    const idleInput: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
+    const idleInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     for (let i = 0; i < 20_000; i += 1) client.tick(idleInput);
     expect((client as unknown as { sequence: number }).sequence).toBe(0);
 
@@ -316,13 +367,26 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
     };
     const delta = encodeSnapshot(7, 3, 0, [state], { snapshotId: 6, players: [state] });
     expect(() => transport.pump([delta])).not.toThrow();
     expect(client.stats.packetLossEstimate).toBeGreaterThan(0);
-    expect(() => client.tick({ moveX: 0, moveZ: 1, yaw: 0, jump: true, jet: false })).not.toThrow();
+    expect(() =>
+      client.tick({
+        moveX: 0,
+        moveZ: 1,
+        yaw: 0,
+        pitch: 0,
+        jump: true,
+        jet: false,
+        fire: false,
+        altFire: false,
+        slot: 0,
+      }),
+    ).not.toThrow();
   });
 
   it('bounds the packet-loss loop instead of freezing on a forged snapshotId gap', () => {
@@ -345,6 +409,7 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
     };
@@ -362,7 +427,17 @@ describe('NetClient', () => {
     const client = new NetClient(transport, terrain, { now: () => clock.ms });
     client.playerId = 0;
 
-    const skiInput: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: true, jet: false };
+    const skiInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: true,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     for (let tick = 0; tick < 40; tick += 1) {
       clock.ms += FIXED_TICK_MS;
       client.tick(skiInput);
@@ -380,6 +455,7 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
     };
@@ -403,7 +479,17 @@ describe('NetClient', () => {
     const transport = makeTransport(makeLink({ value: 3 }));
     const client = new NetClient(transport, terrain, { now: () => clock.ms });
     client.playerId = 0;
-    const skiInput: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: true, jet: false };
+    const skiInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: true,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     for (let i = 0; i < 5; i += 1) client.tick(skiInput);
     const pending = (client as unknown as { pendingInputs: unknown[] }).pendingInputs;
     expect(pending.length).toBe(5);
@@ -458,6 +544,7 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      weaponSlot: 4,
       onGround: 0 as const,
       ski: 0 as const,
     };

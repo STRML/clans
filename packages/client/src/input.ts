@@ -66,8 +66,14 @@ export class Input {
       moveX: axis('KeyD', 'KeyA'),
       moveZ: axis('KeyW', 'KeyS'),
       yaw: this.yaw,
+      pitch: this.pitch,
       jump: this.isDown('Space'),
       jet: this.jet,
+      // Task 8 wires the real key/mouse bindings; this task's only job is a compiling,
+      // inert default so free cam and every existing input consumer stay unaffected.
+      fire: false,
+      altFire: false,
+      slot: 0,
     };
   }
 }

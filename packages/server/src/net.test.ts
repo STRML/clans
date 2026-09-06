@@ -13,7 +13,17 @@ import {
 import { startNetServer, type NetServer } from './net.js';
 import type { SceneSpawn } from './world.js';
 
-const idleSample: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
+const idleSample: PlayerInput = {
+  moveX: 0,
+  moveZ: 0,
+  yaw: 0,
+  pitch: 0,
+  jump: false,
+  jet: false,
+  fire: false,
+  altFire: false,
+  slot: 0,
+};
 
 const terrain: Heightfield = {
   gridSize: 2,
@@ -183,7 +193,17 @@ describe('startNetServer', () => {
       encodeInput({
         sequence: 1,
         samples: [
-          { moveX: Number.NaN, moveZ: 1, yaw: 0, jump: false, jet: false },
+          {
+            moveX: Number.NaN,
+            moveZ: 1,
+            yaw: 0,
+            pitch: 0,
+            jump: false,
+            jet: false,
+            fire: false,
+            altFire: false,
+            slot: 0,
+          },
           idleSample,
           idleSample,
         ],
@@ -220,7 +240,17 @@ describe('startNetServer', () => {
     server.tick(2);
 
     // Second message covers ticks 2 and 3: samples are [newest=tick3, tick2, tick1(unused)].
-    const forward: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: false, jet: false };
+    const forward: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     client.send(encodeInput({ sequence: 3, samples: [idleSample, forward, idleSample] }));
     await wait(10);
     server.tick(4); // dequeues the forward sample queued for this tick
@@ -252,7 +282,17 @@ describe('startNetServer', () => {
 
     // 12 messages, each advancing the sequence by exactly one, arrive before any tick
     // drains the queue: a burst comfortably larger than the old cap of 8.
-    const forward: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: false, jet: false };
+    const forward: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     client.send(encodeInput({ sequence: 1, samples: [forward, idleSample, idleSample] }));
     for (let sequence = 2; sequence <= 12; sequence += 1) {
       client.send(encodeInput({ sequence, samples: [idleSample, idleSample, idleSample] }));
@@ -306,7 +346,17 @@ describe('startNetServer', () => {
     server.tick(2); // simulates sequence 1
 
     // Queues sequence 2 and 3; only sequence 2 will be simulated by the very next tick.
-    const forward: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: false, jet: false };
+    const forward: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     client.send(encodeInput({ sequence: 3, samples: [idleSample, forward, idleSample] }));
     await wait(10);
 

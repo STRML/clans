@@ -2,6 +2,7 @@ import { LIGHT_ARMOR } from './armor.js';
 import { stepPlayers } from './movement.js';
 import type { Heightfield } from './terrain.js';
 import type { PlayerInput, Vec3, World } from './types.js';
+import { resetLoadout, stepWeapons, WEAPON_COUNT } from './weapons.js';
 
 export const FIXED_TICK_MS = 32;
 export const FIXED_DT = FIXED_TICK_MS / 1000;
@@ -56,8 +57,16 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
       alive: new Uint8Array(capacity),
       respawnAt: new Float64Array(capacity),
       score: new Int16Array(capacity),
+      weaponSlot: new Uint8Array(capacity),
+      weaponState: new Uint8Array(capacity),
+      weaponTimer: new Float64Array(capacity),
+      spunUp: new Uint8Array(capacity),
+      grenadeCooldown: new Float64Array(capacity),
+      ammo: new Int16Array(capacity * WEAPON_COUNT),
+      grenades: new Uint8Array(capacity),
     },
     pendingDeaths: [],
+    pendingFireEvents: [],
   };
 }
 
@@ -94,6 +103,7 @@ export function addPlayer(world: World, spawn: Vec3, team = 0): number {
   players.respawnAt[id] = -1;
   players.score[id] = 0;
   resetPlayerToSpawn(world, id, spawn);
+  resetLoadout(world, id, LIGHT_ARMOR);
   return id;
 }
 
@@ -114,5 +124,6 @@ export function stepWorld(
   if (dt !== FIXED_DT)
     throw new RangeError(`Simulation step requires fixed tick ${FIXED_TICK_MS} ms`);
   stepPlayers(world, inputs, dt);
+  stepWeapons(world, inputs, dt);
   world.tick += 1;
 }

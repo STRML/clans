@@ -56,8 +56,16 @@ function readSample(cursor: Cursor): NetInputSample {
     moveX: clampAxis(moveX),
     moveZ: clampAxis(moveZ),
     yaw,
+    // Not on the wire yet: PlayerInput grew these fields for the sim's weapon state
+    // machines (M3 Task 2), but the Input codec itself only gains real pitch/fire/
+    // altFire/slot bytes in the protocol task that follows it. Until then every decoded
+    // sample reports the inert defaults so this stays a valid PlayerInput.
+    pitch: 0,
     jump: (flags & 1) !== 0,
     jet: (flags & 2) !== 0,
+    fire: false,
+    altFire: false,
+    slot: 0,
   };
 }
 

@@ -64,7 +64,17 @@ function ackedBaseline(entry: ClientEntry): SnapshotBaseline | null {
 // indefinitely before this: only the peer's own 'close' removed it, so a client (or
 // script) that connects and goes silent could exhaust sockets and memory one at a time.
 const DEFAULT_JOIN_TIMEOUT_MS = 10_000;
-const IDLE_INPUT: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
+const IDLE_INPUT: PlayerInput = {
+  moveX: 0,
+  moveZ: 0,
+  yaw: 0,
+  pitch: 0,
+  jump: false,
+  jet: false,
+  fire: false,
+  altFire: false,
+  slot: 0,
+};
 // Bounds a client's catch-up queue. Each Input message contributes at most 3 samples and
 // a duplicate/reordered sequence is dropped in applyInputMessage, so this only guards the
 // pathological case of a client that keeps sending while the server falls behind ticking.

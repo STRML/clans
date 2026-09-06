@@ -9,6 +9,7 @@ import {
   serializePlayer,
   type Heightfield,
 } from './index.js';
+import { WeaponId } from './weapons.js';
 
 const terrain: Heightfield = {
   gridSize: 2,
@@ -40,6 +41,7 @@ describe('player snapshots', () => {
       yaw: 0.5,
       energy: 40,
       health: LIGHT_ARMOR.maxDamage,
+      weaponSlot: WeaponId.Blaster,
       onGround: 1,
       ski: 0,
     });
@@ -67,6 +69,7 @@ describe('player snapshots', () => {
       yaw: 1,
       energy: 30,
       health: LIGHT_ARMOR.maxDamage,
+      weaponSlot: WeaponId.Blaster,
       onGround: 0,
       ski: 1,
     });
@@ -84,6 +87,7 @@ describe('player snapshots', () => {
       yaw: 1,
       energy: 30,
       health: LIGHT_ARMOR.maxDamage,
+      weaponSlot: WeaponId.Blaster,
       onGround: 0,
       ski: 1,
     });

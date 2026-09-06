@@ -22,7 +22,17 @@ import { WebSocketTransport } from './transport.js';
 const EYE_HEIGHT = 2.0;
 const FREE_CAM_SPEED = 40;
 const FREE_CAM_FAST = 4;
-const IDLE: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
+const IDLE: PlayerInput = {
+  moveX: 0,
+  moveZ: 0,
+  yaw: 0,
+  pitch: 0,
+  jump: false,
+  jet: false,
+  fire: false,
+  altFire: false,
+  slot: 0,
+};
 
 export interface AppStats {
   fps: number;
@@ -313,7 +323,9 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         steps = 1;
         app.stepOnce = false;
       }
-      const currentInput = app.freeCam ? { ...IDLE, yaw: input.yaw } : input.snapshot();
+      const currentInput = app.freeCam
+        ? { ...IDLE, yaw: input.yaw, pitch: input.pitch }
+        : input.snapshot();
       const simStart = performance.now();
       if (net) {
         stepNetworked(net, app.stats, currentInput, steps, scene, remoteMeshes, remoteBuffers);
