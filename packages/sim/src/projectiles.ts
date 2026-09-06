@@ -9,7 +9,7 @@ import {
 } from './damage.js';
 import { GRAVITY } from './movement.js';
 import { sampleTerrain, type Heightfield, type TerrainSample } from './terrain.js';
-import type { ProjectileStore, Vec3, World } from './types.js';
+import type { PendingFreeId, ProjectileStore, Vec3, World } from './types.js';
 import {
   GRENADE_DATA,
   ProjectileType,
@@ -23,6 +23,14 @@ import {
 export const PROJECTILE_CAPACITY = 256; // Ours: comfortably above what 32 players can sustain.
 const FIXED_DT = 32 / 1000;
 const TERRAIN_MARCH_STEP = 0.5; // meters: fine enough to not skip past a ridge in one tick.
+// Ours, but not arbitrary: must stay >= the server's real snapshot cadence,
+// SNAPSHOT_EVERY_N_TICKS in packages/protocol/src/messages.ts (= 2 as of Codex review round
+// 8), or a freed projectile id can be reallocated before any snapshot ever shows it absent --
+// see ProjectileStore.pendingFreeIds. packages/sim can't import that constant directly (its
+// Global Constraint keeps it standalone, with no dependency on packages/protocol), so this is
+// a literal picked with margin above the known cadence: verify it's still >= that constant's
+// current value if this ever needs revisiting.
+const PROJECTILE_ID_REUSE_DELAY_TICKS = 3;
 
 /**
  * Marches from `origin` along unit `direction` for `length` meters at TERRAIN_MARCH_STEP
@@ -151,20 +159,29 @@ function allocate(store: ProjectileStore): number | null {
 
 /** Deactivates `id` and defers it into `pendingFreeIds` rather than `freeIds` directly, so
  *  `allocate` can't hand it straight back out to another weapon fired later in this same
- *  `stepProjectiles` call. See ProjectileStore.pendingFreeIds and flushPendingFreeIds. */
+ *  `stepProjectiles` call -- or any call within PROJECTILE_ID_REUSE_DELAY_TICKS of this one.
+ *  See ProjectileStore.pendingFreeIds and flushPendingFreeIds. */
 function free(store: ProjectileStore, id: number): void {
   store.active[id] = 0;
-  store.pendingFreeIds.push(id);
+  store.pendingFreeIds.push({ id, ticksRemaining: PROJECTILE_ID_REUSE_DELAY_TICKS });
 }
 
-/** Drains last tick's freed ids into the real `freeIds` pool -- called at the very start of
- *  `stepProjectiles`, mirroring how weapons.ts's `applyPendingAmmoRefunds` drains
- *  `world.pendingAmmoRefunds` at the start of its own next `stepWeapons` call. By the time
- *  this runs, at least one full snapshot has already gone out with these ids inactive and
- *  unallocated (Codex review round 7, finding 5). */
+/** Counts down every pending id's remaining delay by one call, moving any that have now
+ *  waited out PROJECTILE_ID_REUSE_DELAY_TICKS into the real `freeIds` pool -- called at the
+ *  very start of `stepProjectiles`, mirroring how weapons.ts's `applyPendingAmmoRefunds`
+ *  drains `world.pendingAmmoRefunds` at the start of its own next `stepWeapons` call. By the
+ *  time an id reaches `freeIds`, at least PROJECTILE_ID_REUSE_DELAY_TICKS calls have passed
+ *  since it was freed -- comfortably more than the server's real snapshot cadence, so at
+ *  least one full snapshot has gone out with the id inactive and unallocated (Codex review
+ *  round 7, finding 5; round 8, finding 1, for why one tick alone wasn't enough). */
 function flushPendingFreeIds(store: ProjectileStore): void {
-  for (const id of store.pendingFreeIds) store.freeIds.push(id);
-  store.pendingFreeIds = [];
+  const stillPending: PendingFreeId[] = [];
+  for (const pending of store.pendingFreeIds) {
+    const ticksRemaining = pending.ticksRemaining - 1;
+    if (ticksRemaining <= 0) store.freeIds.push(pending.id);
+    else stillPending.push({ id: pending.id, ticksRemaining });
+  }
+  store.pendingFreeIds = stillPending;
 }
 
 function velocityFor(direction: Vec3, speed: number, shooterVel: Vec3, velInherit: number): Vec3 {

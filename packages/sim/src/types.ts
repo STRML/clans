@@ -50,18 +50,37 @@ export interface PlayerStore {
   ammo: Int16Array;
   grenades: Uint8Array;
 }
+/** One id freed by `free()`, held out of `freeIds` until it has sat unallocated for at
+ *  least PROJECTILE_ID_REUSE_DELAY_TICKS calls to `stepProjectiles` -- see that constant
+ *  and ProjectileStore.pendingFreeIds for why. `ticksRemaining` counts down by one on every
+ *  `stepProjectiles` call (the same self-contained, world.tick-independent convention
+ *  `expiresAtTick` already uses, for the same reason: this file's own tests call
+ *  `stepProjectiles` directly, without ever advancing `world.tick`). */
+export interface PendingFreeId {
+  id: number;
+  ticksRemaining: number;
+}
 export interface ProjectileStore {
   count: number;
   freeIds: number[];
-  /** Ids freed this tick, held back from `freeIds` until the START of the next
-   *  `stepProjectiles` call -- mirrors World.pendingAmmoRefunds's cross-tick-boundary
-   *  pattern. Without this, a projectile freed earlier in a `stepProjectiles` call (a hit or
-   *  expiry) could have its id popped straight back off `freeIds` and reallocated to a
-   *  DIFFERENT weapon fired later in that SAME call, so no snapshot ever showed the id
-   *  absent -- the client's disappearance-based cleanup (weapons-view.ts) relies on that gap
-   *  to tell "still the same projectile" apart from "a new one reused the old id" (Codex
-   *  review round 7, finding 5). */
-  pendingFreeIds: number[];
+  /** Ids freed recently, held back from `freeIds` until they've sat unallocated for at least
+   *  PROJECTILE_ID_REUSE_DELAY_TICKS `stepProjectiles` calls -- mirrors World.pendingAmmoRefunds's
+   *  cross-tick-boundary pattern. Without this, a projectile freed earlier in a
+   *  `stepProjectiles` call (a hit or expiry) could have its id popped straight back off
+   *  `freeIds` and reallocated to a DIFFERENT weapon fired later in that SAME call, so no
+   *  snapshot ever showed the id absent -- the client's disappearance-based cleanup
+   *  (weapons-view.ts) relies on that gap to tell "still the same projectile" apart from "a
+   *  new one reused the old id" (Codex review round 7, finding 5).
+   *
+   *  A flat one-tick defer (this array's original shape: `number[]`, unconditionally flushed
+   *  into `freeIds` at the start of the very next call) is NOT enough on its own: the server
+   *  only broadcasts a snapshot every SNAPSHOT_EVERY_N_TICKS (packages/protocol/src/messages.ts,
+   *  = 2 as of Codex review round 8) simulation ticks, so a one-tick defer doesn't guarantee any
+   *  snapshot actually lands in the gap -- an id freed and reallocated within the same
+   *  multi-tick snapshot window could still go out never having been observed absent,
+   *  reintroducing the exact expiry-flash-suppression bug round 7 closed (Codex review round 8,
+   *  finding 1). Each entry now tracks its own countdown instead of being flushed unconditionally. */
+  pendingFreeIds: PendingFreeId[];
   active: Uint8Array;
   type: Uint8Array;
   weaponId: Uint8Array;

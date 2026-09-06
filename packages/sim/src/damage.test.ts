@@ -102,6 +102,33 @@ describe('applyDamage and death', () => {
   });
 });
 
+describe('Codex review round 8, finding 2: overkill damage must not push players.damage past maxDamage', () => {
+  it('a single hit far larger than maxDamage clamps damage at maxDamage, not the raw accumulated total', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    // Two overlapping splash hits (or a point-blank multi-weapon combo) landing the same tick
+    // is plausible in play; three times maxDamage in one shot makes the bug unmissable.
+    applyDamage(world, id, LIGHT_ARMOR.maxDamage * 3, -1, LIGHT_ARMOR);
+    expect(world.players.alive[id]).toBe(0);
+    // Health is computed elsewhere as armor.maxDamage - damage; had damage been left
+    // unclamped, health would have gone negative on the wire and in the HUD (e.g. "-52%")
+    // instead of clamping at 0%.
+    expect(world.players.damage[id]).toBe(LIGHT_ARMOR.maxDamage);
+  });
+
+  it('a lethal hit followed by more damage keeps damage clamped at maxDamage across calls', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    applyDamage(world, id, LIGHT_ARMOR.maxDamage + 5, -1, LIGHT_ARMOR);
+    expect(world.players.damage[id]).toBe(LIGHT_ARMOR.maxDamage);
+    // The player is dead now, so this second hit is a no-op (already covered by the
+    // already-dead test above) -- included here only to confirm the clamp doesn't somehow
+    // let a second overkill hit push damage even further past maxDamage.
+    applyDamage(world, id, LIGHT_ARMOR.maxDamage, -1, LIGHT_ARMOR);
+    expect(world.players.damage[id]).toBe(LIGHT_ARMOR.maxDamage);
+  });
+});
+
 describe('godMode (Codex review round 3, finding 1)', () => {
   it('applyDamage no-ops while godMode is set, the same way it already no-ops for an inactive or dead player', () => {
     const world = createWorld(flat, 1);

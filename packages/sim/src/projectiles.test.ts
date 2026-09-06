@@ -529,17 +529,53 @@ describe('Codex review round 7, finding 5: a freed projectile id cannot be reuse
     expect(idB).not.toBe(idA);
   });
 
-  it('the freed id becomes reusable on a later stepProjectiles call, one tick after it was freed', () => {
+  it('the freed id becomes reusable on a later stepProjectiles call, PROJECTILE_ID_REUSE_DELAY_TICKS ticks after it was freed', () => {
     const world = createWorld(flat, 1);
     fire(world, { origin: { x: 0, y: 1, z: 0 }, direction: { x: 0, y: -1, z: 0 } });
     stepProjectiles(world, FIXED_DT); // spawns A
     const idA = firstProjectile(world);
     stepProjectiles(world, FIXED_DT); // frees A; its id is deferred, not yet reusable
     expect(world.projectiles.active[idA]).toBe(0);
-    stepProjectiles(world, FIXED_DT); // no-op tick: flushes A's id into the real free pool
+    // Two more no-op ticks: with a 3-tick delay (Codex review round 8, finding 1 -- deferring
+    // by only one tick doesn't guarantee a snapshot lands in the gap, since the server only
+    // broadcasts one every SNAPSHOT_EVERY_N_TICKS = 2 simulation ticks), the id isn't flushed
+    // into the real free pool until the third stepProjectiles call after the one that freed it.
+    stepProjectiles(world, FIXED_DT); // still deferred (2 ticks left, then 1)
+    stepProjectiles(world, FIXED_DT); // still deferred going in; flushed to freeIds this call
     fire(world, { origin: { x: 0, y: 1, z: 0 }, direction: { x: 0, y: -1, z: 0 } });
     stepProjectiles(world, FIXED_DT); // spawns C -- the deferred id is available again
     const idC = firstProjectile(world);
     expect(idC).toBe(idA);
+  });
+});
+
+describe('Codex review round 8, finding 1: projectile-id reuse deferral must cover the snapshot cadence, not just one tick', () => {
+  it('a freed id is still not reused on the very next stepProjectiles call after it was freed', () => {
+    const world = createWorld(flat, 1);
+    fire(world, { origin: { x: 0, y: 1, z: 0 }, direction: { x: 0, y: -1, z: 0 } });
+    stepProjectiles(world, FIXED_DT); // spawns A
+    const idA = firstProjectile(world);
+    stepProjectiles(world, FIXED_DT); // frees A this call
+    expect(world.projectiles.active[idA]).toBe(0);
+    // A one-tick defer (round 7's original fix) would already have made idA reusable here --
+    // the exact gap round 8 found: not enough calls have passed to guarantee a snapshot ever
+    // observed idA absent, since a snapshot only goes out every 2 ticks.
+    fire(world, { origin: { x: 5, y: 1, z: 0 }, direction: { x: 0, y: -1, z: 0 } });
+    stepProjectiles(world, FIXED_DT); // spawns B; must NOT reuse idA yet
+    const idB = firstProjectile(world);
+    expect(idB).not.toBe(idA);
+  });
+
+  it('a freed id still is not reused after exactly two ticks -- must clear the cadence with margin', () => {
+    const world = createWorld(flat, 1);
+    fire(world, { origin: { x: 0, y: 1, z: 0 }, direction: { x: 0, y: -1, z: 0 } });
+    stepProjectiles(world, FIXED_DT); // spawns A
+    const idA = firstProjectile(world);
+    stepProjectiles(world, FIXED_DT); // frees A this call
+    stepProjectiles(world, FIXED_DT); // no-op tick
+    fire(world, { origin: { x: 5, y: 1, z: 0 }, direction: { x: 0, y: -1, z: 0 } });
+    stepProjectiles(world, FIXED_DT); // spawns C; idA must still not be reused
+    const idC = firstProjectile(world);
+    expect(idC).not.toBe(idA);
   });
 });

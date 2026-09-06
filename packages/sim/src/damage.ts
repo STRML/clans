@@ -107,7 +107,14 @@ export function applyDamage(
   // kill/score event before any reactive, post-hoc zeroing elsewhere could undo it. Codex
   // review round 3, finding 1.
   if (amount <= 0 || !players.active[id] || !players.alive[id] || players.godMode[id]) return;
-  players.damage[id] = (players.damage[id] ?? 0) + amount;
+  // Clamped here, not left to grow past maxDamage, because this is the single source of
+  // truth every downstream consumer derives health from (armor.maxDamage - damage): the wire
+  // snapshot, the HUD, and any local single-player read. An overkill hit -- two overlapping
+  // splash-radius hits landing the same tick, or a point-blank multi-weapon combo -- used to
+  // push damage arbitrarily far past maxDamage, so health (computed elsewhere) went negative
+  // and the HUD showed values like "-52%" instead of clamping at 0% (Codex review round 8,
+  // finding 2).
+  players.damage[id] = Math.min((players.damage[id] ?? 0) + amount, armor.maxDamage);
   if ((players.damage[id] ?? 0) < armor.maxDamage) return;
   players.alive[id] = 0;
   players.respawnAt[id] = world.tick + RESPAWN_TICKS;
