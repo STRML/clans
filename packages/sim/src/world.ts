@@ -141,6 +141,11 @@ export function stepWorld(
 ): void {
   if (dt !== FIXED_DT)
     throw new RangeError(`Simulation step requires fixed tick ${FIXED_TICK_MS} ms`);
+  // Once the match is over the authoritative sim freezes: no more movement, weapons, or
+  // projectiles, and the tick itself stops advancing (matches real T2; Codex review round 1,
+  // finding 9). world.tick is not part of "state at the moment of game over" for any other
+  // test, so freezing it here too is in scope.
+  if (world.gameOver) return;
   stepPlayers(world, inputs, dt);
   stepWeapons(world, inputs, dt);
   stepProjectiles(world, dt);

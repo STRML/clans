@@ -91,4 +91,32 @@ describe('fixed world', () => {
     expect(() => stepWorld(world, new Map())).not.toThrow();
     expect(world.players.position[a * 3]).toBe(5);
   });
+
+  it('freezes the simulation once gameOver is true (Codex review round 1, finding 8)', () => {
+    // Real T2 freezes the match at game over; an authoritative sim must not keep moving
+    // players, spending ammo, or advancing the tick once gameOver is true.
+    const world = createWorld(terrain, 1);
+    const a = addPlayer(world, { x: 0, y: 0, z: 0 });
+    world.gameOver = true;
+    const tickBefore = world.tick;
+    const positionBefore = Array.from(world.players.position);
+    const velocityBefore = Array.from(world.players.velocity);
+    const ammoBefore = Array.from(world.players.ammo);
+    const input = {
+      moveX: 1,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: true,
+      jet: true,
+      fire: true,
+      altFire: false,
+      slot: 0,
+    };
+    stepWorld(world, new Map([[a, input]]));
+    expect(world.tick).toBe(tickBefore);
+    expect(Array.from(world.players.position)).toEqual(positionBefore);
+    expect(Array.from(world.players.velocity)).toEqual(velocityBefore);
+    expect(Array.from(world.players.ammo)).toEqual(ammoBefore);
+  });
 });

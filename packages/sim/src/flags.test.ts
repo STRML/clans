@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addPlayer, createWorld, type Heightfield } from './index.js';
+import { addPlayer, createWorld, stepWorld, type Heightfield } from './index.js';
 import { applyDamage } from './damage.js';
 import { LIGHT_ARMOR } from './armor.js';
 import { createFlags, FlagState, GameOverReason, RETURN_TICKS, stepFlags } from './flags.js';
@@ -149,16 +149,21 @@ describe('touching your own dropped flag returns it instantly', () => {
 
 describe('match clock: time limit game over', () => {
   const TICKS = 10; // a small time limit so the test does not need 46,875 real ticks.
+  // stepFlags runs before stepWorld's `world.tick += 1`, so the tick that is about to
+  // complete is `world.tick + 1`. The clock must fire on the call that completes tick
+  // TICKS, i.e. when `world.tick` (pre-increment) is TICKS - 1 (Codex review round 1,
+  // finding 8) -- not a tick later, on the call where `world.tick` already equals TICKS.
+  const BOUNDARY = TICKS - 1;
 
   it('expires with a leader: the higher-scoring team wins', () => {
     const world = createWorld(flat, 1);
     createFlags(world, stands, TICKS);
     world.teamScores[1] = 300;
     world.teamScores[2] = 100;
-    world.tick = TICKS - 1;
+    world.tick = BOUNDARY - 1;
     stepFlags(world, FIXED_DT);
     expect(world.gameOver).toBe(false);
-    world.tick = TICKS;
+    world.tick = BOUNDARY;
     stepFlags(world, FIXED_DT);
     expect(world.gameOver).toBe(true);
     expect(world.winnerTeam).toBe(1);
@@ -170,7 +175,7 @@ describe('match clock: time limit game over', () => {
     createFlags(world, stands, TICKS);
     world.teamScores[1] = 200;
     world.teamScores[2] = 200;
-    world.tick = TICKS;
+    world.tick = BOUNDARY;
     stepFlags(world, FIXED_DT);
     expect(world.gameOver).toBe(true);
     expect(world.winnerTeam).toBe(0);
@@ -183,14 +188,25 @@ describe('match clock: time limit game over', () => {
     const attacker = addPlayer(world, { x: 100, y: 0, z: 0 }, 1);
     world.teamScores[1] = 700; // one capture short of the 8-capture, 800-point win
     world.teamScores[2] = 750; // leading on score, but the clock never gets a turn to say so
-    world.tick = TICKS - 1;
+    world.tick = BOUNDARY - 1;
     stepFlags(world, FIXED_DT); // picks up team 2's flag, one tick before the clock expires
     expect(world.gameOver).toBe(false);
     world.players.position.set([0, 0, 0], attacker * 3); // home, own flag untouched
-    world.tick = TICKS; // the exact tick the clock would otherwise expire on
+    world.tick = BOUNDARY; // the exact tick the clock would otherwise expire on
     stepFlags(world, FIXED_DT); // the capture resolves before the clock check runs
     expect(world.gameOver).toBe(true);
     expect(world.winnerTeam).toBe(1); // the capturer, not team 2 who was leading on the clock
     expect(world.gameOverReason).toBe(GameOverReason.CaptureLimit);
+  });
+});
+
+describe('Codex review round 1, finding 8: time-limit game over must not land a tick late', () => {
+  it('stepWorld ends the match on the tick that reaches the limit, not the tick after', () => {
+    const world = createWorld(flat, 1);
+    createFlags(world, stands, 1); // time limit of a single tick
+    stepWorld(world, new Map());
+    expect(world.tick).toBe(1);
+    expect(world.gameOver).toBe(true);
+    expect(world.gameOverReason).toBe(GameOverReason.TimeLimit);
   });
 });

@@ -203,9 +203,14 @@ function handleReturnTimers(world: World): void {
 /** The leading team wins; equal scores is a tie (winnerTeam 0). Checked last in `stepFlags` so
  * a capture-limit win landing on the very same tick (already handled above, in
  * `handleTouchesAndCaptures`) always takes priority -- this only fires when `gameOver` is
- * still false after everything else this tick has run. */
+ * still false after everything else this tick has run.
+ *
+ * `stepFlags` runs before `stepWorld` increments `world.tick`, so `world.tick` here is the
+ * tick about to complete, not the tick that just completed. Comparing against `world.tick + 1`
+ * (the tick this step is about to finish) rather than the pre-increment `world.tick` keeps the
+ * clock from firing one tick late (Codex review round 1, finding 8). */
 function checkTimeLimit(world: World): void {
-  if (world.gameOver || world.tick < world.timeLimitTicks) return;
+  if (world.gameOver || world.tick + 1 < world.timeLimitTicks) return;
   const team1 = world.teamScores[1] ?? 0;
   const team2 = world.teamScores[2] ?? 0;
   world.gameOver = true;
