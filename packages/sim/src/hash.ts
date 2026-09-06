@@ -1,4 +1,5 @@
 import type { World } from './types.js';
+import { ammoIndex, WeaponId } from './weapons.js';
 
 const FNV_PRIME = 0x01000193;
 
@@ -25,6 +26,17 @@ function num(arr: Float64Array | Uint8Array | Uint16Array | Int16Array, i: numbe
   return arr[i] ?? 0;
 }
 
+/**
+ * Mixes in every field of PlayerStore that is real simulation state, not just position/
+ * velocity/yaw/energy/damage/weaponSlot. Through round 11 this stopped at weaponSlot and
+ * never touched ammo, grenades, or the weapon/grenade state machines (weaponState,
+ * weaponTimer, spunUp, grenadeCooldown) -- all of which stepWeapons (weapons.ts) mutates
+ * every tick and all of which are now wired onto the wire snapshot (snapshot.ts) precisely
+ * because they can diverge between client prediction and the server. A hash that never
+ * mixed them in could report two worlds identical when their weapon state had actually
+ * drifted apart, silently defeating the determinism check the spec's Testing section
+ * documents. Codex review round 12 (PR #9), finding 2.
+ */
 function mixPlayer(hash: number, players: World['players'], id: number): number {
   const base = id * 3;
   let h = mix(hash, id);
@@ -39,6 +51,14 @@ function mixPlayer(hash: number, players: World['players'], id: number): number 
   h = mix(h, num(players.energy, id));
   h = mix(h, num(players.damage, id));
   h = mix(h, num(players.weaponSlot, id));
+  h = mix(h, num(players.ammo, ammoIndex(id, WeaponId.Spinfusor)));
+  h = mix(h, num(players.ammo, ammoIndex(id, WeaponId.Chaingun)));
+  h = mix(h, num(players.ammo, ammoIndex(id, WeaponId.Mortar)));
+  h = mix(h, num(players.grenades, id));
+  h = mix(h, num(players.weaponState, id));
+  h = mix(h, num(players.weaponTimer, id));
+  h = mix(h, num(players.spunUp, id));
+  h = mix(h, num(players.grenadeCooldown, id));
   return h;
 }
 

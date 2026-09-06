@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   addPlayer,
+  ammoIndex,
   createFlags,
   createWorld,
   deserializePlayer,
@@ -8,7 +9,10 @@ import {
   GameOverReason,
   hashWorld,
   serializeActivePlayers,
+  WeaponId,
+  WeaponState,
   type Heightfield,
+  type World,
 } from './index.js';
 
 const terrain: Heightfield = {
@@ -97,6 +101,55 @@ describe('hashWorld', () => {
     world.winnerTeam = 1;
     world.gameOverReason = GameOverReason.TimeLimit;
     expect(hashWorld(world)).not.toBe(before);
+  });
+
+  it('changes when ammo, grenades, or the weapon/grenade state machines differ (Codex review round 12, PR #9, finding 2)', () => {
+    // Through round 11, mixPlayer stopped at weaponSlot and never mixed in ammo, grenades,
+    // weaponState, weaponTimer, spunUp, or grenadeCooldown -- all real simulation state that
+    // stepWeapons (weapons.ts) mutates every tick. Two worlds identical everywhere else but
+    // different in exactly these fields hashed the SAME, silently defeating the
+    // determinism-check mechanism the spec's Testing section documents: a real client/server
+    // divergence in weapon state would go completely undetected. Each field below is checked
+    // in isolation against a shared, otherwise-identical baseline, so a fix that only covers
+    // some of them still fails this test.
+    const baseline = (): World => {
+      const world = createWorld(terrain, 1);
+      addPlayer(world, { x: 1, y: 2, z: 3 }, 1);
+      return world;
+    };
+    const before = hashWorld(baseline());
+
+    const discChanged = baseline();
+    discChanged.players.ammo[ammoIndex(0, WeaponId.Spinfusor)] = 3;
+    expect(hashWorld(discChanged)).not.toBe(before);
+
+    const chaingunChanged = baseline();
+    chaingunChanged.players.ammo[ammoIndex(0, WeaponId.Chaingun)] = 3;
+    expect(hashWorld(chaingunChanged)).not.toBe(before);
+
+    const mortarChanged = baseline();
+    mortarChanged.players.ammo[ammoIndex(0, WeaponId.Mortar)] = 3;
+    expect(hashWorld(mortarChanged)).not.toBe(before);
+
+    const grenadesChanged = baseline();
+    grenadesChanged.players.grenades[0] = 1;
+    expect(hashWorld(grenadesChanged)).not.toBe(before);
+
+    const weaponStateChanged = baseline();
+    weaponStateChanged.players.weaponState[0] = WeaponState.Firing;
+    expect(hashWorld(weaponStateChanged)).not.toBe(before);
+
+    const weaponTimerChanged = baseline();
+    weaponTimerChanged.players.weaponTimer[0] = 1.218;
+    expect(hashWorld(weaponTimerChanged)).not.toBe(before);
+
+    const spunUpChanged = baseline();
+    spunUpChanged.players.spunUp[0] = 1;
+    expect(hashWorld(spunUpChanged)).not.toBe(before);
+
+    const grenadeCooldownChanged = baseline();
+    grenadeCooldownChanged.players.grenadeCooldown[0] = 0.62;
+    expect(hashWorld(grenadeCooldownChanged)).not.toBe(before);
   });
 
   it('matches for two independently built worlds with identical CTF state', () => {

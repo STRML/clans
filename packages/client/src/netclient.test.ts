@@ -229,6 +229,7 @@ describe('NetClient', () => {
       weaponState: 1,
       weaponTimer: 0,
       spunUp: 0 as const,
+      grenadeCooldown: 0,
     };
     const state1 = { ...base, x: 1, z: 0 };
     const state2 = { ...base, x: 2, z: 0 };
@@ -412,6 +413,7 @@ describe('NetClient', () => {
       weaponState: 1,
       weaponTimer: 0,
       spunUp: 0 as const,
+      grenadeCooldown: 0,
     };
     const delta = encodeSnapshot(
       7,
@@ -470,6 +472,7 @@ describe('NetClient', () => {
       weaponState: 1,
       weaponTimer: 0,
       spunUp: 0 as const,
+      grenadeCooldown: 0,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(() =>
@@ -527,6 +530,7 @@ describe('NetClient', () => {
       weaponState: 1,
       weaponTimer: 0,
       spunUp: 0 as const,
+      grenadeCooldown: 0,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
 
@@ -626,6 +630,7 @@ describe('NetClient', () => {
       weaponState: 1,
       weaponTimer: 0,
       spunUp: 0 as const,
+      grenadeCooldown: 0,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
     expect(client.world.players.wasGrounded[0]).toBe(0);
@@ -749,6 +754,7 @@ describe('NetClient', () => {
       weaponState: 1,
       weaponTimer: 0,
       spunUp: 0 as const,
+      grenadeCooldown: 0,
     };
     const extras: WorldExtras = {
       projectiles: [],
@@ -797,6 +803,7 @@ describe('NetClient', () => {
       weaponState: 1,
       weaponTimer: 0,
       spunUp: 0 as const,
+      grenadeCooldown: 0,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(client.localHealth).toBeCloseTo(0.4);
@@ -914,6 +921,7 @@ describe('NetClient', () => {
       weaponState: 1,
       weaponTimer: 0,
       spunUp: 0 as const,
+      grenadeCooldown: 0,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -976,6 +984,7 @@ describe('NetClient', () => {
       weaponState: 1,
       weaponTimer: 0,
       spunUp: 0 as const,
+      grenadeCooldown: 0,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [alive], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -1043,6 +1052,7 @@ describe('NetClient', () => {
       weaponState: 1,
       weaponTimer: 0,
       spunUp: 0 as const,
+      grenadeCooldown: 0,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [fullHealth], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -1125,6 +1135,7 @@ describe('NetClient', () => {
       weaponState: 1,
       weaponTimer: 0,
       spunUp: 0 as const,
+      grenadeCooldown: 0,
     };
     transport.pump([encodeSnapshot(1, 5, 2, [serverState], null, emptyExtras())]);
 
@@ -1194,6 +1205,7 @@ describe('NetClient', () => {
       weaponState: WeaponState.Ready,
       weaponTimer: 0,
       spunUp: 0 as const,
+      grenadeCooldown: 0,
     };
     transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
 
@@ -1214,6 +1226,86 @@ describe('NetClient', () => {
     expect(client.world.lastFireEvents).toHaveLength(1);
     expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(14);
     expect(client.world.players.weaponState[0]).toBe(WeaponState.Firing);
+  });
+
+  it('self-heals a lost-input grenade-cooldown prediction drift so a stale cooldown cannot block the next real throw (Codex review round 12, PR #9, finding 1)', () => {
+    // Round 10 fixed the grenade COUNT (see the ammo self-heal test above) but left
+    // grenadeCooldown -- the grenade throw's own parallel cooldown timer (sim/weapons.ts's
+    // tryThrowGrenade) -- off the wire entirely, the exact class of bug round 11 fixed for
+    // the primary weapon's weaponState/weaponTimer/spunUp. So a lost altFire input could get
+    // its grenade count repaired on the very next snapshot while staying stuck predicting a
+    // stale nonzero cooldown, and tryThrowGrenade only allows a throw once the cooldown has
+    // reached 0: the player's next real throw attempt was silently suppressed for up to a
+    // full 1 s cooldown window even with the grenade count restored.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 30 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    expect(client.world.players.grenades[0]).toBe(5);
+    expect(client.world.players.grenadeCooldown[0]).toBe(0);
+
+    const altFireInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: true,
+      slot: 0,
+    };
+    // sequence 1: predicts a grenade throw locally -- this input never actually reaches the
+    // server (lost or evicted), exactly like the ammo/weapon-state self-heal tests above.
+    client.tick(altFireInput);
+    expect(client.world.players.grenades[0]).toBe(4);
+    // GRENADE_DATA.throwCooldown (1.0 s): unlike weaponTimer, this is not decremented on the
+    // same tick it's set -- stepOnePlayer's cooldown decrement runs BEFORE tryThrowGrenade,
+    // so a freshly-set cooldown starts the very next tick, not this one.
+    expect(client.world.players.grenadeCooldown[0]).toBeCloseTo(1.0, 5);
+
+    // The server's authoritative snapshot: it never saw the altFire input, so it stayed at
+    // full grenades and zero cooldown, and lastInputSequence of 1 means reconcile will not
+    // replay sequence 1 back on top of the corrected baseline below.
+    const serverState = {
+      id: 0,
+      team: 0,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60,
+      weaponSlot: WeaponId.Blaster,
+      onGround: 0 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: WeaponState.Ready,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+    };
+    transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
+
+    // Self-healed: grenade count (round 10) AND the cooldown timer itself (round 12) now
+    // match the server's authoritative values, not just the count.
+    expect(client.world.players.grenades[0]).toBe(5);
+    expect(client.world.players.grenadeCooldown[0]).toBe(0);
+
+    // The real regression: a subsequent local altFire input must actually produce a throw,
+    // not be suppressed by a stale nonzero cooldown tryThrowGrenade would otherwise still be
+    // sitting on.
+    client.tick(altFireInput);
+    expect(client.world.lastFireEvents).toHaveLength(1);
+    expect(client.world.players.grenades[0]).toBe(4);
+    expect(client.world.players.grenadeCooldown[0]).toBeCloseTo(1.0, 5);
   });
 
   it('updates the local spawn point on a networked respawn (Codex review round 5, finding 2)', () => {
@@ -1250,6 +1342,7 @@ describe('NetClient', () => {
       weaponState: 1,
       weaponTimer: 0,
       spunUp: 0 as const,
+      grenadeCooldown: 0,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -1342,6 +1435,7 @@ describe('NetClient', () => {
       weaponState: 1,
       weaponTimer: 0,
       spunUp: 0 as const,
+      grenadeCooldown: 0,
     };
     const dead = { ...alive, health: 0 };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);

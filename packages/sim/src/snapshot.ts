@@ -46,6 +46,16 @@ export interface PlayerSnapshotData {
   weaponState: number;
   weaponTimer: number;
   spunUp: 0 | 1;
+  /**
+   * PlayerStore.grenadeCooldown -- the grenade throw's own little state machine (a 1 s
+   * cooldown gate in weapons.ts's tryThrowGrenade), a sibling to weaponState/weaponTimer/
+   * spunUp above but never wired onto the snapshot when those were (round 11). Round 10's
+   * ammo fix self-heals the grenade COUNT after a lost altFire input, but left this cooldown
+   * timer stuck at its locally-predicted value: the player's next real altFire attempt
+   * within that stale window was silently suppressed even though the server -- which never
+   * actually saw the throw -- would have allowed it. Codex review round 12 (PR #9).
+   */
+  grenadeCooldown: number;
 }
 
 function num(arr: Float64Array | Uint8Array | Uint16Array | Int16Array, i: number): number {
@@ -82,6 +92,7 @@ export function serializePlayer(world: World, id: number): PlayerSnapshotData {
     weaponState: num(p.weaponState, id),
     weaponTimer: num(p.weaponTimer, id),
     spunUp: bit(p.spunUp, id),
+    grenadeCooldown: num(p.grenadeCooldown, id),
   };
 }
 
@@ -125,4 +136,5 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   players.weaponState[data.id] = data.weaponState;
   players.weaponTimer[data.id] = data.weaponTimer;
   players.spunUp[data.id] = data.spunUp;
+  players.grenadeCooldown[data.id] = data.grenadeCooldown;
 }

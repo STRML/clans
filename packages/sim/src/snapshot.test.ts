@@ -53,6 +53,7 @@ describe('player snapshots', () => {
       weaponState: WeaponState.Ready,
       weaponTimer: 0,
       spunUp: 0,
+      grenadeCooldown: 0,
     });
   });
 
@@ -89,6 +90,7 @@ describe('player snapshots', () => {
       weaponState: WeaponState.Reload,
       weaponTimer: 0.35,
       spunUp: 1,
+      grenadeCooldown: 0.6,
     });
     expect(world.players.count).toBe(4);
     expect(world.players.active[3]).toBe(1);
@@ -115,6 +117,7 @@ describe('player snapshots', () => {
       weaponState: WeaponState.Reload,
       weaponTimer: 0.35,
       spunUp: 1,
+      grenadeCooldown: 0.6,
     });
   });
 
@@ -178,5 +181,23 @@ describe('player snapshots', () => {
     expect(target.players.weaponState[id]).toBe(WeaponState.Firing);
     expect(target.players.weaponTimer[id]).toBeCloseTo(1.218, 3);
     expect(target.players.spunUp[id]).toBe(1);
+  });
+
+  it('round-trips grenadeCooldown through serialize/deserialize (Codex review round 12, PR #9)', () => {
+    // Round 11 wired the primary weapon's state machine (weaponState/weaponTimer/spunUp)
+    // onto the wire but missed its sibling: the grenade throw's own cooldown timer
+    // (weapons.ts's tryThrowGrenade). Without this round-tripping, a client left with a
+    // stale nonzero grenadeCooldown by a lost altFire input has nothing to correct it
+    // against, and tryThrowGrenade's own cooldown guard would go on suppressing a real
+    // subsequent throw even after the server corrects the grenade count back up.
+    const world = createWorld(terrain, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    world.players.grenadeCooldown[id] = 0.62;
+    const data = serializePlayer(world, id);
+    expect(data.grenadeCooldown).toBeCloseTo(0.62, 3);
+
+    const target = createWorld(terrain, 1);
+    deserializePlayer(target, data);
+    expect(target.players.grenadeCooldown[id]).toBeCloseTo(0.62, 3);
   });
 });

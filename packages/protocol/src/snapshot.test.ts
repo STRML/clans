@@ -340,6 +340,41 @@ describe('snapshot codec', () => {
     ]);
   });
 
+  it('marks only grenadeCooldown dirty in a delta when nothing else changed, and round-trips it (Codex review round 12, PR #9, finding 1)', () => {
+    // Round 12: grenadeCooldown -- the grenade throw's own parallel cooldown timer, a
+    // sibling round 11 missed -- folds into the SAME DIRTY_PREDICTION bit as ammo and the
+    // primary weapon state machine, for the reasoning DIRTY_PREDICTION's own comment gives.
+    // Same shape as the weapon-state-machine delta test above, but for grenadeCooldown alone.
+    const source = createWorld(terrain, 1);
+    const id = addPlayer(source, { x: 0, y: 0, z: 0 }, 1);
+    const baselinePlayers = serializeActivePlayers(source);
+    const baselineBytes = encodeSnapshot(1, source.tick, 0, baselinePlayers, null, emptyExtras());
+    const decodedBaseline = decodeSnapshot(baselineBytes, null);
+
+    // Simulate a grenade throw landing on the server: only the grenade cooldown moves, same
+    // as stepWeapons's tryThrowGrenade would leave it mid-cooldown.
+    source.players.grenadeCooldown[id] = 0.62;
+    const nextPlayers = serializeActivePlayers(source);
+    const deltaBytes = encodeSnapshot(
+      2,
+      source.tick,
+      0,
+      nextPlayers,
+      { snapshotId: 1, players: baselinePlayers },
+      emptyExtras(),
+    );
+    const decoded = decodeSnapshot(deltaBytes, {
+      snapshotId: 1,
+      players: decodedBaseline.players,
+    });
+    expect(decoded.players).toEqual([
+      {
+        ...decodedBaseline.players[0],
+        grenadeCooldown: expect.closeTo(0.62, 3) as number,
+      },
+    ]);
+  });
+
   it('rejects a full snapshot carrying a non-finite transform value', () => {
     // Codex round 2 (PR #4): snapshot floats were accepted with no finiteness check and
     // written straight into prediction state, so a NaN x from a corrupted or adversarial

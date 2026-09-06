@@ -102,7 +102,12 @@ const HEADER_BYTES = 1 + 4 + 4 + 4 + 4 + 1; // type, snapshotId, baselineId, tic
 // even after round 10 wired ammo. Codex review round 11 (PR #9): a lost fire input could
 // get its ammo corrected on the next snapshot while staying stuck in a stale Firing state,
 // silently suppressing the player's next real shot for up to a full fire-cycle duration.
-const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 4 + 1;
+// grenadeCooldown (f32): the grenade throw's own parallel cooldown timer (weapons.ts's
+// tryThrowGrenade), a sibling to weaponState/weaponTimer/spunUp that round 11 missed.
+// Codex review round 12 (PR #9), finding 1: round 10's ammo fix self-heals the grenade
+// COUNT after a lost altFire input, but left this cooldown stuck at its stale
+// locally-predicted value, silently suppressing the player's next real throw.
+const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 4 + 1 + 4;
 const PROJECTILE_BYTES = 2 + 1 + 1 + 4 * 6 + 2; // id, type, weaponId, 6 f32 (pos+vel), ownerId
 const FLAG_BYTES = 1 + 1 + 1 + 4 * 3 + 2 + 4; // id, team, state, 3 f32 (pos), carrierId i16, returnInS f32
 const DELTA_FLAG = 1;
@@ -122,7 +127,10 @@ const DIRTY_RESPAWN = 64;
 // input), they change together on nearly every shot, and a weapon actively firing/reloading
 // touches weaponTimer virtually every tick regardless -- splitting them into a second bit
 // would rarely save a byte and would cost a full mask-width bump to get. Renamed from
-// DIRTY_AMMO to reflect the broader "prediction-correcting state changed" meaning.
+// DIRTY_AMMO to reflect the broader "prediction-correcting state changed" meaning. Round 12
+// (PR #9, finding 1) folds grenadeCooldown in here too, for the identical reason: it is the
+// grenade throw's own reconciled-prediction timer, changes in lockstep with the grenades
+// count already under this bit, and gains nothing from a bit of its own.
 const DIRTY_PREDICTION = 128;
 const EPSILON = 1e-4;
 
@@ -190,6 +198,7 @@ function writePlayerFull(cursor: Cursor, data: PlayerSnapshotData): void {
   writeU8(cursor, data.weaponState);
   writeF32(cursor, data.weaponTimer);
   writeU8(cursor, data.spunUp);
+  writeF32(cursor, data.grenadeCooldown);
 }
 function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const id = readU16(cursor);
@@ -213,7 +222,8 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const weaponState = readU8(cursor);
   const weaponTimer = readF32(cursor);
   const spunUp = readU8(cursor) ? 1 : 0;
-  assertFinite([x, y, z, vx, vy, vz, yaw, energy, health, weaponTimer]);
+  const grenadeCooldown = readF32(cursor);
+  assertFinite([x, y, z, vx, vy, vz, yaw, energy, health, weaponTimer, grenadeCooldown]);
   return {
     id,
     team,
@@ -237,6 +247,7 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
     weaponState,
     weaponTimer,
     spunUp,
+    grenadeCooldown,
   };
 }
 
@@ -399,14 +410,17 @@ function ammoChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
     a.grenades !== b.grenades
   );
 }
-// weaponState/spunUp are small integers (exact equality, like ammo above); weaponTimer is a
-// float counting down every tick a fire/reload/dry-fire/activate timer is running, so it
-// uses the same EPSILON tolerance transformChanged does rather than exact equality.
+// weaponState/spunUp are small integers (exact equality, like ammo above); weaponTimer and
+// grenadeCooldown are floats counting down every tick their respective timer is running, so
+// both use the same EPSILON tolerance transformChanged does rather than exact equality.
+// grenadeCooldown added round 12 (PR #9), finding 1: the grenade throw's own cooldown timer,
+// a sibling to weaponTimer that round 11 missed.
 function weaponMachineChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
   return (
     a.weaponState !== b.weaponState ||
     Math.abs(a.weaponTimer - b.weaponTimer) > EPSILON ||
-    a.spunUp !== b.spunUp
+    a.spunUp !== b.spunUp ||
+    Math.abs(a.grenadeCooldown - b.grenadeCooldown) > EPSILON
   );
 }
 function dirtyMask(current: PlayerSnapshotData, previous: PlayerSnapshotData): number {
@@ -458,7 +472,8 @@ function changedRecordBytes(mask: number): number {
   if (mask & DIRTY_HEALTH) bytes += 4;
   if (mask & DIRTY_WEAPON) bytes += 1;
   if (mask & DIRTY_RESPAWN) bytes += 1;
-  if (mask & DIRTY_PREDICTION) bytes += 4 + 1 + 4 + 1; // ammo(4) + weaponState + weaponTimer + spunUp
+  // ammo(4) + weaponState(1) + weaponTimer(4) + spunUp(1) + grenadeCooldown(4)
+  if (mask & DIRTY_PREDICTION) bytes += 4 + 1 + 4 + 1 + 4;
   return bytes;
 }
 function writeChangedTransform(cursor: Cursor, data: PlayerSnapshotData): void {
@@ -480,6 +495,7 @@ function writeChangedWeaponMachine(cursor: Cursor, data: PlayerSnapshotData): vo
   writeU8(cursor, data.weaponState);
   writeF32(cursor, data.weaponTimer);
   writeU8(cursor, data.spunUp);
+  writeF32(cursor, data.grenadeCooldown);
 }
 function writeChangedPlayer(cursor: Cursor, data: PlayerSnapshotData, mask: number): void {
   writeU16(cursor, data.id);
@@ -610,10 +626,12 @@ function readChangedAmmo(cursor: Cursor, next: PlayerSnapshotData): void {
 function readChangedWeaponMachine(cursor: Cursor, next: PlayerSnapshotData): void {
   const weaponState = readU8(cursor);
   const weaponTimer = readF32(cursor);
-  assertFinite([weaponTimer]);
   next.weaponState = weaponState;
   next.weaponTimer = weaponTimer;
   next.spunUp = readU8(cursor) ? 1 : 0;
+  const grenadeCooldown = readF32(cursor);
+  assertFinite([weaponTimer, grenadeCooldown]);
+  next.grenadeCooldown = grenadeCooldown;
 }
 function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData>): void {
   const id = readU16(cursor);
