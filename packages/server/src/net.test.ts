@@ -1165,4 +1165,92 @@ describe('startNetServer', () => {
     client.close();
     spawnServer.close();
   });
+
+  it('does not damage a player whose respawn becomes due on the same tick a laggy shooter fires at their spawn point (Codex review round 6, P2)', async () => {
+    // runOneTick respawns due players BEFORE applyLagCompensatedHits runs, in the same tick,
+    // and respawning clears the respawned id's position history immediately (see
+    // clearHistory's and respawnDuePlayers' own comments). If a laggy shooter's shot resolves
+    // as a live miss this same tick -- the target was still dead when stepWorld ran -- the
+    // lag-comp recheck that follows must not find the freshly-respawned player standing at
+    // their spawn point and treat that as though it were where they had been all along.
+    const respawnSpawns: SceneSpawn[] = [
+      { name: null, team: 1, position: [0, 0, 0], radius: 5 },
+      { name: null, team: 2, position: [0, 0, 8], radius: 5 }, // the exact line the shooter aims down
+    ];
+    let clock = 0;
+    const respawnWorld = createWorld(terrain, 1, 8);
+    const lagServer = startNetServer({
+      world: respawnWorld,
+      spawns: respawnSpawns,
+      port: TEST_PORT + 12,
+      now: () => clock,
+    });
+    await lagServer.ready;
+
+    const shooter = await connect(TEST_PORT + 12);
+    const welcomePromise = receive(shooter);
+    shooter.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    respawnWorld.players.position.set([0, 0, 0], welcome.playerId * 3);
+
+    // The eventual target: alive and sitting on the shot line at first, so a few ticks of
+    // real history get recorded for it -- matching the review's exact repro (history
+    // existed, then got cleared by this tick's respawn) rather than "never had any history".
+    const targetId = addPlayer(respawnWorld, { x: 0, y: 0, z: 8 }, 2);
+
+    // Establish a 150ms ping: send a snapshot, ack it 150ms of server-clock time later.
+    const firstPromise = receive(shooter);
+    lagServer.tick(2);
+    const first = decodeSnapshot(await firstPromise, null);
+    clock = 150;
+    shooter.send(encodeAck({ snapshotId: first.snapshotId }));
+    await wait(20);
+
+    const idle: NetInputSample = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    for (let step = 0; step < 5; step += 1) {
+      respawnWorld.players.position.set([0, 0, 8], targetId * 3);
+      lagServer.tick(3 + step);
+    }
+
+    shooter.send(
+      encodeInput({
+        sequence: 1,
+        samples: [
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+        ],
+      }),
+    );
+    await wait(20);
+    lagServer.tick(20); // slot switch to the Laser Rifle only, still Ready, no shot yet
+
+    // The target dies right before the shot resolves, with its respawn already due: on the
+    // very next tick, respawnDuePlayers respawns it back to [0, 0, 8] -- the same spot the
+    // shooter is aiming down -- and clears its history in the same call, before
+    // applyLagCompensatedHits ever runs this tick.
+    respawnWorld.players.alive[targetId] = 0;
+    respawnWorld.players.respawnAt[targetId] = 0;
+
+    const fire: NetInputSample = { ...idle, slot: 4, fire: true };
+    shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
+    await wait(20);
+    lagServer.tick(21); // live sim finds no target (dead); same tick it respawns, then rechecks
+
+    expect(respawnWorld.players.alive[targetId]).toBe(1); // actually respawned
+    expect(respawnWorld.players.damage[targetId]).toBe(0); // but the correction must not hit it
+
+    shooter.close();
+    lagServer.close();
+  });
 });

@@ -75,6 +75,11 @@ export function positionAtTick(
 
 export interface RewindHandle {
   saved: Array<{ id: number; x: number; y: number; z: number }>;
+  /**
+   * Ids temporarily deactivated because no history sample was available for them --
+   * `restorePositions` must reactivate exactly these, and nothing else.
+   */
+  deactivated: number[];
 }
 
 /**
@@ -85,6 +90,20 @@ export interface RewindHandle {
  * `stepWorld` itself, which is what corrupted unrelated player state (energy, ammo,
  * velocity, ...) in the design this replaced (Codex PR #9 round 3, P1 finding 1).
  * `restorePositions` must run immediately after the recheck, in the same tick.
+ *
+ * A player with no recorded sample at or before `targetTick` -- most commonly one whose
+ * respawn became due this very tick, which clears their history before this ever runs (see
+ * `clearHistory`'s and `respawnDuePlayers`' own comments) -- cannot be lag-compensated at
+ * all: there is no evidence of where they actually were during the shooter's rewind window.
+ * Substituting their CURRENT position (the old behavior) is wrong in the opposite direction
+ * from a rewind bug -- it lets the recheck see a freshly-respawned player standing at their
+ * spawn point as though that were where they had been all along, so a shot the live
+ * simulation correctly missed (they were dead when `stepWorld` ran) could still land on them
+ * a moment after they come back to life (Codex review round 6, P2). Excluding them from the
+ * hit-test entirely -- by deactivating them for the duration of the recheck -- is the
+ * correct response to "we don't know": `isValidTarget` (`@clans/sim`) requires
+ * `world.players.active`, so a deactivated id cannot register a hit in `hitTestFireEvent`
+ * regardless of where its position currently sits.
  */
 export function rewindOthers(
   world: World,
@@ -94,8 +113,15 @@ export function rewindOthers(
 ): RewindHandle {
   const targetTick = world.tick - rewindTicks;
   const saved: RewindHandle['saved'] = [];
+  const deactivated: number[] = [];
   for (let id = 0; id < world.players.count; id += 1) {
     if (!world.players.active[id] || excludeIds.includes(id)) continue;
+    const sample = positionAtTick(history, id, targetTick);
+    if (!sample) {
+      world.players.active[id] = 0;
+      deactivated.push(id);
+      continue;
+    }
     const base = id * 3;
     saved.push({
       id,
@@ -103,20 +129,24 @@ export function rewindOthers(
       y: world.players.position[base + 1] ?? 0,
       z: world.players.position[base + 2] ?? 0,
     });
-    const sample = positionAtTick(history, id, targetTick);
-    if (sample) world.players.position.set([sample.x, sample.y, sample.z], base);
+    world.players.position.set([sample.x, sample.y, sample.z], base);
   }
-  return { saved };
+  return { saved, deactivated };
 }
 
 /**
- * Restores the true position `rewindOthers` saved. Because the substitution now only ever
- * brackets a narrow, side-effect-free hit-test recheck run after `stepWorld` has already
- * completed against true positions, nothing else needs restoring and no tick is lost: the
- * player already moved normally this tick before their position was ever borrowed.
+ * Restores the true position `rewindOthers` saved, and reactivates any player it excluded
+ * for lack of a history sample. Because the substitution now only ever brackets a narrow,
+ * side-effect-free hit-test recheck run after `stepWorld` has already completed against true
+ * positions, nothing else needs restoring and no tick is lost: the player already moved
+ * normally this tick before their position -- or, for a deactivated id, their eligibility as
+ * a target -- was ever borrowed.
  */
 export function restorePositions(world: World, handle: RewindHandle): void {
   for (const entry of handle.saved) {
     world.players.position.set([entry.x, entry.y, entry.z], entry.id * 3);
+  }
+  for (const id of handle.deactivated) {
+    world.players.active[id] = 1;
   }
 }

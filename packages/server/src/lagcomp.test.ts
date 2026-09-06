@@ -203,8 +203,9 @@ describe('clearHistory on respawn (Codex PR #9 round 3, P1 finding 2)', () => {
 
     world.tick = 6; // shortly after respawn, well within the ~1s history window
     // No sample recorded yet since the respawn -- a shot arriving now has nothing to
-    // rewind this id onto at all. rewindOthers leaves an untouched (true, current)
-    // position whenever positionAtTick returns null; see its own source.
+    // rewind this id onto at all. rewindOthers excludes this id from the recheck entirely
+    // rather than substituting its current position (Codex review round 6, P2 -- see the
+    // "rewindOthers excludes a player with no history sample" describe block below).
     expect(positionAtTick(history, id, world.tick - 1)).toBeNull();
   });
 
@@ -223,5 +224,55 @@ describe('clearHistory on respawn (Codex PR #9 round 3, P1 finding 2)', () => {
     world.tick = 6;
     const sample = positionAtTick(history, id, world.tick - 1);
     expect(sample?.z).toBe(500); // the corpse's old position, not the new spawn's
+  });
+});
+
+describe('rewindOthers excludes a player with no history sample (Codex review round 6, P2)', () => {
+  it('deactivates a no-history player instead of leaving them targetable at their current position', () => {
+    const world = createWorld(flat, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 0 });
+    // A player who just respawned this same tick: clearHistory already ran (or, as here,
+    // no sample was ever recorded), so positionAtTick has nothing to hand back for them.
+    const target = addPlayer(world, { x: 5, y: 0, z: 5 });
+    const history = createPositionHistory();
+    world.tick = 10;
+
+    const handle = rewindOthers(world, history, [shooter], 5);
+
+    // The old, buggy fallback left the target both active and at their current position --
+    // exactly what let a lag-compensated recheck see a freshly-respawned player standing at
+    // their spawn point as though that were where they had always been. The fix removes them
+    // from consideration entirely: `isValidTarget` (@clans/sim) requires `players.active`.
+    expect(world.players.active[target]).toBe(0);
+    expect(handle.deactivated).toEqual([target]);
+    // Position itself is untouched (nothing to rewind it to); only eligibility changes.
+    expect(world.players.position[target * 3]).toBe(5);
+    expect(world.players.position[target * 3 + 2]).toBe(5);
+
+    restorePositions(world, handle);
+    expect(world.players.active[target]).toBe(1); // reactivated once the recheck is done
+  });
+
+  it('still rewinds a player who does have a history sample, unaffected by the no-history path', () => {
+    const world = createWorld(flat, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const target = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const history = createPositionHistory();
+    for (let step = 0; step < 5; step += 1) {
+      world.players.position.set([0, 0, step], target * 3);
+      world.tick = step;
+      recordHistory(history, world);
+    }
+    world.players.position.set([0, 0, 100], target * 3);
+    world.tick = 10;
+
+    const handle = rewindOthers(world, history, [shooter], 5);
+
+    expect(handle.deactivated).toEqual([]);
+    expect(world.players.active[target]).toBe(1);
+    expect(world.players.position[target * 3 + 2]).toBe(4); // newest sample at or before tick 5
+
+    restorePositions(world, handle);
+    expect(world.players.position[target * 3 + 2]).toBe(100);
   });
 });
