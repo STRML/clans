@@ -35,6 +35,7 @@ function mixPlayer(hash: number, players: World['players'], id: number): number 
   h = mix(h, num(players.velocity, base + 2));
   h = mix(h, num(players.yaw, id));
   h = mix(h, num(players.energy, id));
+  h = mix(h, num(players.damage, id));
   return h;
 }
 

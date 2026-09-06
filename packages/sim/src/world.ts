@@ -52,7 +52,12 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
       wasGrounded: new Uint8Array(capacity),
       wasJumpHeld: new Uint8Array(capacity),
       landingSpeed: new Float64Array(capacity),
+      damage: new Float64Array(capacity),
+      alive: new Uint8Array(capacity),
+      respawnAt: new Float64Array(capacity),
+      score: new Int16Array(capacity),
     },
+    pendingDeaths: [],
   };
 }
 
@@ -84,6 +89,10 @@ export function addPlayer(world: World, spawn: Vec3, team = 0): number {
   if (id === players.count) players.count += 1;
   players.active[id] = 1;
   players.team[id] = team;
+  players.damage[id] = 0;
+  players.alive[id] = 1;
+  players.respawnAt[id] = -1;
+  players.score[id] = 0;
   resetPlayerToSpawn(world, id, spawn);
   return id;
 }

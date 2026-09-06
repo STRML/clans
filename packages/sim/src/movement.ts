@@ -1,4 +1,5 @@
 import { LIGHT_ARMOR, type ArmorData } from './armor.js';
+import { applyFallDamage } from './damage.js';
 import { sampleTerrain, type TerrainSample } from './terrain.js';
 import type { PlayerInput, PlayerStore, World } from './types.js';
 
@@ -281,15 +282,20 @@ function applyForces(
 }
 
 function writeState(
-  players: PlayerStore,
+  world: World,
   id: number,
   body: Body,
   contact: Contact,
   input: PlayerInput,
   ctx: TickContext,
+  armor: ArmorData,
 ): void {
+  const players = world.players;
   writeBody(players, id, body);
-  if (contact.landingSpeed >= 0) players.landingSpeed[id] = contact.landingSpeed;
+  if (contact.landingSpeed >= 0) {
+    players.landingSpeed[id] = contact.landingSpeed;
+    applyFallDamage(world, id, contact.landingSpeed, armor);
+  }
   players.onGround[id] = contact.grounded ? 1 : 0;
   players.ski[id] = ctx.skiing ? 1 : 0;
   // The jump edge compares against the grounded state at the start of this tick, not the
@@ -343,7 +349,7 @@ function stepPlayer(
     resetToSpawn(players, id, armor);
     return; // already fully reset; writeState below would overwrite it with this tick's stale fall state
   }
-  writeState(players, id, body, contact, input, ctx);
+  writeState(world, id, body, contact, input, ctx, armor);
 }
 
 export function stepPlayers(
@@ -351,8 +357,9 @@ export function stepPlayers(
   inputs: ReadonlyMap<number, PlayerInput>,
   dt: number,
 ): void {
+  world.pendingDeaths = [];
   for (let id = 0; id < world.players.count; id += 1) {
-    if (!world.players.active[id]) continue;
+    if (!world.players.active[id] || !world.players.alive[id]) continue;
     const input = inputs.get(id) ?? { ...IDLE, yaw: world.players.yaw[id] ?? 0 };
     stepPlayer(world, id, input, LIGHT_ARMOR, dt);
   }

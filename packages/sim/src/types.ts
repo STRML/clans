@@ -29,6 +29,10 @@ export interface PlayerStore {
   wasGrounded: Uint8Array;
   wasJumpHeld: Uint8Array;
   landingSpeed: Float64Array;
+  damage: Float64Array;
+  alive: Uint8Array;
+  respawnAt: Float64Array;
+  score: Int16Array;
 }
 export interface World {
   tick: number;
@@ -37,4 +41,5 @@ export interface World {
   /** Below this height a player has fallen out of the world and returns to spawn. */
   killY: number;
   players: PlayerStore;
+  pendingDeaths: number[];
 }

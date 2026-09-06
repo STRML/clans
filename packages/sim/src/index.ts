@@ -1,4 +1,5 @@
 export * from './armor.js';
+export * from './damage.js';
 // movement.ts is internal: stepWorld is the only entry point, so the fixed-tick guard
 // cannot be bypassed. GRAVITY is re-exported for tests and tuning tools.
 export { GRAVITY } from './movement.js';

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { LIGHT_ARMOR } from './armor.js';
 import {
   addPlayer,
   createWorld,
@@ -38,6 +39,7 @@ describe('player snapshots', () => {
       vz: 6,
       yaw: 0.5,
       energy: 40,
+      health: LIGHT_ARMOR.maxDamage,
       onGround: 1,
       ski: 0,
     });
@@ -64,6 +66,7 @@ describe('player snapshots', () => {
       vz: 0,
       yaw: 1,
       energy: 30,
+      health: LIGHT_ARMOR.maxDamage,
       onGround: 0,
       ski: 1,
     });
@@ -80,6 +83,7 @@ describe('player snapshots', () => {
       vz: 0,
       yaw: 1,
       energy: 30,
+      health: LIGHT_ARMOR.maxDamage,
       onGround: 0,
       ski: 1,
     });
