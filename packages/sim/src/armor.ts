@@ -25,6 +25,13 @@ export interface ArmorData {
   runSurfaceAngle: number;
   jumpSurfaceAngle: number;
   speedDamageScale: number;
+  discAmmo: number;
+  chaingunAmmo: number;
+  mortarAmmo: number;
+  grenadeCount: number;
+  maxWeapons: number;
+  laserRifleAllowed: boolean;
+  mortarAllowed: boolean;
 }
 
 export const LIGHT_ARMOR: ArmorData = {
@@ -54,4 +61,11 @@ export const LIGHT_ARMOR: ArmorData = {
   runSurfaceAngle: 70,
   jumpSurfaceAngle: 80,
   speedDamageScale: 0.004,
+  discAmmo: 15,
+  chaingunAmmo: 100,
+  mortarAmmo: 0,
+  grenadeCount: 5,
+  maxWeapons: 3,
+  laserRifleAllowed: true,
+  mortarAllowed: false,
 };

@@ -14,7 +14,9 @@ Files used in milestone 1:
 - `Katabatic.mis` and `Katabatic.ter`: the Katabatic mission and terrain.
 - `IceWorld.Snow.png`, `IceWorld.RockBlue.png`, `IceWorld.SnowRock.png`, `IceWorld.Ice.png`: the terrain textures.
 
-Later milestones add converted `.glb` interiors and shapes.
+Later milestones add converted `.glb` interiors and shapes. Milestone 3 adds no new source
+files: its `Flag` and `ExteriorFlagStand` objects come from the same `Katabatic.mis` already
+credited above.
 
 ## Sources
 

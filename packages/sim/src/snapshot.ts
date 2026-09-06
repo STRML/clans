@@ -1,4 +1,6 @@
+import { LIGHT_ARMOR } from './armor.js';
 import type { PlayerStore, World } from './types.js';
+import { ammoIndex, WeaponId } from './weapons.js';
 
 export interface PlayerSnapshotData {
   id: number;
@@ -11,11 +13,79 @@ export interface PlayerSnapshotData {
   vz: number;
   yaw: number;
   energy: number;
+  health: number;
+  weaponSlot: number;
   onGround: 0 | 1;
   ski: 0 | 1;
+  /** See PlayerStore.respawnSeq (types.ts) -- the authoritative "a respawn just happened"
+   *  wire signal a client compares against what the previous snapshot reported. */
+  respawnSeq: number;
+  /**
+   * The three finite ammo pools (PlayerStore.ammo, indexed via weapons.ts's ammoIndex) --
+   * the Laser Rifle and Blaster are never sent, since their ammo is permanently -1
+   * (infinite, gated by energy only) and never changes. Wired onto the snapshot so
+   * reconciliation has an authoritative value to correct client-side prediction against on
+   * every snapshot, not just at respawn -- see netclient.ts's reconcile/deserializePlayer.
+   * Codex review round 10 (PR #9), finding 1.
+   */
+  discAmmo: number;
+  chaingunAmmo: number;
+  mortarAmmo: number;
+  /** PlayerStore.grenades -- same self-heal rationale as the ammo fields above. */
+  grenades: number;
+  /**
+   * PlayerStore.weaponState/weaponTimer/spunUp -- the fire-eligibility state MACHINE
+   * itself (weapons.ts's stepWeapons/WeaponState), as opposed to the ammo counts above.
+   * Round 10 wired ammo so a lost fire input's ammo drift self-heals within one snapshot,
+   * but left this machine off the wire entirely: a client whose locally-predicted shot
+   * never landed server-side could get its ammo corrected back up while staying stuck in
+   * a stale Firing state, and stepWeapons only allows firing from Ready/NoAmmo -- so the
+   * player's next real fire attempt was silently suppressed for up to a full fire-cycle
+   * duration even with full ammo. Codex review round 11 (PR #9).
+   */
+  weaponState: number;
+  weaponTimer: number;
+  spunUp: 0 | 1;
+  /**
+   * PlayerStore.grenadeCooldown -- the grenade throw's own little state machine (a 1 s
+   * cooldown gate in weapons.ts's tryThrowGrenade), a sibling to weaponState/weaponTimer/
+   * spunUp above but never wired onto the snapshot when those were (round 11). Round 10's
+   * ammo fix self-heals the grenade COUNT after a lost altFire input, but left this cooldown
+   * timer stuck at its locally-predicted value: the player's next real altFire attempt
+   * within that stale window was silently suppressed even though the server -- which never
+   * actually saw the throw -- would have allowed it. Codex review round 12 (PR #9).
+   */
+  grenadeCooldown: number;
+  /**
+   * PlayerStore.score -- signed (suicide/team-kill scoring in damage.ts can drive it
+   * negative). Round 13's hashWorld/mixPlayer already mixed this in, but it was never
+   * actually wired onto PlayerSnapshotData/writePlayerFull/serializePlayer, so a
+   * decoded/reconstructed player always came back with score 0 regardless of the source's
+   * real value -- hashWorld on the two worlds diverged even though the wire faithfully
+   * transmitted everything it actually carried. Codex review round 14 (PR #9), finding 1.
+   */
+  score: number;
+  /** PlayerStore.godMode -- same gap and same fix as score above: round 13 hashed it,
+   *  round 14 wires it. Also the authoritative correction netclient.ts's reconcile applies
+   *  on every snapshot for the networked god-mode fix (see netclient.ts's setGodMode,
+   *  Codex review round 14, finding 2). */
+  godMode: 0 | 1;
+  /**
+   * PlayerStore.wasJumpHeld -- movement.ts's jumpEdge check
+   * (`input.jump && (!players.wasJumpHeld[id] || !players.wasGrounded[id])`) reads this to
+   * tell a freshly-pressed jump apart from a continuously-held one. It was never wired onto
+   * the snapshot, so netclient.ts's reconcile() hardcoded it to 0 after every snapshot --
+   * "treat the jump key as freshly pressed" -- which is wrong whenever the LOCAL player is
+   * actually holding jump/jet across the snapshot boundary: the very next replayed input
+   * then looks like a fresh press and triggers an extra jump impulse the server never
+   * produced, a real misprediction. wasGrounded stays off the wire deliberately (its
+   * onGround-as-proxy approximation in reconcile() already works and is not this finding).
+   * Codex review round 15 (PR #9), finding 1.
+   */
+  wasJumpHeld: 0 | 1;
 }
 
-function num(arr: Float64Array | Uint8Array, i: number): number {
+function num(arr: Float64Array | Uint8Array | Uint16Array | Int16Array, i: number): number {
   return arr[i] ?? 0;
 }
 
@@ -37,8 +107,22 @@ export function serializePlayer(world: World, id: number): PlayerSnapshotData {
     vz: num(p.velocity, base + 2),
     yaw: num(p.yaw, id),
     energy: num(p.energy, id),
+    health: LIGHT_ARMOR.maxDamage - num(p.damage, id),
+    weaponSlot: num(p.weaponSlot, id),
     onGround: bit(p.onGround, id),
     ski: bit(p.ski, id),
+    respawnSeq: num(p.respawnSeq, id),
+    discAmmo: num(p.ammo, ammoIndex(id, WeaponId.Spinfusor)),
+    chaingunAmmo: num(p.ammo, ammoIndex(id, WeaponId.Chaingun)),
+    mortarAmmo: num(p.ammo, ammoIndex(id, WeaponId.Mortar)),
+    grenades: num(p.grenades, id),
+    weaponState: num(p.weaponState, id),
+    weaponTimer: num(p.weaponTimer, id),
+    spunUp: bit(p.spunUp, id),
+    grenadeCooldown: num(p.grenadeCooldown, id),
+    score: num(p.score, id),
+    godMode: bit(p.godMode, id),
+    wasJumpHeld: bit(p.wasJumpHeld, id),
   };
 }
 
@@ -69,6 +153,27 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   players.velocity.set([data.vx, data.vy, data.vz], data.id * 3);
   players.yaw[data.id] = data.yaw;
   players.energy[data.id] = data.energy;
+  players.damage[data.id] = LIGHT_ARMOR.maxDamage - data.health;
+  players.alive[data.id] = data.health > 0 ? 1 : 0;
+  // A live decoded player is never due for a respawn. `respawnAt` isn't itself on the wire
+  // (a dead player's local countdown is set separately, see netclient.ts's death detection),
+  // but leaving it at the typed array's raw zero-init (rather than addPlayer's -1 "not
+  // scheduled" sentinel) desynced hashWorld's now-full-state hash from a freshly addPlayer'd
+  // world with no wire round trip at all -- Codex review round 13 (PR #9).
+  if (players.alive[data.id]) players.respawnAt[data.id] = -1;
+  players.weaponSlot[data.id] = data.weaponSlot;
   players.onGround[data.id] = data.onGround;
   players.ski[data.id] = data.ski;
+  players.respawnSeq[data.id] = data.respawnSeq;
+  players.ammo[ammoIndex(data.id, WeaponId.Spinfusor)] = data.discAmmo;
+  players.ammo[ammoIndex(data.id, WeaponId.Chaingun)] = data.chaingunAmmo;
+  players.ammo[ammoIndex(data.id, WeaponId.Mortar)] = data.mortarAmmo;
+  players.grenades[data.id] = data.grenades;
+  players.weaponState[data.id] = data.weaponState;
+  players.weaponTimer[data.id] = data.weaponTimer;
+  players.spunUp[data.id] = data.spunUp;
+  players.grenadeCooldown[data.id] = data.grenadeCooldown;
+  players.score[data.id] = data.score;
+  players.godMode[data.id] = data.godMode;
+  players.wasJumpHeld[data.id] = data.wasJumpHeld;
 }

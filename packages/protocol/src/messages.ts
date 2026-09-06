@@ -6,6 +6,15 @@ export enum MessageType {
   Input = 3,
   Snapshot = 4,
   Ack = 5,
+  Event = 6,
+  God = 7,
+}
+
+export const PROTOCOL_VERSION = 2; // M1/M2 carried no version field at all; this milestone starts at 2.
+
+export enum WelcomeStatus {
+  Ok = 0,
+  VersionMismatch = 1,
 }
 
 /** The wire shape of one tick's input is identical to the sim's own PlayerInput. */
@@ -13,18 +22,19 @@ export type NetInputSample = PlayerInput;
 
 export interface JoinMessage {
   type: MessageType.Join;
+  version: number;
 }
 export interface WelcomeMessage {
   type: MessageType.Welcome;
   playerId: number;
   team: number;
   tickMs: number;
+  status: WelcomeStatus;
   /**
-   * The mission spawn point the server placed this player at. Without it the client's
-   * local prediction world has no spawn to fall back to and defaults to (0,0,0); a
-   * client that mispredicts falling below the kill plane before its first snapshot
-   * arrives then resets to the map origin instead of the real spawn, diverging from
-   * the server until the next reconciliation papers over it.
+   * The mission spawn point the server placed this player at. M2 added this so the
+   * client's local prediction world has a real fall-back spawn instead of the map origin
+   * before its first snapshot arrives. `status` is new in M3; `spawnX`/`spawnY`/`spawnZ`
+   * are unchanged from M2 and must not be dropped.
    */
   spawnX: number;
   spawnY: number;
@@ -38,6 +48,23 @@ export interface InputMessage {
 export interface AckMessage {
   type: MessageType.Ack;
   snapshotId: number;
+}
+
+export enum EventKind {
+  PlayerKilled = 0, // a = attackerId (-1 = environment), b = victimId
+  FlagTouched = 1, // a = playerId, b = flagId
+  FlagCaptured = 2, // a = team, b = playerId
+  LaserFired = 3, // a = shooterId, b = hitPlayerId (-1 = miss)
+}
+export interface EventMessage {
+  type: MessageType.Event;
+  kind: EventKind;
+  a: number;
+  b: number;
+}
+export interface GodMessage {
+  type: MessageType.God;
+  enabled: boolean;
 }
 
 export const SNAPSHOT_EVERY_N_TICKS = 2;
@@ -59,3 +86,8 @@ export const SNAPSHOT_HISTORY_DEPTH = 8;
  * packet, which would otherwise allocate tens of thousands of players and meshes.
  */
 export const MAX_SNAPSHOT_PLAYERS = 256;
+// Matches packages/sim's PROJECTILE_CAPACITY: the sim never produces more than this many active
+// projectiles, so any wire value above it is corrupt or hostile, not just unusually busy.
+export const MAX_SNAPSHOT_PROJECTILES = 256;
+// Two flags in this milestone's CTF map. A little headroom in case a future map adds more.
+export const MAX_SNAPSHOT_FLAGS = 8;

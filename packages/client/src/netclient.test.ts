@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   FIXED_DT,
   FIXED_TICK_MS,
+  LIGHT_ARMOR,
+  RESPAWN_TICKS,
+  TIME_LIMIT_TICKS,
+  WeaponId,
+  WeaponState,
   addPlayer,
+  ammoIndex,
   createWorld,
   nextRandom,
   serializeActivePlayers,
@@ -13,11 +19,17 @@ import {
   type World,
 } from '@clans/sim';
 import {
+  EventKind,
   MessageType,
   SNAPSHOT_EVERY_N_TICKS,
+  WelcomeStatus,
+  decodeGod,
   decodeInput,
+  emptyExtras,
+  encodeEvent,
   encodeSnapshot,
   encodeWelcome,
+  type WorldExtras,
 } from '@clans/protocol';
 import { NetClient } from './netclient.js';
 import type { Transport } from './transport.js';
@@ -109,9 +121,29 @@ describe('NetClient', () => {
     addPlayer(server, { x: 500, y: 0, z: 500 }, 1);
     let nextSnapshotId = 1;
     let lastInputSequence = 0;
-    const skiInput: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: true, jet: false };
+    const skiInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: true,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     // Like the real server: step with the newest input received, idle until the first arrives.
-    let serverInput: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
+    let serverInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     const totalTicks = Math.ceil(3 / FIXED_DT);
     // Prediction is judged at equal input sequence: the client's position right after it
     // applied input n must match the server's position right after it applied input n.
@@ -141,8 +173,16 @@ describe('NetClient', () => {
       if (arrived > 0) serverAt.set(arrived, positionOf(server));
       if (tick % SNAPSHOT_EVERY_N_TICKS === 0) {
         const players = serializeActivePlayers(server);
+        // Mirror the real server's WorldExtras.timeRemainingS (packages/server/src/net.ts's
+        // buildExtras), not emptyExtras()'s placeholder 0: since this client now derives
+        // world.timeLimitTicks from timeRemainingS every snapshot (Codex review round 13,
+        // finding P2), a snapshot's placeholder 0 mid-match would collapse the client's
+        // local time limit down to the current tick and freeze prediction immediately.
         serverToClient.send(
-          encodeSnapshot(nextSnapshotId, server.tick, lastInputSequence, players, null),
+          encodeSnapshot(nextSnapshotId, server.tick, lastInputSequence, players, null, {
+            ...emptyExtras(),
+            timeRemainingS: Math.max(0, (server.timeLimitTicks - server.tick) * FIXED_DT),
+          }),
         );
         nextSnapshotId += 1;
       }
@@ -179,15 +219,33 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      health: 60,
+      weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     const state1 = { ...base, x: 1, z: 0 };
     const state2 = { ...base, x: 2, z: 0 };
     const state3 = { ...base, x: 3, z: 0 };
-    transport.pump([encodeSnapshot(1, 0, 0, [state1], null)]);
-    transport.pump([encodeSnapshot(2, 2, 0, [state2], { snapshotId: 1, players: [state1] })]);
-    transport.pump([encodeSnapshot(3, 4, 0, [state3], { snapshotId: 1, players: [state1] })]);
+    transport.pump([encodeSnapshot(1, 0, 0, [state1], null, emptyExtras())]);
+    transport.pump([
+      encodeSnapshot(2, 2, 0, [state2], { snapshotId: 1, players: [state1] }, emptyExtras()),
+    ]);
+    transport.pump([
+      encodeSnapshot(3, 4, 0, [state3], { snapshotId: 1, players: [state1] }, emptyExtras()),
+    ]);
     expect(client.stats.packetLossEstimate).toBe(0);
     expect(client.world.players.position[0]).toBe(3);
   });
@@ -229,6 +287,7 @@ describe('NetClient', () => {
         playerId: 0,
         team: 1,
         tickMs: FIXED_TICK_MS,
+        status: WelcomeStatus.Ok,
         spawnX: 500,
         spawnY: 10,
         spawnZ: 500,
@@ -245,7 +304,17 @@ describe('NetClient', () => {
     clock.ms = 0;
     const transport = makeTransport(makeLink({ value: 14 }));
     const client = new NetClient(transport, terrain, { now: () => clock.ms });
-    const forward: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: false, jet: false };
+    const forward: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     for (let i = 0; i < 5; i += 1) client.tick(forward);
     expect(client.world.players.velocity[2]).not.toBe(0);
 
@@ -254,6 +323,7 @@ describe('NetClient', () => {
         playerId: 0,
         team: 1,
         tickMs: FIXED_TICK_MS,
+        status: WelcomeStatus.Ok,
         spawnX: 500,
         spawnY: 10,
         spawnZ: 500,
@@ -271,7 +341,17 @@ describe('NetClient', () => {
     const transport = makeTransport(makeLink({ value: 11 }));
     const client = new NetClient(transport, terrain, { now: () => clock.ms });
     client.playerId = 0;
-    const skiInput: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: true, jet: false };
+    const skiInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: true,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     // Well past the ceiling (4x MAX_REPLAY_TICKS), and well past the existing "40 ticks,
     // then reconcile hard-snaps" scenario this must not disturb.
     for (let i = 0; i < 500; i += 1) client.tick(skiInput);
@@ -291,7 +371,17 @@ describe('NetClient', () => {
     const transport = makeTransport(makeLink({ value: 16 }));
     transport.setConnected(false); // still CONNECTING: isOpen() is true, isConnected() is not
     const client = new NetClient(transport, terrain, { now: () => clock.ms });
-    const idleInput: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
+    const idleInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     for (let i = 0; i < 20_000; i += 1) client.tick(idleInput);
     expect((client as unknown as { sequence: number }).sequence).toBe(0);
 
@@ -316,13 +406,46 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      health: 60,
+      weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
-    const delta = encodeSnapshot(7, 3, 0, [state], { snapshotId: 6, players: [state] });
+    const delta = encodeSnapshot(
+      7,
+      3,
+      0,
+      [state],
+      { snapshotId: 6, players: [state] },
+      emptyExtras(),
+    );
     expect(() => transport.pump([delta])).not.toThrow();
     expect(client.stats.packetLossEstimate).toBeGreaterThan(0);
-    expect(() => client.tick({ moveX: 0, moveZ: 1, yaw: 0, jump: true, jet: false })).not.toThrow();
+    expect(() =>
+      client.tick({
+        moveX: 0,
+        moveZ: 1,
+        yaw: 0,
+        pitch: 0,
+        jump: true,
+        jet: false,
+        fire: false,
+        altFire: false,
+        slot: 0,
+      }),
+    ).not.toThrow();
   });
 
   it('bounds the packet-loss loop instead of freezing on a forged snapshotId gap', () => {
@@ -345,11 +468,27 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      health: 60,
+      weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
-    transport.pump([encodeSnapshot(1, 0, 0, [state], null)]);
-    expect(() => transport.pump([encodeSnapshot(0xffffffff, 2, 0, [state], null)])).not.toThrow();
+    transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
+    expect(() =>
+      transport.pump([encodeSnapshot(0xffffffff, 2, 0, [state], null, emptyExtras())]),
+    ).not.toThrow();
 
     const lossWindow = (client as unknown as { lossWindow: number[] }).lossWindow;
     expect(lossWindow.length).toBeLessThanOrEqual(50);
@@ -362,7 +501,17 @@ describe('NetClient', () => {
     const client = new NetClient(transport, terrain, { now: () => clock.ms });
     client.playerId = 0;
 
-    const skiInput: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: true, jet: false };
+    const skiInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: true,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     for (let tick = 0; tick < 40; tick += 1) {
       clock.ms += FIXED_TICK_MS;
       client.tick(skiInput);
@@ -380,10 +529,24 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      health: 60,
+      weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
-    transport.pump([encodeSnapshot(1, 0, 0, [serverState], null)]);
+    transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
 
     expect(client.stats.predictionErrorM).toBeGreaterThan(0);
     expect(client.world.players.position[0]).toBe(0);
@@ -403,7 +566,17 @@ describe('NetClient', () => {
     const transport = makeTransport(makeLink({ value: 3 }));
     const client = new NetClient(transport, terrain, { now: () => clock.ms });
     client.playerId = 0;
-    const skiInput: PlayerInput = { moveX: 0, moveZ: 1, yaw: 0, jump: true, jet: false };
+    const skiInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: true,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
     for (let i = 0; i < 5; i += 1) client.tick(skiInput);
     const pending = (client as unknown as { pendingInputs: unknown[] }).pendingInputs;
     expect(pending.length).toBe(5);
@@ -428,6 +601,7 @@ describe('NetClient', () => {
         playerId: 2,
         team: 1,
         tickMs: FIXED_TICK_MS,
+        status: WelcomeStatus.Ok,
         spawnX: 500,
         spawnY: 10,
         spawnZ: 500,
@@ -458,11 +632,1122 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      health: 60,
+      weaponSlot: 4,
       onGround: 0 as const,
       ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
-    transport.pump([encodeSnapshot(1, 0, 0, [serverState], null)]);
+    transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
     expect(client.world.players.wasGrounded[0]).toBe(0);
     expect(client.world.players.wasJumpHeld[0]).toBe(0);
+  });
+
+  it('does not fire an extra jump impulse on reconciliation when the local player held jump across the snapshot boundary (Codex review round 15, PR #9, finding 1)', () => {
+    // Before this fix, reconcile() hardcoded wasJumpHeld to 0 after every snapshot ("treat
+    // the jump key as freshly pressed" -- see this file's git history). A LOCAL player
+    // continuously holding jump while grounded (skiing) already has wasJumpHeld=1 and
+    // wasGrounded=1, so movement.ts's jumpEdge
+    // (`input.jump && (!wasJumpHeld[id] || !wasGrounded[id])`) reads false and predicts no
+    // repeat jump -- but the hardcoded reset made the very next replayed input look like a
+    // fresh press, and jumpEdge fired a real jump impulse (+jumpForce/mass, ~8.3 m/s
+    // vertical for LIGHT_ARMOR) the server never produced.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 9 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    // Simulate several already-elapsed ticks of holding jump while grounded (a ski hop):
+    // both edge-detection flags already read true, so a further held tick predicts no jump.
+    client.world.players.onGround[0] = 1;
+    client.world.players.wasGrounded[0] = 1;
+    client.world.players.wasJumpHeld[0] = 1;
+    const heldJump: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: true,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    client.tick(heldJump); // queues pendingInputs[0] (sequence 1); predicts no new jump
+    expect(client.world.players.velocity[1]).toBeCloseTo(0, 5);
+
+    const serverState = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60,
+      weaponSlot: 4,
+      onGround: 1 as const,
+      ski: 1 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 1 as const, // the server also saw this as a continued hold, not a fresh press
+    };
+    // lastInputSequence 0: the server has not acked sequence 1 yet, so reconcile() replays it.
+    transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
+
+    // With the fix, wasJumpHeld/wasGrounded both read true going into the replay, jumpEdge
+    // stays false, and vy stays ~0. Before the fix, the hardcoded 0 made jumpEdge true and
+    // this assertion failed with vy near 8.3 (the phantom jump impulse).
+    expect(client.world.players.velocity[1]).toBeCloseTo(0, 5);
+  });
+
+  it('exposes projectiles, flags, team scores, and game over from the snapshot extras', () => {
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 11 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    const extras: WorldExtras = {
+      projectiles: [
+        {
+          id: 0,
+          type: 0,
+          weaponId: 0,
+          x: 1,
+          y: 2,
+          z: 3,
+          vx: 90,
+          vy: 0,
+          vz: 0,
+          ownerId: 0,
+          armed: 1,
+        },
+      ],
+      flags: [{ id: 0, team: 1, state: 1, x: 5, y: 0, z: 5, carrierId: 0, returnInS: -1 }],
+      teamScores: [100, 0],
+      gameOver: false,
+      winnerTeam: 0,
+      timeRemainingS: 1200.5,
+      gameOverReason: 0,
+    };
+    transport.pump([encodeSnapshot(1, 0, 0, [], null, extras)]);
+    expect(client.projectiles).toEqual(extras.projectiles);
+    expect(client.flags).toEqual(extras.flags);
+    expect(client.teamScores).toEqual([100, 0]);
+    expect(client.gameOver).toBe(false);
+    expect(client.timeRemainingS).toBeCloseTo(1200.5, 1);
+    expect(client.gameOverReason).toBe(0);
+  });
+
+  it('mirrors gameOver/winnerTeam/gameOverReason onto world so stepWorld freezes prediction', () => {
+    // Codex review round 2 (PR #9), finding 3: round 1 added an early-return freeze guard
+    // to stepWorld that checks world.gameOver, but the snapshot handler only ever updated
+    // this NetClient's own gameOver/winnerTeam/gameOverReason fields, never the world's --
+    // tick() keeps calling stepWorld(this.world, ...) every frame regardless, so the
+    // client's local world never learned the match had ended and kept predicting movement,
+    // weapon timers, ammo, and unacknowledged-input replay after the server had frozen.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 21 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    const extras: WorldExtras = {
+      projectiles: [],
+      flags: [],
+      teamScores: [3, 1],
+      gameOver: true,
+      winnerTeam: 1,
+      timeRemainingS: 0,
+      gameOverReason: 1,
+    };
+    transport.pump([encodeSnapshot(1, 0, 0, [], null, extras)]);
+
+    expect(client.gameOver).toBe(true);
+    expect(client.world.gameOver).toBe(true);
+    expect(client.world.winnerTeam).toBe(1);
+    expect(client.world.gameOverReason).toBe(1);
+
+    const beforeX = client.world.players.position[0] ?? 0;
+    client.tick({
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    });
+    expect(client.world.players.position[0] ?? 0).toBe(beforeX);
+  });
+
+  it('does not replay a pending input past a game-over snapshot (Codex review round 3, residual of finding 3)', () => {
+    // Round 2 mirrored gameOver onto world.gameOver so stepWorld's freeze guard could
+    // engage, but within handleSnapshot that assignment ran AFTER reconcile() had
+    // already replayed any pending (unacknowledged) local inputs. The very first
+    // game-over snapshot therefore still let one extra tick of local prediction run
+    // against a world that had not yet been told the match ended.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 31 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+
+    const forwardInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    // Leave this input unacknowledged: the snapshot below names lastInputSequence 0,
+    // so reconcile() will still find it pending and eligible for replay.
+    client.tick(forwardInput);
+    expect(client.world.players.position[2] ?? 0).toBeGreaterThan(0);
+
+    const serverState = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60,
+      weaponSlot: 4,
+      onGround: 1 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
+    };
+    const extras: WorldExtras = {
+      projectiles: [],
+      flags: [],
+      teamScores: [3, 1],
+      gameOver: true,
+      winnerTeam: 1,
+      timeRemainingS: 0,
+      gameOverReason: 1,
+    };
+    transport.pump([encodeSnapshot(1, 1, 0, [serverState], null, extras)]);
+
+    // reconcile() sets position/tick to the server's authoritative (0,0,0)/1. The freeze
+    // guard must already be active by the time reconcile() replays the pending
+    // forwardInput, so no extra tick of movement or tick advance is layered on top.
+    expect(client.world.players.position[0]).toBe(0);
+    expect(client.world.players.position[2]).toBe(0);
+    expect(client.world.tick).toBe(1);
+  });
+
+  it('derives world.timeLimitTicks from timeRemainingS so local prediction matches a server running a custom time limit (Codex review round 13, finding P2)', () => {
+    // createFlags (packages/sim/src/flags.ts) accepts a configurable timeLimitTicks, so a
+    // server is not obligated to run the sim's default match length. This client's local
+    // world is created with that default, and until this fix nothing ever corrected it, so
+    // local prediction's checkTimeLimit compared world.tick against the wrong limit and
+    // could end the match locally well before the server did. Repro: server configured
+    // with TIME_LIMIT_TICKS + 1000 (a higher limit than default), both sides at
+    // TIME_LIMIT_TICKS - 1 ticks -- one client-side prediction tick must NOT flip
+    // world.gameOver, because the server (checking against its own higher limit) would not
+    // have either.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 41 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+
+    const serverTimeLimitTicks = TIME_LIMIT_TICKS + 1000;
+    const serverTick = TIME_LIMIT_TICKS - 1;
+    // Same forward calculation the server uses in packages/server/src/net.ts's buildExtras:
+    // timeRemainingS = (timeLimitTicks - tick) * FIXED_DT.
+    const timeRemainingS = (serverTimeLimitTicks - serverTick) * FIXED_DT;
+
+    const serverState = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60,
+      weaponSlot: 4,
+      onGround: 1 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
+    };
+    const extras: WorldExtras = {
+      projectiles: [],
+      flags: [],
+      teamScores: [0, 0],
+      gameOver: false,
+      winnerTeam: 0,
+      timeRemainingS,
+      gameOverReason: 0,
+    };
+    transport.pump([encodeSnapshot(1, serverTick, 0, [serverState], null, extras)]);
+
+    expect(client.world.tick).toBe(serverTick);
+    expect(client.world.timeLimitTicks).toBe(serverTimeLimitTicks);
+    expect(client.world.gameOver).toBe(false);
+
+    // One local-prediction tick crosses the sim's DEFAULT time limit (TIME_LIMIT_TICKS)
+    // but must stay well under the server's actual, higher configured limit.
+    client.tick({
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    });
+
+    expect(client.world.tick).toBe(serverTick + 1);
+    expect(client.world.gameOver).toBe(false);
+  });
+
+  it('reads localHealth off the reconciled snapshot for the local player', () => {
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 12 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    const state = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      onGround: 1 as const,
+      ski: 0 as const,
+      health: 0.4,
+      weaponSlot: 0,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
+    };
+    transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
+    expect(client.localHealth).toBeCloseTo(0.4);
+  });
+
+  it('collects incoming Event messages into a bounded rolling history', () => {
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 13 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    transport.pump([encodeEvent({ kind: EventKind.PlayerKilled, a: 1, b: 2 })]);
+    expect(client.recentEvents).toEqual([
+      { type: MessageType.Event, kind: EventKind.PlayerKilled, a: 1, b: 2, seq: 1 },
+    ]);
+  });
+
+  it('tags each event with a never-reused, ever-increasing sequence number', () => {
+    // Codex review round 1, finding 14 (PR #9): a consumer tracking "new since last
+    // frame" by array index into this rolling buffer breaks once the buffer's own
+    // eviction (past its 100-event cap) shifts everything down. seq is assigned once, at
+    // receipt, and never reused, so it survives eviction where an index cannot.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 17 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    for (let i = 0; i < 105; i += 1) {
+      transport.pump([encodeEvent({ kind: EventKind.PlayerKilled, a: 0, b: i })]);
+    }
+    expect(client.recentEvents).toHaveLength(100);
+    const seqs = client.recentEvents.map((event) => event.seq);
+    expect(seqs[0]).toBe(6); // the first 5 (seq 1..5) were evicted past the 100-event cap
+    expect(seqs.at(-1)).toBe(105);
+    expect(new Set(seqs).size).toBe(100); // every retained seq is unique
+  });
+
+  it('rejects a VersionMismatch Welcome instead of joining as if it had succeeded', () => {
+    // Codex review round 1, finding 13 (PR #9): the handler ignored welcome.status
+    // entirely and always assigned playerId/team, so a version-mismatch rejection from
+    // the server still left the client reporting a live playerId and sending input until
+    // the server eventually timed it out.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 18 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    transport.pump([
+      encodeWelcome({
+        playerId: 5,
+        team: 1,
+        tickMs: FIXED_TICK_MS,
+        status: WelcomeStatus.VersionMismatch,
+        spawnX: 500,
+        spawnY: 10,
+        spawnZ: 500,
+      }),
+    ]);
+    expect(client.playerId).toBe(-1);
+    expect(client.team).toBe(0);
+    // Failed joins are surfaced through the same mechanism callers already watch
+    // (transport.isOpen(), via the `connected` getter) rather than a parallel channel.
+    expect(client.connected).toBe(false);
+  });
+
+  it('accepts an Ok Welcome exactly as before', () => {
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 19 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    transport.pump([
+      encodeWelcome({
+        playerId: 3,
+        team: 2,
+        tickMs: FIXED_TICK_MS,
+        status: WelcomeStatus.Ok,
+        spawnX: 100,
+        spawnY: 5,
+        spawnZ: 100,
+      }),
+    ]);
+    expect(client.playerId).toBe(3);
+    expect(client.team).toBe(2);
+    expect(client.connected).toBe(true);
+  });
+
+  it('resets ammo, grenades, and weapon state on a locally-observed respawn transition', () => {
+    // Codex review round 1, finding 1 (PR #9): ammo/grenades/weaponSlot/weaponState/
+    // weaponTimer are not on the wire snapshot, so a real server-side respawn (a fresh
+    // 15 discs) never reached this client's own prediction state -- it kept predicting
+    // dry-fire from whatever ammo it had at the moment of death.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 20 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+
+    // Spend every disc and grenade before dying, as the repro describes.
+    client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)] = 0;
+    client.world.players.weaponSlot[0] = WeaponId.Spinfusor;
+    client.world.players.grenades[0] = 0;
+
+    const dead = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 0,
+      weaponSlot: WeaponId.Spinfusor,
+      onGround: 1 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 0,
+      chaingunAmmo: 0,
+      mortarAmmo: 0,
+      grenades: 0,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
+    };
+    transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
+    expect(client.world.players.alive[0]).toBe(0);
+    // Ammo/grenades must not be touched by death alone -- only a later respawn resets them.
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(0);
+
+    const respawned = { ...dead, health: 60, weaponSlot: WeaponId.Blaster, respawnSeq: 1 };
+    transport.pump([encodeSnapshot(2, 20, 0, [respawned], null, emptyExtras())]);
+
+    expect(client.world.players.alive[0]).toBe(1);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Chaingun)]).toBe(100);
+    expect(client.world.players.grenades[0]).toBe(5);
+    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Blaster);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
+    expect(client.world.players.weaponTimer[0]).toBe(0);
+    expect(client.world.players.respawnAt[0]).toBe(-1);
+  });
+
+  it('resets the loadout on a respawn even when the intermediate dead snapshot is skipped (Codex review round 7)', () => {
+    // Codex review round 7 (PR #9): the old detector diffed the CLIENT's own
+    // locally-predicted alive state (world.players.alive from before this snapshot) against
+    // the incoming one. If local prediction never actually applied an intermediate "dead"
+    // snapshot -- dropped, coalesced, or simply not delivered given the delta/full snapshot
+    // cadence -- it stayed "alive" throughout from its own point of view, so the transition
+    // was never detected and the loadout never reset, even though the server legitimately
+    // killed and respawned the player. Repro: spend ammo/grenades locally, apply one ALIVE
+    // (but damaged) baseline snapshot -- no "dead" snapshot ever reaches this client -- then
+    // jump straight to a respawn snapshot at full health with a different weapon slot.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 24 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+
+    // Spend every disc and grenade before the baseline snapshot, as the repro describes.
+    client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)] = 0;
+    client.world.players.weaponSlot[0] = WeaponId.Spinfusor;
+    client.world.players.grenades[0] = 0;
+
+    const alive = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 20, // alive, but damaged -- this client never sees health hit 0 on the wire
+      weaponSlot: WeaponId.Spinfusor,
+      onGround: 1 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 0,
+      chaingunAmmo: 0,
+      mortarAmmo: 0,
+      grenades: 0,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
+    };
+    transport.pump([encodeSnapshot(1, 10, 0, [alive], null, emptyExtras())]);
+    expect(client.world.players.alive[0]).toBe(1);
+    // This baseline snapshot alone (still alive, no death observed) must not touch ammo.
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(0);
+
+    // The server killed and fully respawned this player entirely between snapshot 1 and
+    // this one -- this next snapshot is the only thing the client ever sees of it.
+    const respawned = { ...alive, health: 60, weaponSlot: WeaponId.Blaster, respawnSeq: 1 };
+    transport.pump([encodeSnapshot(2, 20, 0, [respawned], null, emptyExtras())]);
+
+    expect(client.world.players.alive[0]).toBe(1);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Chaingun)]).toBe(100);
+    expect(client.world.players.grenades[0]).toBe(5);
+    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Blaster);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
+    expect(client.world.players.weaponTimer[0]).toBe(0);
+    expect(client.world.players.respawnAt[0]).toBe(-1);
+  });
+
+  it('resets the loadout on a full-health-to-full-health respawn that no health/alive signal can ever detect on its own (Codex review round 8, PR #9)', () => {
+    // Round 7 (the test above) closed the gap where the dead snapshot itself never reaches
+    // the client, by comparing against what the PREVIOUS received snapshot itself reported.
+    // But there is a case even that comparison cannot resolve: if the last snapshot this
+    // client actually received showed the player alive at FULL health, and the player then
+    // died and fully respawned entirely BETWEEN two received snapshots (the dead tick's
+    // snapshot skipped/dropped/coalesced, same as round 7, but this time landing between two
+    // full-health readings), the next snapshot ALSO reports full health and alive --
+    // identical to the previous one. `isAlive` never flips and `reportedHealth > wasHealth`
+    // never fires, because neither field moved at all. From health/alive data alone this is
+    // genuinely indistinguishable from "nothing happened" -- this repro used to pass through
+    // the old detector as a no-op, leaving stale, consumed ammo. Only respawnSeq (Codex review
+    // round 8) can catch it.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 26 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+
+    // Spend every disc and grenade before the baseline snapshot, as the repro describes.
+    client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)] = 0;
+    client.world.players.weaponSlot[0] = WeaponId.Spinfusor;
+    client.world.players.grenades[0] = 0;
+
+    const fullHealth = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60, // full health, alive -- indistinguishable from the post-respawn snapshot below
+      weaponSlot: WeaponId.Spinfusor,
+      onGround: 1 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 0,
+      chaingunAmmo: 0,
+      mortarAmmo: 0,
+      grenades: 0,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
+    };
+    transport.pump([encodeSnapshot(1, 10, 0, [fullHealth], null, emptyExtras())]);
+    expect(client.world.players.alive[0]).toBe(1);
+    // This baseline snapshot alone (no death observed, health unchanged) must not touch ammo.
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(0);
+
+    // The server killed and fully respawned this player entirely between snapshot 1 and this
+    // one. health and alive read identically to the previous snapshot -- only respawnSeq
+    // moved, which is exactly the scenario neither old signal could ever resolve.
+    const respawnedSameHealth = { ...fullHealth, respawnSeq: 1 };
+    transport.pump([encodeSnapshot(2, 20, 0, [respawnedSameHealth], null, emptyExtras())]);
+
+    expect(client.world.players.alive[0]).toBe(1);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Chaingun)]).toBe(100);
+    expect(client.world.players.grenades[0]).toBe(5);
+    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Blaster);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
+    expect(client.world.players.weaponTimer[0]).toBe(0);
+    expect(client.world.players.respawnAt[0]).toBe(-1);
+  });
+
+  it('self-heals a lost-input ammo prediction drift on the next snapshot instead of staying wrong forever (Codex review round 10, PR #9, finding 1)', () => {
+    // The client predicts ammo consumption locally (sim/weapons.ts's stepWeapons), same as
+    // position. Before this fix the wire snapshot carried no ammo field at all, so if the
+    // fire input that caused a local decrement never actually reached the server -- lost
+    // beyond the 3-sample input redundancy window (protocol/handshake.ts), or evicted from
+    // the server's own input queue under backpressure (server/net.ts) -- nothing on the
+    // wire could ever correct the client's now-permanently-wrong local ammo count, short of
+    // the player's next death/respawn (which resets the whole loadout via resetLoadout, an
+    // unrelated round 1/8 mechanism).
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 30 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    client.world.players.weaponSlot[0] = WeaponId.Spinfusor;
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+
+    const fireInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: true,
+      altFire: false,
+      slot: 0,
+    };
+    client.tick(fireInput); // sequence 1: predicts a Spinfusor shot, decrementing local ammo
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(14);
+
+    const idleInput: PlayerInput = { ...fireInput, fire: false };
+    client.tick(idleInput); // sequence 2: an ordinary follow-up tick
+
+    // The server's authoritative snapshot: sequence 1 (the fire input) never reached it --
+    // lost or evicted -- so its ammo never moved, and lastInputSequence of 2 means the
+    // server has already simulated past sequence 1 without ever seeing it, so reconcile
+    // will not replay it back on top of the corrected baseline below.
+    const serverState = {
+      id: 0,
+      team: 0,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60,
+      weaponSlot: WeaponId.Spinfusor,
+      onGround: 0 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
+    };
+    transport.pump([encodeSnapshot(1, 5, 2, [serverState], null, emptyExtras())]);
+
+    // Self-healed to the server's authoritative value on this very next snapshot, instead
+    // of staying stuck at the wrongly-predicted 14 until the player's next death.
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+  });
+
+  it('self-heals a lost-input weapon-state-machine prediction drift so a stale Firing state cannot block the next real shot (Codex review round 11, PR #9)', () => {
+    // Round 10 fixed ammo (see the test above) but left weaponState/weaponTimer/spunUp --
+    // the actual fire-eligibility state MACHINE (sim/weapons.ts's stepWeapons) -- off the
+    // wire entirely. So a lost fire input could get its ammo repaired on the very next
+    // snapshot while staying stuck predicting Firing, and stepWeapons only allows firing
+    // from Ready/NoAmmo: the player's next real fire attempt was silently suppressed for up
+    // to a full fire-cycle duration (1.25 s for the Spinfusor) even with full ammo restored.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 30 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    client.world.players.weaponSlot[0] = WeaponId.Spinfusor;
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
+
+    const fireInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: true,
+      altFire: false,
+      slot: 0,
+    };
+    // sequence 1: predicts a Spinfusor shot locally -- this input never actually reaches
+    // the server (lost or evicted), exactly like the ammo self-heal test above.
+    client.tick(fireInput);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(14);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Firing);
+    // fireTime (1.25s) minus one FIXED_DT tick of immediate decrement -- the exact figure
+    // from the round 11 repro.
+    expect(client.world.players.weaponTimer[0]).toBeCloseTo(1.25 - FIXED_DT, 5);
+
+    // The server's authoritative snapshot: it never saw the fire input, so it stayed Ready
+    // at full ammo, and lastInputSequence of 1 means reconcile will not replay sequence 1
+    // back on top of the corrected baseline below.
+    const serverState = {
+      id: 0,
+      team: 0,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60,
+      weaponSlot: WeaponId.Spinfusor,
+      onGround: 0 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: WeaponState.Ready,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
+    };
+    transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
+
+    // Self-healed: ammo (round 10) AND the state machine itself (round 11) now match the
+    // server's authoritative values, not just ammo.
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
+    expect(client.world.players.weaponTimer[0]).toBe(0);
+    expect(client.world.players.spunUp[0]).toBe(0);
+
+    // The real regression: a subsequent local fire input must actually produce a fire
+    // event, not be suppressed by a stale Firing state stepWeapons would otherwise still
+    // be sitting in.
+    client.tick(fireInput);
+    // world.pendingFireEvents is drained back to [] within the same stepWorld tick
+    // (projectiles.ts's stepProjectiles); world.lastFireEvents is what survives the tick
+    // for a caller -- see FireEvent's own doc comment in weapons.ts.
+    expect(client.world.lastFireEvents).toHaveLength(1);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(14);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Firing);
+  });
+
+  it('self-heals a lost-input grenade-cooldown prediction drift so a stale cooldown cannot block the next real throw (Codex review round 12, PR #9, finding 1)', () => {
+    // Round 10 fixed the grenade COUNT (see the ammo self-heal test above) but left
+    // grenadeCooldown -- the grenade throw's own parallel cooldown timer (sim/weapons.ts's
+    // tryThrowGrenade) -- off the wire entirely, the exact class of bug round 11 fixed for
+    // the primary weapon's weaponState/weaponTimer/spunUp. So a lost altFire input could get
+    // its grenade count repaired on the very next snapshot while staying stuck predicting a
+    // stale nonzero cooldown, and tryThrowGrenade only allows a throw once the cooldown has
+    // reached 0: the player's next real throw attempt was silently suppressed for up to a
+    // full 1 s cooldown window even with the grenade count restored.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 30 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    expect(client.world.players.grenades[0]).toBe(5);
+    expect(client.world.players.grenadeCooldown[0]).toBe(0);
+
+    const altFireInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: true,
+      slot: 0,
+    };
+    // sequence 1: predicts a grenade throw locally -- this input never actually reaches the
+    // server (lost or evicted), exactly like the ammo/weapon-state self-heal tests above.
+    client.tick(altFireInput);
+    expect(client.world.players.grenades[0]).toBe(4);
+    // GRENADE_DATA.throwCooldown (1.0 s): unlike weaponTimer, this is not decremented on the
+    // same tick it's set -- stepOnePlayer's cooldown decrement runs BEFORE tryThrowGrenade,
+    // so a freshly-set cooldown starts the very next tick, not this one.
+    expect(client.world.players.grenadeCooldown[0]).toBeCloseTo(1.0, 5);
+
+    // The server's authoritative snapshot: it never saw the altFire input, so it stayed at
+    // full grenades and zero cooldown, and lastInputSequence of 1 means reconcile will not
+    // replay sequence 1 back on top of the corrected baseline below.
+    const serverState = {
+      id: 0,
+      team: 0,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60,
+      weaponSlot: WeaponId.Blaster,
+      onGround: 0 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: WeaponState.Ready,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
+    };
+    transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
+
+    // Self-healed: grenade count (round 10) AND the cooldown timer itself (round 12) now
+    // match the server's authoritative values, not just the count.
+    expect(client.world.players.grenades[0]).toBe(5);
+    expect(client.world.players.grenadeCooldown[0]).toBe(0);
+
+    // The real regression: a subsequent local altFire input must actually produce a throw,
+    // not be suppressed by a stale nonzero cooldown tryThrowGrenade would otherwise still be
+    // sitting on.
+    client.tick(altFireInput);
+    expect(client.world.lastFireEvents).toHaveLength(1);
+    expect(client.world.players.grenades[0]).toBe(4);
+    expect(client.world.players.grenadeCooldown[0]).toBeCloseTo(1.0, 5);
+  });
+
+  it('updates the local spawn point on a networked respawn (Codex review round 5, finding 2)', () => {
+    // The wire snapshot only carries the respawned POSITION, not a separate spawn-point
+    // field (that would be new protocol work). Before this fix, players.spawn was only
+    // ever set from the Welcome handshake's join spawn and never updated on a real
+    // respawn, so any local consumer of "the current respawn point" saw the ORIGINAL join
+    // spawn forever instead of the point the server had just respawned the player at.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 22 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+
+    const dead = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 0,
+      weaponSlot: WeaponId.Blaster,
+      onGround: 1 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
+    };
+    transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
+    expect(client.world.players.alive[0]).toBe(0);
+
+    // The server respawns this player far from the origin -- a different spot than the
+    // join spawn (which defaults to the world origin in this test's client construction).
+    // Full health is LIGHT_ARMOR.maxDamage on the wire (health = maxDamage - damage, see
+    // snapshot.ts's serializePlayer), not a 0-100 percentage: this test's local player
+    // later falls below the kill plane and, post-fix, that routes through applyDamage,
+    // which reads the locally-reconstructed `damage` field -- so it has to be realistic.
+    const respawned = {
+      ...dead,
+      x: 500,
+      y: 10,
+      z: 500,
+      health: LIGHT_ARMOR.maxDamage,
+      respawnSeq: 1,
+    };
+    transport.pump([encodeSnapshot(2, 20, 0, [respawned], null, emptyExtras())]);
+    expect(client.world.players.alive[0]).toBe(1);
+
+    // The local copy of players.spawn must follow the real respawn point.
+    expect([...client.world.players.spawn.slice(0, 3)]).toEqual([500, 10, 500]);
+
+    // Falling below the kill plane locally is now a real death (Codex review round 9,
+    // PR #9, P1): movement.ts's kill-plane path no longer teleports using players.spawn --
+    // it routes through applyDamage like any other death -- so local prediction just marks
+    // the player dead in place and waits for the server's own respawn snapshot, the same
+    // as it would for a remote kill. A terrain hole (emptySquares), not just a low y, is
+    // needed: on solid ground movement.ts's own ground-contact resolution snaps a falling
+    // player back onto the surface before the kill-plane check ever runs.
+    client.world.terrain.emptySquares = new Set([0]);
+    const killY = client.world.killY;
+    client.world.players.position.set([500, killY - 100, 500], 0);
+    // damage was just reconstructed as `LIGHT_ARMOR.maxDamage - health`, and health made a
+    // round trip through the wire's f32 encoding, so it is not exactly LIGHT_ARMOR.maxDamage
+    // any more -- off by about 1e-8, epsilon-close but on the wrong side of applyDamage's
+    // exact `< armor.maxDamage` threshold. Set it to a clean 0 directly: this test is about
+    // spawn tracking and death detection, not about float precision at the health boundary
+    // (an existing characteristic shared by every locally-predicted lethal hit, unrelated to
+    // this fix).
+    client.world.players.damage[0] = 0;
+    const idleInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    client.tick(idleInput);
+
+    expect(client.world.players.alive[0]).toBe(0);
+    // No local teleport happened: x/z are untouched, and y only moved by one tick's worth
+    // of gravity integration -- Codex review round 13 (PR #9) fixed movement.ts to commit
+    // the newly-integrated position before triggering a kill-plane death (so a carried
+    // flag drops at the real death spot, not a stale one), so y is no longer frozen at
+    // exactly what was set above.
+    const finalPosition = client.world.players.position.slice(0, 3);
+    expect(finalPosition[0]).toBe(500);
+    expect(finalPosition[1]).toBeCloseTo(killY - 100, 1);
+    expect(finalPosition[2]).toBe(500);
+  });
+
+  it('sets a local respawnAt on death so the HUD countdown does not read stale/zero time', () => {
+    // Codex review round 1, finding 1 (PR #9): respawnAt is not on the wire snapshot and
+    // the local world never runs a real death for a remotely-inflicted kill, so hud.ts's
+    // countdown read whatever stale value was already there (often 0), showing "0s" for
+    // the entire respawn wait instead of a real countdown.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 21 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    const alive = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60,
+      weaponSlot: 4,
+      onGround: 1 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 0 as const,
+    };
+    const dead = { ...alive, health: 0 };
+    transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
+    expect(client.world.players.respawnAt[0]).toBe(10 + RESPAWN_TICKS);
+  });
+
+  it('sends a God message when setGodMode is called', () => {
+    clock.ms = 0;
+    const link = makeLink({ value: 14 });
+    const sent: Uint8Array[] = [];
+    const rawSend = link.send.bind(link);
+    link.send = (bytes) => {
+      sent.push(bytes);
+      rawSend(bytes);
+    };
+    const transport = makeTransport(link);
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.setGodMode(true);
+    const god = sent.find((bytes) => bytes[0] === MessageType.God);
+    expect(god && decodeGod(god)).toEqual({ type: MessageType.God, enabled: true });
+  });
+
+  it('applies god mode to local prediction immediately, not just over the wire (Codex review round 14, PR #9, finding 2)', () => {
+    // Round 4, finding 5 fixed single-player's debug toggle to apply god mode to the local
+    // world proactively (app.ts's setLocalGodMode), but the NETWORKED path only ever sent
+    // the God message and relied on the next snapshot's godMode field to reach local
+    // prediction -- which (per finding 1, same round) wasn't even on the wire yet. Reviewer's
+    // repro: enable god mode while networked, then fall below the kill plane locally. Without
+    // this fix, applyDamage's proactive invulnerability check never sees the toggle on THIS
+    // client's own predicted world, so the local player dies to the fall even though the
+    // server (which received the God message) keeps the real player alive.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 15 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.setGodMode(true);
+    expect(client.world.players.godMode[0]).toBe(1);
+
+    const noInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    client.world.players.position[1] = client.world.killY - 1;
+    client.tick(noInput);
+    expect(client.world.players.alive[0]).toBe(1);
+  });
+
+  it('resets the predicted weapon loadout and clears predicted projectiles on a delayed Welcome (Codex review round 4, finding 8)', () => {
+    // tick() runs local prediction every frame regardless of whether the join handshake has
+    // completed, so firing before Welcome arrives both spends predicted ammo and spawns a
+    // predicted projectile the server never authorized -- it did not even know about this
+    // player yet. handleWelcome already resets movement/position/velocity/energy (see the
+    // two tests above); it must also reset the loadout and clear the projectile store.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 15 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    const fireSpinfusor: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: true,
+      altFire: false,
+      slot: 1, // Spinfusor
+    };
+    client.tick(fireSpinfusor); // fire before Welcome ever arrives
+
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBeLessThan(15);
+    expect(client.world.projectiles.count).toBeGreaterThan(0);
+    expect(Array.from(client.world.projectiles.active)).toContain(1);
+
+    transport.pump([
+      encodeWelcome({
+        playerId: 0,
+        team: 1,
+        tickMs: FIXED_TICK_MS,
+        status: WelcomeStatus.Ok,
+        spawnX: 500,
+        spawnY: 10,
+        spawnZ: 500,
+      }),
+    ]);
+
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Blaster);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
+    expect(client.world.projectiles.count).toBe(0);
+    expect(Array.from(client.world.projectiles.active).every((flag) => flag === 0)).toBe(true);
   });
 });

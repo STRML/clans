@@ -3,6 +3,8 @@ import {
   FIXED_DT,
   addPlayer,
   createWorld,
+  dueForRespawn,
+  respawnPlayer,
   sampleTerrain,
   stepWorld,
   type Heightfield,
@@ -18,7 +20,17 @@ const flat: Heightfield = {
   heightScale: 1,
   heights: new Uint16Array(4),
 };
-const idle: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
+const idle: PlayerInput = {
+  moveX: 0,
+  moveZ: 0,
+  yaw: 0,
+  pitch: 0,
+  jump: false,
+  jet: false,
+  fire: false,
+  altFire: false,
+  slot: 0,
+};
 const inputMap = (id: number, input: Partial<PlayerInput>) =>
   new Map([[id, { ...idle, ...input }]]);
 
@@ -68,37 +80,66 @@ describe('Light movement', () => {
     expect(world.players.position[id * 3 + 2]).toBeCloseTo(500, 3);
   });
 
-  it('falls through an empty square and returns to spawn below the kill depth', () => {
+  it('falls through an empty square and dies instead of instantly resetting to spawn', () => {
+    // Codex review round 9, PR #9 (P1): the kill plane used to reposition the player
+    // directly, bypassing pendingDeaths/respawnAt entirely -- a real CTF exploit, since a
+    // flag carrier who fell out kept the flag and just teleported with it back to spawn.
+    // Falling below world.killY must now go through applyDamage like any other death: no
+    // free instant reset, a real pendingDeaths entry, and the standard 5 s respawn timer.
     const holed: Heightfield = { ...flat, emptySquares: new Set([0]) };
     const world = createWorld(holed, 1);
     const id = addPlayer(world, { x: 10, y: 0, z: 10 });
     stepWorld(world, inputMap(id, {}));
     expect(world.players.onGround[id]).toBe(0);
     expect(world.players.velocity[id * 3 + 1]).toBeLessThan(0);
-    for (let tick = 0; tick < 200; tick += 1) stepWorld(world, inputMap(id, {}));
-    // 200 ticks of free fall is over 200 m; the reset put the player back at the spawn.
-    expect(world.players.position[id * 3 + 1]).toBeGreaterThan(-30);
-    expect(world.players.position[id * 3]).toBe(10);
-    expect(world.players.position[id * 3 + 2]).toBe(10);
+    let deathTick = -1;
+    // Tracks the position committed just before the tick that ends up killing the player,
+    // for the round 13 finding 4 assertions below.
+    let yBeforeFinalTick = world.players.position[id * 3 + 1] ?? 0;
+    for (let tick = 0; tick < 200; tick += 1) {
+      if (world.players.alive[id] === 0) break;
+      yBeforeFinalTick = world.players.position[id * 3 + 1] ?? 0;
+      stepWorld(world, inputMap(id, {}));
+      if (world.players.alive[id] === 0 && deathTick < 0) deathTick = world.tick - 1;
+    }
+    expect(deathTick).toBeGreaterThanOrEqual(0);
+    expect(world.players.alive[id]).toBe(0);
+    // The fix does NOT teleport the player back to spawn on its own -- only respawnPlayer
+    // (called once dueForRespawn) does that. But (Codex review round 13, PR #9, finding 4)
+    // it now DOES commit the death tick's own newly-integrated position, since stepFlags
+    // reads world.players.position for a dying carrier's flag-drop point later in this same
+    // stepWorld call: the committed position is strictly past the kill plane and strictly
+    // below where the previous tick left off, not stuck at the pre-death value.
+    expect(world.players.position[id * 3 + 1]).toBeLessThan(world.killY);
+    expect(world.players.position[id * 3 + 1]).toBeLessThan(yBeforeFinalTick);
   });
 
-  it('restores full energy and ground state on a kill-plane reset, like any other respawn', () => {
-    // Codex round 10 (PR #4): the kill-plane path only reset the local body's position
-    // and velocity, then writeState unconditionally overwrote onGround/ski/wasGrounded
-    // from the stale ctx/contact computed for the falling tick, and energy was left
-    // wherever the fall interrupted its natural recharge rather than restored. A fall-out
-    // is a respawn like any other and must leave the same fresh state addPlayer does.
+  it('routes a kill-plane death through the real respawn cycle: full energy/ground-state reset once due', () => {
+    // Codex round 10 (PR #4) established that a fall-out must leave the same fresh state
+    // addPlayer produces; round 9 moved *how* that happens from a bespoke reset to the
+    // standard dueForRespawn/respawnPlayer cycle every other death already uses.
     const holed: Heightfield = { ...flat, emptySquares: new Set([0]) };
     const world = createWorld(holed, 1);
     const id = addPlayer(world, { x: 10, y: 0, z: 10 });
     world.players.energy[id] = 10;
     world.players.onGround[id] = 1;
     world.players.wasGrounded[id] = 1;
-    for (let tick = 0; tick < 200; tick += 1) stepWorld(world, inputMap(id, {}));
+    for (let tick = 0; tick < 200 && world.players.alive[id] === 1; tick += 1) {
+      stepWorld(world, inputMap(id, {}));
+    }
+    expect(world.players.alive[id]).toBe(0);
+    while (dueForRespawn(world).length === 0) stepWorld(world, inputMap(id, {}));
+    for (const respawnId of dueForRespawn(world)) {
+      respawnPlayer(world, respawnId, { x: 10, y: 0, z: 10 });
+    }
+    expect(world.players.alive[id]).toBe(1);
     expect(world.players.energy[id]).toBe(60);
     expect(world.players.onGround[id]).toBe(0);
     expect(world.players.ski[id]).toBe(0);
     expect(world.players.wasGrounded[id]).toBe(0);
+    expect(world.players.position[id * 3]).toBe(10);
+    expect(world.players.position[id * 3 + 1]).toBe(0);
+    expect(world.players.position[id * 3 + 2]).toBe(10);
   });
 
   it('holds the run cap when running downhill without skiing', () => {

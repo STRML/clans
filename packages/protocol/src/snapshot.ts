@@ -4,20 +4,80 @@ import {
   createReader,
   createWriter,
   readF32,
+  readI16,
   readU16,
   readU32,
   readU8,
   writeF32,
+  writeI16,
   writeU16,
   writeU32,
   writeU8,
   type Cursor,
 } from './codec.js';
-import { MAX_SNAPSHOT_PLAYERS, MessageType } from './messages.js';
+import {
+  MAX_SNAPSHOT_FLAGS,
+  MAX_SNAPSHOT_PLAYERS,
+  MAX_SNAPSHOT_PROJECTILES,
+  MessageType,
+} from './messages.js';
 
 export interface SnapshotBaseline {
   snapshotId: number;
   players: PlayerSnapshotData[];
+}
+export interface ProjectileSnapshotData {
+  id: number;
+  type: number; // ProjectileType from @clans/sim
+  weaponId: number; // WeaponId from @clans/sim
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  ownerId: number;
+  /**
+   * ProjectileStore.armed (0/1) -- whether this projectile can still detonate on contact
+   * (projectiles.ts). hash.ts's mixProjectiles has hashed this since round 13, but it was
+   * never wired onto the snapshot itself, a real gap in what a client can observe about a
+   * live projectile. expiresAtTick is deliberately NOT wired alongside it: it is a raw
+   * internal tick counter with no meaning across a client/server boundary that numbers
+   * ticks differently, and the client doesn't need it -- weapons-view.ts already handles
+   * projectile lifecycle by reacting to a projectile's absence in the next snapshot, not by
+   * predicting its exact expiry tick. Codex review round 15 (PR #9), finding 2.
+   */
+  armed: number;
+}
+export interface FlagSnapshotData {
+  id: number;
+  team: number;
+  state: number; // FlagState from @clans/sim
+  x: number;
+  y: number;
+  z: number;
+  carrierId: number; // -1 if not carried
+  returnInS: number; // -1 if not counting down
+}
+export interface WorldExtras {
+  projectiles: ProjectileSnapshotData[];
+  flags: FlagSnapshotData[];
+  teamScores: [number, number]; // [team1, team2]
+  gameOver: boolean;
+  winnerTeam: number;
+  timeRemainingS: number; // seconds until the match clock expires; derived, not the raw tick threshold
+  gameOverReason: number; // GameOverReason from @clans/sim: 0 = capture limit, 1 = time limit
+}
+export function emptyExtras(): WorldExtras {
+  return {
+    projectiles: [],
+    flags: [],
+    teamScores: [0, 0],
+    gameOver: false,
+    winnerTeam: 0,
+    timeRemainingS: 0,
+    gameOverReason: 0,
+  };
 }
 export interface DecodedSnapshot {
   snapshotId: number;
@@ -26,15 +86,75 @@ export interface DecodedSnapshot {
   lastInputSequence: number;
   players: PlayerSnapshotData[];
   removedIds: number[];
+  projectiles: ProjectileSnapshotData[];
+  flags: FlagSnapshotData[];
+  teamScores: [number, number];
+  gameOver: boolean;
+  winnerTeam: number;
+  timeRemainingS: number;
+  gameOverReason: number;
 }
 
 const HEADER_BYTES = 1 + 4 + 4 + 4 + 4 + 1; // type, snapshotId, baselineId, tick, lastInputSequence, flags
-const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1; // id, team, 7 f32 (transform), energy f32, status byte
+// id, team, 7 f32, energy f32, status byte, health f32, weaponSlot u8, respawnSeq u8,
+// discAmmo u8, chaingunAmmo u8, mortarAmmo u8, grenades u8.
+// respawnSeq is a single byte (mod-256 truncation of the sim's Uint16 counter, see
+// sim/types.ts's respawnSeq doc comment) -- a client only ever compares it against what the
+// immediately-previous snapshot IT received reported, so the only way that comparison could
+// miss a change is 256 respawns of the same id landing between two snapshots the client
+// actually got. Not a realistic loss/coalescing scenario at this milestone's scale.
+// The four ammo fields are single bytes each: the spec's largest ammo pool (mortar, up to
+// 200) and grenade count both fit comfortably under 256. Codex review round 10 (PR #9),
+// finding 1: without these on the wire, reconciliation had no authoritative ammo value to
+// correct client-side prediction against, so a lost or evicted input's ammo drift persisted
+// until the player's next death/respawn instead of self-healing on the next snapshot.
+// weaponState (u8, WeaponState enum, 0-5) + weaponTimer (f32) + spunUp (u8, 0/1): the
+// fire-eligibility state machine itself (weapons.ts's stepWeapons), missing from the wire
+// even after round 10 wired ammo. Codex review round 11 (PR #9): a lost fire input could
+// get its ammo corrected on the next snapshot while staying stuck in a stale Firing state,
+// silently suppressing the player's next real shot for up to a full fire-cycle duration.
+// grenadeCooldown (f32): the grenade throw's own parallel cooldown timer (weapons.ts's
+// tryThrowGrenade), a sibling to weaponState/weaponTimer/spunUp that round 11 missed.
+// Codex review round 12 (PR #9), finding 1: round 10's ammo fix self-heals the grenade
+// COUNT after a lost altFire input, but left this cooldown stuck at its stale
+// locally-predicted value, silently suppressing the player's next real throw.
+// score (i16, signed -- suicide/team-kill scoring can go negative) + godMode (u8, 0/1):
+// round 13's hashWorld/mixPlayer already mixed both into the determinism hash, but neither
+// was ever wired onto the snapshot itself, so a decoded/reconstructed player always came
+// back with score 0 / godMode 0 regardless of the source's real values, and hashWorld on
+// the two worlds diverged even though the wire faithfully transmitted everything it
+// actually carried. Codex review round 14 (PR #9), finding 1.
+// wasJumpHeld: no new bytes -- it packs into the existing status byte's bit 2 (statusByte's
+// own comment has the detail). Codex review round 15 (PR #9), finding 1.
+const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 4 + 1 + 4 + 2 + 1;
+// id, type, weaponId, 6 f32 (pos+vel), ownerId, armed (round 15, PR #9, finding 2).
+const PROJECTILE_BYTES = 2 + 1 + 1 + 4 * 6 + 2 + 1;
+const FLAG_BYTES = 1 + 1 + 1 + 4 * 3 + 2 + 4; // id, team, state, 3 f32 (pos), carrierId i16, returnInS f32
 const DELTA_FLAG = 1;
 const DIRTY_TRANSFORM = 1;
 const DIRTY_ENERGY = 2;
 const DIRTY_STATUS = 4;
 const DIRTY_TEAM = 8;
+const DIRTY_HEALTH = 16;
+const DIRTY_WEAPON = 32;
+const DIRTY_RESPAWN = 64;
+// The last bit available in the dirty-mask byte. Round 10 put the four ammo/grenade fields
+// here, since there is no room left for each to claim its own bit -- consistent with
+// DIRTY_TRANSFORM already batching seven fields under one bit. Round 11 (PR #9, finding 2)
+// folds weaponState/weaponTimer/spunUp into the SAME bit rather than growing the mask to a
+// Uint16: ammo and the weapon state machine are already the same reconciliation concern
+// (both exist purely to correct client-side prediction drift from a lost or evicted fire
+// input), they change together on nearly every shot, and a weapon actively firing/reloading
+// touches weaponTimer virtually every tick regardless -- splitting them into a second bit
+// would rarely save a byte and would cost a full mask-width bump to get. Renamed from
+// DIRTY_AMMO to reflect the broader "prediction-correcting state changed" meaning. Round 12
+// (PR #9, finding 1) folds grenadeCooldown in here too, for the identical reason: it is the
+// grenade throw's own reconciled-prediction timer, changes in lockstep with the grenades
+// count already under this bit, and gains nothing from a bit of its own. Round 14 (PR #9,
+// finding 1) folds score and godMode in here too: both are reconciliation-adjacent
+// authoritative corrections (godMode backs netclient.ts's networked god-mode fix, finding
+// 2 of the same round) that change rarely and gain nothing from a bit of their own.
+const DIRTY_PREDICTION = 128;
 const EPSILON = 1e-4;
 
 interface SnapshotHeader {
@@ -66,8 +186,21 @@ function readHeader(cursor: Cursor): SnapshotHeader {
   };
 }
 
+// Bit 2 (wasJumpHeld) added round 15 (PR #9), finding 1: a single boolean, so it packs into
+// this existing status byte the same way onGround/ski already do, rather than claiming a
+// whole new wire byte for one bit -- see PlayerSnapshotData.wasJumpHeld's doc comment
+// (sim/snapshot.ts) for the misprediction this closes.
 function statusByte(data: PlayerSnapshotData): number {
-  return (data.onGround ? 1 : 0) | (data.ski ? 2 : 0);
+  return (data.onGround ? 1 : 0) | (data.ski ? 2 : 0) | (data.wasJumpHeld ? 4 : 0);
+}
+
+// A NaN or Infinity in any of these would otherwise reach client-side prediction
+// (or the server's own authoritative state, for a delta the server decodes) and poison
+// it, exactly as an unvalidated input axis would (see handshake.ts's readSample).
+function assertFinite(values: readonly number[]): void {
+  if (values.some((value) => !Number.isFinite(value))) {
+    throw new RangeError('Snapshot value must be finite');
+  }
 }
 
 function writePlayerFull(cursor: Cursor, data: PlayerSnapshotData): void {
@@ -82,16 +215,20 @@ function writePlayerFull(cursor: Cursor, data: PlayerSnapshotData): void {
   writeF32(cursor, data.yaw);
   writeF32(cursor, data.energy);
   writeU8(cursor, statusByte(data));
+  writeF32(cursor, data.health);
+  writeU8(cursor, data.weaponSlot);
+  writeU8(cursor, data.respawnSeq);
+  writeU8(cursor, data.discAmmo);
+  writeU8(cursor, data.chaingunAmmo);
+  writeU8(cursor, data.mortarAmmo);
+  writeU8(cursor, data.grenades);
+  writeU8(cursor, data.weaponState);
+  writeF32(cursor, data.weaponTimer);
+  writeU8(cursor, data.spunUp);
+  writeF32(cursor, data.grenadeCooldown);
+  writeI16(cursor, data.score);
+  writeU8(cursor, data.godMode);
 }
-// A NaN or Infinity in any of these would otherwise reach client-side prediction
-// (or the server's own authoritative state, for a delta the server decodes) and poison
-// it, exactly as an unvalidated input axis would (see handshake.ts's readSample).
-function assertFinite(values: readonly number[]): void {
-  if (values.some((value) => !Number.isFinite(value))) {
-    throw new RangeError('Snapshot value must be finite');
-  }
-}
-
 function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const id = readU16(cursor);
   const team = readU8(cursor);
@@ -104,7 +241,20 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const yaw = readF32(cursor);
   const energy = readF32(cursor);
   const flags = readU8(cursor);
-  assertFinite([x, y, z, vx, vy, vz, yaw, energy]);
+  const health = readF32(cursor);
+  const weaponSlot = readU8(cursor);
+  const respawnSeq = readU8(cursor);
+  const discAmmo = readU8(cursor);
+  const chaingunAmmo = readU8(cursor);
+  const mortarAmmo = readU8(cursor);
+  const grenades = readU8(cursor);
+  const weaponState = readU8(cursor);
+  const weaponTimer = readF32(cursor);
+  const spunUp = readU8(cursor) ? 1 : 0;
+  const grenadeCooldown = readF32(cursor);
+  const score = readI16(cursor);
+  const godMode = readU8(cursor) ? 1 : 0;
+  assertFinite([x, y, z, vx, vy, vz, yaw, energy, health, weaponTimer, grenadeCooldown]);
   return {
     id,
     team,
@@ -118,7 +268,123 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
     energy,
     onGround: flags & 1 ? 1 : 0,
     ski: flags & 2 ? 1 : 0,
+    wasJumpHeld: flags & 4 ? 1 : 0,
+    health,
+    weaponSlot,
+    respawnSeq,
+    discAmmo,
+    chaingunAmmo,
+    mortarAmmo,
+    grenades,
+    weaponState,
+    weaponTimer,
+    spunUp,
+    grenadeCooldown,
+    score,
+    godMode,
   };
+}
+
+function writeProjectile(cursor: Cursor, p: ProjectileSnapshotData): void {
+  writeU16(cursor, p.id);
+  writeU8(cursor, p.type);
+  writeU8(cursor, p.weaponId);
+  writeF32(cursor, p.x);
+  writeF32(cursor, p.y);
+  writeF32(cursor, p.z);
+  writeF32(cursor, p.vx);
+  writeF32(cursor, p.vy);
+  writeF32(cursor, p.vz);
+  writeU16(cursor, p.ownerId);
+  writeU8(cursor, p.armed);
+}
+function readProjectile(cursor: Cursor): ProjectileSnapshotData {
+  const id = readU16(cursor);
+  const type = readU8(cursor);
+  const weaponId = readU8(cursor);
+  const x = readF32(cursor);
+  const y = readF32(cursor);
+  const z = readF32(cursor);
+  const vx = readF32(cursor);
+  const vy = readF32(cursor);
+  const vz = readF32(cursor);
+  const ownerId = readU16(cursor);
+  const armed = readU8(cursor) ? 1 : 0;
+  assertFinite([x, y, z, vx, vy, vz]);
+  return { id, type, weaponId, x, y, z, vx, vy, vz, ownerId, armed };
+}
+
+function writeFlag(cursor: Cursor, f: FlagSnapshotData): void {
+  writeU8(cursor, f.id);
+  writeU8(cursor, f.team);
+  writeU8(cursor, f.state);
+  writeF32(cursor, f.x);
+  writeF32(cursor, f.y);
+  writeF32(cursor, f.z);
+  writeI16(cursor, f.carrierId);
+  writeF32(cursor, f.returnInS);
+}
+function readFlag(cursor: Cursor): FlagSnapshotData {
+  const id = readU8(cursor);
+  const team = readU8(cursor);
+  const state = readU8(cursor);
+  const x = readF32(cursor);
+  const y = readF32(cursor);
+  const z = readF32(cursor);
+  const carrierId = readI16(cursor);
+  const returnInS = readF32(cursor);
+  assertFinite([x, y, z, returnInS]);
+  return { id, team, state, x, y, z, carrierId, returnInS };
+}
+
+function writeExtras(cursor: Cursor, extras: WorldExtras): void {
+  writeU16(cursor, extras.projectiles.length);
+  for (const p of extras.projectiles) writeProjectile(cursor, p);
+  writeU8(cursor, extras.flags.length);
+  for (const f of extras.flags) writeFlag(cursor, f);
+  writeU16(cursor, extras.teamScores[0]);
+  writeU16(cursor, extras.teamScores[1]);
+  writeU8(cursor, extras.gameOver ? 1 : 0);
+  writeU8(cursor, extras.winnerTeam);
+  writeF32(cursor, extras.timeRemainingS);
+  writeU8(cursor, extras.gameOverReason);
+}
+function assertPlausibleExtrasCount(count: number, max: number, label: string): void {
+  if (count > max) {
+    throw new RangeError(`Snapshot ${label} count ${String(count)} exceeds ${String(max)}`);
+  }
+}
+
+function readExtras(cursor: Cursor): WorldExtras {
+  const projectileCount = readU16(cursor);
+  assertPlausibleExtrasCount(projectileCount, MAX_SNAPSHOT_PROJECTILES, 'projectile');
+  const projectiles: ProjectileSnapshotData[] = [];
+  for (let i = 0; i < projectileCount; i += 1) projectiles.push(readProjectile(cursor));
+  const flagCount = readU8(cursor);
+  assertPlausibleExtrasCount(flagCount, MAX_SNAPSHOT_FLAGS, 'flag');
+  const flags: FlagSnapshotData[] = [];
+  for (let i = 0; i < flagCount; i += 1) flags.push(readFlag(cursor));
+  const teamScores: [number, number] = [readU16(cursor), readU16(cursor)];
+  const gameOver = readU8(cursor) !== 0;
+  const winnerTeam = readU8(cursor);
+  const timeRemainingS = readF32(cursor);
+  const gameOverReason = readU8(cursor);
+  assertFinite([timeRemainingS]);
+  return { projectiles, flags, teamScores, gameOver, winnerTeam, timeRemainingS, gameOverReason };
+}
+function extrasByteLength(extras: WorldExtras): number {
+  return (
+    2 +
+    extras.projectiles.length * PROJECTILE_BYTES +
+    1 +
+    extras.flags.length * FLAG_BYTES +
+    2 +
+    2 +
+    1 +
+    1 +
+    4 +
+    1
+  );
 }
 
 function encodeFullSnapshot(
@@ -126,11 +392,15 @@ function encodeFullSnapshot(
   tick: number,
   lastInputSequence: number,
   players: PlayerSnapshotData[],
+  extras: WorldExtras,
 ): Uint8Array {
-  const cursor = createWriter(HEADER_BYTES + 2 + players.length * PLAYER_FULL_BYTES);
+  const cursor = createWriter(
+    HEADER_BYTES + 2 + players.length * PLAYER_FULL_BYTES + extrasByteLength(extras),
+  );
   writeHeader(cursor, { snapshotId, baselineId: 0, tick, lastInputSequence, flags: 0 });
   writeU16(cursor, players.length);
   for (const player of players) writePlayerFull(cursor, player);
+  writeExtras(cursor, extras);
   return bytesOf(cursor);
 }
 
@@ -149,10 +419,56 @@ function energyChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
   return Math.abs(a.energy - b.energy) > EPSILON;
 }
 function statusChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
-  return a.onGround !== b.onGround || a.ski !== b.ski;
+  return a.onGround !== b.onGround || a.ski !== b.ski || a.wasJumpHeld !== b.wasJumpHeld;
 }
 function teamChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
   return a.team !== b.team;
+}
+function healthChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
+  return Math.abs(a.health - b.health) > EPSILON;
+}
+function weaponChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
+  return a.weaponSlot !== b.weaponSlot;
+}
+// Exact equality, not the EPSILON comparison the float fields above use: respawnSeq is an
+// integer counter, so any difference at all -- including the mod-256 wraparound the wire
+// truncation can produce -- is itself a real change worth sending.
+function respawnSeqChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
+  return a.respawnSeq !== b.respawnSeq;
+}
+// Exact equality, like respawnSeqChanged above: these are integer ammo counts, not floats,
+// so any difference at all is a real change worth sending.
+function ammoChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
+  return (
+    a.discAmmo !== b.discAmmo ||
+    a.chaingunAmmo !== b.chaingunAmmo ||
+    a.mortarAmmo !== b.mortarAmmo ||
+    a.grenades !== b.grenades
+  );
+}
+// weaponState/spunUp are small integers (exact equality, like ammo above); weaponTimer and
+// grenadeCooldown are floats counting down every tick their respective timer is running, so
+// both use the same EPSILON tolerance transformChanged does rather than exact equality.
+// grenadeCooldown added round 12 (PR #9), finding 1: the grenade throw's own cooldown timer,
+// a sibling to weaponTimer that round 11 missed.
+function weaponMachineChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
+  return (
+    a.weaponState !== b.weaponState ||
+    Math.abs(a.weaponTimer - b.weaponTimer) > EPSILON ||
+    a.spunUp !== b.spunUp ||
+    Math.abs(a.grenadeCooldown - b.grenadeCooldown) > EPSILON
+  );
+}
+// Exact equality, like respawnSeqChanged/ammoChanged above: score is an integer counter and
+// godMode a 0/1 flag, neither a float that needs EPSILON tolerance.
+function scoreOrGodModeChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
+  return a.score !== b.score || a.godMode !== b.godMode;
+}
+// Everything DIRTY_PREDICTION covers, folded into one check -- see that constant's comment
+// for why ammo, the weapon state machine, and score/godMode all share it. Pulled out of
+// dirtyMask itself to keep that function's branch count under the complexity lint's cap.
+function predictionChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
+  return ammoChanged(a, b) || weaponMachineChanged(a, b) || scoreOrGodModeChanged(a, b);
 }
 function dirtyMask(current: PlayerSnapshotData, previous: PlayerSnapshotData): number {
   let mask = 0;
@@ -160,6 +476,10 @@ function dirtyMask(current: PlayerSnapshotData, previous: PlayerSnapshotData): n
   if (energyChanged(current, previous)) mask |= DIRTY_ENERGY;
   if (statusChanged(current, previous)) mask |= DIRTY_STATUS;
   if (teamChanged(current, previous)) mask |= DIRTY_TEAM;
+  if (healthChanged(current, previous)) mask |= DIRTY_HEALTH;
+  if (weaponChanged(current, previous)) mask |= DIRTY_WEAPON;
+  if (respawnSeqChanged(current, previous)) mask |= DIRTY_RESPAWN;
+  if (predictionChanged(current, previous)) mask |= DIRTY_PREDICTION;
   return mask;
 }
 
@@ -194,6 +514,12 @@ function changedRecordBytes(mask: number): number {
   if (mask & DIRTY_ENERGY) bytes += 4;
   if (mask & DIRTY_STATUS) bytes += 1;
   if (mask & DIRTY_TEAM) bytes += 1;
+  if (mask & DIRTY_HEALTH) bytes += 4;
+  if (mask & DIRTY_WEAPON) bytes += 1;
+  if (mask & DIRTY_RESPAWN) bytes += 1;
+  // ammo(4) + weaponState(1) + weaponTimer(4) + spunUp(1) + grenadeCooldown(4) + score(2)
+  // + godMode(1)
+  if (mask & DIRTY_PREDICTION) bytes += 4 + 1 + 4 + 1 + 4 + 2 + 1;
   return bytes;
 }
 function writeChangedTransform(cursor: Cursor, data: PlayerSnapshotData): void {
@@ -205,6 +531,22 @@ function writeChangedTransform(cursor: Cursor, data: PlayerSnapshotData): void {
   writeF32(cursor, data.vz);
   writeF32(cursor, data.yaw);
 }
+function writeChangedAmmo(cursor: Cursor, data: PlayerSnapshotData): void {
+  writeU8(cursor, data.discAmmo);
+  writeU8(cursor, data.chaingunAmmo);
+  writeU8(cursor, data.mortarAmmo);
+  writeU8(cursor, data.grenades);
+}
+function writeChangedWeaponMachine(cursor: Cursor, data: PlayerSnapshotData): void {
+  writeU8(cursor, data.weaponState);
+  writeF32(cursor, data.weaponTimer);
+  writeU8(cursor, data.spunUp);
+  writeF32(cursor, data.grenadeCooldown);
+}
+function writeChangedScoreGodMode(cursor: Cursor, data: PlayerSnapshotData): void {
+  writeI16(cursor, data.score);
+  writeU8(cursor, data.godMode);
+}
 function writeChangedPlayer(cursor: Cursor, data: PlayerSnapshotData, mask: number): void {
   writeU16(cursor, data.id);
   writeU8(cursor, mask);
@@ -212,6 +554,14 @@ function writeChangedPlayer(cursor: Cursor, data: PlayerSnapshotData, mask: numb
   if (mask & DIRTY_ENERGY) writeF32(cursor, data.energy);
   if (mask & DIRTY_STATUS) writeU8(cursor, statusByte(data));
   if (mask & DIRTY_TEAM) writeU8(cursor, data.team);
+  if (mask & DIRTY_HEALTH) writeF32(cursor, data.health);
+  if (mask & DIRTY_WEAPON) writeU8(cursor, data.weaponSlot);
+  if (mask & DIRTY_RESPAWN) writeU8(cursor, data.respawnSeq);
+  if (mask & DIRTY_PREDICTION) {
+    writeChangedAmmo(cursor, data);
+    writeChangedWeaponMachine(cursor, data);
+    writeChangedScoreGodMode(cursor, data);
+  }
 }
 
 function encodeDeltaSnapshot(
@@ -220,11 +570,18 @@ function encodeDeltaSnapshot(
   lastInputSequence: number,
   baseline: SnapshotBaseline,
   players: PlayerSnapshotData[],
+  extras: WorldExtras,
 ): Uint8Array {
   const diff = diffPlayers(players, baseline.players);
   const changedBytes = diff.changed.reduce((sum, entry) => sum + changedRecordBytes(entry.mask), 0);
   const bodyBytes =
-    2 + diff.added.length * PLAYER_FULL_BYTES + 2 + changedBytes + 2 + diff.removedIds.length * 2;
+    2 +
+    diff.added.length * PLAYER_FULL_BYTES +
+    2 +
+    changedBytes +
+    2 +
+    diff.removedIds.length * 2 +
+    extrasByteLength(extras);
   const cursor = createWriter(HEADER_BYTES + bodyBytes);
   writeHeader(cursor, {
     snapshotId,
@@ -239,6 +596,7 @@ function encodeDeltaSnapshot(
   for (const entry of diff.changed) writeChangedPlayer(cursor, entry.data, entry.mask);
   writeU16(cursor, diff.removedIds.length);
   for (const id of diff.removedIds) writeU16(cursor, id);
+  writeExtras(cursor, extras);
   return bytesOf(cursor);
 }
 
@@ -248,10 +606,11 @@ export function encodeSnapshot(
   lastInputSequence: number,
   players: PlayerSnapshotData[],
   baseline: SnapshotBaseline | null,
+  extras: WorldExtras,
 ): Uint8Array {
   return baseline
-    ? encodeDeltaSnapshot(snapshotId, tick, lastInputSequence, baseline, players)
-    : encodeFullSnapshot(snapshotId, tick, lastInputSequence, players);
+    ? encodeDeltaSnapshot(snapshotId, tick, lastInputSequence, baseline, players, extras)
+    : encodeFullSnapshot(snapshotId, tick, lastInputSequence, players, extras);
 }
 
 function assertPlausibleCount(count: number): void {
@@ -265,6 +624,7 @@ function decodeFull(cursor: Cursor, header: SnapshotHeader): DecodedSnapshot {
   assertPlausibleCount(count);
   const players: PlayerSnapshotData[] = [];
   for (let i = 0; i < count; i += 1) players.push(readPlayerFull(cursor));
+  const extras = readExtras(cursor);
   return {
     snapshotId: header.snapshotId,
     baselineId: 0,
@@ -272,6 +632,7 @@ function decodeFull(cursor: Cursor, header: SnapshotHeader): DecodedSnapshot {
     lastInputSequence: header.lastInputSequence,
     players,
     removedIds: [],
+    ...extras,
   };
 }
 
@@ -296,11 +657,37 @@ function readChangedStatus(cursor: Cursor, next: PlayerSnapshotData): void {
   const flags = readU8(cursor);
   next.onGround = flags & 1 ? 1 : 0;
   next.ski = flags & 2 ? 1 : 0;
+  next.wasJumpHeld = flags & 4 ? 1 : 0;
 }
 function readChangedEnergy(cursor: Cursor, next: PlayerSnapshotData): void {
   const energy = readF32(cursor);
   assertFinite([energy]);
   next.energy = energy;
+}
+function readChangedHealth(cursor: Cursor, next: PlayerSnapshotData): void {
+  const health = readF32(cursor);
+  assertFinite([health]);
+  next.health = health;
+}
+function readChangedAmmo(cursor: Cursor, next: PlayerSnapshotData): void {
+  next.discAmmo = readU8(cursor);
+  next.chaingunAmmo = readU8(cursor);
+  next.mortarAmmo = readU8(cursor);
+  next.grenades = readU8(cursor);
+}
+function readChangedWeaponMachine(cursor: Cursor, next: PlayerSnapshotData): void {
+  const weaponState = readU8(cursor);
+  const weaponTimer = readF32(cursor);
+  next.weaponState = weaponState;
+  next.weaponTimer = weaponTimer;
+  next.spunUp = readU8(cursor) ? 1 : 0;
+  const grenadeCooldown = readF32(cursor);
+  assertFinite([weaponTimer, grenadeCooldown]);
+  next.grenadeCooldown = grenadeCooldown;
+}
+function readChangedScoreGodMode(cursor: Cursor, next: PlayerSnapshotData): void {
+  next.score = readI16(cursor);
+  next.godMode = readU8(cursor) ? 1 : 0;
 }
 function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData>): void {
   const id = readU16(cursor);
@@ -312,6 +699,14 @@ function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData
   if (mask & DIRTY_ENERGY) readChangedEnergy(cursor, next);
   if (mask & DIRTY_STATUS) readChangedStatus(cursor, next);
   if (mask & DIRTY_TEAM) next.team = readU8(cursor);
+  if (mask & DIRTY_HEALTH) readChangedHealth(cursor, next);
+  if (mask & DIRTY_WEAPON) next.weaponSlot = readU8(cursor);
+  if (mask & DIRTY_RESPAWN) next.respawnSeq = readU8(cursor);
+  if (mask & DIRTY_PREDICTION) {
+    readChangedAmmo(cursor, next);
+    readChangedWeaponMachine(cursor, next);
+    readChangedScoreGodMode(cursor, next);
+  }
   byId.set(id, next);
 }
 
@@ -347,6 +742,7 @@ function decodeDelta(
     byId.delete(id);
     removedIds.push(id);
   }
+  const extras = readExtras(cursor);
   return {
     snapshotId: header.snapshotId,
     baselineId: header.baselineId,
@@ -354,6 +750,7 @@ function decodeDelta(
     lastInputSequence: header.lastInputSequence,
     players: [...byId.values()],
     removedIds,
+    ...extras,
   };
 }
 

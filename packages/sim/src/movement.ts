@@ -1,4 +1,5 @@
 import { LIGHT_ARMOR, type ArmorData } from './armor.js';
+import { applyDamage, applyFallDamage } from './damage.js';
 import { sampleTerrain, type TerrainSample } from './terrain.js';
 import type { PlayerInput, PlayerStore, World } from './types.js';
 
@@ -8,7 +9,17 @@ const GROUND_EPSILON = 0.001;
 // A grounded player who did not jump or jet may drop this far in one tick and stay
 // grounded. Without it a skier leaves the surface every tick the slope falls away.
 const GROUND_SNAP = 1.0;
-const IDLE: PlayerInput = { moveX: 0, moveZ: 0, yaw: 0, jump: false, jet: false };
+const IDLE: PlayerInput = {
+  moveX: 0,
+  moveZ: 0,
+  yaw: 0,
+  pitch: 0,
+  jump: false,
+  jet: false,
+  fire: false,
+  altFire: false,
+  slot: 0,
+};
 
 interface Body {
   x: number;
@@ -281,15 +292,20 @@ function applyForces(
 }
 
 function writeState(
-  players: PlayerStore,
+  world: World,
   id: number,
   body: Body,
   contact: Contact,
   input: PlayerInput,
   ctx: TickContext,
+  armor: ArmorData,
 ): void {
+  const players = world.players;
   writeBody(players, id, body);
-  if (contact.landingSpeed >= 0) players.landingSpeed[id] = contact.landingSpeed;
+  if (contact.landingSpeed >= 0) {
+    players.landingSpeed[id] = contact.landingSpeed;
+    applyFallDamage(world, id, contact.landingSpeed, armor);
+  }
   players.onGround[id] = contact.grounded ? 1 : 0;
   players.ski[id] = ctx.skiing ? 1 : 0;
   // The jump edge compares against the grounded state at the start of this tick, not the
@@ -297,32 +313,6 @@ function writeState(
   // and a held jump fires on landing (the T2 ski hop).
   players.wasGrounded[id] = ctx.grounded ? 1 : 0;
   players.wasJumpHeld[id] = input.jump ? 1 : 0;
-}
-
-/**
- * Codex round 10 (PR #4): this used to only reset the local `body` (position, velocity)
- * before writeState ran, which then unconditionally overwrote onGround/ski/wasGrounded
- * from the stale ctx/contact computed for the tick the player fell out on, and left
- * energy exactly where the fall interrupted it rather than restoring it. A fall-out is a
- * respawn like any other, and should leave the player in the same fresh state addPlayer
- * (world.ts's resetPlayerToSpawn) produces, not a mix of a reset position and everything
- * else mid-fall. Written directly to the SoA arrays (not `body`) because the caller
- * returns immediately after this, skipping writeState entirely for this tick.
- */
-function resetToSpawn(players: PlayerStore, id: number, armor: ArmorData): void {
-  const base = id * 3;
-  players.position.set(
-    [players.spawn[base] ?? 0, players.spawn[base + 1] ?? 0, players.spawn[base + 2] ?? 0],
-    base,
-  );
-  players.velocity.set([0, 0, 0], base);
-  players.yaw[id] = 0;
-  players.energy[id] = armor.maxEnergy;
-  players.onGround[id] = 0;
-  players.ski[id] = 0;
-  players.wasGrounded[id] = 0;
-  players.wasJumpHeld[id] = 0;
-  players.landingSpeed[id] = 0;
 }
 
 function stepPlayer(
@@ -339,11 +329,31 @@ function stepPlayer(
   const forces = applyForces(players, id, body, input, ctx, armor, dt);
   applyResistance(body, armor, dt);
   const contact = integrate(world, body, ctx.grounded, forces.jumped || forces.jetted, dt);
+  // Falling out of the world is a real death, not a parallel "just move them back" shortcut
+  // (Codex review round 9, PR #9, P1): the old position-only reset skipped pendingDeaths
+  // entirely, so stepFlags never saw the death, a carried flag never dropped, and damage/
+  // ammo/loadout/respawnSeq were never touched -- letting a flag carrier fall out of the map
+  // to instantly and safely relocate a stolen flag. Routing through applyDamage with lethal
+  // env damage (attackerId -1, matching fall damage's own convention) reuses the same
+  // already-hardened pendingDeaths -> stepFlags -> dueForRespawn -> respawnPlayer pipeline
+  // every other death goes through, so a kill-plane fall now costs the standard 5 s respawn
+  // delay instead of an instant reposition.
   if (body.y < world.killY) {
-    resetToSpawn(players, id, armor);
-    return; // already fully reset; writeState below would overwrite it with this tick's stale fall state
+    // Codex review round 13, PR #9, finding 4: round 9 left `body` uncommitted here on the
+    // theory that the previous tick's position was a better flag-drop point than the
+    // out-of-bounds one this tick computed. That's backwards -- stepWorld runs stepFlags
+    // right after stepPlayers, in this same call, and stepFlags reads world.players.position
+    // for a dying carrier's drop point (flags.ts). Leaving the newly-integrated position
+    // uncommitted meant it read the PREVIOUS tick's position, not where the player actually
+    // died, contrary to the spec's failure matrix ("flag drops at death position"). Commit
+    // the real death position (and velocity) before triggering the death, so applyDamage's
+    // pendingDeaths entry and everything stepFlags does with it downstream sees where the
+    // player actually was.
+    writeBody(players, id, body);
+    applyDamage(world, id, armor.maxDamage, -1, armor);
+    return;
   }
-  writeState(players, id, body, contact, input, ctx);
+  writeState(world, id, body, contact, input, ctx, armor);
 }
 
 export function stepPlayers(
@@ -351,8 +361,9 @@ export function stepPlayers(
   inputs: ReadonlyMap<number, PlayerInput>,
   dt: number,
 ): void {
+  world.pendingDeaths = [];
   for (let id = 0; id < world.players.count; id += 1) {
-    if (!world.players.active[id]) continue;
+    if (!world.players.active[id] || !world.players.alive[id]) continue;
     const input = inputs.get(id) ?? { ...IDLE, yaw: world.players.yaw[id] ?? 0 };
     stepPlayer(world, id, input, LIGHT_ARMOR, dt);
   }

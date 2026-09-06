@@ -16,6 +16,22 @@ describe('parseMission', () => {
           props: { position: '326.888 -168.521 74.8106', radius: '5' },
           children: [],
         },
+        {
+          class: 'StaticShape',
+          name: null,
+          props: {
+            position: '330 -180 75',
+            rotation: '0 0 1 45',
+            dataBlock: 'ExteriorFlagStand',
+          },
+          children: [],
+        },
+        {
+          class: 'Item',
+          name: 'Team1Flag1',
+          props: { position: '330 -180 75', rotation: '1 0 0 0', dataBlock: 'Flag' },
+          children: [],
+        },
       ],
     });
   });

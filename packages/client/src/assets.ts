@@ -35,6 +35,7 @@ export interface ClientSceneData {
     position: [number, number, number];
     radius: number;
   }>;
+  flagStands: Array<{ team: number; position: [number, number, number] }>;
 }
 export interface KatabaticAssets {
   terrain: TerrainManifest;

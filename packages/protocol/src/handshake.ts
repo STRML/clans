@@ -3,10 +3,12 @@ import {
   createReader,
   createWriter,
   readF32,
+  readI16,
   readU16,
   readU32,
   readU8,
   writeF32,
+  writeI16,
   writeU16,
   writeU32,
   writeU8,
@@ -14,14 +16,17 @@ import {
 } from './codec.js';
 import {
   MessageType,
+  PROTOCOL_VERSION,
   type AckMessage,
+  type EventMessage,
+  type GodMessage,
   type InputMessage,
   type JoinMessage,
   type NetInputSample,
   type WelcomeMessage,
 } from './messages.js';
 
-const SAMPLE_BYTES = 13; // moveX, moveZ, yaw (f32 each) plus one flags byte
+const SAMPLE_BYTES = 18; // moveX, moveZ, yaw, pitch (f32 each), flags (u8), slot (u8)
 export const INPUT_MESSAGE_BYTES = 1 + 4 + SAMPLE_BYTES * 3;
 
 function expectType(cursor: Cursor, expected: MessageType): void {
@@ -34,7 +39,12 @@ function writeSample(cursor: Cursor, sample: NetInputSample): void {
   writeF32(cursor, sample.moveX);
   writeF32(cursor, sample.moveZ);
   writeF32(cursor, sample.yaw);
-  writeU8(cursor, (sample.jump ? 1 : 0) | (sample.jet ? 2 : 0));
+  writeF32(cursor, sample.pitch);
+  writeU8(
+    cursor,
+    (sample.jump ? 1 : 0) | (sample.jet ? 2 : 0) | (sample.fire ? 4 : 0) | (sample.altFire ? 8 : 0),
+  );
+  writeU8(cursor, sample.slot);
 }
 const clampAxis = (value: number): number => Math.max(-1, Math.min(1, value));
 
@@ -42,42 +52,56 @@ function readSample(cursor: Cursor): NetInputSample {
   const moveX = readF32(cursor);
   const moveZ = readF32(cursor);
   const yaw = readF32(cursor);
+  const pitch = readF32(cursor);
   const flags = readU8(cursor);
-  // A NaN or Infinity move axis (a malformed or adversarial packet) would otherwise
-  // propagate straight into the movement sim and poison the authoritative player state.
-  if (!Number.isFinite(moveX) || !Number.isFinite(moveZ) || !Number.isFinite(yaw)) {
+  const slot = readU8(cursor);
+  // A NaN or Infinity move/look axis (a malformed or adversarial packet) would otherwise
+  // propagate straight into the movement/aim sim and poison the authoritative player state.
+  if (
+    !Number.isFinite(moveX) ||
+    !Number.isFinite(moveZ) ||
+    !Number.isFinite(yaw) ||
+    !Number.isFinite(pitch)
+  ) {
     throw new RangeError('Input sample must be finite');
   }
-  // desiredSpeed scales the armor's speed cap directly by the raw axis with no clamp of
-  // its own, so an out-of-range axis (e.g. moveZ = 100 from a crafted client) reaches
-  // the sim as a multiplier on the cap rather than a fraction of it, moving well past
-  // the legal run speed. Only moveX/moveZ need this: yaw is an angle, unbounded by design.
   return {
+    // desiredSpeed scales the armor's speed cap directly by the raw axis with no clamp of
+    // its own, so an out-of-range axis (e.g. moveZ = 100 from a crafted client) reaches
+    // the sim as a multiplier on the cap rather than a fraction of it, moving well past
+    // the legal run speed. Only moveX/moveZ need this: yaw and pitch are angles, unbounded
+    // by design.
     moveX: clampAxis(moveX),
     moveZ: clampAxis(moveZ),
     yaw,
+    pitch,
     jump: (flags & 1) !== 0,
     jet: (flags & 2) !== 0,
+    fire: (flags & 4) !== 0,
+    altFire: (flags & 8) !== 0,
+    slot,
   };
 }
 
 export function encodeJoin(): Uint8Array {
-  const cursor = createWriter(1);
+  const cursor = createWriter(2);
   writeU8(cursor, MessageType.Join);
+  writeU8(cursor, PROTOCOL_VERSION);
   return bytesOf(cursor);
 }
 export function decodeJoin(bytes: Uint8Array): JoinMessage {
   const cursor = createReader(bytes);
   expectType(cursor, MessageType.Join);
-  return { type: MessageType.Join };
+  return { type: MessageType.Join, version: readU8(cursor) };
 }
 
 export function encodeWelcome(message: Omit<WelcomeMessage, 'type'>): Uint8Array {
-  const cursor = createWriter(18);
+  const cursor = createWriter(19);
   writeU8(cursor, MessageType.Welcome);
   writeU16(cursor, message.playerId);
   writeU8(cursor, message.team);
   writeU16(cursor, message.tickMs);
+  writeU8(cursor, message.status);
   writeF32(cursor, message.spawnX);
   writeF32(cursor, message.spawnY);
   writeF32(cursor, message.spawnZ);
@@ -89,6 +113,7 @@ export function decodeWelcome(bytes: Uint8Array): WelcomeMessage {
   const playerId = readU16(cursor);
   const team = readU8(cursor);
   const tickMs = readU16(cursor);
+  const status = readU8(cursor);
   const spawnX = readF32(cursor);
   const spawnY = readF32(cursor);
   const spawnZ = readF32(cursor);
@@ -98,7 +123,7 @@ export function decodeWelcome(bytes: Uint8Array): WelcomeMessage {
   if (!Number.isFinite(spawnX) || !Number.isFinite(spawnY) || !Number.isFinite(spawnZ)) {
     throw new RangeError('Welcome spawn point must be finite');
   }
-  return { type: MessageType.Welcome, playerId, team, tickMs, spawnX, spawnY, spawnZ };
+  return { type: MessageType.Welcome, playerId, team, tickMs, status, spawnX, spawnY, spawnZ };
 }
 
 export function encodeInput(message: Omit<InputMessage, 'type'>): Uint8Array {
@@ -130,4 +155,30 @@ export function decodeAck(bytes: Uint8Array): AckMessage {
   const cursor = createReader(bytes);
   expectType(cursor, MessageType.Ack);
   return { type: MessageType.Ack, snapshotId: readU32(cursor) };
+}
+
+export function encodeEvent(message: Omit<EventMessage, 'type'>): Uint8Array {
+  const cursor = createWriter(6);
+  writeU8(cursor, MessageType.Event);
+  writeU8(cursor, message.kind);
+  writeI16(cursor, message.a);
+  writeI16(cursor, message.b);
+  return bytesOf(cursor);
+}
+export function decodeEvent(bytes: Uint8Array): EventMessage {
+  const cursor = createReader(bytes);
+  expectType(cursor, MessageType.Event);
+  return { type: MessageType.Event, kind: readU8(cursor), a: readI16(cursor), b: readI16(cursor) };
+}
+
+export function encodeGod(message: Omit<GodMessage, 'type'>): Uint8Array {
+  const cursor = createWriter(2);
+  writeU8(cursor, MessageType.God);
+  writeU8(cursor, message.enabled ? 1 : 0);
+  return bytesOf(cursor);
+}
+export function decodeGod(bytes: Uint8Array): GodMessage {
+  const cursor = createReader(bytes);
+  expectType(cursor, MessageType.God);
+  return { type: MessageType.God, enabled: readU8(cursor) !== 0 };
 }

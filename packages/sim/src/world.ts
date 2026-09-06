@@ -1,7 +1,10 @@
 import { LIGHT_ARMOR } from './armor.js';
+import { GameOverReason, stepFlags, TIME_LIMIT_TICKS } from './flags.js';
 import { stepPlayers } from './movement.js';
+import { createProjectileStore, stepProjectiles } from './projectiles.js';
 import type { Heightfield } from './terrain.js';
 import type { PlayerInput, Vec3, World } from './types.js';
+import { resetLoadout, stepWeapons, WEAPON_COUNT } from './weapons.js';
 
 export const FIXED_TICK_MS = 32;
 export const FIXED_DT = FIXED_TICK_MS / 1000;
@@ -52,7 +55,38 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
       wasGrounded: new Uint8Array(capacity),
       wasJumpHeld: new Uint8Array(capacity),
       landingSpeed: new Float64Array(capacity),
+      damage: new Float64Array(capacity),
+      godMode: new Uint8Array(capacity),
+      alive: new Uint8Array(capacity),
+      respawnAt: new Float64Array(capacity),
+      score: new Int16Array(capacity),
+      weaponSlot: new Uint8Array(capacity),
+      weaponState: new Uint8Array(capacity),
+      weaponTimer: new Float64Array(capacity),
+      spunUp: new Uint8Array(capacity),
+      grenadeCooldown: new Float64Array(capacity),
+      ammo: new Int16Array(capacity * WEAPON_COUNT),
+      grenades: new Uint8Array(capacity),
+      respawnSeq: new Uint16Array(capacity),
     },
+    projectiles: createProjectileStore(),
+    pendingDeaths: [],
+    pendingFireEvents: [],
+    lastFireEvents: [],
+    pendingAmmoRefunds: [],
+    flags: {
+      team: new Uint8Array(0),
+      state: new Uint8Array(0),
+      position: new Float64Array(0),
+      standPosition: new Float64Array(0),
+      carrierId: new Int16Array(0),
+      returnAt: new Float64Array(0),
+    },
+    teamScores: new Uint16Array(3),
+    gameOver: false,
+    winnerTeam: 0,
+    timeLimitTicks: TIME_LIMIT_TICKS,
+    gameOverReason: GameOverReason.CaptureLimit,
   };
 }
 
@@ -84,7 +118,16 @@ export function addPlayer(world: World, spawn: Vec3, team = 0): number {
   if (id === players.count) players.count += 1;
   players.active[id] = 1;
   players.team[id] = team;
+  players.damage[id] = 0;
+  // A reused id (see removePlayer's own reused-id comment) must not inherit whatever the
+  // previous occupant's god-mode toggle -- or respawn count -- was left at.
+  players.godMode[id] = 0;
+  players.alive[id] = 1;
+  players.respawnAt[id] = -1;
+  players.respawnSeq[id] = 0;
+  players.score[id] = 0;
   resetPlayerToSpawn(world, id, spawn);
+  resetLoadout(world, id, LIGHT_ARMOR);
   return id;
 }
 
@@ -95,6 +138,24 @@ export function removePlayer(world: World, id: number): void {
   }
   players.active[id] = 0;
   players.freeIds.push(id);
+  // Codex review round 2, finding 7 (ammo-refund half): a refund recorded by stepProjectiles
+  // for this id is consumed one tick later by stepWeapons. Without this, a disconnect landing
+  // in between lets a new player who gets this same numeric id inherit someone else's stale
+  // refund. Dropping this player's pending entries here closes that specific hole -- it does
+  // not touch the deeper reused-id identity problem (stale projectile ownerId self-exclusion),
+  // which is already tracked separately at github.com/STRML/clans/issues/8.
+  world.pendingAmmoRefunds = world.pendingAmmoRefunds.filter((refund) => refund.playerId !== id);
+}
+
+/**
+ * Toggles a player's invulnerability proactively, at the sim level, rather than the reactive
+ * post-hoc approach it replaces (a server-side set that zeroed damage back to full AFTER
+ * stepWorld had already run -- see applyDamage's godMode guard for why that was too late to
+ * stop a flag drop or score event). Server code calling this is the ONLY thing that should
+ * ever flip the flag; the sim itself never sets it on its own.
+ */
+export function setGodMode(world: World, id: number, enabled: boolean): void {
+  world.players.godMode[id] = enabled ? 1 : 0;
 }
 
 export function stepWorld(
@@ -104,6 +165,14 @@ export function stepWorld(
 ): void {
   if (dt !== FIXED_DT)
     throw new RangeError(`Simulation step requires fixed tick ${FIXED_TICK_MS} ms`);
+  // Once the match is over the authoritative sim freezes: no more movement, weapons, or
+  // projectiles, and the tick itself stops advancing (matches real T2; Codex review round 1,
+  // finding 9). world.tick is not part of "state at the moment of game over" for any other
+  // test, so freezing it here too is in scope.
+  if (world.gameOver) return;
   stepPlayers(world, inputs, dt);
+  stepWeapons(world, inputs, dt);
+  stepProjectiles(world, dt);
+  stepFlags(world, dt);
   world.tick += 1;
 }
