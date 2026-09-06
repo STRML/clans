@@ -127,6 +127,7 @@ export function createProjectileStore(capacity = PROJECTILE_CAPACITY): Projectil
   return {
     count: 0,
     freeIds: [],
+    pendingFreeIds: [],
     active: new Uint8Array(capacity),
     type: new Uint8Array(capacity),
     weaponId: new Uint8Array(capacity),
@@ -148,9 +149,22 @@ function allocate(store: ProjectileStore): number | null {
   return id;
 }
 
+/** Deactivates `id` and defers it into `pendingFreeIds` rather than `freeIds` directly, so
+ *  `allocate` can't hand it straight back out to another weapon fired later in this same
+ *  `stepProjectiles` call. See ProjectileStore.pendingFreeIds and flushPendingFreeIds. */
 function free(store: ProjectileStore, id: number): void {
   store.active[id] = 0;
-  store.freeIds.push(id);
+  store.pendingFreeIds.push(id);
+}
+
+/** Drains last tick's freed ids into the real `freeIds` pool -- called at the very start of
+ *  `stepProjectiles`, mirroring how weapons.ts's `applyPendingAmmoRefunds` drains
+ *  `world.pendingAmmoRefunds` at the start of its own next `stepWeapons` call. By the time
+ *  this runs, at least one full snapshot has already gone out with these ids inactive and
+ *  unallocated (Codex review round 7, finding 5). */
+function flushPendingFreeIds(store: ProjectileStore): void {
+  for (const id of store.pendingFreeIds) store.freeIds.push(id);
+  store.pendingFreeIds = [];
 }
 
 function velocityFor(direction: Vec3, speed: number, shooterVel: Vec3, velInherit: number): Vec3 {
@@ -710,6 +724,7 @@ function spawnFromEvent(world: World, event: FireEvent, dt: number): void {
  * waiting out this latency -- see that function's comment for why lag comp requires it.
  */
 export function stepProjectiles(world: World, dt: number): void {
+  flushPendingFreeIds(world.projectiles);
   for (let id = 0; id < world.projectiles.count; id += 1) {
     if (!world.projectiles.active[id]) continue;
     if (world.projectiles.type[id] === ProjectileType.Grenade) stepGrenade(world, id, dt);

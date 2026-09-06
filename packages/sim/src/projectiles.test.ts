@@ -164,7 +164,11 @@ describe('hitscan: Laser Rifle', () => {
     fire(world, {
       playerId: -1,
       weaponId: WeaponId.LaserRifle,
-      origin: { x: 0, y: 1.6, z: 0 },
+      // y=1.5, not the 1.6 "muzzle height" used elsewhere in this file: 1.6 now lands
+      // within LIGHT_ARMOR's headshot band (Codex review round 7, finding 3 made headY
+      // reachable at y=1.57+), which would apply the 1.3x multiplier this test isn't
+      // exercising. 1.5 stays a body shot.
+      origin: { x: 0, y: 1.5, z: 0 },
       direction: { x: 0, y: 0, z: 1 },
       energyScale: 0.5,
     });
@@ -174,6 +178,28 @@ describe('hitscan: Laser Rifle', () => {
       3,
     );
     expect(world.projectiles.count).toBe(0);
+  });
+});
+
+describe('Codex review round 7, finding 3: Laser Rifle headshot is reachable and applies 1.3x', () => {
+  it('a shot aimed at the top of the target hit sphere lands as a headshot', () => {
+    const world = createWorld(flat, 1);
+    const target = addPlayer(world, { x: 0, y: 0, z: 10 });
+    // LIGHT_ARMOR's hitbox: center.y = 1.15, radius = 0.6. y=1.7 sits 0.55 above center,
+    // inside the sphere's radius (0.6) and above the new headY (1.57) -- reachable only
+    // after the fix; the old headY (1.955) was above the sphere entirely.
+    fire(world, {
+      playerId: -1,
+      weaponId: WeaponId.LaserRifle,
+      origin: { x: 0, y: 1.7, z: 0 },
+      direction: { x: 0, y: 0, z: 1 },
+      energyScale: 1,
+    });
+    stepProjectiles(world, FIXED_DT);
+    expect(LIGHT_ARMOR.maxDamage - world.players.damage[target]!).toBeCloseTo(
+      LIGHT_ARMOR.maxDamage - 0.4 * 1.3,
+      3,
+    );
   });
 });
 
@@ -483,5 +509,37 @@ describe('FireEvent.hitPlayerId/hitPoint: the authoritative hit-test records its
     expect(event?.hitPlayerId).toBe(-1);
     expect(event?.hitPoint).toBeNull();
     expect(event?.resolved).toBe(false);
+  });
+});
+
+describe('Codex review round 7, finding 5: a freed projectile id cannot be reused within the same tick it was freed', () => {
+  it('a projectile fired in the same stepProjectiles call that frees another id does not reuse that id', () => {
+    const world = createWorld(flat, 1);
+    // A: fired straight down, detonates against the ground on its second step and frees its slot.
+    fire(world, { origin: { x: 0, y: 1, z: 0 }, direction: { x: 0, y: -1, z: 0 } });
+    stepProjectiles(world, FIXED_DT); // spawns A
+    const idA = firstProjectile(world);
+    // B: queued so it spawns on the very same stepProjectiles call that frees A.
+    fire(world, { origin: { x: 0, y: 10, z: 0 }, direction: { x: 0, y: 0, z: 1 } });
+    stepProjectiles(world, FIXED_DT); // frees A (terrain hit) AND spawns B, same call
+    expect(world.projectiles.active[idA]).toBe(0); // A is gone
+    const idB = firstProjectile(world); // only B is active now
+    // Without the fix, B's allocate() would pop A's id straight back off freeIds within this
+    // same call, so no snapshot would ever have shown A's id absent before B reused it.
+    expect(idB).not.toBe(idA);
+  });
+
+  it('the freed id becomes reusable on a later stepProjectiles call, one tick after it was freed', () => {
+    const world = createWorld(flat, 1);
+    fire(world, { origin: { x: 0, y: 1, z: 0 }, direction: { x: 0, y: -1, z: 0 } });
+    stepProjectiles(world, FIXED_DT); // spawns A
+    const idA = firstProjectile(world);
+    stepProjectiles(world, FIXED_DT); // frees A; its id is deferred, not yet reusable
+    expect(world.projectiles.active[idA]).toBe(0);
+    stepProjectiles(world, FIXED_DT); // no-op tick: flushes A's id into the real free pool
+    fire(world, { origin: { x: 0, y: 1, z: 0 }, direction: { x: 0, y: -1, z: 0 } });
+    stepProjectiles(world, FIXED_DT); // spawns C -- the deferred id is available again
+    const idC = firstProjectile(world);
+    expect(idC).toBe(idA);
   });
 });

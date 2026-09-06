@@ -20,10 +20,22 @@ export function playerHitbox(world: World, id: number, armor: ArmorData): Player
   const y = world.players.position[base + 1] ?? 0;
   const z = world.players.position[base + 2] ?? 0;
   const [boxX, boxY, height] = armor.boundingBox;
+  const centerY = y + height / 2;
+  const radius = Math.max(boxX, boxY) / 2;
   return {
-    center: { x, y: y + height / 2, z },
-    radius: Math.max(boxX, boxY) / 2,
-    headY: y + height * (1 - HEAD_BAND),
+    center: { x, y: centerY, z },
+    radius,
+    // Judgment call revising the original "ours" pick (Codex review round 7, finding 3): the
+    // old headY, `y + height * (1 - HEAD_BAND)`, anchored the head band to the player's full
+    // standing height, but the ray test above never checks against that height -- it only
+    // ever checks against THIS hit sphere (center ± radius). For LIGHT_ARMOR
+    // (boundingBox [1.2, 1.2, 2.3]) the old headY worked out to y + 1.955, which sits above
+    // the sphere's own top (center.y + radius = y + 1.75), so no ray could ever land a
+    // headshot no matter how it was aimed. headY is now anchored to the sphere's own vertical
+    // extent (2*radius tall) instead: the top 15% of that diameter, i.e.
+    // center.y + radius * (1 - 2 * HEAD_BAND), which keeps "top 15% counts as a head hit" as
+    // the intent while staying reachable by the geometry actually being ray-tested.
+    headY: centerY + radius * (1 - 2 * HEAD_BAND),
   };
 }
 

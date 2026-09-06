@@ -191,12 +191,24 @@ export function resyncCarriedFlagPositions(world: World): void {
   syncCarriedPositions(world);
 }
 
+/** Iterates every active/alive player's touches and captures for this tick, but stops the
+ *  moment a capture ends the match: `completeCapture` (called from `tryCapture`) can flip
+ *  `world.gameOver` mid-loop, and without this check the REST of this tick's players/flags
+ *  kept getting processed against a match that had already ended -- e.g. a capture that wins
+ *  the game returns the enemy flag to its stand in the same tick a teammate happens to be
+ *  standing on that stand, and that teammate's still-pending touch would pick the just-
+ *  returned flag right back up and score, even though the match technically ended earlier in
+ *  this same loop (Codex review round 7, finding 2). The `break outer` inside the inner loop
+ *  covers the capture landing on a later flagId within the SAME playerId's turn; the guard at
+ *  the top of the outer loop covers it landing on an earlier playerId's turn. */
 function handleTouchesAndCaptures(world: World): void {
-  for (let playerId = 0; playerId < world.players.count; playerId += 1) {
+  outer: for (let playerId = 0; playerId < world.players.count; playerId += 1) {
+    if (world.gameOver) break;
     if (!world.players.active[playerId] || !world.players.alive[playerId]) continue;
     for (let flagId = 0; flagId < FLAG_COUNT; flagId += 1) {
       tryPickupOrReturn(world, playerId, flagId);
       tryCapture(world, playerId, flagId);
+      if (world.gameOver) break outer;
     }
   }
   syncCarriedPositions(world);

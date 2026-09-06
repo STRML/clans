@@ -200,6 +200,29 @@ describe('match clock: time limit game over', () => {
   });
 });
 
+describe('Codex review round 7, finding 2: game over stops flag processing for the rest of that tick', () => {
+  it('a teammate touching the just-returned enemy flag in the same tick as the game-ending capture does not score', () => {
+    const world = createWorld(flat, 1);
+    createFlags(world, stands);
+    const attacker = addPlayer(world, { x: 100, y: 0, z: 0 }, 1);
+    // Parked exactly on team 2's stand -- right where completeCapture is about to return
+    // team 2's flag to, in the very same tick attacker's capture ends the match.
+    const teammate = addPlayer(world, { x: 100, y: 0, z: 0 }, 1);
+    world.teamScores[1] = 700; // one capture short of the 800-point win
+    stepFlags(world, FIXED_DT); // attacker carries team 2's flag; teammate's touch is a no-op
+    expect(world.flags.carrierId[1]).toBe(attacker);
+    world.players.position.set([0, 0, 0], attacker * 3); // attacker heads home to capture
+    stepFlags(world, FIXED_DT); // attacker's capture wins the game; teammate is still due a turn
+    expect(world.gameOver).toBe(true);
+    expect(world.winnerTeam).toBe(1);
+    // Without the fix, teammate's still-pending touch (processed right after attacker's,
+    // same loop) would pick the just-returned flag back up and score +20.
+    expect(world.flags.state[1]).toBe(FlagState.Home);
+    expect(world.flags.carrierId[1]).toBe(-1);
+    expect(world.players.score[teammate]).toBe(0);
+  });
+});
+
 describe('Codex review round 1, finding 8: time-limit game over must not land a tick late', () => {
   it('stepWorld ends the match on the tick that reaches the limit, not the tick after', () => {
     const world = createWorld(flat, 1);

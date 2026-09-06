@@ -53,6 +53,15 @@ export interface PlayerStore {
 export interface ProjectileStore {
   count: number;
   freeIds: number[];
+  /** Ids freed this tick, held back from `freeIds` until the START of the next
+   *  `stepProjectiles` call -- mirrors World.pendingAmmoRefunds's cross-tick-boundary
+   *  pattern. Without this, a projectile freed earlier in a `stepProjectiles` call (a hit or
+   *  expiry) could have its id popped straight back off `freeIds` and reallocated to a
+   *  DIFFERENT weapon fired later in that SAME call, so no snapshot ever showed the id
+   *  absent -- the client's disappearance-based cleanup (weapons-view.ts) relies on that gap
+   *  to tell "still the same projectile" apart from "a new one reused the old id" (Codex
+   *  review round 7, finding 5). */
+  pendingFreeIds: number[];
   active: Uint8Array;
   type: Uint8Array;
   weaponId: Uint8Array;

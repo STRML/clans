@@ -253,6 +253,20 @@ describe('playerHitbox and raySphereDistance', () => {
   });
 });
 
+describe('Codex review round 7, finding 3: Laser Rifle headshots must be geometrically reachable', () => {
+  it('headY sits within the hit sphere it is ray-tested against, not above its own top', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const hitbox = playerHitbox(world, id, LIGHT_ARMOR);
+    // Before the fix, LIGHT_ARMOR's headY (y + 1.955) sat above the sphere's own top
+    // (center.y + radius = y + 1.75) -- no ray could ever land high enough to count as a
+    // headshot. headY must now fall inside [center.y - radius, center.y + radius].
+    expect(hitbox.headY).toBeLessThanOrEqual(hitbox.center.y + hitbox.radius);
+    expect(hitbox.headY).toBeGreaterThan(hitbox.center.y - hitbox.radius);
+    expect(hitbox.headY).toBeCloseTo(hitbox.center.y + hitbox.radius * 0.7, 10);
+  });
+});
+
 describe('applyKickback', () => {
   it('scales the velocity change by magnitude/mass and the falloff', () => {
     const world = createWorld(flat, 1);
