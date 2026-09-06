@@ -23,6 +23,19 @@ const disc = (id: number, x: number): ProjectileSnapshotData => ({
   ownerId: 0,
 });
 
+const mortarShell = (id: number, x: number): ProjectileSnapshotData => ({
+  id,
+  type: 1,
+  weaponId: 2,
+  x,
+  y: 1,
+  z: 0,
+  vx: 0,
+  vy: 20,
+  vz: 0,
+  ownerId: 1,
+});
+
 describe('syncProjectileMeshes', () => {
   it('adds a mesh per projectile and removes it once the id disappears', () => {
     const scene = new THREE.Scene();
@@ -32,6 +45,39 @@ describe('syncProjectileMeshes', () => {
     expect(meshes.get(1)?.position.x).toBe(5);
     syncProjectileMeshes(scene, meshes, []);
     expect(scene.children).toHaveLength(0);
+  });
+
+  it('rebuilds the mesh instead of reusing it when a recycled id gets a new projectile type', () => {
+    // Codex review round 2 (PR #9), finding 8: the sim reuses freed projectile ids, so an
+    // id surviving frame-to-frame is not proof it is the same projectile. A disc despawning
+    // and a mortar shell being allocated the same id within one snapshot interval must not
+    // reuse the disc's mesh -- that would render the mortar with the disc's geometry/color
+    // at the mortar's position.
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    syncProjectileMeshes(scene, meshes, [disc(1, 5)]);
+    const discMesh = meshes.get(1);
+    if (!discMesh) throw new Error('expected a mesh for the disc');
+    const discGeometryDispose = vi.spyOn(discMesh.geometry, 'dispose');
+
+    syncProjectileMeshes(scene, meshes, [mortarShell(1, 8)]);
+
+    expect(discGeometryDispose).toHaveBeenCalledOnce();
+    const shellMesh = meshes.get(1);
+    expect(shellMesh).not.toBe(discMesh);
+    expect(shellMesh?.position.x).toBe(8);
+    expect(shellMesh?.geometry).not.toBe(discMesh.geometry);
+    expect(scene.children).toHaveLength(1);
+  });
+
+  it('keeps the same mesh across frames when the id is not reused', () => {
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    syncProjectileMeshes(scene, meshes, [disc(1, 5)]);
+    const mesh = meshes.get(1);
+    syncProjectileMeshes(scene, meshes, [disc(1, 6)]);
+    expect(meshes.get(1)).toBe(mesh);
+    expect(mesh?.position.x).toBe(6);
   });
 
   it('disposes a pruned projectile mesh geometry and material instead of leaking them', () => {
@@ -72,6 +118,19 @@ describe('spawnExplosionsForExpired', () => {
     const previous = new Map([[1, disc(1, 5)]]);
     spawnExplosionsForExpired(scene, effects, previous, [disc(1, 6)]);
     expect(effects).toHaveLength(0);
+  });
+
+  it('still flashes a died projectile whose id was immediately reused by a different type', () => {
+    // Codex review round 2 (PR #9), finding 8: matching on id alone treated a recycled id
+    // as "still present", so the old projectile's death never got its flash even though it
+    // genuinely died -- a different projectile just happened to land on the same id in the
+    // same snapshot interval.
+    const scene = new THREE.Scene();
+    const effects: Effect[] = [];
+    const previous = new Map([[1, disc(1, 5)]]);
+    spawnExplosionsForExpired(scene, effects, previous, [mortarShell(1, 8)]);
+    expect(effects).toHaveLength(1);
+    expect(scene.children).toHaveLength(1);
   });
 });
 

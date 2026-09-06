@@ -20,7 +20,14 @@ export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.
   const radius = isGrenade ? 0.25 : 0.15;
   const geometry = new THREE.SphereGeometry(radius, 8, 6);
   const color = isGrenade ? GRENADE_COLOR : (WEAPON_COLOR[projectile.weaponId] ?? 0xffffff);
-  return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color }));
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color }));
+  // Codex review round 2 (PR #9), finding 8: the sim recycles freed projectile ids (same
+  // pattern as player id reuse), so a mesh keyed only by id can't tell "same projectile,
+  // moved" from "a different projectile got this id". Stamping the type/weaponId it was
+  // built for onto the mesh itself lets syncProjectileMeshes below detect the swap.
+  mesh.userData.type = projectile.type;
+  mesh.userData.weaponId = projectile.weaponId;
+  return mesh;
 }
 
 // Same convention as remote.ts's disposeMesh and flag-view.ts's disposeFlagGroup: every
@@ -59,6 +66,21 @@ export function syncProjectileMeshes(
   pruneProjectileMeshes(scene, meshes, liveIds);
   for (const projectile of projectiles) {
     let mesh = meshes.get(projectile.id);
+    // Codex review round 2 (PR #9), finding 8: an id surviving frame-to-frame is not proof
+    // it is the same projectile -- the sim can free an id and hand it to a brand-new
+    // projectile (a different type/weaponId) within one snapshot interval. Reusing the old
+    // mesh in that case rendered the new projectile with the old one's geometry/color at
+    // the new position, and (from this map's point of view) never registered the old
+    // projectile's death.
+    if (
+      mesh &&
+      (mesh.userData.type !== projectile.type || mesh.userData.weaponId !== projectile.weaponId)
+    ) {
+      scene.remove(mesh);
+      disposeMesh(mesh);
+      meshes.delete(projectile.id);
+      mesh = undefined;
+    }
     if (!mesh) {
       mesh = createProjectileMesh(projectile);
       scene.add(mesh);
@@ -116,9 +138,18 @@ export function spawnExplosionsForExpired(
   previous: Map<number, ProjectileSnapshotData>,
   current: ProjectileSnapshotData[],
 ): void {
-  const currentIds = new Set(current.map((p) => p.id));
+  const currentById = new Map(current.map((p) => [p.id, p]));
   for (const [id, last] of previous) {
-    if (currentIds.has(id)) continue;
+    // Codex review round 2 (PR #9), finding 8: an id present in `current` is not proof the
+    // same projectile is still alive -- the sim can free an id and hand it to a brand-new
+    // projectile (different type/weaponId) within one snapshot interval. Matching on id
+    // alone silently ate the old projectile's death flash because, from this diff's point
+    // of view, "that id still exists". Only treat it as still alive when the type/weaponId
+    // also match; otherwise the old one died and gets its flash same as any other expiry.
+    const stillAlive = currentById.get(id);
+    if (stillAlive && stillAlive.type === last.type && stillAlive.weaponId === last.weaponId) {
+      continue;
+    }
     const mesh = createFlash(last, WEAPON_COLOR[last.weaponId] ?? 0xffffff);
     scene.add(mesh);
     effects.push({ mesh, ttl: EXPLOSION_LIFETIME_S });

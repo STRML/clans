@@ -616,6 +616,48 @@ describe('NetClient', () => {
     expect(client.gameOverReason).toBe(0);
   });
 
+  it('mirrors gameOver/winnerTeam/gameOverReason onto world so stepWorld freezes prediction', () => {
+    // Codex review round 2 (PR #9), finding 3: round 1 added an early-return freeze guard
+    // to stepWorld that checks world.gameOver, but the snapshot handler only ever updated
+    // this NetClient's own gameOver/winnerTeam/gameOverReason fields, never the world's --
+    // tick() keeps calling stepWorld(this.world, ...) every frame regardless, so the
+    // client's local world never learned the match had ended and kept predicting movement,
+    // weapon timers, ammo, and unacknowledged-input replay after the server had frozen.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 21 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    const extras: WorldExtras = {
+      projectiles: [],
+      flags: [],
+      teamScores: [3, 1],
+      gameOver: true,
+      winnerTeam: 1,
+      timeRemainingS: 0,
+      gameOverReason: 1,
+    };
+    transport.pump([encodeSnapshot(1, 0, 0, [], null, extras)]);
+
+    expect(client.gameOver).toBe(true);
+    expect(client.world.gameOver).toBe(true);
+    expect(client.world.winnerTeam).toBe(1);
+    expect(client.world.gameOverReason).toBe(1);
+
+    const beforeX = client.world.players.position[0] ?? 0;
+    client.tick({
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    });
+    expect(client.world.players.position[0] ?? 0).toBe(beforeX);
+  });
+
   it('reads localHealth off the reconciled snapshot for the local player', () => {
     clock.ms = 0;
     const transport = makeTransport(makeLink({ value: 12 }));
