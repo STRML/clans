@@ -496,6 +496,15 @@ function correctionDamage(world: World, event: FireEvent, result: HitResult): nu
  * driven by `world.lastFireEvents`, i.e. a shot with real game effect, never raw
  * `input.fire`, which used to trigger a rewind on every held-trigger tick regardless of
  * reload/ammo/death state).
+ *
+ * Codex round 4, finding 2: this correction runs entirely after `stepWorld` -- and therefore
+ * after that tick's `stepFlags` -- so a kill it produces can never be seen by
+ * `dropCarriedFlagsOnDeath`'s own `pendingDeaths` pass, and the *next* tick's `stepPlayers`
+ * clears `pendingDeaths` before that next tick's `stepFlags` gets a chance either. A flag
+ * carried by a player this correction kills would stay `Carried` by a corpse forever. This
+ * calls `dropFlagsCarriedBy` -- the exact same synchronous mechanism `handleClose` already
+ * uses for the identical disconnect-timing problem -- immediately once `applyDamage` leaves
+ * the target dead.
  */
 function applyLagCompensatedHits(
   world: World,
@@ -515,6 +524,7 @@ function applyLagCompensatedHits(
     event.hitPlayerId = result.hitPlayerId;
     event.hitPoint = result.hitPoint;
     applyDamage(world, result.hitPlayerId, damage, event.playerId, LIGHT_ARMOR);
+    if (!world.players.alive[result.hitPlayerId]) dropFlagsCarriedBy(world, result.hitPlayerId);
   }
 }
 
@@ -677,8 +687,18 @@ export function startNetServer(options: NetServerOptions): NetServer {
     // world.lastFireEvents is therefore already fully correct and uncorrupted; lag
     // compensation is a narrow recheck layered on AFTER, never a substitution before.
     stepWorld(options.world, inputs);
-    respawnDuePlayers(options.world, options.spawns, history);
-    applyLagCompensatedHits(options.world, clients, history);
+    // Codex round 4, finding 6: stepWorld can flip world.gameOver to true partway through
+    // THIS call (a capture or the time limit landing on this exact tick), and the `tick`
+    // function's own gameOver gate below was only checked before this call started, using
+    // the stale pre-tick value. Without re-checking here, both of these post-stepWorld
+    // operations kept running for one tick after the match froze: a respawn timer due on
+    // the game-ending tick still respawned its player into a supposedly-frozen match, and a
+    // lag-comp correction could still land a hit on it. Once gameOver is true, stepWorld's
+    // own guard means neither of these ever has fresh sim state to react to again anyway.
+    if (!options.world.gameOver) {
+      respawnDuePlayers(options.world, options.spawns, history);
+      applyLagCompensatedHits(options.world, clients, history);
+    }
 
     for (const event of killEvents(options.world)) broadcastEvent(clients, event);
     for (const event of flagEvents(options.world, flagsBefore)) broadcastEvent(clients, event);

@@ -6,6 +6,7 @@ import {
   createFlags,
   createWorld,
   FlagState,
+  LIGHT_ARMOR,
   type Heightfield,
   type PlayerInput,
   type World,
@@ -878,5 +879,104 @@ describe('startNetServer', () => {
       .map((bytes) => decodeEvent(bytes));
     expect(events.some((event) => event.kind === EventKind.LaserFired)).toBe(true);
     client.close();
+  });
+
+  it('drops a flag when a lag-compensated correction kills its carrier (Codex round 4, finding 2)', async () => {
+    // applyLagCompensatedHits runs after stepWorld has already returned -- and therefore
+    // after this tick's stepFlags already ran -- so a kill it produces can never be seen by
+    // dropCarriedFlagsOnDeath's pendingDeaths pass, and the *next* tick's stepPlayers clears
+    // pendingDeaths before that next tick's stepFlags gets a chance either. Without net.ts
+    // dropping the flag itself, right here, synchronously, it stays Carried by a corpse forever.
+    createFlags(world, [
+      { team: 1, position: { x: 0, y: 0, z: 0 } },
+      { team: 2, position: { x: 8, y: 0, z: 8 } },
+    ]);
+    let clock = 0;
+    const lagServer = startNetServer({ world, spawns, port: TEST_PORT + 8, now: () => clock });
+    await lagServer.ready;
+    const carrierId = addPlayer(world, { x: 0, y: 0, z: 8 }, 2);
+    world.flags.carrierId[0] = carrierId; // team 1's flag, carried by a team-2 player
+    world.flags.state[0] = FlagState.Carried;
+    world.flags.returnAt[0] = -1;
+
+    const shooter = await connect(TEST_PORT + 8);
+    const welcomePromise = receive(shooter);
+    shooter.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    world.players.position.set([0, 0, 0], welcome.playerId * 3);
+
+    // Establish a 150ms ping so the coming shot triggers a rewind.
+    const firstPromise = receive(shooter);
+    lagServer.tick(2);
+    const first = decodeSnapshot(await firstPromise, null);
+    clock = 150;
+    shooter.send(encodeAck({ snapshotId: first.snapshotId }));
+    await wait(20);
+
+    const idle: NetInputSample = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    // The carrier holds the shot line for a few ticks (recorded into lag-comp history), then
+    // jumps far away right before the shot resolves: the laggy shooter's screen still shows
+    // it in the old spot, so the live hit-test misses and only the recheck can land the hit.
+    for (let step = 0; step < 5; step += 1) {
+      world.players.position.set([0, 0, 8], carrierId * 3);
+      lagServer.tick(3 + step);
+    }
+    world.players.position.set([500, 0, 500], carrierId * 3);
+    // Just under lethal: the recheck's one Laser Rifle hit is what finishes them off.
+    world.players.damage[carrierId] = LIGHT_ARMOR.maxDamage - 0.01;
+
+    shooter.send(
+      encodeInput({
+        sequence: 1,
+        samples: [
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+        ],
+      }),
+    );
+    await wait(20);
+    lagServer.tick(20); // slot switch only, still Ready, no shot yet
+
+    const fire: NetInputSample = { ...idle, slot: 4, fire: true };
+    shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
+    await wait(20);
+    lagServer.tick(21); // fires: the lag-compensated correction is the lethal hit
+
+    expect(world.players.alive[carrierId]).toBe(0);
+    expect(world.flags.state[0]).toBe(FlagState.Dropped);
+    expect(world.flags.carrierId[0]).toBe(-1);
+    shooter.close();
+    lagServer.close();
+  });
+
+  it('does not respawn a due player on the tick the match ends (Codex round 4, finding 6)', () => {
+    // stepWorld freezes the sim once world.gameOver is true, but that flag can flip to true
+    // partway through the very stepWorld call that sets it (here, the time limit landing on
+    // this tick) -- and runOneTick's own respawn handling ran unconditionally afterward,
+    // unguarded by the gameOver state stepWorld had just produced. A respawn timer due on
+    // the exact tick the match ends therefore still fired the player back into a supposedly
+    // frozen game.
+    const deadId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.alive[deadId] = 0;
+    world.players.respawnAt[deadId] = 0;
+    // Makes checkTimeLimit fire on this tick's stepWorld call: it compares world.tick + 1
+    // (pre-increment) against timeLimitTicks, so this is the earliest value that trips it.
+    world.timeLimitTicks = world.tick + 1;
+
+    server.tick(1);
+
+    expect(world.gameOver).toBe(true);
+    expect(world.players.alive[deadId]).toBe(0);
   });
 });
