@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { addPlayer, createWorld, type Heightfield } from './index.js';
+import { addPlayer, applyDamage, createWorld, LIGHT_ARMOR, type Heightfield } from './index.js';
+import { ArmorId, HEAVY_ARMOR } from './armor.js';
 import {
   activeForceFieldBlockers,
   applyBaseObjectDamage,
+  applyLoadoutRequest,
   BASE_OBJECT_DATA,
   BaseObjectKind,
   createBaseObjects,
@@ -230,5 +232,40 @@ describe('ForceField', () => {
     const hit =
       blocker && raycastInteriors([blocker], { x: -5, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }, 20);
     expect(hit).not.toBeNull();
+  });
+});
+
+describe('applyLoadoutRequest', () => {
+  it('applies armor, full heal, full energy, and the repair pack choice at a powered station', () => {
+    const world = createWorld(flat, 1);
+    const { station } = twoGeneratorsOneStation(world);
+    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
+    applyDamage(world, player, 0.3, -1, LIGHT_ARMOR);
+    world.players.energy[player] = 0;
+    const applied = applyLoadoutRequest(world, player, ArmorId.Heavy, true);
+    expect(applied).toBe(true);
+    expect(world.players.armor[player]).toBe(ArmorId.Heavy);
+    expect(world.players.damage[player]).toBe(0);
+    expect(world.players.energy[player]).toBe(HEAVY_ARMOR.maxEnergy);
+    expect(world.players.hasRepairPack[player]).toBe(1);
+    void station;
+  });
+  it('failure matrix row 4: refuses when the station is not powered, player keeps their old loadout', () => {
+    const world = createWorld(flat, 1);
+    const { gen1, gen2 } = twoGeneratorsOneStation(world);
+    const overkill = BASE_OBJECT_DATA[BaseObjectKind.Generator].maxHealth * 10;
+    applyBaseObjectDamage(world, gen1, overkill);
+    applyBaseObjectDamage(world, gen2, overkill);
+    stepPower(world);
+    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
+    const applied = applyLoadoutRequest(world, player, ArmorId.Heavy, true);
+    expect(applied).toBe(false);
+    expect(world.players.armor[player]).toBe(ArmorId.Light);
+  });
+  it('refuses outside the use radius', () => {
+    const world = createWorld(flat, 1);
+    twoGeneratorsOneStation(world);
+    const player = addPlayer(world, { x: 10 + STATION_USE_RADIUS + 5, y: 0, z: 0 }, 1);
+    expect(applyLoadoutRequest(world, player, ArmorId.Medium, false)).toBe(false);
   });
 });

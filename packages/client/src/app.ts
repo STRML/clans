@@ -47,6 +47,7 @@ const IDLE: PlayerInput = {
   fire: false,
   altFire: false,
   slot: 0,
+  packActive: false,
 };
 
 export interface AppStats {

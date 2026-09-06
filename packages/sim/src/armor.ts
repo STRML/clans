@@ -32,6 +32,10 @@ export interface ArmorData {
   maxWeapons: number;
   laserRifleAllowed: boolean;
   mortarAllowed: boolean;
+  /** Repair Pack heal rate per tick -- the spec's Armor numbers table gives 0.0033 for every
+   *  armor identically (`packs/repairpack.cs`'s DefaultRepairBeam is not armor-specific). Added
+   *  here in Task 6, which is the first system that reads it (repair.ts's stepRepairPacks). */
+  repairRate: number;
 }
 
 export const LIGHT_ARMOR: ArmorData = {
@@ -68,6 +72,7 @@ export const LIGHT_ARMOR: ArmorData = {
   maxWeapons: 3,
   laserRifleAllowed: true,
   mortarAllowed: false,
+  repairRate: 0.0033,
 };
 
 export enum ArmorId {
@@ -110,6 +115,7 @@ export const MEDIUM_ARMOR: ArmorData = {
   maxWeapons: 4,
   laserRifleAllowed: false,
   mortarAllowed: false,
+  repairRate: 0.0033,
 };
 
 export const HEAVY_ARMOR: ArmorData = {
@@ -146,6 +152,7 @@ export const HEAVY_ARMOR: ArmorData = {
   maxWeapons: 5,
   laserRifleAllowed: false,
   mortarAllowed: true,
+  repairRate: 0.0033,
 };
 
 export const ARMORS: Record<ArmorId, ArmorData> = {

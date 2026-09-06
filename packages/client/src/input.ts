@@ -84,6 +84,7 @@ export class Input {
       fire: this.fire,
       altFire: this.isDown('KeyG'),
       slot: this.slotFromKeys(),
+      packActive: false,
     };
   }
 }

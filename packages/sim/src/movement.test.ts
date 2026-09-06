@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ArmorId, HEAVY_ARMOR } from './armor.js';
+import { BaseObjectKind, createBaseObjects, stepPower } from './baseObjects.js';
 import {
   FIXED_DT,
   addPlayer,
@@ -31,6 +32,7 @@ const idle: PlayerInput = {
   fire: false,
   altFire: false,
   slot: 0,
+  packActive: false,
 };
 const inputMap = (id: number, input: Partial<PlayerInput>) =>
   new Map([[id, { ...idle, ...input }]]);
@@ -461,5 +463,58 @@ describe('Light movement', () => {
     expect(
       Math.hypot(world.players.velocity[id * 3] ?? 0, world.players.velocity[id * 3 + 2] ?? 0),
     ).toBeLessThanOrEqual(68);
+  });
+});
+
+describe('force fields block enemy movement, pass friendly movement (failure matrix row 17)', () => {
+  function withForceField(ownerTeam: number): ReturnType<typeof createWorld> {
+    const world = createWorld(flat, 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: ownerTeam, position: { x: 5, y: 0, z: 20 } },
+      {
+        kind: BaseObjectKind.ForceField,
+        team: ownerTeam,
+        position: { x: 5, y: 2, z: 0 },
+        rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 },
+        scale: { x: 1, y: 4, z: 6 },
+      },
+    ]);
+    stepPower(world);
+    return world;
+  }
+
+  it('an enemy player pushing straight into a powered force field is stopped at it', () => {
+    const world = withForceField(2);
+    const id = addPlayer(world, { x: 4.5, y: 0, z: 0 }, 1); // team 1, the enemy of the field's team 2
+    const forward: PlayerInput = { ...idle, yaw: Math.PI / 2, moveZ: 1 }; // yaw 90 deg faces +X, moveZ pushes forward into the field at x=5
+    for (let tick = 0; tick < 30; tick += 1) stepWorld(world, new Map([[id, forward]]));
+    expect(world.players.position[id * 3] ?? 0).toBeLessThan(5);
+  });
+
+  it('a friendly player walks through the same powered force field unimpeded', () => {
+    const world = withForceField(1); // field belongs to team 1, same as the player
+    const id = addPlayer(world, { x: 4.5, y: 0, z: 0 }, 1);
+    const forward: PlayerInput = { ...idle, yaw: Math.PI / 2, moveZ: 1 };
+    for (let tick = 0; tick < 30; tick += 1) stepWorld(world, new Map([[id, forward]]));
+    expect(world.players.position[id * 3] ?? 0).toBeGreaterThan(5);
+  });
+
+  it('an unpowered force field blocks no one', () => {
+    const world = createWorld(flat, 1);
+    createBaseObjects(world, [
+      {
+        kind: BaseObjectKind.ForceField,
+        team: 2,
+        position: { x: 5, y: 2, z: 0 },
+        rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 },
+        scale: { x: 1, y: 4, z: 6 },
+      },
+    ]);
+    // No generator for team 2: stepPower leaves the field unpowered.
+    stepPower(world);
+    const id = addPlayer(world, { x: 4.5, y: 0, z: 0 }, 1);
+    const forward: PlayerInput = { ...idle, yaw: Math.PI / 2, moveZ: 1 };
+    for (let tick = 0; tick < 30; tick += 1) stepWorld(world, new Map([[id, forward]]));
+    expect(world.players.position[id * 3] ?? 0).toBeGreaterThan(5);
   });
 });

@@ -75,6 +75,7 @@ describe('handshake codec', () => {
           fire: true,
           altFire: false,
           slot: 2,
+          packActive: false,
         },
         {
           moveX: 0,
@@ -86,6 +87,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: true,
           slot: 0,
+          packActive: false,
         },
         {
           moveX: -1,
@@ -97,6 +99,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
       ],
     };
@@ -159,6 +162,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
         {
           moveX: 0,
@@ -170,6 +174,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
         {
           moveX: 0,
@@ -181,6 +186,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
       ],
     };
@@ -201,6 +207,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
         {
           moveX: 0,
@@ -212,6 +219,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
         {
           moveX: 0,
@@ -223,6 +231,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
       ],
     };
@@ -262,6 +271,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
         {
           moveX: 0,
@@ -273,6 +283,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
         {
           moveX: 0,
@@ -284,6 +295,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
       ],
     };
@@ -298,6 +310,7 @@ describe('handshake codec', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     });
   });
 });

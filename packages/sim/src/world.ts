@@ -3,6 +3,7 @@ import { createEmptyBaseObjects, stepPower } from './baseObjects.js';
 import { GameOverReason, stepFlags, TIME_LIMIT_TICKS } from './flags.js';
 import { stepPlayers } from './movement.js';
 import { createProjectileStore, stepProjectiles } from './projectiles.js';
+import { stepRepairPacks } from './repair.js';
 import type { Heightfield } from './terrain.js';
 import type { PlayerInput, Vec3, World } from './types.js';
 import { createEmptyTurrets, stepTurrets } from './turrets.js';
@@ -186,6 +187,7 @@ export function stepWorld(
   stepPower(world);
   stepTurrets(world, dt);
   stepProjectiles(world, dt);
+  stepRepairPacks(world, inputs, dt);
   stepFlags(world, dt);
   world.tick += 1;
 }

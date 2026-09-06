@@ -1,4 +1,5 @@
 import { armorFor, type ArmorData } from './armor.js';
+import { activeForceFieldBlockers } from './baseObjects.js';
 import { applyDamage, applyFallDamage } from './damage.js';
 import { resolveSphereAgainstInteriors } from './interiors.js';
 import { sampleTerrain, type TerrainSample } from './terrain.js';
@@ -20,6 +21,7 @@ const IDLE: PlayerInput = {
   fire: false,
   altFire: false,
   slot: 0,
+  packActive: false,
 };
 
 interface Body {
@@ -342,6 +344,26 @@ function resolveInteriors(world: World, body: Body, armor: ArmorData): void {
   }
 }
 
+/** Reuses `resolveInteriors`'s own two-sphere push-out against whichever of the player's
+ *  team's opposing force fields are currently powered -- `activeForceFieldBlockers` already
+ *  excludes the player's own team's fields, so there is nothing else to filter here. A
+ *  friendly field never appears in the list this queries, which is what makes "always passes
+ *  your own team" true by construction rather than by an extra team check in this function --
+ *  failure matrix row 17. */
+function resolveForceFields(world: World, id: number, body: Body, armor: ArmorData): void {
+  const team = world.players.team[id] ?? 0;
+  const blockers = activeForceFieldBlockers(world, team);
+  if (blockers.length === 0) return;
+  const [boxX, boxY, height] = armor.boundingBox;
+  const radius = Math.max(boxX, boxY) / 2;
+  const chest = { x: body.x, y: body.y + height - radius, z: body.z };
+  const push = resolveSphereAgainstInteriors(blockers, chest, radius);
+  if (!push) return;
+  body.x += push.x;
+  body.y += push.y;
+  body.z += push.z;
+}
+
 function stepPlayer(
   world: World,
   id: number,
@@ -357,6 +379,7 @@ function stepPlayer(
   applyResistance(body, armor, dt);
   const contact = integrate(world, body, ctx.grounded, forces.jumped || forces.jetted, dt);
   resolveInteriors(world, body, armor);
+  resolveForceFields(world, id, body, armor);
   // Falling out of the world is a real death, not a parallel "just move them back" shortcut
   // (Codex review round 9, PR #9, P1): the old position-only reset skipped pendingDeaths
   // entirely, so stepFlags never saw the death, a carried flag never dropped, and damage/

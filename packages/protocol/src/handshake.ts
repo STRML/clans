@@ -80,6 +80,7 @@ function readSample(cursor: Cursor): NetInputSample {
     fire: (flags & 4) !== 0,
     altFire: (flags & 8) !== 0,
     slot,
+    packActive: false,
   };
 }
 

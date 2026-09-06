@@ -44,6 +44,7 @@ const IDLE_INPUT: PlayerInput = {
   fire: false,
   altFire: false,
   slot: 0,
+  packActive: false,
 };
 
 const flat: Heightfield = {

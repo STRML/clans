@@ -16,6 +16,8 @@ export interface PlayerInput {
   fire: boolean;
   altFire: boolean;
   slot: number; // 0 = no change, 1..5 = select that weapon slot (see weaponIdForSlot)
+  /** Repair Pack beam held down. Level-triggered, like `fire`. */
+  packActive: boolean;
 }
 export interface PlayerStore {
   count: number;

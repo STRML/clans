@@ -25,6 +25,7 @@ export * from './hash.js';
 export * from './interiors.js';
 export * from './projectiles.js';
 export * from './random.js';
+export * from './repair.js';
 export * from './snapshot.js';
 export * from './terrain.js';
 export * from './turrets.js';

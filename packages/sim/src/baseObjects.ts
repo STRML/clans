@@ -1,5 +1,7 @@
+import { ARMORS, ArmorId, type ArmorData } from './armor.js';
 import { buildInteriorCollider, type InteriorInstance } from './interiors.js';
 import type { Vec3, World } from './types.js';
+import { resetLoadout } from './weapons.js';
 
 export enum BaseObjectKind {
   Generator = 0,
@@ -281,4 +283,31 @@ export function stationAt(world: World, playerId: number): number | null {
     if (distanceVec(playerPos, stationPos) <= STATION_USE_RADIUS) return id;
   }
   return null;
+}
+
+/**
+ * The one place a player's armor and Repair Pack choice actually change -- called directly by
+ * server/net.ts's Loadout handler and by the client's single-player equivalent, never
+ * threaded through PlayerInput/stepWorld (this is a one-shot request, not per-tick state,
+ * matching how `setGodMode` already works). Re-checks `stationAt` at call time rather than
+ * trusting an earlier "in range" result, which is what makes failure matrix row 4 true for
+ * free: a request that arrives the same tick power drops (or after the player already walked
+ * away) simply finds no station and returns false, leaving every field of the player's
+ * current loadout untouched.
+ */
+export function applyLoadoutRequest(
+  world: World,
+  playerId: number,
+  armor: ArmorId,
+  repairPack: boolean,
+): boolean {
+  if (stationAt(world, playerId) === null) return false;
+  const players = world.players;
+  const data: ArmorData = ARMORS[armor];
+  players.armor[playerId] = armor;
+  players.damage[playerId] = 0;
+  players.energy[playerId] = data.maxEnergy;
+  players.hasRepairPack[playerId] = repairPack ? 1 : 0;
+  resetLoadout(world, playerId, data);
+  return true;
 }
