@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { addPlayer, createWorld, stepWorld, type Heightfield } from './index.js';
+import {
+  addPlayer,
+  createWorld,
+  dueForRespawn,
+  respawnPlayer,
+  stepWorld,
+  type Heightfield,
+  type PlayerInput,
+} from './index.js';
 import { applyDamage } from './damage.js';
 import { LIGHT_ARMOR } from './armor.js';
 import { createFlags, FlagState, GameOverReason, RETURN_TICKS, stepFlags } from './flags.js';
@@ -18,6 +26,17 @@ const stands = [
   { team: 1, position: { x: 0, y: 0, z: 0 } },
   { team: 2, position: { x: 100, y: 0, z: 0 } },
 ];
+const idle: PlayerInput = {
+  moveX: 0,
+  moveZ: 0,
+  yaw: 0,
+  pitch: 0,
+  jump: false,
+  jet: false,
+  fire: false,
+  altFire: false,
+  slot: 0,
+};
 
 describe('pickup, capture, and scoring', () => {
   it('touching the enemy flag carries it and scores +20', () => {
@@ -231,5 +250,51 @@ describe('Codex review round 1, finding 8: time-limit game over must not land a 
     expect(world.tick).toBe(1);
     expect(world.gameOver).toBe(true);
     expect(world.gameOverReason).toBe(GameOverReason.TimeLimit);
+  });
+});
+
+describe('Codex review round 9, PR #9, P1: a flag carrier falling out of the world', () => {
+  it('drops the carried flag and dies for real, instead of teleporting home still holding it', () => {
+    // Before the fix, movement.ts's kill-plane handling repositioned the player directly
+    // and never touched pendingDeaths, so stepFlags never saw a death: a flag carrier who
+    // fell out of the world stayed "alive", kept the flag, and the flag's carried-position
+    // sync just followed them back to their spawn -- a real exploit (fall out of the map to
+    // instantly and safely relocate a stolen flag). A terrain hole, not just a low y: on
+    // solid ground movement.ts's own ground-contact resolution snaps a falling player back
+    // onto the surface before the kill-plane check ever runs (see movement.ts's
+    // integrate/classify -- empty square means no snap). `flat`'s 2x2 grid is a single
+    // square (col/row always clamp to 0 -- see terrain.ts's sampleTerrain), so marking
+    // square 0 empty makes the whole map a hole and the carrier starts falling immediately.
+    const holed: Heightfield = { ...flat, emptySquares: new Set([0]) };
+    const world = createWorld(holed, 1);
+    createFlags(world, stands);
+    const carrier = addPlayer(world, { x: 100, y: 0, z: 0 }, 1);
+    stepWorld(world, new Map([[carrier, idle]])); // parked on team 2's stand: picks it up
+    expect(world.flags.state[1]).toBe(FlagState.Carried);
+    expect(world.flags.carrierId[1]).toBe(carrier);
+    let ticks = 0;
+    while (world.players.alive[carrier] === 1 && ticks < 300) {
+      stepWorld(world, new Map([[carrier, idle]]));
+      ticks += 1;
+    }
+    expect(ticks).toBeLessThan(300); // sanity: the carrier actually died within the budget
+    expect(world.players.alive[carrier]).toBe(0);
+    // The flag dropped -- not carried into the void, not teleported home with the player.
+    expect(world.flags.state[1]).toBe(FlagState.Dropped);
+    expect(world.flags.carrierId[1]).toBe(-1);
+    expect(world.flags.position[1 * 3]).toBe(100); // dropped near the fall-out point
+    expect(world.flags.position[1 * 3 + 1]).toBe(0); // clamped to the flat terrain height there
+    expect(world.flags.position[1 * 3 + 2]).toBe(0);
+    // A real death, not an instant reset: the standard 5 s respawn timer is running, and
+    // the player does not come back alive on their own without going through it.
+    expect(world.players.respawnAt[carrier]).toBeGreaterThan(world.tick);
+    // Drive the standard respawn cycle to confirm damage/loadout come back clean, exactly
+    // like every other death (weapons.test.ts covers ammo/grenades in detail).
+    while (dueForRespawn(world).length === 0) stepWorld(world, new Map([[carrier, idle]]));
+    for (const id of dueForRespawn(world)) respawnPlayer(world, id, { x: 100, y: 0, z: 0 });
+    expect(world.players.alive[carrier]).toBe(1);
+    expect(world.players.damage[carrier]).toBe(0);
+    // The dropped flag is still where it fell, recoverable by either team.
+    expect(world.flags.state[1]).toBe(FlagState.Dropped);
   });
 });

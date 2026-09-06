@@ -138,10 +138,14 @@ export function respawnPlayer(world: World, id: number, spawn: Vec3): void {
   players.damage[id] = 0;
   players.respawnAt[id] = -1;
   players.position.set([spawn.x, spawn.y, spawn.z], id * 3);
-  // movement.ts's kill-plane fallback (resetToSpawn) reads players.spawn, not players.position,
-  // when a player falls out of the world -- so this has to move too, or a player who respawns
-  // somewhere new and later falls out lands all the way back at their original spawn instead
-  // of the one they just respawned at (Codex review round 4, finding 7).
+  // Codex review round 4, finding 7: originally kept in sync because movement.ts's
+  // kill-plane fallback read players.spawn (not players.position) to instantly reposition
+  // a player who fell out of the world -- that bespoke reset was removed in review round 9,
+  // which routes a kill-plane fall through THIS function instead (via applyDamage's normal
+  // pendingDeaths -> dueForRespawn -> respawnPlayer cycle), so movement.ts no longer reads
+  // players.spawn at all. Kept in sync regardless: netclient.ts mirrors this same field
+  // locally for its own respawn-detection bookkeeping, and any future "return to last
+  // spawn" consumer should see the actual respawn point, not the original join spawn.
   players.spawn.set([spawn.x, spawn.y, spawn.z], id * 3);
   players.velocity.set([0, 0, 0], id * 3);
   // Codex review round 2, finding 4: this reset health/position/velocity but left energy,

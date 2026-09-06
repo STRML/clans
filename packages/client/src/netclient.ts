@@ -430,10 +430,11 @@ export class NetClient {
       // work). deserializePlayer above already wrote that position onto players.position
       // for this dead-to-alive edge, but never touches players.spawn -- so without this,
       // players.spawn stays at whatever it was set to when this client first joined.
-      // movement.ts's kill-plane fallback (resetToSpawn) reads players.spawn, not
-      // players.position, when a player falls out of the world, so a player who respawns
-      // somewhere new and later falls out of the world locally landed back at their
-      // original join spawn instead of the one the server just respawned them at.
+      // Kept in sync so any local consumer of "where would this player currently respawn"
+      // sees the actual respawn point rather than the original join spawn. (Historically
+      // this fed movement.ts's kill-plane fallback directly; review round 9 replaced that
+      // bespoke reset with the standard applyDamage/respawnPlayer death cycle, so
+      // movement.ts itself no longer reads players.spawn -- see damage.ts's respawnPlayer.)
       this.world.players.spawn.set(
         [
           this.world.players.position[LOCAL_SLOT * 3] ?? 0,

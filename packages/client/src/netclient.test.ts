@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   FIXED_DT,
   FIXED_TICK_MS,
+  LIGHT_ARMOR,
   RESPAWN_TICKS,
   WeaponId,
   WeaponState,
@@ -994,14 +995,12 @@ describe('NetClient', () => {
     expect(client.world.players.respawnAt[0]).toBe(-1);
   });
 
-  it('updates the local spawn point on a networked respawn so a later kill-plane fall returns there, not to the join spawn (Codex review round 5, finding 2)', () => {
+  it('updates the local spawn point on a networked respawn (Codex review round 5, finding 2)', () => {
     // The wire snapshot only carries the respawned POSITION, not a separate spawn-point
-    // field (that would be new protocol work), and players.spawn is what movement.ts's
-    // kill-plane fallback reads when a player falls out of the world locally. Before this
-    // fix, players.spawn was only ever set from the Welcome handshake's join spawn and
-    // never updated on a real respawn, so falling out of the world after respawning
-    // somewhere else snapped the player back to their ORIGINAL join spawn instead of the
-    // point the server had just respawned them at.
+    // field (that would be new protocol work). Before this fix, players.spawn was only
+    // ever set from the Welcome handshake's join spawn and never updated on a real
+    // respawn, so any local consumer of "the current respawn point" saw the ORIGINAL join
+    // spawn forever instead of the point the server had just respawned the player at.
     clock.ms = 0;
     const transport = makeTransport(makeLink({ value: 22 }));
     const client = new NetClient(transport, terrain, { now: () => clock.ms });
@@ -1029,21 +1028,42 @@ describe('NetClient', () => {
 
     // The server respawns this player far from the origin -- a different spot than the
     // join spawn (which defaults to the world origin in this test's client construction).
-    const respawned = { ...dead, x: 500, y: 10, z: 500, health: 60, respawnSeq: 1 };
+    // Full health is LIGHT_ARMOR.maxDamage on the wire (health = maxDamage - damage, see
+    // snapshot.ts's serializePlayer), not a 0-100 percentage: this test's local player
+    // later falls below the kill plane and, post-fix, that routes through applyDamage,
+    // which reads the locally-reconstructed `damage` field -- so it has to be realistic.
+    const respawned = {
+      ...dead,
+      x: 500,
+      y: 10,
+      z: 500,
+      health: LIGHT_ARMOR.maxDamage,
+      respawnSeq: 1,
+    };
     transport.pump([encodeSnapshot(2, 20, 0, [respawned], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
 
     // The local copy of players.spawn must follow the real respawn point.
     expect([...client.world.players.spawn.slice(0, 3)]).toEqual([500, 10, 500]);
 
-    // Now simulate falling out of the world locally: place the player far below the kill
-    // plane and step once. A terrain hole (emptySquares), not just a low y, is needed: on
-    // solid ground movement.ts's own ground-contact resolution snaps a falling player back
-    // onto the surface before the kill-plane check ever runs (see damage.test.ts's sim-side
-    // counterpart of this same fix, round 4 finding 7), so exercising the check for real
-    // needs a square with nothing under it at all.
+    // Falling below the kill plane locally is now a real death (Codex review round 9,
+    // PR #9, P1): movement.ts's kill-plane path no longer teleports using players.spawn --
+    // it routes through applyDamage like any other death -- so local prediction just marks
+    // the player dead in place and waits for the server's own respawn snapshot, the same
+    // as it would for a remote kill. A terrain hole (emptySquares), not just a low y, is
+    // needed: on solid ground movement.ts's own ground-contact resolution snaps a falling
+    // player back onto the surface before the kill-plane check ever runs.
     client.world.terrain.emptySquares = new Set([0]);
-    client.world.players.position.set([500, client.world.killY - 100, 500], 0);
+    const killY = client.world.killY;
+    client.world.players.position.set([500, killY - 100, 500], 0);
+    // damage was just reconstructed as `LIGHT_ARMOR.maxDamage - health`, and health made a
+    // round trip through the wire's f32 encoding, so it is not exactly LIGHT_ARMOR.maxDamage
+    // any more -- off by about 1e-8, epsilon-close but on the wrong side of applyDamage's
+    // exact `< armor.maxDamage` threshold. Set it to a clean 0 directly: this test is about
+    // spawn tracking and death detection, not about float precision at the health boundary
+    // (an existing characteristic shared by every locally-predicted lethal hit, unrelated to
+    // this fix).
+    client.world.players.damage[0] = 0;
     const idleInput: PlayerInput = {
       moveX: 0,
       moveZ: 0,
@@ -1057,7 +1077,9 @@ describe('NetClient', () => {
     };
     client.tick(idleInput);
 
-    expect([...client.world.players.position.slice(0, 3)]).toEqual([500, 10, 500]);
+    expect(client.world.players.alive[0]).toBe(0);
+    // No local teleport happened: the position is exactly what was set above, untouched.
+    expect([...client.world.players.position.slice(0, 3)]).toEqual([500, killY - 100, 500]);
   });
 
   it('sets a local respawnAt on death so the HUD countdown does not read stale/zero time', () => {

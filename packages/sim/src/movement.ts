@@ -1,5 +1,5 @@
 import { LIGHT_ARMOR, type ArmorData } from './armor.js';
-import { applyFallDamage } from './damage.js';
+import { applyDamage, applyFallDamage } from './damage.js';
 import { sampleTerrain, type TerrainSample } from './terrain.js';
 import type { PlayerInput, PlayerStore, World } from './types.js';
 
@@ -315,32 +315,6 @@ function writeState(
   players.wasJumpHeld[id] = input.jump ? 1 : 0;
 }
 
-/**
- * Codex round 10 (PR #4): this used to only reset the local `body` (position, velocity)
- * before writeState ran, which then unconditionally overwrote onGround/ski/wasGrounded
- * from the stale ctx/contact computed for the tick the player fell out on, and left
- * energy exactly where the fall interrupted it rather than restoring it. A fall-out is a
- * respawn like any other, and should leave the player in the same fresh state addPlayer
- * (world.ts's resetPlayerToSpawn) produces, not a mix of a reset position and everything
- * else mid-fall. Written directly to the SoA arrays (not `body`) because the caller
- * returns immediately after this, skipping writeState entirely for this tick.
- */
-function resetToSpawn(players: PlayerStore, id: number, armor: ArmorData): void {
-  const base = id * 3;
-  players.position.set(
-    [players.spawn[base] ?? 0, players.spawn[base + 1] ?? 0, players.spawn[base + 2] ?? 0],
-    base,
-  );
-  players.velocity.set([0, 0, 0], base);
-  players.yaw[id] = 0;
-  players.energy[id] = armor.maxEnergy;
-  players.onGround[id] = 0;
-  players.ski[id] = 0;
-  players.wasGrounded[id] = 0;
-  players.wasJumpHeld[id] = 0;
-  players.landingSpeed[id] = 0;
-}
-
 function stepPlayer(
   world: World,
   id: number,
@@ -355,9 +329,20 @@ function stepPlayer(
   const forces = applyForces(players, id, body, input, ctx, armor, dt);
   applyResistance(body, armor, dt);
   const contact = integrate(world, body, ctx.grounded, forces.jumped || forces.jetted, dt);
+  // Falling out of the world is a real death, not a parallel "just move them back" shortcut
+  // (Codex review round 9, PR #9, P1): the old position-only reset skipped pendingDeaths
+  // entirely, so stepFlags never saw the death, a carried flag never dropped, and damage/
+  // ammo/loadout/respawnSeq were never touched -- letting a flag carrier fall out of the map
+  // to instantly and safely relocate a stolen flag. Routing through applyDamage with lethal
+  // env damage (attackerId -1, matching fall damage's own convention) reuses the same
+  // already-hardened pendingDeaths -> stepFlags -> dueForRespawn -> respawnPlayer pipeline
+  // every other death goes through, so a kill-plane fall now costs the standard 5 s respawn
+  // delay instead of an instant reposition. `body` is intentionally left unwritten here: the
+  // last position committed before this tick's fall is a better flag-drop point than the
+  // out-of-bounds one this tick computed, and dead players are skipped next tick regardless.
   if (body.y < world.killY) {
-    resetToSpawn(players, id, armor);
-    return; // already fully reset; writeState below would overwrite it with this tick's stale fall state
+    applyDamage(world, id, armor.maxDamage, -1, armor);
+    return;
   }
   writeState(world, id, body, contact, input, ctx, armor);
 }
