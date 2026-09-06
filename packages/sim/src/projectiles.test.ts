@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { LIGHT_ARMOR } from './armor.js';
+import { playerHitbox } from './damage.js';
 import { addPlayer, createWorld, type Heightfield } from './index.js';
 import { WeaponId, type FireEvent } from './weapons.js';
 import { stepProjectiles } from './projectiles.js';
@@ -277,6 +278,42 @@ describe('terrain: an empty square is a hole, not solid ground', () => {
     const id = firstProjectile(world);
     for (let tick = 0; tick < 10; tick += 1) stepProjectiles(world, FIXED_DT);
     expect(world.projectiles.active[id]).toBe(1); // still falling through the hole
+  });
+});
+
+describe('terrain: blocks a non-Laser shot before it can reach a player on the far side', () => {
+  it('a Chaingun bullet that crosses a ridge before reaching a player behind it detonates at the ridge instead of damaging the player (Codex review round 2, finding 1)', () => {
+    const world = createWorld(ridgeGrid, 1);
+    const target = addPlayer(world, { x: 4, y: 0, z: 0 });
+    fire(world, {
+      playerId: -1,
+      weaponId: WeaponId.Chaingun,
+      origin: { x: 0, y: 1, z: 0 },
+      direction: { x: 1, y: 0, z: 0 },
+    });
+    // Chaingun resolves in the same tick it spawns (its Tracer fast-path), so one call is
+    // enough: the ray sweeps straight through the x∈[2,3] ridge and on to the target at
+    // x=4. Before the fix, the player-hit check ran first and found the target, since it
+    // never knew the ridge was in the way; only afterward did the (now-skipped) terrain
+    // check run.
+    stepProjectiles(world, FIXED_DT);
+    expect(world.players.damage[target]).toBe(0);
+  });
+});
+
+describe('point-blank hit: ray origin already inside the target hitbox', () => {
+  it('a Chaingun bullet fired with the muzzle already inside the target hitbox still registers a hit (Codex review round 2, finding 6)', () => {
+    const world = createWorld(flat, 1);
+    const target = addPlayer(world, { x: 0, y: 0, z: 10 });
+    const hitbox = playerHitbox(world, target, LIGHT_ARMOR);
+    fire(world, {
+      playerId: -1,
+      weaponId: WeaponId.Chaingun,
+      origin: hitbox.center,
+      direction: { x: 0, y: 0, z: 1 },
+    });
+    stepProjectiles(world, FIXED_DT);
+    expect(world.players.damage[target]).toBeGreaterThan(0);
   });
 });
 

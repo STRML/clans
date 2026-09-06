@@ -214,25 +214,33 @@ function explode(
 
 /** Finds the *nearest* player hit along the previous->current swept segment, not the first
  *  one encountered by ascending id -- two candidates on the same ray used to return whichever
- *  had the lower id, regardless of which was actually closer to where the shot started. */
-function findDirectHit(world: World, id: number, previous: Vec3, current: Vec3): number | null {
+ *  had the lower id, regardless of which was actually closer to where the shot started.
+ *  Returns the distance alongside the id so stepLinearOrTracer can compare it against a
+ *  terrain hit on the same segment (Codex review round 2, finding 1): resolving this before
+ *  checking terrain let a shot that crossed a ridge first still detonate on a player standing
+ *  on the far side, instead of stopping at the ridge it should have hit first. */
+function findDirectHit(
+  world: World,
+  id: number,
+  previous: Vec3,
+  current: Vec3,
+): { playerId: number; distance: number } | null {
   const dx = current.x - previous.x,
     dy = current.y - previous.y,
     dz = current.z - previous.z;
   const length = Math.hypot(dx, dy, dz) || 1;
   const direction = { x: dx / length, y: dy / length, z: dz / length };
   const ownerId = world.projectiles.ownerId[id] ?? -1;
-  let nearestId: number | null = null;
-  let nearestDistance = Infinity;
+  let nearest: { playerId: number; distance: number } | null = null;
   for (let playerId = 0; playerId < world.players.count; playerId += 1) {
     if (!isValidTarget(world, playerId, ownerId)) continue;
     const hitbox = playerHitbox(world, playerId, LIGHT_ARMOR);
     const distance = raySphereDistance(previous, direction, hitbox);
-    if (distance === null || distance > length || distance >= nearestDistance) continue;
-    nearestId = playerId;
-    nearestDistance = distance;
+    if (distance === null || distance > length || (nearest && distance >= nearest.distance))
+      continue;
+    nearest = { playerId, distance };
   }
-  return nearestId;
+  return nearest;
 }
 
 /** Distance to hitbox contact this tick: 0 if `current` already overlaps it, else the swept
@@ -324,6 +332,12 @@ function expireOneTick(store: ProjectileStore, id: number, lifetimeSeconds: numb
   return elapsed >= Math.round(lifetimeSeconds / FIXED_DT);
 }
 
+/** Steps one non-grenade projectile (Linear or Tracer) a tick and resolves whichever it hits
+ *  first along the previous->current segment: terrain or a player. Both checks run every
+ *  tick and the closer of the two wins -- checking player-hit alone and only falling back to
+ *  terrain on a miss (this used to) let a shot that crossed a ridge first still detonate on
+ *  a player standing behind it, since the player-hit check never knew the ridge was in the
+ *  way (Codex review round 2, finding 1). */
 function stepLinearOrTracer(world: World, id: number, dt: number): void {
   const store = world.projectiles;
   const base = id * 3;
@@ -336,14 +350,14 @@ function stepLinearOrTracer(world: World, id: number, dt: number): void {
   };
   writeVec3(store.position, base, current);
   const data = WEAPON_DATA[store.weaponId[id] as WeaponId];
-  const hitPlayer = findDirectHit(world, id, previous, current);
-  if (hitPlayer !== null) {
-    resolveImpact(world, id, data, current, hitPlayer);
+  const directHit = findDirectHit(world, id, previous, current);
+  const terrainHit = terrainHitAlongSegment(world.terrain, previous, current);
+  if (terrainHit && (!directHit || terrainHit.distance <= directHit.distance)) {
+    resolveImpact(world, id, data, terrainHit.point, null);
     return;
   }
-  const terrainHit = terrainHitAlongSegment(world.terrain, previous, current);
-  if (terrainHit) {
-    resolveImpact(world, id, data, terrainHit.point, null);
+  if (directHit) {
+    resolveImpact(world, id, data, current, directHit.playerId);
     return;
   }
   if (expireOneTick(store, id, data.lifetime)) free(store, id);

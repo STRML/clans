@@ -131,6 +131,22 @@ describe('respawnPlayer and dueForRespawn', () => {
     expect(world.players.position[id * 3]).toBe(42);
     expect(world.players.respawnAt[id]).toBe(-1);
   });
+
+  it('restores energy and clears ground/jump-edge state left over from before death (Codex review round 2, finding 4)', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    // Simulate dying mid-jet with a jump held while airborne, on the way down from an earlier
+    // jump: everything respawnPlayer used to leave untouched.
+    world.players.energy[id] = 0;
+    world.players.onGround[id] = 1;
+    world.players.wasGrounded[id] = 1;
+    world.players.wasJumpHeld[id] = 1;
+    respawnPlayer(world, id, { x: 0, y: 0, z: 0 });
+    expect(world.players.energy[id]).toBe(LIGHT_ARMOR.maxEnergy);
+    expect(world.players.onGround[id]).toBe(0);
+    expect(world.players.wasGrounded[id]).toBe(0);
+    expect(world.players.wasJumpHeld[id]).toBe(0);
+  });
 });
 
 describe('playerHitbox and raySphereDistance', () => {
@@ -151,6 +167,24 @@ describe('playerHitbox and raySphereDistance', () => {
     const id = addPlayer(world, { x: 10, y: 0, z: 0 });
     const hitbox = playerHitbox(world, id, LIGHT_ARMOR);
     expect(raySphereDistance({ x: 0, y: 100, z: 0 }, { x: 1, y: 0, z: 0 }, hitbox)).toBeNull();
+  });
+  it('is an immediate hit at distance 0 when the ray origin already starts inside the sphere (Codex review round 2, finding 6)', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 10, y: 0, z: 0 });
+    const hitbox = playerHitbox(world, id, LIGHT_ARMOR);
+    // The origin sits exactly at the sphere's center, well inside its radius -- the old
+    // discriminant math resolved this to t < 0 and reported a miss.
+    expect(raySphereDistance(hitbox.center, { x: 1, y: 0, z: 0 }, hitbox)).toBe(0);
+  });
+  it('still misses when the sphere sits behind the ray origin instead of surrounding it', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: -10, y: 0, z: 0 });
+    const hitbox = playerHitbox(world, id, LIGHT_ARMOR);
+    // t < 0 here comes from the sphere being entirely behind the origin (c > 0), which is a
+    // real miss and must stay one -- only the c <= 0 (origin inside) case should flip to 0.
+    expect(
+      raySphereDistance({ x: 0, y: hitbox.center.y, z: 0 }, { x: 1, y: 0, z: 0 }, hitbox),
+    ).toBeNull();
   });
 });
 

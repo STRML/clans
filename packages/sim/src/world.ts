@@ -132,6 +132,13 @@ export function removePlayer(world: World, id: number): void {
   }
   players.active[id] = 0;
   players.freeIds.push(id);
+  // Codex review round 2, finding 7 (ammo-refund half): a refund recorded by stepProjectiles
+  // for this id is consumed one tick later by stepWeapons. Without this, a disconnect landing
+  // in between lets a new player who gets this same numeric id inherit someone else's stale
+  // refund. Dropping this player's pending entries here closes that specific hole -- it does
+  // not touch the deeper reused-id identity problem (stale projectile ownerId self-exclusion),
+  // which is already tracked separately at github.com/STRML/clans/issues/8.
+  world.pendingAmmoRefunds = world.pendingAmmoRefunds.filter((refund) => refund.playerId !== id);
 }
 
 export function stepWorld(

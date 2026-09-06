@@ -84,6 +84,16 @@ describe('fixed world', () => {
     expect(() => removePlayer(world, a)).toThrow(RangeError);
   });
 
+  it('drops a pending ammo refund for a removed player so a reused id cannot inherit it (Codex review round 2, finding 7)', () => {
+    const world = createWorld(terrain, 1);
+    const a = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const b = addPlayer(world, { x: 1, y: 0, z: 1 });
+    world.pendingAmmoRefunds.push({ playerId: a, weaponId: 0, isAltFire: false });
+    world.pendingAmmoRefunds.push({ playerId: b, weaponId: 1, isAltFire: true });
+    removePlayer(world, a);
+    expect(world.pendingAmmoRefunds).toEqual([{ playerId: b, weaponId: 1, isAltFire: true }]);
+  });
+
   it('skips inactive players when stepping the world', () => {
     const world = createWorld(terrain, 1);
     const a = addPlayer(world, { x: 5, y: 0, z: 5 });
