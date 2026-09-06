@@ -21,6 +21,7 @@ const disc = (id: number, x: number): ProjectileSnapshotData => ({
   vy: 0,
   vz: 0,
   ownerId: 0,
+  armed: 1,
 });
 
 const mortarShell = (id: number, x: number): ProjectileSnapshotData => ({
@@ -34,6 +35,7 @@ const mortarShell = (id: number, x: number): ProjectileSnapshotData => ({
   vy: 20,
   vz: 0,
   ownerId: 1,
+  armed: 0,
 });
 
 describe('syncProjectileMeshes', () => {

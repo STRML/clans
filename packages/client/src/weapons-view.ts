@@ -90,19 +90,28 @@ export function syncProjectileMeshes(
   }
 }
 
+// Pulls the `?? fallback` branches for a projectile's scalar fields out of
+// readProjectileFromWorld itself, which otherwise trips the complexity lint's cap -- adding
+// `armed` (round 15, PR #9, finding 2) was the field that tipped it over.
+function projectileNum(arr: Float64Array | Uint8Array | Int16Array, i: number): number {
+  return arr[i] ?? 0;
+}
+
 function readProjectileFromWorld(world: World, id: number): ProjectileSnapshotData {
+  const p = world.projectiles;
   const base = id * 3;
   return {
     id,
-    type: world.projectiles.type[id] ?? 0,
-    weaponId: world.projectiles.weaponId[id] ?? 0,
-    x: world.projectiles.position[base] ?? 0,
-    y: world.projectiles.position[base + 1] ?? 0,
-    z: world.projectiles.position[base + 2] ?? 0,
-    vx: world.projectiles.velocity[base] ?? 0,
-    vy: world.projectiles.velocity[base + 1] ?? 0,
-    vz: world.projectiles.velocity[base + 2] ?? 0,
-    ownerId: world.projectiles.ownerId[id] ?? -1,
+    type: projectileNum(p.type, id),
+    weaponId: projectileNum(p.weaponId, id),
+    x: projectileNum(p.position, base),
+    y: projectileNum(p.position, base + 1),
+    z: projectileNum(p.position, base + 2),
+    vx: projectileNum(p.velocity, base),
+    vy: projectileNum(p.velocity, base + 1),
+    vz: projectileNum(p.velocity, base + 2),
+    ownerId: p.ownerId[id] ?? -1,
+    armed: projectileNum(p.armed, id),
   };
 }
 

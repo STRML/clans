@@ -29,6 +29,7 @@ const sample = (x: number, vx: number): PlayerSnapshotData => ({
   grenadeCooldown: 0,
   score: 0,
   godMode: 0 as const,
+  wasJumpHeld: 0 as const,
 });
 
 describe('RemoteBuffer', () => {

@@ -380,14 +380,28 @@ export class NetClient {
     // correct it: nothing here ever detects "an input never landed." Applying the
     // authoritative value on every snapshot means that drift self-heals within one round trip
     // instead of persisting until the player's next death/respawn.
+    // deserializePlayer does not touch spawn/wasGrounded at all, and wasGrounded has no wire
+    // field of its own, so it still needs an onGround-based proxy (round 1's original fix,
+    // PR #4) -- but round 15 (PR #9, finding 1) changed WHICH onGround it proxies from.
+    // movement.ts's writeState records wasGrounded[tick] as ctx.grounded, computed from the
+    // player's position at the START of that tick -- i.e. wasGrounded[tick] equals
+    // onGround[tick - 1] under normal local ticking. The old proxy used serverState.onGround,
+    // this SAME snapshot tick's own outcome, which is off by one tick and only happens to
+    // match at that tick when grounded state didn't change -- wrong exactly at a landing or
+    // lift-off tick, which a continuously-held jump (skiing/bunny-hopping) hits constantly.
+    // Capturing this client's own pre-reconcile onGround here (its most recent locally-ticked
+    // value, i.e. onGround as of the tick just before this one) reproduces the correct
+    // one-tick lag without needing a new wire field. This was exposed, not created, by wiring
+    // wasJumpHeld below: with wasJumpHeld hardcoded to 0, jumpEdge's `!wasJumpHeld` half was
+    // always true regardless of wasGrounded, masking this proxy's off-by-one-tick error;
+    // fixing wasJumpHeld alone (leaving the old serverState.onGround proxy) let jumpEdge's
+    // `!wasGrounded` half decide instead, and it decided wrong at every hop landing --
+    // regressing "keeps prediction within 0.5 m ... during a 3 s ski run" to ~2.7 m of
+    // error. jumpEdge reads both flags together, so both had to be fixed together.
+    const previousOnGround = this.world.players.onGround[LOCAL_SLOT] ?? 0;
     deserializePlayer(this.world, { ...serverState, id: LOCAL_SLOT });
-    // The wire snapshot has no wasJumpHeld field, and deserializePlayer does not touch
-    // spawn/wasGrounded/wasJumpHeld at all, so without this the replay below starts from
-    // this client's own stale pre-reconcile jump-edge state rather than the server's.
-    // onGround is on the wire; wasJumpHeld is not, so treat the jump key as freshly
-    // pressed rather than trust a held-jump state the server never confirmed.
-    this.world.players.wasGrounded[LOCAL_SLOT] = serverState.onGround;
-    this.world.players.wasJumpHeld[LOCAL_SLOT] = 0;
+    this.world.players.wasGrounded[LOCAL_SLOT] = previousOnGround;
+    this.world.players.wasJumpHeld[LOCAL_SLOT] = serverState.wasJumpHeld;
     this.world.tick = serverTick;
     this.syncRespawnState(serverState.health, serverState.respawnSeq);
     this.pendingInputs = this.pendingInputs.filter(

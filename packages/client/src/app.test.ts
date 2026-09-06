@@ -82,6 +82,7 @@ const snapshot: PlayerSnapshotData = {
   grenadeCooldown: 0,
   score: 0,
   godMode: 0 as const,
+  wasJumpHeld: 0 as const,
 };
 
 describe('updateRemotes', () => {
@@ -192,6 +193,7 @@ describe('syncWorldView (Codex review round 6, finding P2)', () => {
       vy: 0,
       vz: 0,
       ownerId: 0,
+      armed: 1,
     };
     const flag: FlagSnapshotData = {
       id: 0,
@@ -445,6 +447,7 @@ describe('positionOfPlayer', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     const net: Pick<NetClient, 'playerId' | 'remotePlayers'> = {
       playerId: localId,

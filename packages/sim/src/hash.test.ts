@@ -54,15 +54,45 @@ describe('hashWorld', () => {
     source.players.yaw[id] = 1.2;
     source.players.energy[id] = 55;
     const target = createWorld(terrain, 1);
-    // Codex review round 13 (PR #9), finding 2: mixPlayer now also covers respawnAt, which
-    // is NOT on the wire snapshot (deliberately -- see snapshot.ts's PlayerSnapshotData) and
-    // so was never something deserializePlayer alone could reproduce. A real client doesn't
-    // conjure a player from nothing on every snapshot either: it tracks one locally (via
-    // addPlayer, same as source here) and reconciles it against incoming snapshots, so
-    // pre-seeding target the same way is the realistic round trip, not a synthetic one.
+    // A real client doesn't conjure a player from nothing on every snapshot either: it
+    // tracks one locally (via addPlayer, same as source here) and reconciles it against
+    // incoming snapshots, so pre-seeding target the same way is the realistic round trip,
+    // not a synthetic one.
     addPlayer(target, { x: 10, y: 0, z: -5 }, 2);
     target.tick = source.tick;
     for (const player of serializeActivePlayers(source)) deserializePlayer(target, player);
+    expect(hashWorld(target)).toBe(hashWorld(source));
+  });
+
+  it('reproduces the hash after a round trip with real (non-default) respawnAt/score/godMode/respawnSeq, without every PlayerStore field needing to be wire-carried (Codex review round 15, PR #9, findings 3a/3b)', () => {
+    // The reviewer's own repro, generalized: a dead source player with a real respawnAt, a
+    // nonzero score/godMode, and a respawnSeq that survives the wire's mod-256 truncation
+    // must still hash identically to its round-tripped target -- even though respawnAt is
+    // not on the wire at all and respawnSeq is truncated on it. deserializePlayer forces an
+    // ALIVE decoded player's respawnAt to -1 (round 13's fix), so give target's pre-seeded
+    // player a deliberately different respawnAt (10, not source's 42) to prove the hash
+    // genuinely ignores it rather than happening to agree by coincidence.
+    const source = createWorld(terrain, 1);
+    const id = addPlayer(source, { x: 10, y: 0, z: -5 }, 2);
+    // Damage past maxDamage drives health <= 0, which is what serializePlayer actually wires
+    // ("health", not "alive" or "damage" directly) -- deserializePlayer derives both alive
+    // and damage back out of that single wire field.
+    source.players.damage[id] = 1;
+    source.players.alive[id] = 0;
+    source.players.respawnAt[id] = 42;
+    source.players.score[id] = -5;
+    source.players.godMode[id] = 1;
+    source.players.respawnSeq[id] = 3;
+    const target = createWorld(terrain, 1);
+    addPlayer(target, { x: 10, y: 0, z: -5 }, 2);
+    target.players.respawnAt[id] = 10;
+    target.tick = source.tick;
+    for (const player of serializeActivePlayers(source)) deserializePlayer(target, player);
+    expect(target.players.alive[id]).toBe(0);
+    expect(target.players.respawnAt[id]).toBe(10); // deserializePlayer never touches a dead player's respawnAt
+    expect(target.players.score[id]).toBe(-5);
+    expect(target.players.godMode[id]).toBe(1);
+    expect(target.players.respawnSeq[id]).toBe(3);
     expect(hashWorld(target)).toBe(hashWorld(source));
   });
 
@@ -196,14 +226,16 @@ describe('hashWorld', () => {
 
   it("changes when any player field mixPlayer stopped short of through round 12, a projectile's expiry/armed state, a flag's return timer/stand position, or the match time limit differ (Codex review round 13, PR #9, finding 2)", () => {
     // Through round 12, mixPlayer stopped at grenadeCooldown and never mixed in onGround,
-    // ski, wasGrounded, wasJumpHeld, godMode, alive, respawnAt, score, or respawnSeq;
-    // mixProjectiles never mixed in expiresAtTick or armed; mixFlags never mixed in returnAt
-    // or standPosition; and hashWorld itself never mixed in timeLimitTicks. Two worlds
+    // ski, wasGrounded, wasJumpHeld, godMode, alive, score, or respawnSeq; mixProjectiles
+    // never mixed in expiresAtTick or armed; mixFlags never mixed in returnAt or
+    // standPosition; and hashWorld itself never mixed in timeLimitTicks. Two worlds
     // identical everywhere else but different in exactly one of these fields hashed the
     // SAME, silently defeating the determinism check. Each field is checked in isolation
     // against a shared, otherwise-identical baseline, so a fix that only covers some of them
     // still fails this test. (spawn and landingSpeed are deliberately NOT covered here -- see
-    // mixPlayer's doc comment in hash.ts for why neither is future-affecting state.)
+    // mixPlayer's doc comment in hash.ts for why neither is future-affecting state. respawnAt
+    // was covered here through round 14 but round 15, finding 3a, removed it from mixPlayer
+    // -- see the dedicated respawnAt test below for its current, correct behavior.)
     const stands = [
       { team: 1, position: { x: 0, y: 0, z: 0 } },
       { team: 2, position: { x: 10, y: 0, z: 0 } },
@@ -244,9 +276,9 @@ describe('hashWorld', () => {
     aliveChanged.players.alive[0] = 0;
     expect(hashWorld(aliveChanged)).not.toBe(before);
 
-    const respawnAtChanged = baseline();
-    respawnAtChanged.players.respawnAt[0] = 42;
-    expect(hashWorld(respawnAtChanged)).not.toBe(before);
+    // respawnAt is NOT checked here -- round 15 (PR #9, finding 3a) removed it from
+    // mixPlayer entirely, since it fails hashWorld's own "matches across encode and decode"
+    // contract. See the dedicated test below.
 
     const scoreChanged = baseline();
     scoreChanged.players.score[0] = 10;
@@ -275,5 +307,37 @@ describe('hashWorld', () => {
     const timeLimitChanged = baseline();
     timeLimitChanged.timeLimitTicks = 100;
     expect(hashWorld(timeLimitChanged)).not.toBe(before);
+  });
+
+  it("hashes identically for two worlds differing only in a DEAD player's respawnAt (Codex review round 15, PR #9, finding 3a)", () => {
+    // respawnAt is not on the wire for a dead player (the client reconstructs its own
+    // respawn-countdown estimate locally -- see netclient.ts's death-detection code), so it
+    // is not something a correct encode/decode round trip is expected to reproduce.
+    // hashWorld must not treat two otherwise-identical dead players as different just
+    // because their local respawnAt bookkeeping differs.
+    const baseline = (): World => {
+      const world = createWorld(terrain, 1);
+      const id = addPlayer(world, { x: 1, y: 2, z: 3 }, 1);
+      world.players.alive[id] = 0;
+      world.players.respawnAt[id] = 5;
+      return world;
+    };
+    const a = baseline();
+    const b = baseline();
+    b.players.respawnAt[0] = 42;
+    expect(hashWorld(a)).toBe(hashWorld(b));
+  });
+
+  it("hashes identically for two worlds whose respawnSeq differs by exactly 256, matching the wire's mod-256 truncation (Codex review round 15, PR #9, finding 3b)", () => {
+    // protocol/snapshot.ts truncates respawnSeq to a single wire byte (round 8's choice).
+    // hashWorld must mask to the same width, or it would demand more precision from a
+    // round trip than the wire is designed to carry.
+    const a = createWorld(terrain, 1);
+    addPlayer(a, { x: 1, y: 2, z: 3 }, 1);
+    a.players.respawnSeq[0] = 3;
+    const b = createWorld(terrain, 1);
+    addPlayer(b, { x: 1, y: 2, z: 3 }, 1);
+    b.players.respawnSeq[0] = 3 + 256;
+    expect(hashWorld(a)).toBe(hashWorld(b));
   });
 });

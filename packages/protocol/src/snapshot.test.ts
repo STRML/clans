@@ -173,7 +173,7 @@ describe('snapshot codec', () => {
 
   it('round-trips projectiles, flags, team scores, and game over', () => {
     const projectiles: ProjectileSnapshotData[] = [
-      { id: 3, type: 0, weaponId: 0, x: 1, y: 2, z: 3, vx: 90, vy: 0, vz: 0, ownerId: 0 },
+      { id: 3, type: 0, weaponId: 0, x: 1, y: 2, z: 3, vx: 90, vy: 0, vz: 0, ownerId: 0, armed: 1 },
     ];
     const flags: FlagSnapshotData[] = [
       { id: 0, team: 1, state: 0, x: 0, y: 0, z: 0, carrierId: -1, returnInS: -1 },
@@ -424,6 +424,67 @@ describe('snapshot codec', () => {
         godMode: 1,
       },
     ]);
+  });
+
+  it('round-trips wasJumpHeld through a full snapshot (Codex review round 15, PR #9, finding 1)', () => {
+    // netclient.ts's reconcile() used to hardcode wasJumpHeld to 0 after every snapshot,
+    // since there was no wire field to read the real value from. This wire fix is what
+    // lets reconcile() stop doing that -- see PlayerSnapshotData.wasJumpHeld's doc comment
+    // (sim/snapshot.ts) for the misprediction that caused.
+    const source = createWorld(terrain, 1);
+    const id = addPlayer(source, { x: 0, y: 0, z: 0 }, 1);
+    source.players.wasJumpHeld[id] = 1;
+    const players = serializeActivePlayers(source);
+    expect(players[0]).toMatchObject({ wasJumpHeld: 1 });
+    const bytes = encodeSnapshot(1, source.tick, 0, players, null, emptyExtras());
+    const decoded = decodeSnapshot(bytes, null);
+    expect(decoded.players[0]).toMatchObject({ wasJumpHeld: 1 });
+  });
+
+  it('marks only status dirty in a delta when wasJumpHeld alone changes, and round-trips it', () => {
+    // wasJumpHeld packs into the same status byte as onGround/ski (statusByte's own
+    // comment), so it must participate in statusChanged/DIRTY_STATUS like they do.
+    const source = createWorld(terrain, 1);
+    const id = addPlayer(source, { x: 0, y: 0, z: 0 }, 1);
+    const baselinePlayers = serializeActivePlayers(source);
+    const baselineBytes = encodeSnapshot(1, source.tick, 0, baselinePlayers, null, emptyExtras());
+    const decodedBaseline = decodeSnapshot(baselineBytes, null);
+
+    source.players.wasJumpHeld[id] = 1;
+    const nextPlayers = serializeActivePlayers(source);
+    const deltaBytes = encodeSnapshot(
+      2,
+      source.tick,
+      0,
+      nextPlayers,
+      { snapshotId: 1, players: baselinePlayers },
+      emptyExtras(),
+    );
+    const decoded = decodeSnapshot(deltaBytes, {
+      snapshotId: 1,
+      players: decodedBaseline.players,
+    });
+    expect(decoded.players).toEqual([
+      {
+        ...decodedBaseline.players[0],
+        wasJumpHeld: 1,
+      },
+    ]);
+  });
+
+  it("round-trips a projectile's armed flag through a full snapshot (Codex review round 15, PR #9, finding 2)", () => {
+    // hash.ts's mixProjectiles has hashed armed since round 13, but it was never wired onto
+    // the snapshot itself. expiresAtTick is deliberately NOT wired -- see
+    // ProjectileSnapshotData's doc comment for why.
+    const projectiles: ProjectileSnapshotData[] = [
+      { id: 5, type: 1, weaponId: 2, x: 1, y: 2, z: 3, vx: 0, vy: 0, vz: 0, ownerId: 0, armed: 1 },
+    ];
+    const bytes = encodeSnapshot(1, 0, 0, [], null, {
+      ...emptyExtras(),
+      projectiles,
+    });
+    const decoded = decodeSnapshot(bytes, null);
+    expect(decoded.projectiles).toEqual(projectiles);
   });
 
   it('rejects a full snapshot carrying a non-finite transform value', () => {

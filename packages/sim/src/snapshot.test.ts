@@ -56,6 +56,7 @@ describe('player snapshots', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0,
+      wasJumpHeld: 0,
     });
   });
 
@@ -95,6 +96,7 @@ describe('player snapshots', () => {
       grenadeCooldown: 0.6,
       score: -3,
       godMode: 1,
+      wasJumpHeld: 1,
     });
     expect(world.players.count).toBe(4);
     expect(world.players.active[3]).toBe(1);
@@ -124,6 +126,7 @@ describe('player snapshots', () => {
       grenadeCooldown: 0.6,
       score: -3,
       godMode: 1,
+      wasJumpHeld: 1,
     });
   });
 
@@ -226,5 +229,21 @@ describe('player snapshots', () => {
     deserializePlayer(target, data);
     expect(target.players.score[id]).toBe(-5);
     expect(target.players.godMode[id]).toBe(1);
+  });
+
+  it('round-trips wasJumpHeld through serialize/deserialize (Codex review round 15, PR #9, finding 1)', () => {
+    // netclient.ts's reconcile() used to hardcode wasJumpHeld to 0 after every snapshot,
+    // since it had no wire field to read it from -- see this field's doc comment on
+    // PlayerSnapshotData for the misprediction that caused. If it did not survive the wire,
+    // that fix would be a no-op.
+    const world = createWorld(terrain, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    world.players.wasJumpHeld[id] = 1;
+    const data = serializePlayer(world, id);
+    expect(data.wasJumpHeld).toBe(1);
+
+    const target = createWorld(terrain, 1);
+    deserializePlayer(target, data);
+    expect(target.players.wasJumpHeld[id]).toBe(1);
   });
 });

@@ -37,6 +37,17 @@ export interface ProjectileSnapshotData {
   vy: number;
   vz: number;
   ownerId: number;
+  /**
+   * ProjectileStore.armed (0/1) -- whether this projectile can still detonate on contact
+   * (projectiles.ts). hash.ts's mixProjectiles has hashed this since round 13, but it was
+   * never wired onto the snapshot itself, a real gap in what a client can observe about a
+   * live projectile. expiresAtTick is deliberately NOT wired alongside it: it is a raw
+   * internal tick counter with no meaning across a client/server boundary that numbers
+   * ticks differently, and the client doesn't need it -- weapons-view.ts already handles
+   * projectile lifecycle by reacting to a projectile's absence in the next snapshot, not by
+   * predicting its exact expiry tick. Codex review round 15 (PR #9), finding 2.
+   */
+  armed: number;
 }
 export interface FlagSnapshotData {
   id: number;
@@ -113,8 +124,11 @@ const HEADER_BYTES = 1 + 4 + 4 + 4 + 4 + 1; // type, snapshotId, baselineId, tic
 // back with score 0 / godMode 0 regardless of the source's real values, and hashWorld on
 // the two worlds diverged even though the wire faithfully transmitted everything it
 // actually carried. Codex review round 14 (PR #9), finding 1.
+// wasJumpHeld: no new bytes -- it packs into the existing status byte's bit 2 (statusByte's
+// own comment has the detail). Codex review round 15 (PR #9), finding 1.
 const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 4 + 1 + 4 + 2 + 1;
-const PROJECTILE_BYTES = 2 + 1 + 1 + 4 * 6 + 2; // id, type, weaponId, 6 f32 (pos+vel), ownerId
+// id, type, weaponId, 6 f32 (pos+vel), ownerId, armed (round 15, PR #9, finding 2).
+const PROJECTILE_BYTES = 2 + 1 + 1 + 4 * 6 + 2 + 1;
 const FLAG_BYTES = 1 + 1 + 1 + 4 * 3 + 2 + 4; // id, team, state, 3 f32 (pos), carrierId i16, returnInS f32
 const DELTA_FLAG = 1;
 const DIRTY_TRANSFORM = 1;
@@ -172,8 +186,12 @@ function readHeader(cursor: Cursor): SnapshotHeader {
   };
 }
 
+// Bit 2 (wasJumpHeld) added round 15 (PR #9), finding 1: a single boolean, so it packs into
+// this existing status byte the same way onGround/ski already do, rather than claiming a
+// whole new wire byte for one bit -- see PlayerSnapshotData.wasJumpHeld's doc comment
+// (sim/snapshot.ts) for the misprediction this closes.
 function statusByte(data: PlayerSnapshotData): number {
-  return (data.onGround ? 1 : 0) | (data.ski ? 2 : 0);
+  return (data.onGround ? 1 : 0) | (data.ski ? 2 : 0) | (data.wasJumpHeld ? 4 : 0);
 }
 
 // A NaN or Infinity in any of these would otherwise reach client-side prediction
@@ -250,6 +268,7 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
     energy,
     onGround: flags & 1 ? 1 : 0,
     ski: flags & 2 ? 1 : 0,
+    wasJumpHeld: flags & 4 ? 1 : 0,
     health,
     weaponSlot,
     respawnSeq,
@@ -277,6 +296,7 @@ function writeProjectile(cursor: Cursor, p: ProjectileSnapshotData): void {
   writeF32(cursor, p.vy);
   writeF32(cursor, p.vz);
   writeU16(cursor, p.ownerId);
+  writeU8(cursor, p.armed);
 }
 function readProjectile(cursor: Cursor): ProjectileSnapshotData {
   const id = readU16(cursor);
@@ -289,8 +309,9 @@ function readProjectile(cursor: Cursor): ProjectileSnapshotData {
   const vy = readF32(cursor);
   const vz = readF32(cursor);
   const ownerId = readU16(cursor);
+  const armed = readU8(cursor) ? 1 : 0;
   assertFinite([x, y, z, vx, vy, vz]);
-  return { id, type, weaponId, x, y, z, vx, vy, vz, ownerId };
+  return { id, type, weaponId, x, y, z, vx, vy, vz, ownerId, armed };
 }
 
 function writeFlag(cursor: Cursor, f: FlagSnapshotData): void {
@@ -398,7 +419,7 @@ function energyChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
   return Math.abs(a.energy - b.energy) > EPSILON;
 }
 function statusChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
-  return a.onGround !== b.onGround || a.ski !== b.ski;
+  return a.onGround !== b.onGround || a.ski !== b.ski || a.wasJumpHeld !== b.wasJumpHeld;
 }
 function teamChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
   return a.team !== b.team;
@@ -636,6 +657,7 @@ function readChangedStatus(cursor: Cursor, next: PlayerSnapshotData): void {
   const flags = readU8(cursor);
   next.onGround = flags & 1 ? 1 : 0;
   next.ski = flags & 2 ? 1 : 0;
+  next.wasJumpHeld = flags & 4 ? 1 : 0;
 }
 function readChangedEnergy(cursor: Cursor, next: PlayerSnapshotData): void {
   const energy = readF32(cursor);

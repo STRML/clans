@@ -70,6 +70,19 @@ export interface PlayerSnapshotData {
    *  on every snapshot for the networked god-mode fix (see netclient.ts's setGodMode,
    *  Codex review round 14, finding 2). */
   godMode: 0 | 1;
+  /**
+   * PlayerStore.wasJumpHeld -- movement.ts's jumpEdge check
+   * (`input.jump && (!players.wasJumpHeld[id] || !players.wasGrounded[id])`) reads this to
+   * tell a freshly-pressed jump apart from a continuously-held one. It was never wired onto
+   * the snapshot, so netclient.ts's reconcile() hardcoded it to 0 after every snapshot --
+   * "treat the jump key as freshly pressed" -- which is wrong whenever the LOCAL player is
+   * actually holding jump/jet across the snapshot boundary: the very next replayed input
+   * then looks like a fresh press and triggers an extra jump impulse the server never
+   * produced, a real misprediction. wasGrounded stays off the wire deliberately (its
+   * onGround-as-proxy approximation in reconcile() already works and is not this finding).
+   * Codex review round 15 (PR #9), finding 1.
+   */
+  wasJumpHeld: 0 | 1;
 }
 
 function num(arr: Float64Array | Uint8Array | Uint16Array | Int16Array, i: number): number {
@@ -109,6 +122,7 @@ export function serializePlayer(world: World, id: number): PlayerSnapshotData {
     grenadeCooldown: num(p.grenadeCooldown, id),
     score: num(p.score, id),
     godMode: bit(p.godMode, id),
+    wasJumpHeld: bit(p.wasJumpHeld, id),
   };
 }
 
@@ -161,4 +175,5 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   players.grenadeCooldown[data.id] = data.grenadeCooldown;
   players.score[data.id] = data.score;
   players.godMode[data.id] = data.godMode;
+  players.wasJumpHeld[data.id] = data.wasJumpHeld;
 }

@@ -234,6 +234,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     const state1 = { ...base, x: 1, z: 0 };
     const state2 = { ...base, x: 2, z: 0 };
@@ -420,6 +421,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     const delta = encodeSnapshot(
       7,
@@ -481,6 +483,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(() =>
@@ -541,6 +544,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
 
@@ -643,10 +647,80 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
     expect(client.world.players.wasGrounded[0]).toBe(0);
     expect(client.world.players.wasJumpHeld[0]).toBe(0);
+  });
+
+  it('does not fire an extra jump impulse on reconciliation when the local player held jump across the snapshot boundary (Codex review round 15, PR #9, finding 1)', () => {
+    // Before this fix, reconcile() hardcoded wasJumpHeld to 0 after every snapshot ("treat
+    // the jump key as freshly pressed" -- see this file's git history). A LOCAL player
+    // continuously holding jump while grounded (skiing) already has wasJumpHeld=1 and
+    // wasGrounded=1, so movement.ts's jumpEdge
+    // (`input.jump && (!wasJumpHeld[id] || !wasGrounded[id])`) reads false and predicts no
+    // repeat jump -- but the hardcoded reset made the very next replayed input look like a
+    // fresh press, and jumpEdge fired a real jump impulse (+jumpForce/mass, ~8.3 m/s
+    // vertical for LIGHT_ARMOR) the server never produced.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 9 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    // Simulate several already-elapsed ticks of holding jump while grounded (a ski hop):
+    // both edge-detection flags already read true, so a further held tick predicts no jump.
+    client.world.players.onGround[0] = 1;
+    client.world.players.wasGrounded[0] = 1;
+    client.world.players.wasJumpHeld[0] = 1;
+    const heldJump: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: true,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    client.tick(heldJump); // queues pendingInputs[0] (sequence 1); predicts no new jump
+    expect(client.world.players.velocity[1]).toBeCloseTo(0, 5);
+
+    const serverState = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60,
+      weaponSlot: 4,
+      onGround: 1 as const,
+      ski: 1 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+      grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
+      wasJumpHeld: 1 as const, // the server also saw this as a continued hold, not a fresh press
+    };
+    // lastInputSequence 0: the server has not acked sequence 1 yet, so reconcile() replays it.
+    transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
+
+    // With the fix, wasJumpHeld/wasGrounded both read true going into the replay, jumpEdge
+    // stays false, and vy stays ~0. Before the fix, the hardcoded 0 made jumpEdge true and
+    // this assertion failed with vy near 8.3 (the phantom jump impulse).
+    expect(client.world.players.velocity[1]).toBeCloseTo(0, 5);
   });
 
   it('exposes projectiles, flags, team scores, and game over from the snapshot extras', () => {
@@ -656,7 +730,19 @@ describe('NetClient', () => {
     client.playerId = 0;
     const extras: WorldExtras = {
       projectiles: [
-        { id: 0, type: 0, weaponId: 0, x: 1, y: 2, z: 3, vx: 90, vy: 0, vz: 0, ownerId: 0 },
+        {
+          id: 0,
+          type: 0,
+          weaponId: 0,
+          x: 1,
+          y: 2,
+          z: 3,
+          vx: 90,
+          vy: 0,
+          vz: 0,
+          ownerId: 0,
+          armed: 1,
+        },
       ],
       flags: [{ id: 0, team: 1, state: 1, x: 5, y: 0, z: 5, carrierId: 0, returnInS: -1 }],
       teamScores: [100, 0],
@@ -769,6 +855,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     const extras: WorldExtras = {
       projectiles: [],
@@ -836,6 +923,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     const extras: WorldExtras = {
       projectiles: [],
@@ -901,6 +989,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(client.localHealth).toBeCloseTo(0.4);
@@ -1021,6 +1110,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -1086,6 +1176,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [alive], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -1156,6 +1247,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [fullHealth], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -1241,6 +1333,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 5, 2, [serverState], null, emptyExtras())]);
 
@@ -1313,6 +1406,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
 
@@ -1400,6 +1494,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
 
@@ -1454,6 +1549,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -1556,6 +1652,7 @@ describe('NetClient', () => {
       grenadeCooldown: 0,
       score: 0,
       godMode: 0 as const,
+      wasJumpHeld: 0 as const,
     };
     const dead = { ...alive, health: 0 };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
