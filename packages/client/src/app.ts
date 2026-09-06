@@ -215,6 +215,13 @@ export function stepSinglePlayer(
   const inputs = new Map<number, PlayerInput>([[playerId, input]]);
   for (let step = 0; step < steps; step += 1) {
     stepWorld(world, inputs);
+    // Codex review round 5, finding 3 (PR #9): stepWorld can flip world.gameOver to true
+    // partway through THIS call (the time limit landing on this exact step), and this
+    // loop's respawn handling ran unconditionally regardless of that -- the same class of
+    // bug already fixed server-side in packages/server/src/net.ts's runOneTick (round 4,
+    // finding 6). Without this guard, a dead player whose respawn timer expired on the
+    // same step the match ended still respawned into a supposedly-frozen match.
+    if (world.gameOver) continue;
     for (const id of dueForRespawn(world)) respawnPlayer(world, id, spawn);
   }
 }
@@ -396,6 +403,7 @@ export function hudSourceFrom(
   playerId: number,
   net: Pick<
     NetClient,
+    | 'playerId'
     | 'teamScores'
     | 'flags'
     | 'gameOver'
@@ -409,6 +417,11 @@ export function hudSourceFrom(
     ? {
         world,
         playerId,
+        // Codex review round 5, finding 4 (PR #9): `playerId` above is the fixed local
+        // prediction slot (0), not the id the server actually assigned this connection --
+        // see HudSource.networkPlayerId's own comment for why hud.ts's flag-carrier check
+        // needs the real one instead.
+        networkPlayerId: net.playerId,
         teamScores: net.teamScores,
         flags: net.flags,
         gameOver: net.gameOver,
@@ -420,6 +433,9 @@ export function hudSourceFrom(
     : {
         world,
         playerId,
+        // Single-player has no separate network identity: the sim's own player id already
+        // is the real one.
+        networkPlayerId: playerId,
         teamScores: [world.teamScores[1] ?? 0, world.teamScores[2] ?? 0],
         flags: flagsFromWorld(world),
         gameOver: world.gameOver,

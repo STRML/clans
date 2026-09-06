@@ -371,6 +371,23 @@ export class NetClient {
     if (!wasAlive && isAlive) {
       resetLoadout(this.world, LOCAL_SLOT, LIGHT_ARMOR);
       this.world.players.respawnAt[LOCAL_SLOT] = -1;
+      // Codex review round 5, finding 2 (PR #9): the wire snapshot carries only the
+      // respawned position, not a separate spawn-point field (that would be new protocol
+      // work). deserializePlayer above already wrote that position onto players.position
+      // for this dead-to-alive edge, but never touches players.spawn -- so without this,
+      // players.spawn stays at whatever it was set to when this client first joined.
+      // movement.ts's kill-plane fallback (resetToSpawn) reads players.spawn, not
+      // players.position, when a player falls out of the world, so a player who respawns
+      // somewhere new and later falls out of the world locally landed back at their
+      // original join spawn instead of the one the server just respawned them at.
+      this.world.players.spawn.set(
+        [
+          this.world.players.position[LOCAL_SLOT * 3] ?? 0,
+          this.world.players.position[LOCAL_SLOT * 3 + 1] ?? 0,
+          this.world.players.position[LOCAL_SLOT * 3 + 2] ?? 0,
+        ],
+        LOCAL_SLOT * 3,
+      );
     } else if (wasAlive && !isAlive) {
       this.world.players.respawnAt[LOCAL_SLOT] = this.world.tick + RESPAWN_TICKS;
     }

@@ -12,6 +12,17 @@ import { EventKind, type EventMessage, type FlagSnapshotData } from '@clans/prot
 export interface HudSource {
   world: World;
   playerId: number;
+  /**
+   * Codex review round 5, finding 4 (PR #9): `playerId` above indexes this client's own
+   * predicted state in `world.players`, which is always the fixed local-prediction slot
+   * (0) for a networked game -- it has nothing to do with the id the server actually
+   * assigned this connection. Wire data like `flags[].carrierId` carries that real,
+   * server-assigned id instead, so comparing it against `playerId` was only ever correct
+   * for the very first player to join a server (whose local slot and network id both
+   * happen to be 0). This field is that real id: `net.playerId` when networked, the same
+   * value as `playerId` in single-player (which has no separate network identity).
+   */
+  networkPlayerId: number;
   teamScores: [number, number];
   flags: FlagSnapshotData[];
   gameOver: boolean;
@@ -70,7 +81,7 @@ function flagStatusRow(source: HudSource): HudRow {
   const team = source.world.players.team[source.playerId] ?? 0;
   const own = source.flags.find((flag) => flag.team === team);
   const enemy = source.flags.find((flag) => flag.team !== team && flag.team !== 0);
-  const carryingEnemy = enemy?.carrierId === source.playerId;
+  const carryingEnemy = enemy?.carrierId === source.networkPlayerId;
   if (carryingEnemy && own && own.state !== FlagState.Home) {
     return { id: 'hud-flag-status', text: 'your flag is not home' };
   }

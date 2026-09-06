@@ -208,6 +208,31 @@ describe('stepSinglePlayer (Codex review round 4, finding 1)', () => {
 
     expect(world.players.alive[id]).toBe(0);
   });
+
+  it('does not respawn a player once the match ends on the same step their respawn timer expires (Codex review round 5, finding 3)', () => {
+    // Codex review round 5, finding 3 (PR #9): stepWorld can flip world.gameOver to true
+    // DURING the very call that also makes a dead player's respawn timer due (the time
+    // limit landing on the exact same tick as their respawn), and this loop's respawn
+    // handling used to run unconditionally regardless of that -- the same class of bug
+    // already fixed server-side in packages/server/src/net.ts's runOneTick (round 4,
+    // finding 6). Without the guard, the match ends but the respawn logic still revives
+    // the player into the now-frozen match.
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    applyDamage(world, id, LIGHT_ARMOR.maxDamage, -1, LIGHT_ARMOR);
+    expect(world.players.alive[id]).toBe(0);
+    expect(world.players.respawnAt[id]).toBe(RESPAWN_TICKS);
+
+    // Force the time limit to land on the exact tick the respawn timer also expires.
+    world.timeLimitTicks = RESPAWN_TICKS;
+
+    const spawn = { x: 5, y: 0, z: 5 };
+    stepSinglePlayer(world, id, IDLE_INPUT, RESPAWN_TICKS, spawn);
+
+    expect(world.gameOver).toBe(true);
+    expect(world.players.alive[id]).toBe(0);
+    expect([...world.players.position.slice(id * 3, id * 3 + 3)]).not.toEqual([5, 0, 5]);
+  });
 });
 
 describe('setLocalGodMode (Codex review round 4, finding 5)', () => {
@@ -322,6 +347,8 @@ describe('hudSourceFrom', () => {
     expect(source.gameOverReason).toBe(world.gameOverReason);
     expect(source.recentEvents).toEqual([]);
     expect(source.timeRemainingS).toBeCloseTo((world.timeLimitTicks - world.tick) * FIXED_DT);
+    // Single-player has no separate network identity: the sim's own player id is the real one.
+    expect(source.networkPlayerId).toBe(id);
   });
 
   it('takes CTF and clock state from the net client when one is connected', () => {
@@ -329,6 +356,7 @@ describe('hudSourceFrom', () => {
     const id = addPlayer(world, { x: 0, y: 0, z: 0 });
     const net: Pick<
       NetClient,
+      | 'playerId'
       | 'teamScores'
       | 'flags'
       | 'gameOver'
@@ -337,6 +365,7 @@ describe('hudSourceFrom', () => {
       | 'gameOverReason'
       | 'recentEvents'
     > = {
+      playerId: 31,
       teamScores: [3, 4],
       flags: [],
       gameOver: true,
@@ -353,6 +382,13 @@ describe('hudSourceFrom', () => {
     expect(source.winnerTeam).toBe(2);
     expect(source.timeRemainingS).toBe(42);
     expect(source.gameOverReason).toBe(GameOverReason.TimeLimit);
+    // Codex review round 5, finding 4 (PR #9): `playerId` (id, the local prediction slot)
+    // must stay the world.players index, but the HUD's carrier-id comparison needs the
+    // server-assigned id -- net.playerId -- which is very likely NOT 0 on a bot-filled dev
+    // server. Both differ here (id is the world's own addPlayer id, 0; net.playerId is 31)
+    // to prove hudSourceFrom does not conflate them.
+    expect(source.playerId).toBe(id);
+    expect(source.networkPlayerId).toBe(31);
   });
 });
 

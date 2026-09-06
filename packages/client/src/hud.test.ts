@@ -26,6 +26,7 @@ function baseSource(overrides: Partial<HudSource> = {}): HudSource {
   return {
     world,
     playerId,
+    networkPlayerId: playerId,
     teamScores: [0, 0],
     flags: [],
     gameOver: false,
@@ -76,6 +77,21 @@ describe('describeHud', () => {
       { id: 1, team: 2, state: 1, x: 0, y: 0, z: 0, carrierId: 0, returnInS: -1 }, // enemy, carried by us
     ];
     expect(rowsOf(baseSource({ flags }))['hud-flag-status']).toBe('your flag is not home');
+  });
+
+  it('shows "carrying the enemy flag" when the real network player id carries it, even though the local prediction slot is 0 (Codex review round 5, finding 4)', () => {
+    // The dev server starts with 31 bots already connected, so a joining human is very
+    // likely assigned a real id other than 0 (e.g. 31) -- but this client's own predicted
+    // state always lives at world.players slot 0 (the fixed local-prediction convention),
+    // regardless of that real id. Before this fix, flagStatusRow compared carrierId
+    // against `playerId` (always 0 for the local slot), so this case never matched and the
+    // HUD stayed blank even though the server-side flag really is Carried by this player.
+    const source = baseSource({ playerId: 0, networkPlayerId: 31 });
+    const flags: FlagSnapshotData[] = [
+      { id: 0, team: 1, state: 0, x: 0, y: 0, z: 0, carrierId: -1, returnInS: -1 }, // ours, home
+      { id: 1, team: 2, state: 1, x: 0, y: 0, z: 0, carrierId: 31, returnInS: -1 }, // enemy, carried by us
+    ];
+    expect(rowsOf({ ...source, flags })['hud-flag-status']).toBe('carrying the enemy flag');
   });
 
   it('shows a respawn countdown only while dead', () => {
