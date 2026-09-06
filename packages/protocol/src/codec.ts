@@ -28,6 +28,15 @@ export function readU16(cursor: Cursor): number {
   cursor.offset += 2;
   return value;
 }
+export function writeI16(cursor: Cursor, value: number): void {
+  cursor.view.setInt16(cursor.offset, value, true);
+  cursor.offset += 2;
+}
+export function readI16(cursor: Cursor): number {
+  const value = cursor.view.getInt16(cursor.offset, true);
+  cursor.offset += 2;
+  return value;
+}
 export function writeU32(cursor: Cursor, value: number): void {
   cursor.view.setUint32(cursor.offset, value, true);
   cursor.offset += 4;

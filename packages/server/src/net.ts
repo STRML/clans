@@ -10,8 +10,10 @@ import {
 } from '@clans/sim';
 import {
   MessageType,
+  WelcomeStatus,
   decodeAck,
   decodeInput,
+  emptyExtras,
   encodeSnapshot,
   encodeWelcome,
   SNAPSHOT_EVERY_N_TICKS,
@@ -119,7 +121,15 @@ function handleJoin(
     lastInput: IDLE_INPUT,
   });
   socket.send(
-    encodeWelcome({ playerId, team, tickMs: FIXED_TICK_MS, spawnX: x, spawnY: y, spawnZ: z }),
+    encodeWelcome({
+      playerId,
+      team,
+      tickMs: FIXED_TICK_MS,
+      status: WelcomeStatus.Ok,
+      spawnX: x,
+      spawnY: y,
+      spawnZ: z,
+    }),
   );
 }
 
@@ -189,12 +199,16 @@ function sendSnapshot(
     Date.now(),
   );
   const baseline = useFull ? null : ackedBaseline(entry);
+  // TODO(Task 7): wire real projectiles/flags/scores/game-over into WorldExtras here.
+  // The World doesn't carry pendingFireEvents/flags/CTF state wiring into net.ts yet,
+  // so this sends the wire-compatible empty extras block until that task lands.
   const bytes = encodeSnapshot(
     nextSnapshotId,
     tickNumber,
     entry.session.lastSimulatedSequence,
     players,
     baseline,
+    emptyExtras(),
   );
   entry.sent.push({ snapshotId: nextSnapshotId, players });
   if (entry.sent.length > SNAPSHOT_HISTORY_DEPTH) entry.sent.shift();

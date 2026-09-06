@@ -1,26 +1,37 @@
 import { describe, expect, it } from 'vitest';
 import {
   decodeAck,
+  decodeEvent,
+  decodeGod,
   decodeInput,
   decodeJoin,
   decodeWelcome,
   encodeAck,
+  encodeEvent,
+  encodeGod,
   encodeInput,
   encodeJoin,
   encodeWelcome,
 } from './handshake.js';
-import { MessageType, type InputMessage } from './messages.js';
+import {
+  EventKind,
+  MessageType,
+  PROTOCOL_VERSION,
+  WelcomeStatus,
+  type InputMessage,
+} from './messages.js';
 
 describe('handshake codec', () => {
-  it('round-trips a Join message', () => {
-    expect(decodeJoin(encodeJoin())).toEqual({ type: MessageType.Join });
+  it('round-trips a Join message carrying the protocol version', () => {
+    expect(decodeJoin(encodeJoin())).toEqual({ type: MessageType.Join, version: PROTOCOL_VERSION });
   });
 
-  it('round-trips a Welcome message, including the spawn point', () => {
+  it('round-trips an accepted Welcome message, including the spawn point', () => {
     const bytes = encodeWelcome({
       playerId: 5,
       team: 2,
       tickMs: 32,
+      status: WelcomeStatus.Ok,
       spawnX: 10,
       spawnY: 1,
       spawnZ: -20,
@@ -30,18 +41,27 @@ describe('handshake codec', () => {
       playerId: 5,
       team: 2,
       tickMs: 32,
+      status: WelcomeStatus.Ok,
       spawnX: 10,
       spawnY: 1,
       spawnZ: -20,
     });
   });
 
-  it('round-trips an Input message with three distinct redundant samples', () => {
-    // pitch/fire/altFire/slot are all defaults here: PlayerInput grew these fields in the
-    // sim's weapons task, but the Input codec itself doesn't carry them on the wire yet
-    // (that lands in the protocol task that follows), so readSample always reports the
-    // inert defaults regardless of what's encoded. A "meaningful" non-default value on
-    // one of these would make this round trip fail until that later task wires them up.
+  it('round-trips a version-mismatch Welcome', () => {
+    const bytes = encodeWelcome({
+      playerId: 0,
+      team: 0,
+      tickMs: 32,
+      status: WelcomeStatus.VersionMismatch,
+      spawnX: 0,
+      spawnY: 0,
+      spawnZ: 0,
+    });
+    expect(decodeWelcome(bytes).status).toBe(WelcomeStatus.VersionMismatch);
+  });
+
+  it('round-trips an Input message with three distinct redundant samples, including the new fields', () => {
     const message: Omit<InputMessage, 'type'> = {
       sequence: 42,
       samples: [
@@ -49,22 +69,22 @@ describe('handshake codec', () => {
           moveX: 1,
           moveZ: -1,
           yaw: 0.5,
-          pitch: 0,
+          pitch: 0.25,
           jump: true,
           jet: false,
-          fire: false,
+          fire: true,
           altFire: false,
-          slot: 0,
+          slot: 2,
         },
         {
           moveX: 0,
           moveZ: 1,
           yaw: 0.25,
-          pitch: 0,
+          pitch: -0.125,
           jump: false,
           jet: true,
           fire: false,
-          altFire: false,
+          altFire: true,
           slot: 0,
         },
         {
@@ -89,6 +109,33 @@ describe('handshake codec', () => {
     expect(decodeAck(encodeAck({ snapshotId: 777 }))).toEqual({
       type: MessageType.Ack,
       snapshotId: 777,
+    });
+  });
+
+  it('round-trips an Event message', () => {
+    const bytes = encodeEvent({ kind: EventKind.PlayerKilled, a: 3, b: 9 });
+    expect(decodeEvent(bytes)).toEqual({
+      type: MessageType.Event,
+      kind: EventKind.PlayerKilled,
+      a: 3,
+      b: 9,
+    });
+  });
+
+  it('round-trips a negative "a"/"b" (miss/no-attacker sentinel) on an Event message', () => {
+    const bytes = encodeEvent({ kind: EventKind.LaserFired, a: 2, b: -1 });
+    expect(decodeEvent(bytes)).toEqual({
+      type: MessageType.Event,
+      kind: EventKind.LaserFired,
+      a: 2,
+      b: -1,
+    });
+  });
+
+  it('round-trips a God message', () => {
+    expect(decodeGod(encodeGod({ enabled: true }))).toEqual({
+      type: MessageType.God,
+      enabled: true,
     });
   });
 
@@ -140,6 +187,48 @@ describe('handshake codec', () => {
     expect(() => decodeInput(encodeInput(message))).toThrow(RangeError);
   });
 
+  it('rejects an Input message carrying a non-finite pitch', () => {
+    const message: Omit<InputMessage, 'type'> = {
+      sequence: 1,
+      samples: [
+        {
+          moveX: 0,
+          moveZ: 0,
+          yaw: 0,
+          pitch: Number.POSITIVE_INFINITY,
+          jump: false,
+          jet: false,
+          fire: false,
+          altFire: false,
+          slot: 0,
+        },
+        {
+          moveX: 0,
+          moveZ: 0,
+          yaw: 0,
+          pitch: 0,
+          jump: false,
+          jet: false,
+          fire: false,
+          altFire: false,
+          slot: 0,
+        },
+        {
+          moveX: 0,
+          moveZ: 0,
+          yaw: 0,
+          pitch: 0,
+          jump: false,
+          jet: false,
+          fire: false,
+          altFire: false,
+          slot: 0,
+        },
+      ],
+    };
+    expect(() => decodeInput(encodeInput(message))).toThrow(RangeError);
+  });
+
   it('rejects a Welcome message carrying a non-finite spawn coordinate', () => {
     // Codex round 3 (PR #4): an unvalidated NaN spawn would otherwise be written straight
     // into the client's local prediction world and resurface, still NaN, the first time
@@ -148,6 +237,7 @@ describe('handshake codec', () => {
       playerId: 1,
       team: 1,
       tickMs: 32,
+      status: WelcomeStatus.Ok,
       spawnX: Number.NaN,
       spawnY: 0,
       spawnZ: 0,

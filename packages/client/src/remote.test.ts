@@ -14,6 +14,7 @@ const sample = (x: number, vx: number): PlayerSnapshotData => ({
   vz: 0,
   yaw: 0,
   energy: 60,
+  health: 60,
   weaponSlot: 4,
   onGround: 1,
   ski: 0,

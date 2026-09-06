@@ -15,7 +15,9 @@ import {
 import {
   MessageType,
   SNAPSHOT_EVERY_N_TICKS,
+  WelcomeStatus,
   decodeInput,
+  emptyExtras,
   encodeSnapshot,
   encodeWelcome,
 } from '@clans/protocol';
@@ -162,7 +164,14 @@ describe('NetClient', () => {
       if (tick % SNAPSHOT_EVERY_N_TICKS === 0) {
         const players = serializeActivePlayers(server);
         serverToClient.send(
-          encodeSnapshot(nextSnapshotId, server.tick, lastInputSequence, players, null),
+          encodeSnapshot(
+            nextSnapshotId,
+            server.tick,
+            lastInputSequence,
+            players,
+            null,
+            emptyExtras(),
+          ),
         );
         nextSnapshotId += 1;
       }
@@ -199,6 +208,7 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      health: 60,
       weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
@@ -206,9 +216,13 @@ describe('NetClient', () => {
     const state1 = { ...base, x: 1, z: 0 };
     const state2 = { ...base, x: 2, z: 0 };
     const state3 = { ...base, x: 3, z: 0 };
-    transport.pump([encodeSnapshot(1, 0, 0, [state1], null)]);
-    transport.pump([encodeSnapshot(2, 2, 0, [state2], { snapshotId: 1, players: [state1] })]);
-    transport.pump([encodeSnapshot(3, 4, 0, [state3], { snapshotId: 1, players: [state1] })]);
+    transport.pump([encodeSnapshot(1, 0, 0, [state1], null, emptyExtras())]);
+    transport.pump([
+      encodeSnapshot(2, 2, 0, [state2], { snapshotId: 1, players: [state1] }, emptyExtras()),
+    ]);
+    transport.pump([
+      encodeSnapshot(3, 4, 0, [state3], { snapshotId: 1, players: [state1] }, emptyExtras()),
+    ]);
     expect(client.stats.packetLossEstimate).toBe(0);
     expect(client.world.players.position[0]).toBe(3);
   });
@@ -250,6 +264,7 @@ describe('NetClient', () => {
         playerId: 0,
         team: 1,
         tickMs: FIXED_TICK_MS,
+        status: WelcomeStatus.Ok,
         spawnX: 500,
         spawnY: 10,
         spawnZ: 500,
@@ -285,6 +300,7 @@ describe('NetClient', () => {
         playerId: 0,
         team: 1,
         tickMs: FIXED_TICK_MS,
+        status: WelcomeStatus.Ok,
         spawnX: 500,
         spawnY: 10,
         spawnZ: 500,
@@ -367,11 +383,19 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      health: 60,
       weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
     };
-    const delta = encodeSnapshot(7, 3, 0, [state], { snapshotId: 6, players: [state] });
+    const delta = encodeSnapshot(
+      7,
+      3,
+      0,
+      [state],
+      { snapshotId: 6, players: [state] },
+      emptyExtras(),
+    );
     expect(() => transport.pump([delta])).not.toThrow();
     expect(client.stats.packetLossEstimate).toBeGreaterThan(0);
     expect(() =>
@@ -409,12 +433,15 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      health: 60,
       weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
     };
-    transport.pump([encodeSnapshot(1, 0, 0, [state], null)]);
-    expect(() => transport.pump([encodeSnapshot(0xffffffff, 2, 0, [state], null)])).not.toThrow();
+    transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
+    expect(() =>
+      transport.pump([encodeSnapshot(0xffffffff, 2, 0, [state], null, emptyExtras())]),
+    ).not.toThrow();
 
     const lossWindow = (client as unknown as { lossWindow: number[] }).lossWindow;
     expect(lossWindow.length).toBeLessThanOrEqual(50);
@@ -455,11 +482,12 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      health: 60,
       weaponSlot: 4,
       onGround: 1 as const,
       ski: 0 as const,
     };
-    transport.pump([encodeSnapshot(1, 0, 0, [serverState], null)]);
+    transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
 
     expect(client.stats.predictionErrorM).toBeGreaterThan(0);
     expect(client.world.players.position[0]).toBe(0);
@@ -514,6 +542,7 @@ describe('NetClient', () => {
         playerId: 2,
         team: 1,
         tickMs: FIXED_TICK_MS,
+        status: WelcomeStatus.Ok,
         spawnX: 500,
         spawnY: 10,
         spawnZ: 500,
@@ -544,11 +573,12 @@ describe('NetClient', () => {
       vz: 0,
       yaw: 0,
       energy: 60,
+      health: 60,
       weaponSlot: 4,
       onGround: 0 as const,
       ski: 0 as const,
     };
-    transport.pump([encodeSnapshot(1, 0, 0, [serverState], null)]);
+    transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
     expect(client.world.players.wasGrounded[0]).toBe(0);
     expect(client.world.players.wasJumpHeld[0]).toBe(0);
   });

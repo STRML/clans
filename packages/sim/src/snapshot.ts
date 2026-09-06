@@ -12,11 +12,7 @@ export interface PlayerSnapshotData {
   vz: number;
   yaw: number;
   energy: number;
-  // Optional, not required: packages/protocol does not carry this field on the wire yet
-  // (that lands with the weapons/CTF milestone's protocol task). A snapshot decoded from
-  // the current wire format omits it, and deserializePlayer treats that as full health
-  // rather than crediting a nonexistent hit.
-  health?: number;
+  health: number;
   weaponSlot: number;
   onGround: 0 | 1;
   ski: 0 | 1;
@@ -78,9 +74,8 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   players.velocity.set([data.vx, data.vy, data.vz], data.id * 3);
   players.yaw[data.id] = data.yaw;
   players.energy[data.id] = data.energy;
-  const health = data.health ?? LIGHT_ARMOR.maxDamage;
-  players.damage[data.id] = LIGHT_ARMOR.maxDamage - health;
-  players.alive[data.id] = health > 0 ? 1 : 0;
+  players.damage[data.id] = LIGHT_ARMOR.maxDamage - data.health;
+  players.alive[data.id] = data.health > 0 ? 1 : 0;
   players.weaponSlot[data.id] = data.weaponSlot;
   players.onGround[data.id] = data.onGround;
   players.ski[data.id] = data.ski;
