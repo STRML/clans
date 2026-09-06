@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
-import { addPlayer, createFlags, createWorld, type Heightfield } from '@clans/sim';
+import { addPlayer, createFlags, createWorld, FIXED_DT, type Heightfield } from '@clans/sim';
 import type { FlagSnapshotData } from '@clans/protocol';
 import { flagsFromWorld, syncFlagMeshes } from './flag-view.js';
 
@@ -88,5 +88,50 @@ describe('flagsFromWorld', () => {
     const flags = flagsFromWorld(world);
     expect(flags).toHaveLength(2);
     expect(flags[1]).toMatchObject({ team: 2, x: 100 });
+  });
+
+  it('reports -1 for a flag that is home or carried, with no return timer running', () => {
+    const flat: Heightfield = {
+      gridSize: 2,
+      squareSize: 1000,
+      originX: 0,
+      originY: 0,
+      originZ: 1000,
+      heightScale: 1,
+      heights: new Uint16Array(4),
+    };
+    const world = createWorld(flat, 1);
+    createFlags(world, [{ team: 1, position: { x: 0, y: 0, z: 0 } }]);
+    addPlayer(world, { x: 0, y: 0, z: 0 });
+
+    expect(flagsFromWorld(world)[0]?.returnInS).toBe(-1);
+  });
+
+  it("computes returnInS from world.flags.returnAt and the current tick, the same formula the networked path (server's snapshotWorldFlag) uses, instead of always hardcoding -1 (Codex review round 6, finding P3)", () => {
+    // Codex review round 6, finding P3 (PR #9): the single-player adapter used to hardcode
+    // returnInS: -1 no matter what, so a single-player dropped flag never fades over its
+    // final 2 s before auto-return the way the networked path (which gets returnInS from the
+    // server) already does. This drops a flag by hand (setting returnAt directly, the same
+    // field flags.ts's dropFlag sets) and checks the derived seconds-remaining matches the
+    // exact (returnAt - tick) * FIXED_DT formula packages/server/src/net.ts's
+    // snapshotWorldFlag uses for the wire snapshot.
+    const flat: Heightfield = {
+      gridSize: 2,
+      squareSize: 1000,
+      originX: 0,
+      originY: 0,
+      originZ: 1000,
+      heightScale: 1,
+      heights: new Uint16Array(4),
+    };
+    const world = createWorld(flat, 1);
+    createFlags(world, [{ team: 1, position: { x: 0, y: 0, z: 0 } }]);
+    addPlayer(world, { x: 0, y: 0, z: 0 });
+
+    const ticksRemaining = 63; // an arbitrary in-flight return countdown, not a round number of seconds
+    world.tick = 100;
+    world.flags.returnAt[0] = world.tick + ticksRemaining;
+
+    expect(flagsFromWorld(world)[0]?.returnInS).toBeCloseTo(ticksRemaining * FIXED_DT, 10);
   });
 });

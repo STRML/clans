@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { FlagState, type World } from '@clans/sim';
+import { FIXED_DT, FlagState, type World } from '@clans/sim';
 import type { FlagSnapshotData } from '@clans/protocol';
 
 const TEAM_COLOR: Record<number, number> = { 1: 0xdd3333, 2: 0x3366dd };
@@ -96,11 +96,23 @@ function applyReturnFade(group: THREE.Group, flag: FlagSnapshotData): void {
   material.opacity = RETURN_FADE_MIN_OPACITY + (1 - RETURN_FADE_MIN_OPACITY) * t;
 }
 
-/** Single-player mode has no server snapshot; read the sim's own flag store directly. */
+/**
+ * Single-player mode has no server snapshot; read the sim's own flag store directly.
+ *
+ * Codex review round 6, finding P3 (PR #9): this used to hardcode `returnInS: -1` regardless
+ * of the flag's actual state, so `applyReturnFade` above -- which only fades a flag once its
+ * `returnInS` reads a non-negative value at or under `RETURN_FADE_SECONDS` -- never saw
+ * anything but "not counting down" here. The networked path never had this bug: the server
+ * computes `returnInS` from `world.flags.returnAt` and the current tick (see
+ * packages/server/src/net.ts's snapshotWorldFlag), and this reuses that exact formula so a
+ * single-player dropped flag fades over its final two seconds before auto-return the same way
+ * the networked one does.
+ */
 export function flagsFromWorld(world: World): FlagSnapshotData[] {
   const out: FlagSnapshotData[] = [];
   for (let id = 0; id < world.flags.state.length; id += 1) {
     const base = id * 3;
+    const returnAt = world.flags.returnAt[id] ?? -1;
     out.push({
       id,
       team: world.flags.team[id] ?? 0,
@@ -109,7 +121,7 @@ export function flagsFromWorld(world: World): FlagSnapshotData[] {
       y: world.flags.position[base + 1] ?? 0,
       z: world.flags.position[base + 2] ?? 0,
       carrierId: world.flags.carrierId[id] ?? -1,
-      returnInS: -1, // Single-player has no networked countdown; the sim's own tick governs it.
+      returnInS: returnAt < 0 ? -1 : (returnAt - world.tick) * FIXED_DT,
     });
   }
   return out;

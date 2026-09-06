@@ -260,13 +260,38 @@ export function drainNewEvents(
   return newEvents;
 }
 
-/** Syncs projectile/flag/laser-beam meshes and the HUD to the latest sim or net state. Pulled
+/**
+ * Syncs projectile/flag/laser-beam meshes and the HUD to the latest sim or net state. Pulled
  * out of `frame` to keep its own branching (net vs. single-player, free cam, god mode) under
- * the project's complexity budget. */
-function syncWorldView(
+ * the project's complexity budget.
+ *
+ * Exported for a focused unit test. Codex review round 6, finding P2 (PR #9): NetClient never
+ * clears `projectiles`/`flags` once the socket disconnects -- they just hold whatever the last
+ * snapshot decoded -- and this function used to read them unconditionally off `net` regardless
+ * of connection state, so a disconnect left the last snapshot's projectile and flag meshes
+ * live in the scene forever (their pruning logic in weapons-view.ts/flag-view.ts only removes a
+ * mesh whose id is no longer in the *current* list, and that list never changed). This mirrors
+ * `updateRemotes`' existing disconnect handling in this same file: once `net.connected` is
+ * false, feed the mesh-sync functions an empty list so their own pruning naturally clears
+ * everything, rather than mutating NetClient state from here.
+ */
+export function syncWorldView(
   world: World,
   playerId: number,
-  net: NetClient | null,
+  net: Pick<
+    NetClient,
+    | 'playerId'
+    | 'remotePlayers'
+    | 'projectiles'
+    | 'flags'
+    | 'teamScores'
+    | 'gameOver'
+    | 'winnerTeam'
+    | 'timeRemainingS'
+    | 'gameOverReason'
+    | 'recentEvents'
+    | 'connected'
+  > | null,
   scene: THREE.Scene,
   hud: { update(source: HudSource): void },
   effects: Effect[],
@@ -276,13 +301,14 @@ function syncWorldView(
   seenEventSeq: { seq: number },
   dtSeconds: number,
 ): void {
-  const projectiles = net ? net.projectiles : projectilesFromWorld(world);
+  const connected = net ? net.connected : true;
+  const projectiles = net ? (connected ? net.projectiles : []) : projectilesFromWorld(world);
   spawnExplosionsForExpired(scene, effects, previousProjectiles, projectiles);
   syncProjectileMeshes(scene, projectileMeshes, projectiles);
   previousProjectiles.clear();
   for (const projectile of projectiles) previousProjectiles.set(projectile.id, projectile);
 
-  syncFlagMeshes(scene, flagMeshes, net ? net.flags : flagsFromWorld(world));
+  syncFlagMeshes(scene, flagMeshes, net ? (connected ? net.flags : []) : flagsFromWorld(world));
 
   const allEvents: TimestampedEvent[] = net ? net.recentEvents : [];
   const newEvents = drainNewEvents(allEvents, seenEventSeq);

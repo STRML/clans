@@ -13,19 +13,26 @@ import {
   type PlayerInput,
   type PlayerSnapshotData,
 } from '@clans/sim';
-import { EventKind, MessageType } from '@clans/protocol';
+import {
+  EventKind,
+  MessageType,
+  type FlagSnapshotData,
+  type ProjectileSnapshotData,
+} from '@clans/protocol';
 import {
   drainNewEvents,
   hudSourceFrom,
   positionOfPlayer,
   setLocalGodMode,
   stepSinglePlayer,
+  syncWorldView,
   teleportPlayerToFlag,
   updateRemotes,
 } from './app.js';
 import { flagsFromWorld } from './flag-view.js';
 import { RemoteBuffer } from './remote.js';
 import type { NetClient, RemoteSnapshot, TimestampedEvent } from './netclient.js';
+import type { Effect } from './weapons-view.js';
 
 const IDLE_INPUT: PlayerInput = {
   moveX: 0,
@@ -143,6 +150,112 @@ describe('updateRemotes', () => {
     // treats equal timestamps as a single sample) still jumped straight to the newest
     // instead of ever bracketing between them.
     expect(samples[0]?.atMs).not.toBe(samples[1]?.atMs);
+  });
+});
+
+describe('syncWorldView (Codex review round 6, finding P2)', () => {
+  it("stops rendering a disconnected net client's last-known projectile and flag meshes instead of leaving them live forever", () => {
+    // Codex review round 6, finding P2 (PR #9): NetClient never clears `projectiles`/`flags`
+    // once the socket disconnects -- they still hold whatever the last snapshot decoded --
+    // and syncWorldView used to read them off `net` unconditionally, regardless of connection
+    // state. weapons-view.ts's/flag-view.ts's own mesh-pruning only removes a mesh whose id is
+    // no longer in the *current* list, so with that list never changing after a disconnect,
+    // a projectile or flag present at the moment of disconnect stayed in the scene forever.
+    const world = createWorld(flat, 1);
+    const localId = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const scene = new THREE.Scene();
+    const projectileMeshes = new Map<number, THREE.Mesh>();
+    const previousProjectiles = new Map<number, ProjectileSnapshotData>();
+    const flagMeshes = new Map<number, THREE.Group>();
+    const effects: Effect[] = [];
+    const seenEventSeq = { seq: 0 };
+    const hud = { update: () => {} };
+    const projectile: ProjectileSnapshotData = {
+      id: 1,
+      type: 0,
+      weaponId: 0,
+      x: 0,
+      y: 1,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      ownerId: 0,
+    };
+    const flag: FlagSnapshotData = {
+      id: 0,
+      team: 1,
+      state: 0,
+      x: 0,
+      y: 0,
+      z: 0,
+      carrierId: -1,
+      returnInS: -1,
+    };
+    // `connected` is a read-only getter on the real NetClient (it derives from the
+    // transport), so this is spelled as an explicit inline type rather than
+    // `Pick<NetClient, ...>` -- same as the fakeNet in the updateRemotes test above -- to
+    // keep it a plain, mutable boolean field this test can flip.
+    const fakeNet: Pick<
+      NetClient,
+      | 'playerId'
+      | 'remotePlayers'
+      | 'projectiles'
+      | 'flags'
+      | 'teamScores'
+      | 'gameOver'
+      | 'winnerTeam'
+      | 'timeRemainingS'
+      | 'gameOverReason'
+      | 'recentEvents'
+    > & { connected: boolean } = {
+      playerId: localId,
+      remotePlayers: new Map(),
+      projectiles: [projectile],
+      flags: [flag],
+      teamScores: [0, 0],
+      gameOver: false,
+      winnerTeam: 0,
+      timeRemainingS: 0,
+      gameOverReason: 0,
+      recentEvents: [],
+      connected: true,
+    };
+
+    syncWorldView(
+      world,
+      localId,
+      fakeNet,
+      scene,
+      hud,
+      effects,
+      projectileMeshes,
+      previousProjectiles,
+      flagMeshes,
+      seenEventSeq,
+      1 / 60,
+    );
+    expect(projectileMeshes.size).toBe(1);
+    expect(flagMeshes.size).toBe(1);
+
+    // The socket drops; NetClient still holds the same last-decoded projectiles/flags.
+    fakeNet.connected = false;
+    syncWorldView(
+      world,
+      localId,
+      fakeNet,
+      scene,
+      hud,
+      effects,
+      projectileMeshes,
+      previousProjectiles,
+      flagMeshes,
+      seenEventSeq,
+      1 / 60,
+    );
+
+    expect(projectileMeshes.size).toBe(0);
+    expect(flagMeshes.size).toBe(0);
   });
 });
 
