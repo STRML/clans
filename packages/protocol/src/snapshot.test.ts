@@ -375,6 +375,57 @@ describe('snapshot codec', () => {
     ]);
   });
 
+  it('round-trips score and godMode through a full snapshot (Codex review round 14, PR #9, finding 1)', () => {
+    // Round 13's hashWorld/mixPlayer already mixed score and godMode into the determinism
+    // hash, but neither field was ever actually wired onto the wire format itself, so a
+    // decoded/reconstructed player always came back with score 0 / godMode 0 regardless of
+    // the source's real values. score is signed (damage.ts's suicide/team-kill scoring can
+    // drive it negative), so exercise a negative value, not just the ammo fields' always-
+    // nonnegative range.
+    const source = createWorld(terrain, 1);
+    const id = addPlayer(source, { x: 0, y: 0, z: 0 }, 1);
+    source.players.score[id] = -5;
+    source.players.godMode[id] = 1;
+    const players = serializeActivePlayers(source);
+    expect(players[0]).toMatchObject({ score: -5, godMode: 1 });
+    const bytes = encodeSnapshot(1, source.tick, 0, players, null, emptyExtras());
+    const decoded = decodeSnapshot(bytes, null);
+    expect(decoded.players[0]).toMatchObject({ score: -5, godMode: 1 });
+  });
+
+  it('marks only score/godMode dirty in a delta when nothing else changed, and round-trips them', () => {
+    // Same shape as the ammo-only and weapon-state-machine-only delta tests above, but for
+    // the newly wired score/godMode pair, which share DIRTY_PREDICTION with them.
+    const source = createWorld(terrain, 1);
+    const id = addPlayer(source, { x: 0, y: 0, z: 0 }, 1);
+    const baselinePlayers = serializeActivePlayers(source);
+    const baselineBytes = encodeSnapshot(1, source.tick, 0, baselinePlayers, null, emptyExtras());
+    const decodedBaseline = decodeSnapshot(baselineBytes, null);
+
+    source.players.score[id] = 12;
+    source.players.godMode[id] = 1;
+    const nextPlayers = serializeActivePlayers(source);
+    const deltaBytes = encodeSnapshot(
+      2,
+      source.tick,
+      0,
+      nextPlayers,
+      { snapshotId: 1, players: baselinePlayers },
+      emptyExtras(),
+    );
+    const decoded = decodeSnapshot(deltaBytes, {
+      snapshotId: 1,
+      players: decodedBaseline.players,
+    });
+    expect(decoded.players).toEqual([
+      {
+        ...decodedBaseline.players[0],
+        score: 12,
+        godMode: 1,
+      },
+    ]);
+  });
+
   it('rejects a full snapshot carrying a non-finite transform value', () => {
     // Codex round 2 (PR #4): snapshot floats were accepted with no finiteness check and
     // written straight into prediction state, so a NaN x from a corrupted or adversarial

@@ -54,6 +54,8 @@ describe('player snapshots', () => {
       weaponTimer: 0,
       spunUp: 0,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0,
     });
   });
 
@@ -91,6 +93,8 @@ describe('player snapshots', () => {
       weaponTimer: 0.35,
       spunUp: 1,
       grenadeCooldown: 0.6,
+      score: -3,
+      godMode: 1,
     });
     expect(world.players.count).toBe(4);
     expect(world.players.active[3]).toBe(1);
@@ -118,6 +122,8 @@ describe('player snapshots', () => {
       weaponTimer: 0.35,
       spunUp: 1,
       grenadeCooldown: 0.6,
+      score: -3,
+      godMode: 1,
     });
   });
 
@@ -199,5 +205,26 @@ describe('player snapshots', () => {
     const target = createWorld(terrain, 1);
     deserializePlayer(target, data);
     expect(target.players.grenadeCooldown[id]).toBeCloseTo(0.62, 3);
+  });
+
+  it('round-trips score and godMode through serialize/deserialize (Codex review round 14, PR #9, finding 1)', () => {
+    // Round 13's hashWorld/mixPlayer already mixed score and godMode into the determinism
+    // hash, but neither was ever wired onto PlayerSnapshotData/serializePlayer/
+    // deserializePlayer -- so a decoded/reconstructed player always came back with score 0 /
+    // godMode 0 regardless of the source's real values. score is signed (damage.ts's
+    // suicide/team-kill scoring can drive it negative), so exercise a negative value here,
+    // not just the ammo/grenade fields' always-nonnegative range.
+    const world = createWorld(terrain, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    world.players.score[id] = -5;
+    world.players.godMode[id] = 1;
+    const data = serializePlayer(world, id);
+    expect(data.score).toBe(-5);
+    expect(data.godMode).toBe(1);
+
+    const target = createWorld(terrain, 1);
+    deserializePlayer(target, data);
+    expect(target.players.score[id]).toBe(-5);
+    expect(target.players.godMode[id]).toBe(1);
   });
 });

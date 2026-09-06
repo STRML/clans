@@ -8,6 +8,7 @@ import {
   resetLoadout,
   resetPlayerToSpawn,
   RESPAWN_TICKS,
+  setGodMode as setSimGodMode,
   stepWorld,
   type Heightfield,
   type PlayerInput,
@@ -200,7 +201,23 @@ export class NetClient {
     this.transport.send(encodeInput({ sequence: this.sequence, samples }));
   }
 
+  /**
+   * Codex review round 14 (PR #9), finding 2: this used to only send the God message and
+   * rely on the next snapshot's godMode field to reach local prediction -- except (per
+   * finding 1, same round) godMode wasn't even on the wire yet, so nothing ever applied the
+   * toggle to this.world. applyDamage's invulnerability check runs against LOCAL prediction
+   * every tick (movement.ts/damage.ts), so a networked player who enabled god mode and then
+   * fell below the kill plane still predicted their own death locally, even though the
+   * server (which did receive the God message) kept the real player alive -- a jarring
+   * misprediction corrected only on the next snapshot. Mirrors app.ts's single-player
+   * toggle handler (round 4, finding 5): apply the change to the local world immediately,
+   * proactively, the same tick the player toggles it, rather than waiting on a round trip.
+   * Once finding 1's wire fix lands, the godMode field reconcile() applies from every
+   * snapshot also acts as a redundant authoritative correction, the same layered pattern
+   * round 8's respawnSeq fix established.
+   */
   setGodMode(enabled: boolean): void {
+    setSimGodMode(this.world, LOCAL_SLOT, enabled);
     this.transport.send(encodeGod({ enabled }));
   }
 

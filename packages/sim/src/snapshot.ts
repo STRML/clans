@@ -56,6 +56,20 @@ export interface PlayerSnapshotData {
    * actually saw the throw -- would have allowed it. Codex review round 12 (PR #9).
    */
   grenadeCooldown: number;
+  /**
+   * PlayerStore.score -- signed (suicide/team-kill scoring in damage.ts can drive it
+   * negative). Round 13's hashWorld/mixPlayer already mixed this in, but it was never
+   * actually wired onto PlayerSnapshotData/writePlayerFull/serializePlayer, so a
+   * decoded/reconstructed player always came back with score 0 regardless of the source's
+   * real value -- hashWorld on the two worlds diverged even though the wire faithfully
+   * transmitted everything it actually carried. Codex review round 14 (PR #9), finding 1.
+   */
+  score: number;
+  /** PlayerStore.godMode -- same gap and same fix as score above: round 13 hashed it,
+   *  round 14 wires it. Also the authoritative correction netclient.ts's reconcile applies
+   *  on every snapshot for the networked god-mode fix (see netclient.ts's setGodMode,
+   *  Codex review round 14, finding 2). */
+  godMode: 0 | 1;
 }
 
 function num(arr: Float64Array | Uint8Array | Uint16Array | Int16Array, i: number): number {
@@ -93,6 +107,8 @@ export function serializePlayer(world: World, id: number): PlayerSnapshotData {
     weaponTimer: num(p.weaponTimer, id),
     spunUp: bit(p.spunUp, id),
     grenadeCooldown: num(p.grenadeCooldown, id),
+    score: num(p.score, id),
+    godMode: bit(p.godMode, id),
   };
 }
 
@@ -143,4 +159,6 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   players.weaponTimer[data.id] = data.weaponTimer;
   players.spunUp[data.id] = data.spunUp;
   players.grenadeCooldown[data.id] = data.grenadeCooldown;
+  players.score[data.id] = data.score;
+  players.godMode[data.id] = data.godMode;
 }

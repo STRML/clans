@@ -66,6 +66,27 @@ describe('hashWorld', () => {
     expect(hashWorld(target)).toBe(hashWorld(source));
   });
 
+  it('reproduces the hash after a round trip when score or godMode differ from their zero defaults (Codex review round 14, PR #9, finding 1)', () => {
+    // Round 13 extended mixPlayer to mix score and godMode into the determinism hash, but
+    // neither field was ever actually wired onto PlayerSnapshotData/writePlayerFull/
+    // serializePlayer -- so a decoded/reconstructed player always came back with score 0 /
+    // godMode 0 regardless of the source's real values, and hashWorld on the two worlds
+    // diverged even though the wire faithfully transmitted everything it actually carried.
+    // This is the reviewer's own repro: set score away from 0, snapshot/decode into a
+    // freshly seeded world, and the hashes must still match.
+    const source = createWorld(terrain, 1);
+    const id = addPlayer(source, { x: 10, y: 0, z: -5 }, 2);
+    source.players.score[id] = 7;
+    source.players.godMode[id] = 1;
+    const target = createWorld(terrain, 1);
+    addPlayer(target, { x: 10, y: 0, z: -5 }, 2);
+    target.tick = source.tick;
+    for (const player of serializeActivePlayers(source)) deserializePlayer(target, player);
+    expect(target.players.score[id]).toBe(7);
+    expect(target.players.godMode[id]).toBe(1);
+    expect(hashWorld(target)).toBe(hashWorld(source));
+  });
+
   it('changes when a projectile is added', () => {
     const world = createWorld(terrain, 1);
     const before = hashWorld(world);

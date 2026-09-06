@@ -107,7 +107,13 @@ const HEADER_BYTES = 1 + 4 + 4 + 4 + 4 + 1; // type, snapshotId, baselineId, tic
 // Codex review round 12 (PR #9), finding 1: round 10's ammo fix self-heals the grenade
 // COUNT after a lost altFire input, but left this cooldown stuck at its stale
 // locally-predicted value, silently suppressing the player's next real throw.
-const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 4 + 1 + 4;
+// score (i16, signed -- suicide/team-kill scoring can go negative) + godMode (u8, 0/1):
+// round 13's hashWorld/mixPlayer already mixed both into the determinism hash, but neither
+// was ever wired onto the snapshot itself, so a decoded/reconstructed player always came
+// back with score 0 / godMode 0 regardless of the source's real values, and hashWorld on
+// the two worlds diverged even though the wire faithfully transmitted everything it
+// actually carried. Codex review round 14 (PR #9), finding 1.
+const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 4 + 1 + 4 + 2 + 1;
 const PROJECTILE_BYTES = 2 + 1 + 1 + 4 * 6 + 2; // id, type, weaponId, 6 f32 (pos+vel), ownerId
 const FLAG_BYTES = 1 + 1 + 1 + 4 * 3 + 2 + 4; // id, team, state, 3 f32 (pos), carrierId i16, returnInS f32
 const DELTA_FLAG = 1;
@@ -130,7 +136,10 @@ const DIRTY_RESPAWN = 64;
 // DIRTY_AMMO to reflect the broader "prediction-correcting state changed" meaning. Round 12
 // (PR #9, finding 1) folds grenadeCooldown in here too, for the identical reason: it is the
 // grenade throw's own reconciled-prediction timer, changes in lockstep with the grenades
-// count already under this bit, and gains nothing from a bit of its own.
+// count already under this bit, and gains nothing from a bit of its own. Round 14 (PR #9,
+// finding 1) folds score and godMode in here too: both are reconciliation-adjacent
+// authoritative corrections (godMode backs netclient.ts's networked god-mode fix, finding
+// 2 of the same round) that change rarely and gain nothing from a bit of their own.
 const DIRTY_PREDICTION = 128;
 const EPSILON = 1e-4;
 
@@ -199,6 +208,8 @@ function writePlayerFull(cursor: Cursor, data: PlayerSnapshotData): void {
   writeF32(cursor, data.weaponTimer);
   writeU8(cursor, data.spunUp);
   writeF32(cursor, data.grenadeCooldown);
+  writeI16(cursor, data.score);
+  writeU8(cursor, data.godMode);
 }
 function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const id = readU16(cursor);
@@ -223,6 +234,8 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const weaponTimer = readF32(cursor);
   const spunUp = readU8(cursor) ? 1 : 0;
   const grenadeCooldown = readF32(cursor);
+  const score = readI16(cursor);
+  const godMode = readU8(cursor) ? 1 : 0;
   assertFinite([x, y, z, vx, vy, vz, yaw, energy, health, weaponTimer, grenadeCooldown]);
   return {
     id,
@@ -248,6 +261,8 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
     weaponTimer,
     spunUp,
     grenadeCooldown,
+    score,
+    godMode,
   };
 }
 
@@ -423,6 +438,17 @@ function weaponMachineChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boo
     Math.abs(a.grenadeCooldown - b.grenadeCooldown) > EPSILON
   );
 }
+// Exact equality, like respawnSeqChanged/ammoChanged above: score is an integer counter and
+// godMode a 0/1 flag, neither a float that needs EPSILON tolerance.
+function scoreOrGodModeChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
+  return a.score !== b.score || a.godMode !== b.godMode;
+}
+// Everything DIRTY_PREDICTION covers, folded into one check -- see that constant's comment
+// for why ammo, the weapon state machine, and score/godMode all share it. Pulled out of
+// dirtyMask itself to keep that function's branch count under the complexity lint's cap.
+function predictionChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
+  return ammoChanged(a, b) || weaponMachineChanged(a, b) || scoreOrGodModeChanged(a, b);
+}
 function dirtyMask(current: PlayerSnapshotData, previous: PlayerSnapshotData): number {
   let mask = 0;
   if (transformChanged(current, previous)) mask |= DIRTY_TRANSFORM;
@@ -432,9 +458,7 @@ function dirtyMask(current: PlayerSnapshotData, previous: PlayerSnapshotData): n
   if (healthChanged(current, previous)) mask |= DIRTY_HEALTH;
   if (weaponChanged(current, previous)) mask |= DIRTY_WEAPON;
   if (respawnSeqChanged(current, previous)) mask |= DIRTY_RESPAWN;
-  if (ammoChanged(current, previous) || weaponMachineChanged(current, previous)) {
-    mask |= DIRTY_PREDICTION;
-  }
+  if (predictionChanged(current, previous)) mask |= DIRTY_PREDICTION;
   return mask;
 }
 
@@ -472,8 +496,9 @@ function changedRecordBytes(mask: number): number {
   if (mask & DIRTY_HEALTH) bytes += 4;
   if (mask & DIRTY_WEAPON) bytes += 1;
   if (mask & DIRTY_RESPAWN) bytes += 1;
-  // ammo(4) + weaponState(1) + weaponTimer(4) + spunUp(1) + grenadeCooldown(4)
-  if (mask & DIRTY_PREDICTION) bytes += 4 + 1 + 4 + 1 + 4;
+  // ammo(4) + weaponState(1) + weaponTimer(4) + spunUp(1) + grenadeCooldown(4) + score(2)
+  // + godMode(1)
+  if (mask & DIRTY_PREDICTION) bytes += 4 + 1 + 4 + 1 + 4 + 2 + 1;
   return bytes;
 }
 function writeChangedTransform(cursor: Cursor, data: PlayerSnapshotData): void {
@@ -497,6 +522,10 @@ function writeChangedWeaponMachine(cursor: Cursor, data: PlayerSnapshotData): vo
   writeU8(cursor, data.spunUp);
   writeF32(cursor, data.grenadeCooldown);
 }
+function writeChangedScoreGodMode(cursor: Cursor, data: PlayerSnapshotData): void {
+  writeI16(cursor, data.score);
+  writeU8(cursor, data.godMode);
+}
 function writeChangedPlayer(cursor: Cursor, data: PlayerSnapshotData, mask: number): void {
   writeU16(cursor, data.id);
   writeU8(cursor, mask);
@@ -510,6 +539,7 @@ function writeChangedPlayer(cursor: Cursor, data: PlayerSnapshotData, mask: numb
   if (mask & DIRTY_PREDICTION) {
     writeChangedAmmo(cursor, data);
     writeChangedWeaponMachine(cursor, data);
+    writeChangedScoreGodMode(cursor, data);
   }
 }
 
@@ -633,6 +663,10 @@ function readChangedWeaponMachine(cursor: Cursor, next: PlayerSnapshotData): voi
   assertFinite([weaponTimer, grenadeCooldown]);
   next.grenadeCooldown = grenadeCooldown;
 }
+function readChangedScoreGodMode(cursor: Cursor, next: PlayerSnapshotData): void {
+  next.score = readI16(cursor);
+  next.godMode = readU8(cursor) ? 1 : 0;
+}
 function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData>): void {
   const id = readU16(cursor);
   const mask = readU8(cursor);
@@ -649,6 +683,7 @@ function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData
   if (mask & DIRTY_PREDICTION) {
     readChangedAmmo(cursor, next);
     readChangedWeaponMachine(cursor, next);
+    readChangedScoreGodMode(cursor, next);
   }
   byId.set(id, next);
 }

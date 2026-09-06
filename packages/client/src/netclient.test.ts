@@ -232,6 +232,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     const state1 = { ...base, x: 1, z: 0 };
     const state2 = { ...base, x: 2, z: 0 };
@@ -416,6 +418,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     const delta = encodeSnapshot(
       7,
@@ -475,6 +479,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(() =>
@@ -533,6 +539,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
 
@@ -633,6 +641,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
     expect(client.world.players.wasGrounded[0]).toBe(0);
@@ -757,6 +767,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     const extras: WorldExtras = {
       projectiles: [],
@@ -822,6 +834,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     const extras: WorldExtras = {
       projectiles: [],
@@ -885,6 +899,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(client.localHealth).toBeCloseTo(0.4);
@@ -1003,6 +1019,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -1066,6 +1084,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [alive], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -1134,6 +1154,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [fullHealth], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -1217,6 +1239,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 5, 2, [serverState], null, emptyExtras())]);
 
@@ -1287,6 +1311,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
 
@@ -1372,6 +1398,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
 
@@ -1424,6 +1452,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -1524,6 +1554,8 @@ describe('NetClient', () => {
       weaponTimer: 0,
       spunUp: 0 as const,
       grenadeCooldown: 0,
+      score: 0,
+      godMode: 0 as const,
     };
     const dead = { ...alive, health: 0 };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
@@ -1544,6 +1576,37 @@ describe('NetClient', () => {
     client.setGodMode(true);
     const god = sent.find((bytes) => bytes[0] === MessageType.God);
     expect(god && decodeGod(god)).toEqual({ type: MessageType.God, enabled: true });
+  });
+
+  it('applies god mode to local prediction immediately, not just over the wire (Codex review round 14, PR #9, finding 2)', () => {
+    // Round 4, finding 5 fixed single-player's debug toggle to apply god mode to the local
+    // world proactively (app.ts's setLocalGodMode), but the NETWORKED path only ever sent
+    // the God message and relied on the next snapshot's godMode field to reach local
+    // prediction -- which (per finding 1, same round) wasn't even on the wire yet. Reviewer's
+    // repro: enable god mode while networked, then fall below the kill plane locally. Without
+    // this fix, applyDamage's proactive invulnerability check never sees the toggle on THIS
+    // client's own predicted world, so the local player dies to the fall even though the
+    // server (which received the God message) keeps the real player alive.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 15 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.setGodMode(true);
+    expect(client.world.players.godMode[0]).toBe(1);
+
+    const noInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    client.world.players.position[1] = client.world.killY - 1;
+    client.tick(noInput);
+    expect(client.world.players.alive[0]).toBe(1);
   });
 
   it('resets the predicted weapon loadout and clears predicted projectiles on a delayed Welcome (Codex review round 4, finding 8)', () => {
