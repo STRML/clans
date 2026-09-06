@@ -45,6 +45,22 @@ export interface PlayerStore {
   ammo: Int16Array;
   grenades: Uint8Array;
 }
+export interface ProjectileStore {
+  count: number;
+  freeIds: number[];
+  active: Uint8Array;
+  type: Uint8Array;
+  weaponId: Uint8Array;
+  ownerId: Int16Array;
+  position: Float64Array;
+  velocity: Float64Array;
+  /** Ticks this projectile has been alive, counted by stepProjectiles itself rather than
+   *  world.tick: stepProjectiles is called directly (not only via stepWorld) by its own
+   *  tests, which never advance world.tick, so a self-contained per-projectile counter is
+   *  the only thing that behaves the same under both call paths. */
+  expiresAtTick: Float64Array;
+  armed: Uint8Array;
+}
 export interface World {
   tick: number;
   random: RandomState;
@@ -52,6 +68,7 @@ export interface World {
   /** Below this height a player has fallen out of the world and returns to spawn. */
   killY: number;
   players: PlayerStore;
+  projectiles: ProjectileStore;
   pendingDeaths: number[];
   pendingFireEvents: import('./weapons.js').FireEvent[];
 }

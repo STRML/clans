@@ -1,5 +1,6 @@
 import { LIGHT_ARMOR } from './armor.js';
 import { stepPlayers } from './movement.js';
+import { createProjectileStore, stepProjectiles } from './projectiles.js';
 import type { Heightfield } from './terrain.js';
 import type { PlayerInput, Vec3, World } from './types.js';
 import { resetLoadout, stepWeapons, WEAPON_COUNT } from './weapons.js';
@@ -65,6 +66,7 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
       ammo: new Int16Array(capacity * WEAPON_COUNT),
       grenades: new Uint8Array(capacity),
     },
+    projectiles: createProjectileStore(),
     pendingDeaths: [],
     pendingFireEvents: [],
   };
@@ -125,5 +127,6 @@ export function stepWorld(
     throw new RangeError(`Simulation step requires fixed tick ${FIXED_TICK_MS} ms`);
   stepPlayers(world, inputs, dt);
   stepWeapons(world, inputs, dt);
+  stepProjectiles(world, dt);
   world.tick += 1;
 }

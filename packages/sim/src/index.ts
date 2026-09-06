@@ -20,6 +20,7 @@ export {
 // cannot be bypassed. GRAVITY is re-exported for tests and tuning tools.
 export { GRAVITY } from './movement.js';
 export * from './hash.js';
+export * from './projectiles.js';
 export * from './random.js';
 export * from './snapshot.js';
 export * from './terrain.js';
