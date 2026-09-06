@@ -16,6 +16,15 @@ const CAPSULE_HEIGHT = 1.2;
 // large can only be a teleport, never legitimate movement.
 const TELEPORT_DISTANCE_M = 15;
 
+// WONTFIX (PR #4, M2 status table): Codex round 17 found this distance heuristic still
+// smears a reused player id if the departed player's last position happened to be within
+// TELEPORT_DISTANCE_M of the new player's spawn AND the reuse lands within a single
+// snapshot interval -- both a spatial and a timing coincidence. Closing this fully needs a
+// per-player generation or teleport flag on the wire (snapshot.ts), a protocol change, to
+// tell "same player, still moving" apart from "id reused" with certainty. Lowering this
+// threshold instead would trade a rare, momentary, cosmetic glitch (a slide) for a more
+// common one: ordinary high-speed skiing bursts snapping unnecessarily. Not proportionate
+// for M2; revisit alongside any future snapshot wire format change.
 function distance(a: PlayerSnapshotData, b: PlayerSnapshotData): number {
   return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 }
