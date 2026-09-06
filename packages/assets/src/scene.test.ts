@@ -28,6 +28,10 @@ describe('scene extraction', () => {
     expect(scene.spawns).toEqual([
       { name: 'SpawnA', team: 1, position: [326.888, 74.8106, 168.521], radius: 5 },
     ]);
+    expect(scene.flags).toEqual([{ team: 1, position: [330, 75, 180] }]);
+    expect(scene.flagStands).toEqual([
+      { team: 1, position: [330, 75, 180], rotation: { axis: [0, 1, 0], degrees: 45 } },
+    ]);
   });
 
   it('rejects a scalar field that is missing or not a number', () => {

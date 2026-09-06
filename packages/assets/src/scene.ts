@@ -12,6 +12,8 @@ export interface SceneData {
   sky: { visibleDistance: number; fogDistance: number; fogColor: Color4; materialList: string };
   missionArea: { minX: number; minZ: number; width: number; depth: number };
   spawns: Array<{ name: string | null; team: number; position: Vec3; radius: number }>;
+  flags: Array<{ team: number; position: Vec3 }>;
+  flagStands: Array<{ team: number; position: Vec3; rotation: AxisAngle }>;
 }
 
 /** A property that must be present. Mission files never omit these. */
@@ -37,14 +39,19 @@ function numbers(value: string, count: number): number[] {
   return parsed;
 }
 
+/** Negate, without letting a zero input turn into a distinct -0 output. */
+function negate(value: number): number {
+  return value === 0 ? 0 : -value;
+}
+
 export function torquePositionToYUp(value: string): Vec3 {
   const [x = 0, y = 0, z = 0] = numbers(value, 3);
-  return [x, z, -y];
+  return [x, z, negate(y)];
 }
 
 export function torqueAxisAngleToYUp(value: string): AxisAngle {
   const [x = 0, y = 0, z = 0, degrees = 0] = numbers(value, 4);
-  return { axis: [x, z, -y], degrees };
+  return { axis: [x, z, negate(y)], degrees };
 }
 
 function color(value: string): Color4 {
@@ -151,6 +158,30 @@ function buildSpawns(all: LocatedObject[]): SceneData['spawns'] {
     }));
 }
 
+/**
+ * The flag and its stand are not dedicated Torque classes: the mission represents them as a
+ * generic Item/StaticShape whose `dataBlock` names the actual game object ("Flag",
+ * "ExteriorFlagStand"). Filter on dataBlock, not class.
+ */
+function buildFlags(all: LocatedObject[]): SceneData['flags'] {
+  return all
+    .filter(({ object }) => object.props.dataBlock === 'Flag')
+    .map(({ object, ancestors }) => ({
+      team: teamFor(ancestors),
+      position: torquePositionToYUp(object.props.position ?? ''),
+    }));
+}
+
+function buildFlagStands(all: LocatedObject[]): SceneData['flagStands'] {
+  return all
+    .filter(({ object }) => object.props.dataBlock === 'ExteriorFlagStand')
+    .map(({ object, ancestors }) => ({
+      team: teamFor(ancestors),
+      position: torquePositionToYUp(object.props.position ?? ''),
+      rotation: torqueAxisAngleToYUp(object.props.rotation ?? '0 0 1 0'),
+    }));
+}
+
 export function extractScene(objects: MissionObject[]): SceneData {
   const all = flatten(objects);
   return {
@@ -159,5 +190,7 @@ export function extractScene(objects: MissionObject[]): SceneData {
     sky: buildSky(findByClass(all, 'Sky')),
     missionArea: buildMissionArea(findByClass(all, 'MissionArea')),
     spawns: buildSpawns(all),
+    flags: buildFlags(all),
+    flagStands: buildFlagStands(all),
   };
 }
