@@ -259,6 +259,29 @@ export class NetClient {
     this.pushSnapshotHistory({ snapshotId: decoded.snapshotId, players: decoded.players });
     this.transport.send(encodeAck({ snapshotId: decoded.snapshotId }));
 
+    // Codex review round 2 (PR #9), finding 3: stepWorld's freeze guard reads
+    // world.gameOver, not this NetClient field. tick() calls stepWorld(this.world, ...)
+    // every frame regardless of the fields below, so without mirroring the snapshot onto
+    // the world object itself, this client's local world never learns the match ended and
+    // keeps predicting movement/weapon timers/ammo and replaying unacknowledged inputs
+    // after the server has already frozen. timeRemainingS has no World-side counterpart
+    // (world.timeLimitTicks is fixed at match start), so it stays a NetClient-only field.
+    //
+    // Codex review round 3 (PR #9), residual of the above: this assignment must also
+    // happen before reconcile() below, not after. reconcile() replays any pending
+    // (unacknowledged) local inputs via stepWorld to catch prediction up to the server's
+    // authoritative state, and stepWorld's freeze guard only engages once world.gameOver
+    // is true. Setting it after reconcile() let the very first game-over snapshot's replay
+    // run against a world that did not yet know the match had ended, advancing local
+    // prediction one extra tick past the true end state.
+    this.gameOver = decoded.gameOver;
+    this.winnerTeam = decoded.winnerTeam;
+    this.timeRemainingS = decoded.timeRemainingS;
+    this.gameOverReason = decoded.gameOverReason;
+    this.world.gameOver = decoded.gameOver;
+    this.world.winnerTeam = decoded.winnerTeam;
+    this.world.gameOverReason = decoded.gameOverReason;
+
     const self = decoded.players.find((player) => player.id === this.playerId);
     if (self) {
       this.reconcile(self, decoded.tick, decoded.lastInputSequence);
@@ -273,20 +296,6 @@ export class NetClient {
     this.projectiles = decoded.projectiles;
     this.flags = decoded.flags;
     this.teamScores = decoded.teamScores;
-    this.gameOver = decoded.gameOver;
-    this.winnerTeam = decoded.winnerTeam;
-    this.timeRemainingS = decoded.timeRemainingS;
-    this.gameOverReason = decoded.gameOverReason;
-    // Codex review round 2 (PR #9), finding 3: stepWorld's freeze guard reads
-    // world.gameOver, not this NetClient field. tick() calls stepWorld(this.world, ...)
-    // every frame regardless of the fields above, so without mirroring the snapshot onto
-    // the world object itself, this client's local world never learns the match ended and
-    // keeps predicting movement/weapon timers/ammo and replaying unacknowledged inputs
-    // after the server has already frozen. timeRemainingS has no World-side counterpart
-    // (world.timeLimitTicks is fixed at match start), so it stays a NetClient-only field.
-    this.world.gameOver = decoded.gameOver;
-    this.world.winnerTeam = decoded.winnerTeam;
-    this.world.gameOverReason = decoded.gameOverReason;
     this.remoteTick = decoded.tick;
     this.remoteSnapshots.push({ tick: decoded.tick, players: this.remotePlayers });
     if (this.remoteSnapshots.length > MAX_REMOTE_SNAPSHOT_QUEUE) this.remoteSnapshots.shift();

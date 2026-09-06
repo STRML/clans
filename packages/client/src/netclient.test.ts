@@ -658,6 +658,68 @@ describe('NetClient', () => {
     expect(client.world.players.position[0] ?? 0).toBe(beforeX);
   });
 
+  it('does not replay a pending input past a game-over snapshot (Codex review round 3, residual of finding 3)', () => {
+    // Round 2 mirrored gameOver onto world.gameOver so stepWorld's freeze guard could
+    // engage, but within handleSnapshot that assignment ran AFTER reconcile() had
+    // already replayed any pending (unacknowledged) local inputs. The very first
+    // game-over snapshot therefore still let one extra tick of local prediction run
+    // against a world that had not yet been told the match ended.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 31 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+
+    const forwardInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 1,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    // Leave this input unacknowledged: the snapshot below names lastInputSequence 0,
+    // so reconcile() will still find it pending and eligible for replay.
+    client.tick(forwardInput);
+    expect(client.world.players.position[2] ?? 0).toBeGreaterThan(0);
+
+    const serverState = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60,
+      weaponSlot: 4,
+      onGround: 1 as const,
+      ski: 0 as const,
+    };
+    const extras: WorldExtras = {
+      projectiles: [],
+      flags: [],
+      teamScores: [3, 1],
+      gameOver: true,
+      winnerTeam: 1,
+      timeRemainingS: 0,
+      gameOverReason: 1,
+    };
+    transport.pump([encodeSnapshot(1, 1, 0, [serverState], null, extras)]);
+
+    // reconcile() sets position/tick to the server's authoritative (0,0,0)/1. The freeze
+    // guard must already be active by the time reconcile() replays the pending
+    // forwardInput, so no extra tick of movement or tick advance is layered on top.
+    expect(client.world.players.position[0]).toBe(0);
+    expect(client.world.players.position[2]).toBe(0);
+    expect(client.world.tick).toBe(1);
+  });
+
   it('reads localHealth off the reconciled snapshot for the local player', () => {
     clock.ms = 0;
     const transport = makeTransport(makeLink({ value: 12 }));
