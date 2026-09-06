@@ -10,6 +10,7 @@ export class Input {
   yaw = 0;
   pitch = 0;
   jet = false;
+  fire = false;
   sensitivity = 0.002;
   private readonly keys = new Set<string>();
 
@@ -32,9 +33,11 @@ export class Input {
     });
     target.addEventListener('mousedown', (event) => {
       if (event.button === 2) this.jet = true;
+      else if (event.button === 0) this.fire = true;
     });
     window.addEventListener('mouseup', (event) => {
       if (event.button === 2) this.jet = false;
+      else if (event.button === 0) this.fire = false;
     });
     window.addEventListener('mousemove', (event) => this.look(event));
   }
@@ -52,10 +55,19 @@ export class Input {
   releaseAll(): void {
     this.keys.clear();
     this.jet = false;
+    this.fire = false;
   }
 
   isDown(code: string): boolean {
     return this.keys.has(code);
+  }
+
+  /** The lowest held number key 1-5, or 0 if none are held — matches `weaponIdForSlot`. */
+  private slotFromKeys(): number {
+    for (let n = 1; n <= 5; n += 1) {
+      if (this.isDown(`Digit${String(n)}`)) return n;
+    }
+    return 0;
   }
 
   /** The sim input for this tick. Keys work without pointer lock; only the mouse needs it. */
@@ -69,11 +81,9 @@ export class Input {
       pitch: this.pitch,
       jump: this.isDown('Space'),
       jet: this.jet,
-      // Task 8 wires the real key/mouse bindings; this task's only job is a compiling,
-      // inert default so free cam and every existing input consumer stay unaffected.
-      fire: false,
-      altFire: false,
-      slot: 0,
+      fire: this.fire,
+      altFire: this.isDown('KeyG'),
+      slot: this.slotFromKeys(),
     };
   }
 }
