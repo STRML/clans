@@ -1480,8 +1480,15 @@ describe('NetClient', () => {
     client.tick(idleInput);
 
     expect(client.world.players.alive[0]).toBe(0);
-    // No local teleport happened: the position is exactly what was set above, untouched.
-    expect([...client.world.players.position.slice(0, 3)]).toEqual([500, killY - 100, 500]);
+    // No local teleport happened: x/z are untouched, and y only moved by one tick's worth
+    // of gravity integration -- Codex review round 13 (PR #9) fixed movement.ts to commit
+    // the newly-integrated position before triggering a kill-plane death (so a carried
+    // flag drops at the real death spot, not a stale one), so y is no longer frozen at
+    // exactly what was set above.
+    const finalPosition = client.world.players.position.slice(0, 3);
+    expect(finalPosition[0]).toBe(500);
+    expect(finalPosition[1]).toBeCloseTo(killY - 100, 1);
+    expect(finalPosition[2]).toBe(500);
   });
 
   it('sets a local respawnAt on death so the HUD countdown does not read stale/zero time', () => {

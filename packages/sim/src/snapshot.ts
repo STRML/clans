@@ -125,6 +125,12 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   players.energy[data.id] = data.energy;
   players.damage[data.id] = LIGHT_ARMOR.maxDamage - data.health;
   players.alive[data.id] = data.health > 0 ? 1 : 0;
+  // A live decoded player is never due for a respawn. `respawnAt` isn't itself on the wire
+  // (a dead player's local countdown is set separately, see netclient.ts's death detection),
+  // but leaving it at the typed array's raw zero-init (rather than addPlayer's -1 "not
+  // scheduled" sentinel) desynced hashWorld's now-full-state hash from a freshly addPlayer'd
+  // world with no wire round trip at all -- Codex review round 13 (PR #9).
+  if (players.alive[data.id]) players.respawnAt[data.id] = -1;
   players.weaponSlot[data.id] = data.weaponSlot;
   players.onGround[data.id] = data.onGround;
   players.ski[data.id] = data.ski;
