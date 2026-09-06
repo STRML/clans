@@ -122,6 +122,19 @@ export class NetClient {
   // 1 s full-snapshot fallback; a bounded history lets a delta name any recent baseline.
   private readonly snapshotHistory: SnapshotBaseline[] = [];
   private previousSnapshotId = 0;
+  // Codex review round 7 (PR #9): what syncRespawnState below detects a respawn against.
+  // These track what the last SNAPSHOT reported for the local player, not the client's own
+  // locally-predicted alive/health -- local prediction can skip an intermediate "dead"
+  // snapshot entirely (dropped, coalesced, or just never delivered under the delta/full
+  // cadence) and stay "alive" throughout even though the server legitimately killed and
+  // respawned the player, so a comparison against prediction never sees the transition. A
+  // comparison against these two only ever moves on data actually received from the wire,
+  // so a skipped snapshot in between cannot hide the edge from it. Initialized to match the
+  // just-spawned state applied by the constructor/Welcome handler (alive, and no previous
+  // health to have risen above yet), so the very first real snapshot cannot itself read as
+  // a spurious respawn.
+  private lastSnapshotAlive = true;
+  private lastSnapshotHealth = Number.POSITIVE_INFINITY;
   private readonly lossWindow: number[] = [];
   private readonly bytesWindow: Array<{ at: number; bytes: number }> = [];
   private readonly inputSentAt = new Map<number, number>();
@@ -322,7 +335,6 @@ export class NetClient {
   ): void {
     const beforeX = this.world.players.position[0] ?? 0;
     const beforeZ = this.world.players.position[2] ?? 0;
-    const wasAlive = this.world.players.alive[LOCAL_SLOT] === 1;
     deserializePlayer(this.world, { ...serverState, id: LOCAL_SLOT });
     // The wire snapshot has no wasJumpHeld field, and deserializePlayer does not touch
     // spawn/wasGrounded/wasJumpHeld at all, so without this the replay below starts from
@@ -332,7 +344,7 @@ export class NetClient {
     this.world.players.wasGrounded[LOCAL_SLOT] = serverState.onGround;
     this.world.players.wasJumpHeld[LOCAL_SLOT] = 0;
     this.world.tick = serverTick;
-    this.syncRespawnState(wasAlive);
+    this.syncRespawnState(serverState.health);
     this.pendingInputs = this.pendingInputs.filter(
       (pending) => pending.sequence > lastInputSequence,
     );
@@ -365,10 +377,29 @@ export class NetClient {
    * `resetLoadout` the server's own respawnPlayer wrapper uses (not hand-rolled defaults),
    * and stamp a local respawnAt on the alive-to-dead edge so hud.ts's countdown has
    * something real to count down from instead of reading 0 forever.
+   *
+   * Codex review round 7 (PR #9): the original version of this detected the transition by
+   * diffing the CLIENT's own locally-predicted alive state (world.players.alive before this
+   * snapshot applied) against the just-decoded one. That is fragile to any skipped
+   * intermediate snapshot -- if local prediction never actually applied a "dead" snapshot
+   * (dropped, coalesced, or simply not delivered given the delta/full cadence), it stayed
+   * "alive" throughout even though the server legitimately killed and respawned the player,
+   * so the dead-to-alive edge never fired and the loadout kept its stale, consumed ammo.
+   * `reportedHealth` is the just-decoded snapshot's own health field, and `wasAlive`/
+   * `wasHealth` below are what the PREVIOUS snapshot reported (tracked on this NetClient,
+   * not read back off local prediction) -- both only ever move on data actually received
+   * from the wire, so a respawn is caught even when the client never saw the player go
+   * through a "dead" snapshot at all: `respawnPlayer` fully resets damage to 0 on every
+   * respawn and health only otherwise falls while alive (no regen in this sim), so any
+   * health increase over what the previous snapshot reported is itself proof a respawn
+   * happened, with or without an observed dead edge in between.
    */
-  private syncRespawnState(wasAlive: boolean): void {
-    const isAlive = this.world.players.alive[LOCAL_SLOT] === 1;
-    if (!wasAlive && isAlive) {
+  private syncRespawnState(reportedHealth: number): void {
+    const isAlive = reportedHealth > 0;
+    const wasAlive = this.lastSnapshotAlive;
+    const wasHealth = this.lastSnapshotHealth;
+    const respawned = isAlive && (!wasAlive || reportedHealth > wasHealth);
+    if (respawned) {
       resetLoadout(this.world, LOCAL_SLOT, LIGHT_ARMOR);
       this.world.players.respawnAt[LOCAL_SLOT] = -1;
       // Codex review round 5, finding 2 (PR #9): the wire snapshot carries only the
@@ -391,6 +422,8 @@ export class NetClient {
     } else if (wasAlive && !isAlive) {
       this.world.players.respawnAt[LOCAL_SLOT] = this.world.tick + RESPAWN_TICKS;
     }
+    this.lastSnapshotAlive = isAlive;
+    this.lastSnapshotHealth = reportedHealth;
   }
 
   private recordLoss(snapshotId: number): void {

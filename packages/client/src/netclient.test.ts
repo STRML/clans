@@ -868,6 +868,62 @@ describe('NetClient', () => {
     expect(client.world.players.respawnAt[0]).toBe(-1);
   });
 
+  it('resets the loadout on a respawn even when the intermediate dead snapshot is skipped (Codex review round 7)', () => {
+    // Codex review round 7 (PR #9): the old detector diffed the CLIENT's own
+    // locally-predicted alive state (world.players.alive from before this snapshot) against
+    // the incoming one. If local prediction never actually applied an intermediate "dead"
+    // snapshot -- dropped, coalesced, or simply not delivered given the delta/full snapshot
+    // cadence -- it stayed "alive" throughout from its own point of view, so the transition
+    // was never detected and the loadout never reset, even though the server legitimately
+    // killed and respawned the player. Repro: spend ammo/grenades locally, apply one ALIVE
+    // (but damaged) baseline snapshot -- no "dead" snapshot ever reaches this client -- then
+    // jump straight to a respawn snapshot at full health with a different weapon slot.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 24 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+
+    // Spend every disc and grenade before the baseline snapshot, as the repro describes.
+    client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)] = 0;
+    client.world.players.weaponSlot[0] = WeaponId.Spinfusor;
+    client.world.players.grenades[0] = 0;
+
+    const alive = {
+      id: 0,
+      team: 1,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 20, // alive, but damaged -- this client never sees health hit 0 on the wire
+      weaponSlot: WeaponId.Spinfusor,
+      onGround: 1 as const,
+      ski: 0 as const,
+    };
+    transport.pump([encodeSnapshot(1, 10, 0, [alive], null, emptyExtras())]);
+    expect(client.world.players.alive[0]).toBe(1);
+    // This baseline snapshot alone (still alive, no death observed) must not touch ammo.
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(0);
+
+    // The server killed and fully respawned this player entirely between snapshot 1 and
+    // this one -- this next snapshot is the only thing the client ever sees of it.
+    const respawned = { ...alive, health: 60, weaponSlot: WeaponId.Blaster };
+    transport.pump([encodeSnapshot(2, 20, 0, [respawned], null, emptyExtras())]);
+
+    expect(client.world.players.alive[0]).toBe(1);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Chaingun)]).toBe(100);
+    expect(client.world.players.grenades[0]).toBe(5);
+    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Blaster);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
+    expect(client.world.players.weaponTimer[0]).toBe(0);
+    expect(client.world.players.respawnAt[0]).toBe(-1);
+  });
+
   it('updates the local spawn point on a networked respawn so a later kill-plane fall returns there, not to the join spawn (Codex review round 5, finding 2)', () => {
     // The wire snapshot only carries the respawned POSITION, not a separate spawn-point
     // field (that would be new protocol work), and players.spawn is what movement.ts's
