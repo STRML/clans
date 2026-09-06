@@ -27,15 +27,21 @@ function num(arr: Float64Array | Uint8Array | Uint16Array | Int16Array, i: numbe
 }
 
 /**
- * Mixes in every field of PlayerStore that is real simulation state, not just position/
- * velocity/yaw/energy/damage/weaponSlot. Through round 11 this stopped at weaponSlot and
- * never touched ammo, grenades, or the weapon/grenade state machines (weaponState,
- * weaponTimer, spunUp, grenadeCooldown) -- all of which stepWeapons (weapons.ts) mutates
- * every tick and all of which are now wired onto the wire snapshot (snapshot.ts) precisely
- * because they can diverge between client prediction and the server. A hash that never
- * mixed them in could report two worlds identical when their weapon state had actually
- * drifted apart, silently defeating the determinism check the spec's Testing section
- * documents. Codex review round 12 (PR #9), finding 2.
+ * Mixes in every field of PlayerStore that is real, future-affecting simulation state.
+ * Deliberately excluded: count/freeIds (store bookkeeping, not per-player), active (already
+ * gates which ids this function is called for), spawn (movement.ts no longer reads it at
+ * all -- see damage.ts's respawnPlayer comment -- it is bookkeeping netclient.ts mirrors
+ * locally, not state stepWorld's own outputs depend on), and landingSpeed (written on a
+ * landing tick, consumed synchronously by that same call's applyFallDamage, and never read
+ * again -- two worlds that differ only in landingSpeed produce identical FUTURE behavior).
+ * Through round 11 this stopped at weaponSlot; round 12 added ammo/grenades/weaponState/
+ * weaponTimer/spunUp/grenadeCooldown but still missed onGround, ski, wasGrounded,
+ * wasJumpHeld, godMode, alive, respawnAt, score, and respawnSeq -- all of it real per-player
+ * state that movement.ts, damage.ts, and weapons.ts mutate every tick or every death/
+ * respawn. A hash that never mixed these in could report two worlds identical when e.g. one
+ * player was dead and the other alive, or one carried a 10-point scoring lead the other
+ * didn't, silently defeating the determinism check the spec's Testing section documents.
+ * Codex review round 13 (PR #9), finding 2.
  */
 function mixPlayer(hash: number, players: World['players'], id: number): number {
   const base = id * 3;
@@ -49,7 +55,15 @@ function mixPlayer(hash: number, players: World['players'], id: number): number 
   h = mix(h, num(players.velocity, base + 2));
   h = mix(h, num(players.yaw, id));
   h = mix(h, num(players.energy, id));
+  h = mix(h, num(players.onGround, id));
+  h = mix(h, num(players.ski, id));
+  h = mix(h, num(players.wasGrounded, id));
+  h = mix(h, num(players.wasJumpHeld, id));
   h = mix(h, num(players.damage, id));
+  h = mix(h, num(players.godMode, id));
+  h = mix(h, num(players.alive, id));
+  h = mix(h, num(players.respawnAt, id));
+  h = mix(h, num(players.score, id));
   h = mix(h, num(players.weaponSlot, id));
   h = mix(h, num(players.ammo, ammoIndex(id, WeaponId.Spinfusor)));
   h = mix(h, num(players.ammo, ammoIndex(id, WeaponId.Chaingun)));
@@ -59,9 +73,20 @@ function mixPlayer(hash: number, players: World['players'], id: number): number 
   h = mix(h, num(players.weaponTimer, id));
   h = mix(h, num(players.spunUp, id));
   h = mix(h, num(players.grenadeCooldown, id));
+  h = mix(h, num(players.respawnSeq, id));
   return h;
 }
 
+/**
+ * Mixes in every field of ProjectileStore that is real simulation state -- everything
+ * except count/freeIds/pendingFreeIds (store bookkeeping) and active (already gates which
+ * ids this loop visits). Through round 12 this stopped at ownerId and never touched
+ * expiresAtTick or armed, both of which projectiles.ts mutates every tick and both of which
+ * decide observable behavior (when a projectile despawns, whether a grenade can still be
+ * armed to detonate on contact) -- exactly the kind of state a client/server divergence
+ * could disagree on while every mixed field still matched. Codex review round 13 (PR #9),
+ * finding 2.
+ */
 function mixProjectiles(hash: number, world: World): number {
   let h = hash;
   for (let id = 0; id < world.projectiles.count; id += 1) {
@@ -77,10 +102,18 @@ function mixProjectiles(hash: number, world: World): number {
     h = mix(h, num(world.projectiles.velocity, base + 1));
     h = mix(h, num(world.projectiles.velocity, base + 2));
     h = mix(h, num(world.projectiles.ownerId, id));
+    h = mix(h, num(world.projectiles.expiresAtTick, id));
+    h = mix(h, num(world.projectiles.armed, id));
   }
   return h;
 }
 
+/**
+ * Mixes in every field of FlagStore. Through round 12 this stopped at position and never
+ * touched returnAt (the dropped-flag return timer flags.ts counts down every tick) or
+ * standPosition (where a dropped/returned flag heads back to) -- both real per-flag state
+ * that could diverge silently. Codex review round 13 (PR #9), finding 2.
+ */
 function mixFlags(hash: number, world: World): number {
   let h = hash;
   for (let id = 0; id < world.flags.state.length; id += 1) {
@@ -92,6 +125,10 @@ function mixFlags(hash: number, world: World): number {
     h = mix(h, num(world.flags.position, base));
     h = mix(h, num(world.flags.position, base + 1));
     h = mix(h, num(world.flags.position, base + 2));
+    h = mix(h, num(world.flags.standPosition, base));
+    h = mix(h, num(world.flags.standPosition, base + 1));
+    h = mix(h, num(world.flags.standPosition, base + 2));
+    h = mix(h, num(world.flags.returnAt, id));
   }
   return h;
 }
@@ -102,6 +139,12 @@ export function hashWorld(world: World): number {
   hash = mix(hash, world.gameOver ? 1 : 0);
   hash = mix(hash, world.winnerTeam);
   hash = mix(hash, world.gameOverReason);
+  // Set once, by createWorld or createFlags, not touched again after -- but still a real
+  // per-match value that flags.ts's stepFlags compares world.tick against every tick to
+  // decide whether the match ends, so two otherwise-identical worlds with different time
+  // limits would end on different ticks: a real divergence the hash used to miss entirely.
+  // Codex review round 13 (PR #9), finding 2.
+  hash = mix(hash, world.timeLimitTicks);
   hash = mix(hash, num(world.teamScores, 1));
   hash = mix(hash, num(world.teamScores, 2));
   const p = world.players;

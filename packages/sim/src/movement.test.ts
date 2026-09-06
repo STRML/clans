@@ -93,18 +93,25 @@ describe('Light movement', () => {
     expect(world.players.onGround[id]).toBe(0);
     expect(world.players.velocity[id * 3 + 1]).toBeLessThan(0);
     let deathTick = -1;
+    // Tracks the position committed just before the tick that ends up killing the player,
+    // for the round 13 finding 4 assertions below.
+    let yBeforeFinalTick = world.players.position[id * 3 + 1] ?? 0;
     for (let tick = 0; tick < 200; tick += 1) {
+      if (world.players.alive[id] === 0) break;
+      yBeforeFinalTick = world.players.position[id * 3 + 1] ?? 0;
       stepWorld(world, inputMap(id, {}));
       if (world.players.alive[id] === 0 && deathTick < 0) deathTick = world.tick - 1;
     }
     expect(deathTick).toBeGreaterThanOrEqual(0);
     expect(world.players.alive[id]).toBe(0);
     // The fix does NOT teleport the player back to spawn on its own -- only respawnPlayer
-    // (called once dueForRespawn) does that -- and it does not write the falling tick's
-    // own computed position either, so the position sits at the last tick committed
-    // before crossing the plane: just above world.killY, not deep below it.
-    expect(world.players.position[id * 3 + 1]).toBeGreaterThanOrEqual(world.killY);
-    expect(world.players.position[id * 3 + 1]).toBeLessThan(world.killY + 5);
+    // (called once dueForRespawn) does that. But (Codex review round 13, PR #9, finding 4)
+    // it now DOES commit the death tick's own newly-integrated position, since stepFlags
+    // reads world.players.position for a dying carrier's flag-drop point later in this same
+    // stepWorld call: the committed position is strictly past the kill plane and strictly
+    // below where the previous tick left off, not stuck at the pre-death value.
+    expect(world.players.position[id * 3 + 1]).toBeLessThan(world.killY);
+    expect(world.players.position[id * 3 + 1]).toBeLessThan(yBeforeFinalTick);
   });
 
   it('routes a kill-plane death through the real respawn cycle: full energy/ground-state reset once due', () => {

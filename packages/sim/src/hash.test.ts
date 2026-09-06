@@ -54,6 +54,13 @@ describe('hashWorld', () => {
     source.players.yaw[id] = 1.2;
     source.players.energy[id] = 55;
     const target = createWorld(terrain, 1);
+    // Codex review round 13 (PR #9), finding 2: mixPlayer now also covers respawnAt, which
+    // is NOT on the wire snapshot (deliberately -- see snapshot.ts's PlayerSnapshotData) and
+    // so was never something deserializePlayer alone could reproduce. A real client doesn't
+    // conjure a player from nothing on every snapshot either: it tracks one locally (via
+    // addPlayer, same as source here) and reconciles it against incoming snapshots, so
+    // pre-seeding target the same way is the realistic round trip, not a synthetic one.
+    addPlayer(target, { x: 10, y: 0, z: -5 }, 2);
     target.tick = source.tick;
     for (const player of serializeActivePlayers(source)) deserializePlayer(target, player);
     expect(hashWorld(target)).toBe(hashWorld(source));
@@ -164,5 +171,88 @@ describe('hashWorld', () => {
     createFlags(b, stands, 500);
     b.teamScores[1] = 300;
     expect(hashWorld(a)).toBe(hashWorld(b));
+  });
+
+  it("changes when any player field mixPlayer stopped short of through round 12, a projectile's expiry/armed state, a flag's return timer/stand position, or the match time limit differ (Codex review round 13, PR #9, finding 2)", () => {
+    // Through round 12, mixPlayer stopped at grenadeCooldown and never mixed in onGround,
+    // ski, wasGrounded, wasJumpHeld, godMode, alive, respawnAt, score, or respawnSeq;
+    // mixProjectiles never mixed in expiresAtTick or armed; mixFlags never mixed in returnAt
+    // or standPosition; and hashWorld itself never mixed in timeLimitTicks. Two worlds
+    // identical everywhere else but different in exactly one of these fields hashed the
+    // SAME, silently defeating the determinism check. Each field is checked in isolation
+    // against a shared, otherwise-identical baseline, so a fix that only covers some of them
+    // still fails this test. (spawn and landingSpeed are deliberately NOT covered here -- see
+    // mixPlayer's doc comment in hash.ts for why neither is future-affecting state.)
+    const stands = [
+      { team: 1, position: { x: 0, y: 0, z: 0 } },
+      { team: 2, position: { x: 10, y: 0, z: 0 } },
+    ];
+    const baseline = (): World => {
+      const world = createWorld(terrain, 1);
+      addPlayer(world, { x: 1, y: 2, z: 3 }, 1);
+      world.projectiles.active[0] = 1;
+      world.projectiles.count = 1;
+      world.projectiles.type[0] = 0;
+      world.projectiles.position.set([1, 2, 3], 0);
+      createFlags(world, stands);
+      return world;
+    };
+    const before = hashWorld(baseline());
+
+    const onGroundChanged = baseline();
+    onGroundChanged.players.onGround[0] = 1;
+    expect(hashWorld(onGroundChanged)).not.toBe(before);
+
+    const skiChanged = baseline();
+    skiChanged.players.ski[0] = 1;
+    expect(hashWorld(skiChanged)).not.toBe(before);
+
+    const wasGroundedChanged = baseline();
+    wasGroundedChanged.players.wasGrounded[0] = 1;
+    expect(hashWorld(wasGroundedChanged)).not.toBe(before);
+
+    const wasJumpHeldChanged = baseline();
+    wasJumpHeldChanged.players.wasJumpHeld[0] = 1;
+    expect(hashWorld(wasJumpHeldChanged)).not.toBe(before);
+
+    const godModeChanged = baseline();
+    godModeChanged.players.godMode[0] = 1;
+    expect(hashWorld(godModeChanged)).not.toBe(before);
+
+    const aliveChanged = baseline();
+    aliveChanged.players.alive[0] = 0;
+    expect(hashWorld(aliveChanged)).not.toBe(before);
+
+    const respawnAtChanged = baseline();
+    respawnAtChanged.players.respawnAt[0] = 42;
+    expect(hashWorld(respawnAtChanged)).not.toBe(before);
+
+    const scoreChanged = baseline();
+    scoreChanged.players.score[0] = 10;
+    expect(hashWorld(scoreChanged)).not.toBe(before);
+
+    const respawnSeqChanged = baseline();
+    respawnSeqChanged.players.respawnSeq[0] = 1;
+    expect(hashWorld(respawnSeqChanged)).not.toBe(before);
+
+    const expiresAtTickChanged = baseline();
+    expiresAtTickChanged.projectiles.expiresAtTick[0] = 100;
+    expect(hashWorld(expiresAtTickChanged)).not.toBe(before);
+
+    const armedChanged = baseline();
+    armedChanged.projectiles.armed[0] = 1;
+    expect(hashWorld(armedChanged)).not.toBe(before);
+
+    const returnAtChanged = baseline();
+    returnAtChanged.flags.returnAt[0] = 100;
+    expect(hashWorld(returnAtChanged)).not.toBe(before);
+
+    const standPositionChanged = baseline();
+    standPositionChanged.flags.standPosition[0] = 99;
+    expect(hashWorld(standPositionChanged)).not.toBe(before);
+
+    const timeLimitChanged = baseline();
+    timeLimitChanged.timeLimitTicks = 100;
+    expect(hashWorld(timeLimitChanged)).not.toBe(before);
   });
 });

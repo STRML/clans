@@ -157,6 +157,13 @@ export function respawnPlayer(world: World, id: number, spawn: Vec3): void {
   // directly too: it's the only armor this milestone has.
   players.energy[id] = LIGHT_ARMOR.maxEnergy;
   players.onGround[id] = 0;
+  // Codex review round 13, PR #9, finding 3: this reset onGround/wasGrounded/wasJumpHeld but
+  // left ski exactly where death interrupted it, unlike the initial-spawn reset
+  // (world.ts's resetPlayerToSpawn), which clears it. ski is on the wire snapshot
+  // (snapshot.ts), and a respawn happens before that tick's snapshot goes out, so a player
+  // who died mid-ski could receive one snapshot that incorrectly still showed them skiing
+  // right after respawning.
+  players.ski[id] = 0;
   players.wasGrounded[id] = 0;
   players.wasJumpHeld[id] = 0;
   // Codex review round 8, PR #9: health/alive alone cannot tell a full-health-to-full-health

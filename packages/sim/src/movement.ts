@@ -337,10 +337,19 @@ function stepPlayer(
   // env damage (attackerId -1, matching fall damage's own convention) reuses the same
   // already-hardened pendingDeaths -> stepFlags -> dueForRespawn -> respawnPlayer pipeline
   // every other death goes through, so a kill-plane fall now costs the standard 5 s respawn
-  // delay instead of an instant reposition. `body` is intentionally left unwritten here: the
-  // last position committed before this tick's fall is a better flag-drop point than the
-  // out-of-bounds one this tick computed, and dead players are skipped next tick regardless.
+  // delay instead of an instant reposition.
   if (body.y < world.killY) {
+    // Codex review round 13, PR #9, finding 4: round 9 left `body` uncommitted here on the
+    // theory that the previous tick's position was a better flag-drop point than the
+    // out-of-bounds one this tick computed. That's backwards -- stepWorld runs stepFlags
+    // right after stepPlayers, in this same call, and stepFlags reads world.players.position
+    // for a dying carrier's drop point (flags.ts). Leaving the newly-integrated position
+    // uncommitted meant it read the PREVIOUS tick's position, not where the player actually
+    // died, contrary to the spec's failure matrix ("flag drops at death position"). Commit
+    // the real death position (and velocity) before triggering the death, so applyDamage's
+    // pendingDeaths entry and everything stepFlags does with it downstream sees where the
+    // player actually was.
+    writeBody(players, id, body);
     applyDamage(world, id, armor.maxDamage, -1, armor);
     return;
   }

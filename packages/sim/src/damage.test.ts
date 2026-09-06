@@ -3,6 +3,8 @@ import { LIGHT_ARMOR } from './armor.js';
 import {
   addPlayer,
   createWorld,
+  FIXED_DT,
+  GRAVITY,
   setGodMode,
   stepWorld,
   type Heightfield,
@@ -203,20 +205,27 @@ describe('respawnPlayer and dueForRespawn', () => {
     expect(world.players.respawnAt[id]).toBe(-1);
   });
 
-  it('restores energy and clears ground/jump-edge state left over from before death (Codex review round 2, finding 4)', () => {
+  it('restores energy and clears ground/jump-edge/ski state left over from before death (Codex review round 2, finding 4; round 13, finding 3)', () => {
     const world = createWorld(flat, 1);
     const id = addPlayer(world, { x: 0, y: 0, z: 0 });
     // Simulate dying mid-jet with a jump held while airborne, on the way down from an earlier
-    // jump: everything respawnPlayer used to leave untouched.
+    // jump, and mid-ski: everything respawnPlayer used to leave untouched.
     world.players.energy[id] = 0;
     world.players.onGround[id] = 1;
     world.players.wasGrounded[id] = 1;
     world.players.wasJumpHeld[id] = 1;
+    world.players.ski[id] = 1;
     respawnPlayer(world, id, { x: 0, y: 0, z: 0 });
     expect(world.players.energy[id]).toBe(LIGHT_ARMOR.maxEnergy);
     expect(world.players.onGround[id]).toBe(0);
     expect(world.players.wasGrounded[id]).toBe(0);
     expect(world.players.wasJumpHeld[id]).toBe(0);
+    // Codex review round 13, PR #9, finding 3: this used to be left at whatever death
+    // interrupted it, unlike world.ts's resetPlayerToSpawn (the initial-spawn reset), which
+    // already clears ski. ski is on the wire snapshot (snapshot.ts) and a respawn happens
+    // before that tick's snapshot goes out, so a player who died mid-ski could receive one
+    // snapshot that incorrectly still showed them skiing right after respawning.
+    expect(world.players.ski[id]).toBe(0);
   });
 
   it('updates players.spawn to the new respawn point on every respawn (Codex review round 4, finding 7)', () => {
@@ -239,15 +248,24 @@ describe('respawnPlayer and dueForRespawn', () => {
     const holeFlat: Heightfield = { ...flat, emptySquares: new Set([0]) };
     const world = createWorld(holeFlat, 1);
     const id = addPlayer(world, { x: 0, y: 0, z: 0 });
-    world.players.position.set([42, world.killY - 100, 7], id * 3);
+    const startY = world.killY - 100;
+    world.players.position.set([42, startY, 7], id * 3);
     stepWorld(world, new Map([[id, idle]]));
     expect(world.players.alive[id]).toBe(0);
     expect(world.pendingDeaths).toEqual([{ id, attackerId: -1 }]);
     expect(world.players.respawnAt[id]).toBe(RESPAWN_TICKS);
-    // No writeBody happened on the death tick, so the position is untouched, not reset.
+    // Codex review round 13, PR #9, finding 4: movement.ts now commits the newly-integrated
+    // body to world.players.position/velocity BEFORE triggering the kill-plane death, so
+    // stepFlags (which runs later in this same stepWorld call) reads where the player
+    // actually died, not the position from before this tick's own fall. With idle input
+    // (no horizontal movement) the only change this tick is one tick's worth of gravity on y.
     expect(world.players.position[id * 3]).toBe(42);
-    expect(world.players.position[id * 3 + 1]).toBe(world.killY - 100);
+    expect(world.players.position[id * 3 + 1]).toBeCloseTo(
+      startY - GRAVITY * FIXED_DT * FIXED_DT,
+      9,
+    );
     expect(world.players.position[id * 3 + 2]).toBe(7);
+    expect(world.players.velocity[id * 3 + 1]).toBeCloseTo(-GRAVITY * FIXED_DT, 9);
   });
 
   it('increments respawnSeq on every respawn, starting from 0 (Codex review round 8, PR #9)', () => {
