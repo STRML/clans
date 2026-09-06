@@ -172,6 +172,130 @@ describe('hitscan: Laser Rifle', () => {
   });
 });
 
+describe('Chaingun: resolves in the same tick it fires (lag-comp compatible)', () => {
+  it('hits the target present at spawn time, before the target can move away on a later tick', () => {
+    const world = createWorld(flat, 1);
+    const target = addPlayer(world, { x: 0, y: 0, z: 10 });
+    fire(world, {
+      playerId: -1,
+      weaponId: WeaponId.Chaingun,
+      origin: { x: 0, y: 1.6, z: 0 },
+      direction: { x: 0, y: 0, z: 1 },
+    });
+    stepProjectiles(world, FIXED_DT);
+    // If the shot were deferred to the *next* stepProjectiles call -- the old one-tick
+    // spawn latency every other projectile type still uses -- this teleport would have
+    // already taken effect by the time the shot's collision test finally ran, and the
+    // Chaingun's lag-comp rewind window (server/net.ts) would already be closed too.
+    world.players.position[target * 3 + 2] = 10000;
+    stepProjectiles(world, FIXED_DT);
+    expect(LIGHT_ARMOR.maxDamage - world.players.damage[target]!).toBeCloseTo(
+      LIGHT_ARMOR.maxDamage - 0.0825,
+      3,
+    );
+  });
+});
+
+describe('direct hit: nearest target on the ray wins, not the first one found by id', () => {
+  it('hits the nearer of two players on the same ray, even though the farther one has the lower id', () => {
+    const world = createWorld(flat, 1);
+    const far = addPlayer(world, { x: 0, y: 0, z: 12 });
+    const near = addPlayer(world, { x: 0, y: 0, z: 6 });
+    fire(world, {
+      playerId: -1,
+      weaponId: WeaponId.Chaingun,
+      origin: { x: 0, y: 1.6, z: 0 },
+      direction: { x: 0, y: 0, z: 1 },
+    });
+    for (let tick = 0; tick < 5; tick += 1) stepProjectiles(world, FIXED_DT);
+    expect(world.players.damage[near]).toBeGreaterThan(0);
+    expect(world.players.damage[far]).toBe(0);
+  });
+});
+
+describe('grenade/mortar: swept collision prevents tunneling through a player', () => {
+  it('an armed mortar moving faster than a player is wide still registers a hit mid-tick', () => {
+    const world = createWorld(flat, 1);
+    const target = addPlayer(world, { x: 5, y: 0, z: 0 });
+    fire(world, {
+      playerId: -1,
+      weaponId: WeaponId.Mortar,
+      origin: { x: 0, y: 1.15, z: 0 },
+      direction: { x: 1, y: 0, z: 0 },
+    });
+    stepProjectiles(world, FIXED_DT); // spawn only
+    const id = firstProjectile(world);
+    world.projectiles.armed[id] = 1; // skip the 2 s arm delay -- tunneling is orthogonal to it
+    // One tick's ~2 m mortar travel, positioned to jump clean over the target's ~1.2 m wide
+    // hitbox: previous (x=4) and current (post-integration, x>6) both land outside it, so
+    // only a swept segment test -- not an endpoint-only check -- can catch this hit.
+    world.projectiles.position.set([4, 1.15, 0], id * 3);
+    world.projectiles.velocity.set([63.7, 0, 0], id * 3);
+    stepProjectiles(world, FIXED_DT);
+    expect(world.players.damage[target]).toBeGreaterThan(0);
+  });
+});
+
+const ridgeGrid: Heightfield = {
+  gridSize: 5,
+  squareSize: 1,
+  originX: 0,
+  originY: 0,
+  originZ: 0,
+  heightScale: 1,
+  // Row 0 (z=0) is flat except columns 2-3, which form a 100 m tall wall spanning x in
+  // [2, 3): heights[2] and heights[3] are the two grid corners of that cell along row 0.
+  heights: (() => {
+    const h = new Uint16Array(25);
+    h[2] = 100;
+    h[3] = 100;
+    return h;
+  })(),
+};
+
+describe('terrain: swept collision catches a ridge crossed within one tick', () => {
+  it('detonates against a spike between the previous and current sample points instead of tunneling through it', () => {
+    const world = createWorld(ridgeGrid, 1);
+    fire(world, { origin: { x: 0, y: 1, z: 0 }, direction: { x: 1, y: 0, z: 0 } });
+    stepProjectiles(world, FIXED_DT); // spawn only, at the origin
+    const id = firstProjectile(world);
+    // One tick's travel spans x=1.5 -> x=4.7, sailing straight through the x∈[2,3] wall.
+    // An endpoint-only check samples height=0 at x=4.7 (past the wall) and misses it.
+    world.projectiles.position.set([1.5, 1, 0], id * 3);
+    world.projectiles.velocity.set([100, 0, 0], id * 3);
+    stepProjectiles(world, FIXED_DT);
+    expect(world.projectiles.active[id]).toBe(0); // detonated against the ridge, not tunneled
+  });
+});
+
+describe('terrain: an empty square is a hole, not solid ground', () => {
+  it('a projectile falling toward an empty square passes through instead of detonating on it', () => {
+    const holeFlat: Heightfield = { ...flat, emptySquares: new Set([0]) };
+    const world = createWorld(holeFlat, 1);
+    fire(world, { origin: { x: 0, y: 5, z: 500 }, direction: { x: 0, y: -1, z: 0 } });
+    stepProjectiles(world, FIXED_DT); // spawn
+    const id = firstProjectile(world);
+    for (let tick = 0; tick < 10; tick += 1) stepProjectiles(world, FIXED_DT);
+    expect(world.projectiles.active[id]).toBe(1); // still falling through the hole
+  });
+});
+
+describe('Laser Rifle: terrain blocks line of sight', () => {
+  it('a target behind a ridge takes no damage even though it is within max range', () => {
+    const world = createWorld(ridgeGrid, 1);
+    const target = addPlayer(world, { x: 4, y: 0, z: 0 });
+    fire(world, {
+      playerId: -1,
+      weaponId: WeaponId.LaserRifle,
+      origin: { x: 0, y: 1, z: 0 },
+      direction: { x: 1, y: 0, z: 0 },
+      energyScale: 1,
+    });
+    stepProjectiles(world, FIXED_DT);
+    expect(world.players.damage[target]).toBe(0);
+  });
+});
+
 describe('grenade altFire', () => {
   it('spawns a Grenade-type projectile inheriting the shooter velocity, at the ours-picked 25 m/s throw speed', () => {
     const world = createWorld(flat, 1);

@@ -70,6 +70,8 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
     projectiles: createProjectileStore(),
     pendingDeaths: [],
     pendingFireEvents: [],
+    lastFireEvents: [],
+    pendingAmmoRefunds: [],
     flags: {
       team: new Uint8Array(0),
       state: new Uint8Array(0),

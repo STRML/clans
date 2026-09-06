@@ -163,6 +163,20 @@ export interface FireEvent {
   energyScale: number; // 1 for every weapon except the Laser Rifle
 }
 
+/**
+ * Recorded by projectiles.ts's spawnStored when the 256-slot projectile store is full and a
+ * shot can't be allocated, so the ammo it already spent optimistically (tryFireWeapon /
+ * tryThrowGrenade decrement ammo before the store is consulted) doesn't just vanish. Carries
+ * weaponId and isAltFire, not just the playerId, because crediting back a shot means crediting
+ * the *specific* thing that was spent -- a weapon's ammo slot via ammoIndex, or the separate
+ * grenade count for an alt-fire throw -- and there's no way to recover that from a bare id.
+ */
+export interface AmmoRefund {
+  playerId: number;
+  weaponId: WeaponId;
+  isAltFire: boolean;
+}
+
 export function ammoIndex(id: number, weaponId: WeaponId): number {
   return id * WEAPON_COUNT + weaponId;
 }
@@ -331,11 +345,32 @@ function stepOnePlayer(world: World, id: number, input: PlayerInput, dt: number)
   tryThrowGrenade(world, id, input);
 }
 
+/**
+ * Credits back the ammo or grenade a shot spent last tick when projectiles.ts discovered,
+ * one tick later, that the projectile store had no room for it (world.pendingAmmoRefunds is
+ * recorded there, then read and cleared here at the start of stepWeapons's own next call --
+ * the same one-tick-later boundary pendingDeaths already crosses between being produced and
+ * consumed). -1 ammo means infinite (Laser Rifle, Blaster) and is left untouched.
+ */
+function applyPendingAmmoRefunds(world: World): void {
+  for (const refund of world.pendingAmmoRefunds) {
+    if (refund.isAltFire) {
+      world.players.grenades[refund.playerId] = (world.players.grenades[refund.playerId] ?? 0) + 1;
+      continue;
+    }
+    const index = ammoIndex(refund.playerId, refund.weaponId);
+    const ammo = world.players.ammo[index] ?? 0;
+    if (ammo >= 0) world.players.ammo[index] = ammo + 1;
+  }
+  world.pendingAmmoRefunds = [];
+}
+
 export function stepWeapons(
   world: World,
   inputs: ReadonlyMap<number, PlayerInput>,
   dt: number,
 ): void {
+  applyPendingAmmoRefunds(world);
   world.pendingFireEvents = [];
   for (let id = 0; id < world.players.count; id += 1) {
     if (!world.players.active[id] || !world.players.alive[id]) continue;

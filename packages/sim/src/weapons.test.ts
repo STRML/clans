@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { LIGHT_ARMOR } from './armor.js';
 import { addPlayer, createWorld, type Heightfield, type PlayerInput } from './index.js';
+import { PROJECTILE_CAPACITY, stepProjectiles } from './projectiles.js';
 import {
   ammoIndex,
   GRENADE_DATA,
@@ -189,6 +190,35 @@ describe('slot switching', () => {
     stepWeapons(world, new Map([[id, { ...IDLE, slot: 2 }]]), FIXED_DT);
     expect(world.players.weaponSlot[id]).toBe(WeaponId.Chaingun);
     expect(world.players.weaponState[id]).toBe(WeaponState.Ready);
+  });
+});
+
+describe('projectile-capacity exhaustion refunds the shot one tick later', () => {
+  it('credits back one disc when the 256-slot projectile store is full', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    world.projectiles.count = PROJECTILE_CAPACITY; // store full: allocate() can't fit another
+    const ammoBefore = world.players.ammo[ammoIndex(id, WeaponId.Spinfusor)]!;
+    fireOnce(world, id, WeaponId.Spinfusor);
+    expect(world.players.ammo[ammoIndex(id, WeaponId.Spinfusor)]).toBe(ammoBefore - 1);
+    stepProjectiles(world, FIXED_DT); // fails to allocate a slot for the shot
+    // Not refunded yet: the credit lands at the start of the *next* stepWeapons call, one
+    // tick later, the same boundary pendingDeaths already crosses.
+    expect(world.players.ammo[ammoIndex(id, WeaponId.Spinfusor)]).toBe(ammoBefore - 1);
+    stepWeapons(world, new Map([[id, IDLE]]), FIXED_DT);
+    expect(world.players.ammo[ammoIndex(id, WeaponId.Spinfusor)]).toBe(ammoBefore);
+  });
+
+  it('credits back one grenade, not ammo, when a thrown grenade fails to allocate', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    world.projectiles.count = PROJECTILE_CAPACITY;
+    const grenadesBefore = world.players.grenades[id]!;
+    stepWeapons(world, new Map([[id, { ...IDLE, altFire: true }]]), FIXED_DT);
+    expect(world.players.grenades[id]).toBe(grenadesBefore - 1);
+    stepProjectiles(world, FIXED_DT);
+    stepWeapons(world, new Map([[id, IDLE]]), FIXED_DT);
+    expect(world.players.grenades[id]).toBe(grenadesBefore);
   });
 });
 

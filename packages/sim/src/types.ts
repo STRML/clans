@@ -79,6 +79,18 @@ export interface World {
   projectiles: ProjectileStore;
   pendingDeaths: Array<{ id: number; attackerId: number }>;
   pendingFireEvents: import('./weapons.js').FireEvent[];
+  /** This tick's fire events, set by stepProjectiles right where it drains
+   *  pendingFireEvents, but -- unlike pendingFireEvents -- not cleared again within that
+   *  same call. It survives stepFlags and stepWorld's return, so server/net.ts can build a
+   *  LaserFired broadcast from it after stepWorld already returned; the next tick's
+   *  stepProjectiles call overwrites it with that tick's events (or an empty array if none
+   *  fired), the same way pendingDeaths gets cleared by the next tick's stepPlayers. */
+  lastFireEvents: import('./weapons.js').FireEvent[];
+  /** Shots/throws that spent ammo but found the projectile store full, recorded by
+   *  projectiles.ts's spawnStored. Read and cleared by stepWeapons at the start of its own
+   *  next call, which credits back the spent ammo or grenade -- see weapons.ts's
+   *  AmmoRefund and applyPendingAmmoRefunds. */
+  pendingAmmoRefunds: import('./weapons.js').AmmoRefund[];
   flags: FlagStore;
   teamScores: Uint16Array;
   gameOver: boolean;
