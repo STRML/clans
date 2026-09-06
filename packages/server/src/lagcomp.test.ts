@@ -53,7 +53,10 @@ describe('recordHistory and positionAtTick', () => {
       world.tick = step;
       recordHistory(history, world);
     }
-    expect(positionAtTick(history, id, 0)?.x).toBe(2); // capacity 4: ticks 0-1 fell off
+    // capacity 4: ticks 0-1 fell off, so the oldest kept sample is tick 2 -- a request for
+    // tick 0 asks for history older than anything kept, and must come back null rather than
+    // clamping to that oldest sample (Codex review round 7, P2).
+    expect(positionAtTick(history, id, 0)).toBeNull();
     expect(positionAtTick(history, id, 3)?.x).toBe(3);
     expect(positionAtTick(history, id, 100)?.x).toBe(5); // clamps to the newest sample
   });
@@ -110,10 +113,13 @@ describe('clearHistory', () => {
     world.tick = 10;
     recordHistory(history, world); // the new occupant's first-ever recorded sample
 
-    // A rewind target close to but before that first sample would, without the fix,
-    // clamp to the old occupant's stale trail instead of finding nothing meaningful yet.
-    const sample = positionAtTick(history, newPlayer, world.tick - 1);
-    expect(sample?.z).toBe(10);
+    // A rewind target before that first sample has no coverage at all -- with clearHistory
+    // in place there's no stale trail to clamp onto, and round 7's fix (positionAtTick
+    // rejects a sample newer than the requested tick) means it also no longer clamps to the
+    // new occupant's own first sample; it returns null for "no evidence" either way.
+    expect(positionAtTick(history, newPlayer, world.tick - 1)).toBeNull();
+    // The sample that does exist at tick 10 is the new occupant's own, not a stale one.
+    expect(positionAtTick(history, newPlayer, world.tick)?.z).toBe(10);
   });
 
   it("without clearing, a reused id inherits the old occupant's stale position (documents the bug)", () => {
@@ -153,6 +159,7 @@ describe('rewinding a position before stepWorld corrupts everything else it touc
     const history = createPositionHistory();
     // This player really was standing at historicalPosition a few ticks ago.
     history.samples.set(bystander, [{ tick: 0, ...historicalPosition }]);
+    world.tick = 5; // "a few ticks ago": targetTick below lands exactly on the tick-0 sample
 
     // The exact pattern net.ts used to run: rewind first, run the FULL simulation against
     // the rewound position, restore position afterward -- and nothing else.
@@ -274,5 +281,46 @@ describe('rewindOthers excludes a player with no history sample (Codex review ro
 
     restorePositions(world, handle);
     expect(world.players.position[target * 3 + 2]).toBe(100);
+  });
+});
+
+describe('positionAtTick rejects a sample newer than the requested tick (Codex review round 7, P2)', () => {
+  it('excludes a just-respawned player from rewindOthers instead of rewinding them onto their current, post-respawn position', () => {
+    const world = createWorld(flat, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const target = addPlayer(world, { x: 0, y: 0, z: 500 }); // pre-respawn corpse trail
+    const history = createPositionHistory();
+    for (let step = 0; step < 5; step += 1) {
+      world.players.position.set([0, 0, 500], target * 3);
+      world.tick = step;
+      recordHistory(history, world);
+    }
+
+    // Respawn clears the trail -- net.ts's respawnDuePlayers calls respawnPlayer then
+    // clearHistory, in that order, reproduced directly here as in the round-3 block above.
+    respawnPlayer(world, target, { x: 0, y: 0, z: 10 });
+    clearHistory(history, target);
+
+    // Exactly one fresh post-respawn sample gets recorded, on the very next tick.
+    world.tick = 6;
+    recordHistory(history, world);
+
+    // A laggy shooter's rewind window reaches back further than that one fresh sample: there
+    // is still no evidence of where this player was at tick 4, only where they are now (tick
+    // 6). The oldest -- and only -- kept sample is newer than the requested tick, so this
+    // must come back null rather than clamping to it.
+    expect(positionAtTick(history, target, 4)).toBeNull();
+
+    const handle = rewindOthers(world, history, [shooter], 2); // targetTick = world.tick - 2 = 4
+    // Pre-fix, positionAtTick fell back to the one post-respawn sample it had (tick 6, z=10)
+    // instead of recognizing tick 4 isn't covered, so rewindOthers treated the
+    // freshly-respawned player as legitimately rewound to exactly where they now stand --
+    // letting a shot the live simulation correctly missed still land right after respawn.
+    expect(world.players.active[target]).toBe(0);
+    expect(handle.deactivated).toEqual([target]);
+    expect(world.players.position[target * 3 + 2]).toBe(10); // untouched: nothing to rewind to
+
+    restorePositions(world, handle);
+    expect(world.players.active[target]).toBe(1);
   });
 });

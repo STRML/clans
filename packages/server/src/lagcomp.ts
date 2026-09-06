@@ -57,7 +57,21 @@ export function recordHistory(history: PositionHistory, world: World): void {
   }
 }
 
-/** The newest recorded sample at or before `tick`, clamped to the oldest kept sample. */
+/**
+ * The newest recorded sample at or before `tick`, or `null` if no sample covers it.
+ *
+ * `list` is oldest-first (see `recordHistory`), so `list[0]` is the oldest sample still
+ * kept. If even that oldest sample is newer than `tick`, history simply doesn't reach back
+ * that far -- e.g. a respawn cleared it and only one fresh post-respawn sample has been
+ * recorded since. Returning that sample anyway (the old behavior: initialize `chosen` to
+ * `list[0]` and fall through the loop untouched) silently substituted a post-respawn
+ * position for a pre-respawn rewind request, which is exactly backwards from "we have no
+ * evidence" -- it let a lag-comp recheck see the freshly-respawned player exactly where
+ * they currently stand, so a shot the live simulation correctly missed could still land
+ * (Codex review round 7, P2). Returning `null` here instead makes this case indistinguishable
+ * from "no history at all" to callers, so `rewindOthers`'s existing `!sample` branch already
+ * excludes the player correctly -- no separate handling needed there.
+ */
 export function positionAtTick(
   history: PositionHistory,
   playerId: number,
@@ -65,6 +79,7 @@ export function positionAtTick(
 ): PositionSample | null {
   const list = history.samples.get(playerId);
   if (!list || list.length === 0) return null;
+  if (list[0]!.tick > tick) return null;
   let chosen = list[0]!;
   for (const sample of list) {
     if (sample.tick > tick) break;
