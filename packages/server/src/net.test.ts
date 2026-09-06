@@ -1,7 +1,15 @@
 import net from 'node:net';
 import { WebSocket } from 'ws';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { addPlayer, createWorld, type Heightfield, type PlayerInput, type World } from '@clans/sim';
+import {
+  addPlayer,
+  createFlags,
+  createWorld,
+  FlagState,
+  type Heightfield,
+  type PlayerInput,
+  type World,
+} from '@clans/sim';
 import {
   decodeSnapshot,
   decodeWelcome,
@@ -384,6 +392,39 @@ describe('startNetServer', () => {
     const first = decodeSnapshot(await firstPromise, null);
     expect(first.tick).toBe(world.tick);
     client.close();
+  });
+
+  it('drops a carried flag on disconnect instead of leaving it stuck on the removed player forever', async () => {
+    // Codex PR #9 review, finding 2 (P1): handleClose removed the disconnecting player
+    // but never dropped any flag they were carrying. Flag drops only ever ran off
+    // world.pendingDeaths (stepFlags's dropCarriedFlagsOnDeath), and a disconnect never
+    // populated it, so the flag stayed Carried forever, attached to a player id that no
+    // longer existed, with no return timer running -- permanently stuck for the match.
+    createFlags(world, [
+      { team: 1, position: { x: 0, y: 0, z: 0 } },
+      { team: 2, position: { x: 8, y: 0, z: 8 } },
+    ]);
+    const client = await connect(TEST_PORT);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    const carrierId = welcome.playerId;
+    const enemyFlagId = welcome.team === 1 ? 1 : 0;
+
+    world.players.position.set([5, 0, 5], carrierId * 3);
+    world.flags.state[enemyFlagId] = FlagState.Carried;
+    world.flags.carrierId[enemyFlagId] = carrierId;
+    world.flags.returnAt[enemyFlagId] = -1;
+
+    const closed = new Promise<void>((resolve) => client.once('close', () => resolve()));
+    client.close();
+    await closed;
+    await wait(20);
+
+    expect(world.players.active[carrierId]).toBe(0);
+    expect(world.flags.state[enemyFlagId]).not.toBe(FlagState.Carried);
+    expect(world.flags.carrierId[enemyFlagId]).toBe(-1);
+    expect(world.flags.returnAt[enemyFlagId]).toBeGreaterThanOrEqual(world.tick);
   });
 
   it('rejects a bind failure through `ready` instead of hanging or crashing unhandled', async () => {

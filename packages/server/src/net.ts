@@ -4,6 +4,7 @@ import {
   FIXED_TICK_MS,
   FlagState,
   LIGHT_ARMOR,
+  RETURN_TICKS,
   WEAPON_DATA,
   WeaponId,
   addPlayer,
@@ -12,6 +13,7 @@ import {
   raySphereDistance,
   removePlayer,
   respawnPlayer,
+  sampleTerrain,
   serializeActivePlayers,
   stepWorld,
   type FireEvent,
@@ -248,6 +250,29 @@ function handleMessage(
   else if (type === MessageType.God) handleGod(clients, godPlayers, socket, bytes);
 }
 
+/**
+ * Drops every flag `playerId` is carrying at their last known position, the same terminal
+ * state a real death leaves a flag in (flags.ts's dropFlag, not exported). This deliberately
+ * does not reuse `world.pendingDeaths`: movement.ts's stepPlayers clears that array at the
+ * very start of every stepWorld call, before stepFlags ever runs, so a disconnect -- which
+ * fires from a WebSocket 'close' event between ticks, never inside stepWorld -- would have
+ * its pendingDeaths entry wiped out before the next tick's stepFlags could see it. Dropping
+ * the flag here, synchronously, needs no sim change and cannot land on the wrong tick.
+ */
+function dropFlagsCarriedBy(world: World, playerId: number): void {
+  const base = playerId * 3;
+  const x = world.players.position[base] ?? 0;
+  const z = world.players.position[base + 2] ?? 0;
+  const y = sampleTerrain(world.terrain, x, z).height;
+  for (let flagId = 0; flagId < world.flags.state.length; flagId += 1) {
+    if (world.flags.carrierId[flagId] !== playerId) continue;
+    world.flags.state[flagId] = FlagState.Dropped;
+    world.flags.position.set([x, y, z], flagId * 3);
+    world.flags.carrierId[flagId] = -1;
+    world.flags.returnAt[flagId] = world.tick + RETURN_TICKS;
+  }
+}
+
 function handleClose(
   world: World,
   clients: Map<WebSocket, ClientEntry>,
@@ -256,6 +281,7 @@ function handleClose(
 ): void {
   const entry = clients.get(socket);
   if (!entry) return;
+  dropFlagsCarriedBy(world, entry.session.playerId);
   removePlayer(world, entry.session.playerId);
   godPlayers.delete(entry.session.playerId);
   clients.delete(socket);
