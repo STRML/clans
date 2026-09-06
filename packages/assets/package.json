@@ -18,6 +18,10 @@
     "pngjs": "^7.0.0"
   },
   "devDependencies": {
-    "@types/pngjs": "^6.0.5"
+    "@gltf-transform/core": "^4.5.0",
+    "@gltf-transform/extensions": "^4.5.0",
+    "@types/pngjs": "^6.0.5",
+    "draco3dgltf": "^1.5.7",
+    "gl-matrix": "^3.4.4"
   }
 }
