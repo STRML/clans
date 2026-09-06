@@ -512,7 +512,12 @@ function applyLagCompensatedHits(
   history: PositionHistory,
 ): void {
   for (const event of world.lastFireEvents) {
-    if (!HITSCAN_WEAPONS.has(event.weaponId) || event.hitPlayerId !== -1) continue;
+    // Round 4: only recheck a genuine live miss. `resolved` is false when the shot never
+    // actually ran its hit-test at all (e.g. the 256-slot projectile store was full), which
+    // otherwise looks identical to a real miss (`hitPlayerId === -1`) and would let lag comp
+    // apply damage from a "shot" that structurally never existed.
+    if (!HITSCAN_WEAPONS.has(event.weaponId) || !event.resolved || event.hitPlayerId !== -1)
+      continue;
     const pingMs = pingForPlayer(clients, event.playerId);
     const rewindTicks = Math.round(Math.min(pingMs, REWIND_CAP_MS) / FIXED_TICK_MS);
     if (rewindTicks <= 0) continue;

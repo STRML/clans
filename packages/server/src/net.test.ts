@@ -960,6 +960,69 @@ describe('startNetServer', () => {
     lagServer.close();
   });
 
+  it('never applies a lag-compensated hit for a Chaingun shot that never actually spawned (Codex round 4, finding 3)', async () => {
+    // With the projectile store full, spawnStored returns null and the shot's hit-test never
+    // runs -- FireEvent.hitPlayerId stays at its default -1, indistinguishable from a genuine
+    // live miss unless applyLagCompensatedHits also checks the new `resolved` flag. Put the
+    // target directly in the shot's line so an unconditional recheck WOULD have hit them.
+    let clock = 0;
+    const lagServer = startNetServer({ world, spawns, port: TEST_PORT + 9, now: () => clock });
+    await lagServer.ready;
+    // allocate() only checks count/freeIds, not which slots are actually marked active --
+    // exhaust just those two fields so the store looks full without any phantom projectiles
+    // actually existing for stepProjectiles to process.
+    world.projectiles.count = world.projectiles.active.length;
+    world.projectiles.freeIds = [];
+
+    const target = addPlayer(world, { x: 0, y: 0, z: 10 }, 2);
+
+    const shooter = await connect(TEST_PORT + 9);
+    const welcomePromise = receive(shooter);
+    shooter.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    world.players.position.set([0, 0, 0], welcome.playerId * 3);
+
+    const firstPromise = receive(shooter);
+    lagServer.tick(2);
+    const first = decodeSnapshot(await firstPromise, null);
+    clock = 150; // establishes a 150ms ping so a real hit would be rewind-eligible
+    shooter.send(encodeAck({ snapshotId: first.snapshotId }));
+    await wait(20);
+
+    const idle: NetInputSample = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+    };
+    shooter.send(
+      encodeInput({
+        sequence: 1,
+        samples: [
+          { ...idle, slot: 2 },
+          { ...idle, slot: 2 },
+          { ...idle, slot: 2 },
+        ],
+      }),
+    );
+    await wait(20);
+    lagServer.tick(20); // slot switch to Chaingun only
+
+    const fire: NetInputSample = { ...idle, slot: 2, fire: true };
+    shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
+    await wait(20);
+    lagServer.tick(21); // fires into a full projectile store: never resolves, never a "shot"
+
+    expect(world.players.damage[target]).toBe(0);
+    shooter.close();
+    lagServer.close();
+  });
+
   it('does not respawn a due player on the tick the match ends (Codex round 4, finding 6)', () => {
     // stepWorld freezes the sim once world.gameOver is true, but that flag can flip to true
     // partway through the very stepWorld call that sets it (here, the time limit landing on
