@@ -126,6 +126,7 @@ export interface World {
   terrain: Heightfield;
   /** Below this height a player has fallen out of the world and returns to spawn. */
   killY: number;
+  interiors: import('./interiors.js').InteriorInstance[];
   players: PlayerStore;
   projectiles: ProjectileStore;
   pendingDeaths: Array<{ id: number; attackerId: number }>;

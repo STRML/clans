@@ -1,5 +1,6 @@
 import { armorFor, type ArmorData } from './armor.js';
 import { applyDamage, applyFallDamage } from './damage.js';
+import { resolveSphereAgainstInteriors } from './interiors.js';
 import { sampleTerrain, type TerrainSample } from './terrain.js';
 import type { PlayerInput, PlayerStore, World } from './types.js';
 
@@ -315,6 +316,32 @@ function writeState(
   players.wasJumpHeld[id] = input.jump ? 1 : 0;
 }
 
+/** Ours: a two-sphere approximation of the player capsule (feet, chest) rather than a full
+ *  swept capsule — the sim already treats a player as one sphere for hit detection
+ *  (damage.ts's playerHitbox), so this reuses the same "close enough for a browser demo"
+ *  bar rather than introducing a second, more precise player shape only interiors use. */
+function resolveInteriors(world: World, body: Body, armor: ArmorData): void {
+  if (world.interiors.length === 0) return;
+  const [boxX, boxY, height] = armor.boundingBox;
+  const radius = Math.max(boxX, boxY) / 2;
+  const feet = { x: body.x, y: body.y + radius, z: body.z };
+  const chest = { x: body.x, y: body.y + height - radius, z: body.z };
+  const push =
+    resolveSphereAgainstInteriors(world.interiors, chest, radius) ??
+    resolveSphereAgainstInteriors(world.interiors, feet, radius);
+  if (!push) return;
+  body.x += push.x;
+  body.y += push.y;
+  body.z += push.z;
+  const len = Math.hypot(push.x, push.y, push.z) || 1;
+  const into = (body.vx * push.x + body.vy * push.y + body.vz * push.z) / len;
+  if (into < 0) {
+    body.vx -= (into * push.x) / len;
+    body.vy -= (into * push.y) / len;
+    body.vz -= (into * push.z) / len;
+  }
+}
+
 function stepPlayer(
   world: World,
   id: number,
@@ -329,6 +356,7 @@ function stepPlayer(
   const forces = applyForces(players, id, body, input, ctx, armor, dt);
   applyResistance(body, armor, dt);
   const contact = integrate(world, body, ctx.grounded, forces.jumped || forces.jetted, dt);
+  resolveInteriors(world, body, armor);
   // Falling out of the world is a real death, not a parallel "just move them back" shortcut
   // (Codex review round 9, PR #9, P1): the old position-only reset skipped pendingDeaths
   // entirely, so stepFlags never saw the death, a carried flag never dropped, and damage/

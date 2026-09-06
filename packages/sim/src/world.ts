@@ -40,6 +40,7 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
     random: { value: seed || 1 },
     terrain,
     killY: lowestTerrainHeight(terrain) - KILL_DEPTH,
+    interiors: [],
     players: {
       count: 0,
       freeIds: [],
