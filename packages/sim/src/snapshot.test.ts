@@ -10,7 +10,7 @@ import {
   serializePlayer,
   type Heightfield,
 } from './index.js';
-import { ammoIndex, WeaponId } from './weapons.js';
+import { ammoIndex, WeaponId, WeaponState } from './weapons.js';
 
 const terrain: Heightfield = {
   gridSize: 2,
@@ -50,6 +50,9 @@ describe('player snapshots', () => {
       chaingunAmmo: LIGHT_ARMOR.chaingunAmmo,
       mortarAmmo: LIGHT_ARMOR.mortarAmmo,
       grenades: LIGHT_ARMOR.grenadeCount,
+      weaponState: WeaponState.Ready,
+      weaponTimer: 0,
+      spunUp: 0,
     });
   });
 
@@ -83,6 +86,9 @@ describe('player snapshots', () => {
       chaingunAmmo: 50,
       mortarAmmo: 4,
       grenades: 3,
+      weaponState: WeaponState.Reload,
+      weaponTimer: 0.35,
+      spunUp: 1,
     });
     expect(world.players.count).toBe(4);
     expect(world.players.active[3]).toBe(1);
@@ -106,6 +112,9 @@ describe('player snapshots', () => {
       chaingunAmmo: 50,
       mortarAmmo: 4,
       grenades: 3,
+      weaponState: WeaponState.Reload,
+      weaponTimer: 0.35,
+      spunUp: 1,
     });
   });
 
@@ -145,5 +154,29 @@ describe('player snapshots', () => {
     expect(target.players.ammo[ammoIndex(id, WeaponId.Chaingun)]).toBe(33);
     expect(target.players.ammo[ammoIndex(id, WeaponId.Mortar)]).toBe(1);
     expect(target.players.grenades[id]).toBe(4);
+  });
+
+  it('round-trips the weapon state machine (weaponState, weaponTimer, spunUp) through serialize/deserialize', () => {
+    // Round 11 (PR #9): round 10 wired ammo/grenades so a lost fire input's ammo drift
+    // self-heals within one snapshot, but the state MACHINE driving fire eligibility
+    // (weapons.ts's stepWeapons) was still missing from the wire entirely. Without these
+    // three fields round-tripping, a client left in a stale Firing state by a lost input
+    // has nothing to correct it against, and stepWeapons's fire-eligibility check (only
+    // Ready/NoAmmo may fire) would go on suppressing a real subsequent shot indefinitely.
+    const world = createWorld(terrain, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    world.players.weaponState[id] = WeaponState.Firing;
+    world.players.weaponTimer[id] = 1.218;
+    world.players.spunUp[id] = 1;
+    const data = serializePlayer(world, id);
+    expect(data.weaponState).toBe(WeaponState.Firing);
+    expect(data.weaponTimer).toBeCloseTo(1.218, 3);
+    expect(data.spunUp).toBe(1);
+
+    const target = createWorld(terrain, 1);
+    deserializePlayer(target, data);
+    expect(target.players.weaponState[id]).toBe(WeaponState.Firing);
+    expect(target.players.weaponTimer[id]).toBeCloseTo(1.218, 3);
+    expect(target.players.spunUp[id]).toBe(1);
   });
 });

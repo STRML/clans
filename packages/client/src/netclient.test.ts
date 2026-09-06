@@ -226,6 +226,9 @@ describe('NetClient', () => {
       chaingunAmmo: 100,
       mortarAmmo: 0,
       grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
     };
     const state1 = { ...base, x: 1, z: 0 };
     const state2 = { ...base, x: 2, z: 0 };
@@ -406,6 +409,9 @@ describe('NetClient', () => {
       chaingunAmmo: 100,
       mortarAmmo: 0,
       grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
     };
     const delta = encodeSnapshot(
       7,
@@ -461,6 +467,9 @@ describe('NetClient', () => {
       chaingunAmmo: 100,
       mortarAmmo: 0,
       grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(() =>
@@ -515,6 +524,9 @@ describe('NetClient', () => {
       chaingunAmmo: 100,
       mortarAmmo: 0,
       grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
 
@@ -611,6 +623,9 @@ describe('NetClient', () => {
       chaingunAmmo: 100,
       mortarAmmo: 0,
       grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
     expect(client.world.players.wasGrounded[0]).toBe(0);
@@ -731,6 +746,9 @@ describe('NetClient', () => {
       chaingunAmmo: 100,
       mortarAmmo: 0,
       grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
     };
     const extras: WorldExtras = {
       projectiles: [],
@@ -776,6 +794,9 @@ describe('NetClient', () => {
       chaingunAmmo: 100,
       mortarAmmo: 0,
       grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(client.localHealth).toBeCloseTo(0.4);
@@ -890,6 +911,9 @@ describe('NetClient', () => {
       chaingunAmmo: 0,
       mortarAmmo: 0,
       grenades: 0,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -949,6 +973,9 @@ describe('NetClient', () => {
       chaingunAmmo: 0,
       mortarAmmo: 0,
       grenades: 0,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [alive], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -1013,6 +1040,9 @@ describe('NetClient', () => {
       chaingunAmmo: 0,
       mortarAmmo: 0,
       grenades: 0,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [fullHealth], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -1092,12 +1122,98 @@ describe('NetClient', () => {
       chaingunAmmo: 100,
       mortarAmmo: 0,
       grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 5, 2, [serverState], null, emptyExtras())]);
 
     // Self-healed to the server's authoritative value on this very next snapshot, instead
     // of staying stuck at the wrongly-predicted 14 until the player's next death.
     expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+  });
+
+  it('self-heals a lost-input weapon-state-machine prediction drift so a stale Firing state cannot block the next real shot (Codex review round 11, PR #9)', () => {
+    // Round 10 fixed ammo (see the test above) but left weaponState/weaponTimer/spunUp --
+    // the actual fire-eligibility state MACHINE (sim/weapons.ts's stepWeapons) -- off the
+    // wire entirely. So a lost fire input could get its ammo repaired on the very next
+    // snapshot while staying stuck predicting Firing, and stepWeapons only allows firing
+    // from Ready/NoAmmo: the player's next real fire attempt was silently suppressed for up
+    // to a full fire-cycle duration (1.25 s for the Spinfusor) even with full ammo restored.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 30 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    client.world.players.weaponSlot[0] = WeaponId.Spinfusor;
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
+
+    const fireInput: PlayerInput = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: true,
+      altFire: false,
+      slot: 0,
+    };
+    // sequence 1: predicts a Spinfusor shot locally -- this input never actually reaches
+    // the server (lost or evicted), exactly like the ammo self-heal test above.
+    client.tick(fireInput);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(14);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Firing);
+    // fireTime (1.25s) minus one FIXED_DT tick of immediate decrement -- the exact figure
+    // from the round 11 repro.
+    expect(client.world.players.weaponTimer[0]).toBeCloseTo(1.25 - FIXED_DT, 5);
+
+    // The server's authoritative snapshot: it never saw the fire input, so it stayed Ready
+    // at full ammo, and lastInputSequence of 1 means reconcile will not replay sequence 1
+    // back on top of the corrected baseline below.
+    const serverState = {
+      id: 0,
+      team: 0,
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      yaw: 0,
+      energy: 60,
+      health: 60,
+      weaponSlot: WeaponId.Spinfusor,
+      onGround: 0 as const,
+      ski: 0 as const,
+      respawnSeq: 0,
+      discAmmo: 15,
+      chaingunAmmo: 100,
+      mortarAmmo: 0,
+      grenades: 5,
+      weaponState: WeaponState.Ready,
+      weaponTimer: 0,
+      spunUp: 0 as const,
+    };
+    transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
+
+    // Self-healed: ammo (round 10) AND the state machine itself (round 11) now match the
+    // server's authoritative values, not just ammo.
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
+    expect(client.world.players.weaponTimer[0]).toBe(0);
+    expect(client.world.players.spunUp[0]).toBe(0);
+
+    // The real regression: a subsequent local fire input must actually produce a fire
+    // event, not be suppressed by a stale Firing state stepWeapons would otherwise still
+    // be sitting in.
+    client.tick(fireInput);
+    // world.pendingFireEvents is drained back to [] within the same stepWorld tick
+    // (projectiles.ts's stepProjectiles); world.lastFireEvents is what survives the tick
+    // for a caller -- see FireEvent's own doc comment in weapons.ts.
+    expect(client.world.lastFireEvents).toHaveLength(1);
+    expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(14);
+    expect(client.world.players.weaponState[0]).toBe(WeaponState.Firing);
   });
 
   it('updates the local spawn point on a networked respawn (Codex review round 5, finding 2)', () => {
@@ -1131,6 +1247,9 @@ describe('NetClient', () => {
       chaingunAmmo: 100,
       mortarAmmo: 0,
       grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -1220,6 +1339,9 @@ describe('NetClient', () => {
       chaingunAmmo: 100,
       mortarAmmo: 0,
       grenades: 5,
+      weaponState: 1,
+      weaponTimer: 0,
+      spunUp: 0 as const,
     };
     const dead = { ...alive, health: 0 };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);

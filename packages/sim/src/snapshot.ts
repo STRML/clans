@@ -33,6 +33,19 @@ export interface PlayerSnapshotData {
   mortarAmmo: number;
   /** PlayerStore.grenades -- same self-heal rationale as the ammo fields above. */
   grenades: number;
+  /**
+   * PlayerStore.weaponState/weaponTimer/spunUp -- the fire-eligibility state MACHINE
+   * itself (weapons.ts's stepWeapons/WeaponState), as opposed to the ammo counts above.
+   * Round 10 wired ammo so a lost fire input's ammo drift self-heals within one snapshot,
+   * but left this machine off the wire entirely: a client whose locally-predicted shot
+   * never landed server-side could get its ammo corrected back up while staying stuck in
+   * a stale Firing state, and stepWeapons only allows firing from Ready/NoAmmo -- so the
+   * player's next real fire attempt was silently suppressed for up to a full fire-cycle
+   * duration even with full ammo. Codex review round 11 (PR #9).
+   */
+  weaponState: number;
+  weaponTimer: number;
+  spunUp: 0 | 1;
 }
 
 function num(arr: Float64Array | Uint8Array | Uint16Array | Int16Array, i: number): number {
@@ -66,6 +79,9 @@ export function serializePlayer(world: World, id: number): PlayerSnapshotData {
     chaingunAmmo: num(p.ammo, ammoIndex(id, WeaponId.Chaingun)),
     mortarAmmo: num(p.ammo, ammoIndex(id, WeaponId.Mortar)),
     grenades: num(p.grenades, id),
+    weaponState: num(p.weaponState, id),
+    weaponTimer: num(p.weaponTimer, id),
+    spunUp: bit(p.spunUp, id),
   };
 }
 
@@ -106,4 +122,7 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   players.ammo[ammoIndex(data.id, WeaponId.Chaingun)] = data.chaingunAmmo;
   players.ammo[ammoIndex(data.id, WeaponId.Mortar)] = data.mortarAmmo;
   players.grenades[data.id] = data.grenades;
+  players.weaponState[data.id] = data.weaponState;
+  players.weaponTimer[data.id] = data.weaponTimer;
+  players.spunUp[data.id] = data.spunUp;
 }

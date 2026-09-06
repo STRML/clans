@@ -97,7 +97,12 @@ const HEADER_BYTES = 1 + 4 + 4 + 4 + 4 + 1; // type, snapshotId, baselineId, tic
 // finding 1: without these on the wire, reconciliation had no authoritative ammo value to
 // correct client-side prediction against, so a lost or evicted input's ammo drift persisted
 // until the player's next death/respawn instead of self-healing on the next snapshot.
-const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4;
+// weaponState (u8, WeaponState enum, 0-5) + weaponTimer (f32) + spunUp (u8, 0/1): the
+// fire-eligibility state machine itself (weapons.ts's stepWeapons), missing from the wire
+// even after round 10 wired ammo. Codex review round 11 (PR #9): a lost fire input could
+// get its ammo corrected on the next snapshot while staying stuck in a stale Firing state,
+// silently suppressing the player's next real shot for up to a full fire-cycle duration.
+const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 4 + 1;
 const PROJECTILE_BYTES = 2 + 1 + 1 + 4 * 6 + 2; // id, type, weaponId, 6 f32 (pos+vel), ownerId
 const FLAG_BYTES = 1 + 1 + 1 + 4 * 3 + 2 + 4; // id, team, state, 3 f32 (pos), carrierId i16, returnInS f32
 const DELTA_FLAG = 1;
@@ -108,12 +113,17 @@ const DIRTY_TEAM = 8;
 const DIRTY_HEALTH = 16;
 const DIRTY_WEAPON = 32;
 const DIRTY_RESPAWN = 64;
-// The last bit available in the dirty-mask byte, so the four ammo/grenade fields share one
-// bit rather than each claiming its own (there is no room left for that) -- consistent with
-// DIRTY_TRANSFORM already batching seven fields under one bit. They change together often
-// enough (any shot or grenade throw touches at least one) that splitting them would rarely
-// save bytes anyway.
-const DIRTY_AMMO = 128;
+// The last bit available in the dirty-mask byte. Round 10 put the four ammo/grenade fields
+// here, since there is no room left for each to claim its own bit -- consistent with
+// DIRTY_TRANSFORM already batching seven fields under one bit. Round 11 (PR #9, finding 2)
+// folds weaponState/weaponTimer/spunUp into the SAME bit rather than growing the mask to a
+// Uint16: ammo and the weapon state machine are already the same reconciliation concern
+// (both exist purely to correct client-side prediction drift from a lost or evicted fire
+// input), they change together on nearly every shot, and a weapon actively firing/reloading
+// touches weaponTimer virtually every tick regardless -- splitting them into a second bit
+// would rarely save a byte and would cost a full mask-width bump to get. Renamed from
+// DIRTY_AMMO to reflect the broader "prediction-correcting state changed" meaning.
+const DIRTY_PREDICTION = 128;
 const EPSILON = 1e-4;
 
 interface SnapshotHeader {
@@ -177,6 +187,9 @@ function writePlayerFull(cursor: Cursor, data: PlayerSnapshotData): void {
   writeU8(cursor, data.chaingunAmmo);
   writeU8(cursor, data.mortarAmmo);
   writeU8(cursor, data.grenades);
+  writeU8(cursor, data.weaponState);
+  writeF32(cursor, data.weaponTimer);
+  writeU8(cursor, data.spunUp);
 }
 function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const id = readU16(cursor);
@@ -197,7 +210,10 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const chaingunAmmo = readU8(cursor);
   const mortarAmmo = readU8(cursor);
   const grenades = readU8(cursor);
-  assertFinite([x, y, z, vx, vy, vz, yaw, energy, health]);
+  const weaponState = readU8(cursor);
+  const weaponTimer = readF32(cursor);
+  const spunUp = readU8(cursor) ? 1 : 0;
+  assertFinite([x, y, z, vx, vy, vz, yaw, energy, health, weaponTimer]);
   return {
     id,
     team,
@@ -218,6 +234,9 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
     chaingunAmmo,
     mortarAmmo,
     grenades,
+    weaponState,
+    weaponTimer,
+    spunUp,
   };
 }
 
@@ -380,6 +399,16 @@ function ammoChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
     a.grenades !== b.grenades
   );
 }
+// weaponState/spunUp are small integers (exact equality, like ammo above); weaponTimer is a
+// float counting down every tick a fire/reload/dry-fire/activate timer is running, so it
+// uses the same EPSILON tolerance transformChanged does rather than exact equality.
+function weaponMachineChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
+  return (
+    a.weaponState !== b.weaponState ||
+    Math.abs(a.weaponTimer - b.weaponTimer) > EPSILON ||
+    a.spunUp !== b.spunUp
+  );
+}
 function dirtyMask(current: PlayerSnapshotData, previous: PlayerSnapshotData): number {
   let mask = 0;
   if (transformChanged(current, previous)) mask |= DIRTY_TRANSFORM;
@@ -389,7 +418,9 @@ function dirtyMask(current: PlayerSnapshotData, previous: PlayerSnapshotData): n
   if (healthChanged(current, previous)) mask |= DIRTY_HEALTH;
   if (weaponChanged(current, previous)) mask |= DIRTY_WEAPON;
   if (respawnSeqChanged(current, previous)) mask |= DIRTY_RESPAWN;
-  if (ammoChanged(current, previous)) mask |= DIRTY_AMMO;
+  if (ammoChanged(current, previous) || weaponMachineChanged(current, previous)) {
+    mask |= DIRTY_PREDICTION;
+  }
   return mask;
 }
 
@@ -427,7 +458,7 @@ function changedRecordBytes(mask: number): number {
   if (mask & DIRTY_HEALTH) bytes += 4;
   if (mask & DIRTY_WEAPON) bytes += 1;
   if (mask & DIRTY_RESPAWN) bytes += 1;
-  if (mask & DIRTY_AMMO) bytes += 4;
+  if (mask & DIRTY_PREDICTION) bytes += 4 + 1 + 4 + 1; // ammo(4) + weaponState + weaponTimer + spunUp
   return bytes;
 }
 function writeChangedTransform(cursor: Cursor, data: PlayerSnapshotData): void {
@@ -445,6 +476,11 @@ function writeChangedAmmo(cursor: Cursor, data: PlayerSnapshotData): void {
   writeU8(cursor, data.mortarAmmo);
   writeU8(cursor, data.grenades);
 }
+function writeChangedWeaponMachine(cursor: Cursor, data: PlayerSnapshotData): void {
+  writeU8(cursor, data.weaponState);
+  writeF32(cursor, data.weaponTimer);
+  writeU8(cursor, data.spunUp);
+}
 function writeChangedPlayer(cursor: Cursor, data: PlayerSnapshotData, mask: number): void {
   writeU16(cursor, data.id);
   writeU8(cursor, mask);
@@ -455,7 +491,10 @@ function writeChangedPlayer(cursor: Cursor, data: PlayerSnapshotData, mask: numb
   if (mask & DIRTY_HEALTH) writeF32(cursor, data.health);
   if (mask & DIRTY_WEAPON) writeU8(cursor, data.weaponSlot);
   if (mask & DIRTY_RESPAWN) writeU8(cursor, data.respawnSeq);
-  if (mask & DIRTY_AMMO) writeChangedAmmo(cursor, data);
+  if (mask & DIRTY_PREDICTION) {
+    writeChangedAmmo(cursor, data);
+    writeChangedWeaponMachine(cursor, data);
+  }
 }
 
 function encodeDeltaSnapshot(
@@ -568,6 +607,14 @@ function readChangedAmmo(cursor: Cursor, next: PlayerSnapshotData): void {
   next.mortarAmmo = readU8(cursor);
   next.grenades = readU8(cursor);
 }
+function readChangedWeaponMachine(cursor: Cursor, next: PlayerSnapshotData): void {
+  const weaponState = readU8(cursor);
+  const weaponTimer = readF32(cursor);
+  assertFinite([weaponTimer]);
+  next.weaponState = weaponState;
+  next.weaponTimer = weaponTimer;
+  next.spunUp = readU8(cursor) ? 1 : 0;
+}
 function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData>): void {
   const id = readU16(cursor);
   const mask = readU8(cursor);
@@ -581,7 +628,10 @@ function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData
   if (mask & DIRTY_HEALTH) readChangedHealth(cursor, next);
   if (mask & DIRTY_WEAPON) next.weaponSlot = readU8(cursor);
   if (mask & DIRTY_RESPAWN) next.respawnSeq = readU8(cursor);
-  if (mask & DIRTY_AMMO) readChangedAmmo(cursor, next);
+  if (mask & DIRTY_PREDICTION) {
+    readChangedAmmo(cursor, next);
+    readChangedWeaponMachine(cursor, next);
+  }
   byId.set(id, next);
 }
 

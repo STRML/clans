@@ -23,6 +23,9 @@ const sample = (x: number, vx: number): PlayerSnapshotData => ({
   chaingunAmmo: 100,
   mortarAmmo: 0,
   grenades: 5,
+  weaponState: 1,
+  weaponTimer: 0,
+  spunUp: 0,
 });
 
 describe('RemoteBuffer', () => {

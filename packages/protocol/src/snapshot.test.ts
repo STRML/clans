@@ -10,6 +10,7 @@ import {
   removePlayer,
   serializeActivePlayers,
   WeaponId,
+  WeaponState,
   type Heightfield,
   type PlayerSnapshotData,
   type World,
@@ -297,6 +298,44 @@ describe('snapshot codec', () => {
         chaingunAmmo: 100,
         mortarAmmo: 0,
         grenades: 5,
+      },
+    ]);
+  });
+
+  it('marks only weapon-state-machine fields dirty in a delta when nothing else changed, and round-trips them (Codex review round 11, PR #9)', () => {
+    // Round 11: weaponState/weaponTimer/spunUp share DIRTY_PREDICTION with ammo rather than
+    // claiming a new bit -- see that constant's comment for why. This is the same shape as
+    // the ammo-only delta test above, but for the state machine itself.
+    const source = createWorld(terrain, 1);
+    const id = addPlayer(source, { x: 0, y: 0, z: 0 }, 1);
+    const baselinePlayers = serializeActivePlayers(source);
+    const baselineBytes = encodeSnapshot(1, source.tick, 0, baselinePlayers, null, emptyExtras());
+    const decodedBaseline = decodeSnapshot(baselineBytes, null);
+
+    // Simulate a shot landing on the server: only the weapon state machine moves, same as
+    // stepWeapons's tryFireWeapon would leave it mid-Firing.
+    source.players.weaponState[id] = WeaponState.Firing;
+    source.players.weaponTimer[id] = 1.218;
+    source.players.spunUp[id] = 1;
+    const nextPlayers = serializeActivePlayers(source);
+    const deltaBytes = encodeSnapshot(
+      2,
+      source.tick,
+      0,
+      nextPlayers,
+      { snapshotId: 1, players: baselinePlayers },
+      emptyExtras(),
+    );
+    const decoded = decodeSnapshot(deltaBytes, {
+      snapshotId: 1,
+      players: decodedBaseline.players,
+    });
+    expect(decoded.players).toEqual([
+      {
+        ...decodedBaseline.players[0],
+        weaponState: WeaponState.Firing,
+        weaponTimer: expect.closeTo(1.218, 3) as number,
+        spunUp: 1,
       },
     ]);
   });
