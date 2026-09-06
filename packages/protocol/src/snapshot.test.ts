@@ -13,7 +13,12 @@ import {
   type World,
 } from '@clans/sim';
 import { bytesOf, createWriter, writeU16, writeU32, writeU8 } from './codec.js';
-import { MAX_SNAPSHOT_PLAYERS, MessageType } from './messages.js';
+import {
+  MAX_SNAPSHOT_FLAGS,
+  MAX_SNAPSHOT_PLAYERS,
+  MAX_SNAPSHOT_PROJECTILES,
+  MessageType,
+} from './messages.js';
 import {
   decodeSnapshot,
   emptyExtras,
@@ -250,6 +255,34 @@ describe('snapshot codec', () => {
     writeU8(cursor, 0); // flags: full, not delta
     writeU16(cursor, MAX_SNAPSHOT_PLAYERS + 1); // declared count, no player data follows
     expect(() => decodeSnapshot(bytesOf(cursor), null)).toThrow(RangeError);
+  });
+
+  it('rejects a full snapshot whose declared projectile or flag count exceeds the plausible maximum', () => {
+    // The player-count guard above (Codex round 3, PR #4) never covered the WorldExtras counts
+    // readExtras added in M3 task 6 -- a corrupted or adversarial packet declaring 65535
+    // projectiles or 255 flags would decode all of them with no upper bound.
+    const projectileCursor = createWriter(30);
+    writeU8(projectileCursor, MessageType.Snapshot);
+    writeU32(projectileCursor, 1);
+    writeU32(projectileCursor, 0);
+    writeU32(projectileCursor, 0);
+    writeU32(projectileCursor, 0);
+    writeU8(projectileCursor, 0);
+    writeU16(projectileCursor, 0); // player count
+    writeU16(projectileCursor, MAX_SNAPSHOT_PROJECTILES + 1); // declared projectile count
+    expect(() => decodeSnapshot(bytesOf(projectileCursor), null)).toThrow(RangeError);
+
+    const flagCursor = createWriter(30);
+    writeU8(flagCursor, MessageType.Snapshot);
+    writeU32(flagCursor, 1);
+    writeU32(flagCursor, 0);
+    writeU32(flagCursor, 0);
+    writeU32(flagCursor, 0);
+    writeU8(flagCursor, 0);
+    writeU16(flagCursor, 0); // player count
+    writeU16(flagCursor, 0); // projectile count
+    writeU8(flagCursor, MAX_SNAPSHOT_FLAGS + 1); // declared flag count
+    expect(() => decodeSnapshot(bytesOf(flagCursor), null)).toThrow(RangeError);
   });
 
   it('rejects a delta whose reconstructed roster exceeds the maximum, even when addedCount alone does not', () => {

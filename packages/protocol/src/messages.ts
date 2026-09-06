@@ -86,3 +86,8 @@ export const SNAPSHOT_HISTORY_DEPTH = 8;
  * packet, which would otherwise allocate tens of thousands of players and meshes.
  */
 export const MAX_SNAPSHOT_PLAYERS = 256;
+// Matches packages/sim's PROJECTILE_CAPACITY: the sim never produces more than this many active
+// projectiles, so any wire value above it is corrupt or hostile, not just unusually busy.
+export const MAX_SNAPSHOT_PROJECTILES = 256;
+// Two flags in this milestone's CTF map. A little headroom in case a future map adds more.
+export const MAX_SNAPSHOT_FLAGS = 8;

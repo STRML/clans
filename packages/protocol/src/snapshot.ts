@@ -15,7 +15,12 @@ import {
   writeU8,
   type Cursor,
 } from './codec.js';
-import { MAX_SNAPSHOT_PLAYERS, MessageType } from './messages.js';
+import {
+  MAX_SNAPSHOT_FLAGS,
+  MAX_SNAPSHOT_PLAYERS,
+  MAX_SNAPSHOT_PROJECTILES,
+  MessageType,
+} from './messages.js';
 
 export interface SnapshotBaseline {
   snapshotId: number;
@@ -244,11 +249,19 @@ function writeExtras(cursor: Cursor, extras: WorldExtras): void {
   writeF32(cursor, extras.timeRemainingS);
   writeU8(cursor, extras.gameOverReason);
 }
+function assertPlausibleExtrasCount(count: number, max: number, label: string): void {
+  if (count > max) {
+    throw new RangeError(`Snapshot ${label} count ${String(count)} exceeds ${String(max)}`);
+  }
+}
+
 function readExtras(cursor: Cursor): WorldExtras {
   const projectileCount = readU16(cursor);
+  assertPlausibleExtrasCount(projectileCount, MAX_SNAPSHOT_PROJECTILES, 'projectile');
   const projectiles: ProjectileSnapshotData[] = [];
   for (let i = 0; i < projectileCount; i += 1) projectiles.push(readProjectile(cursor));
   const flagCount = readU8(cursor);
+  assertPlausibleExtrasCount(flagCount, MAX_SNAPSHOT_FLAGS, 'flag');
   const flags: FlagSnapshotData[] = [];
   for (let i = 0; i < flagCount; i += 1) flags.push(readFlag(cursor));
   const teamScores: [number, number] = [readU16(cursor), readU16(cursor)];
