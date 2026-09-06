@@ -411,7 +411,12 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const terrain = toHeightfield(assets);
   const net = createNetClient(options.serverUrl, terrain);
   const world = net ? net.world : createWorld(terrain, 1);
-  const playerId = net ? 0 : addPlayer(world, spawnPoint(assets, terrain));
+  // Bug found by Task 14's e2e capture test: addPlayer defaults to team 0 when no team is
+  // given, which never equals a flag's team (1 or 2) in flags.ts's isOwnFlag/tryCapture checks.
+  // That let single-player pick up either flag (both looked "enemy") but never capture one
+  // (its "own" flag never matched), silently breaking CTF in single-player. spawnPoint already
+  // picks the team 1 spawn, so team 1 here is the fix, not a new choice.
+  const playerId = net ? 0 : addPlayer(world, spawnPoint(assets, terrain), 1);
   // Single-player has no server; seed CTF locally from the same scene data the server would
   // read (Task 7's loadKatabaticWorld does the equivalent for the networked path).
   if (!net) {
