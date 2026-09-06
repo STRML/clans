@@ -1,4 +1,5 @@
-import { LIGHT_ARMOR } from './armor.js';
+import { armorFor } from './armor.js';
+import { activeForceFieldBlockers, applyBaseObjectDamage, BaseObjectKind } from './baseObjects.js';
 import {
   applyDamage,
   applyKickback,
@@ -7,9 +8,17 @@ import {
   raySphereDistance,
   type PlayerHitbox,
 } from './damage.js';
+import { raycastInteriors, type InteriorInstance } from './interiors.js';
 import { GRAVITY } from './movement.js';
 import { sampleTerrain, type Heightfield, type TerrainSample } from './terrain.js';
 import type { PendingFreeId, ProjectileStore, Vec3, World } from './types.js';
+import {
+  applyTurretDamage,
+  TURRET_BARREL_DATA,
+  type TurretBarrelData,
+  type TurretBarrelId,
+  type TurretFireEvent,
+} from './turrets.js';
 import {
   GRENADE_DATA,
   ProjectileType,
@@ -87,6 +96,60 @@ function terrainHitAlongSegment(
   return marchTerrain(terrain, previous, direction, length);
 }
 
+/** Every collider a projectile from `shooterTeam` can hit along a segment or ray: static
+ *  interiors (always) plus any powered, non-destroyed enemy force field (never a friendly
+ *  one — see `activeForceFieldBlockers`). Both `world.interiors` and force fields resolve
+ *  through the exact same `raycastInteriors` interiors.ts already tests, since a force
+ *  field's cached geometry is itself an `InteriorInstance` (baseObjects.ts). */
+function collidersFor(world: World, shooterTeam: number): InteriorInstance[] {
+  const fields = activeForceFieldBlockers(world, shooterTeam);
+  return fields.length === 0 ? world.interiors : [...world.interiors, ...fields];
+}
+
+/** The nearer of a terrain hit and an interior/force-field hit along the same
+ *  previous->current segment — failure matrix rows 14 and 17. An empty collider list (the
+ *  common case for every M1-M3 test, and for any map without buildings or force fields)
+ *  costs one array length check, not a wasted triangle scan. */
+function worldHitAlongSegment(
+  world: World,
+  previous: Vec3,
+  current: Vec3,
+  shooterTeam: number,
+): { distance: number; point: Vec3; sample?: TerrainSample; normal?: Vec3 } | null {
+  const terrainHit = terrainHitAlongSegment(world.terrain, previous, current);
+  const colliders = collidersFor(world, shooterTeam);
+  if (colliders.length === 0) return terrainHit;
+  const dx = current.x - previous.x,
+    dy = current.y - previous.y,
+    dz = current.z - previous.z;
+  const length = Math.hypot(dx, dy, dz);
+  if (length === 0) return terrainHit;
+  const direction: Vec3 = { x: dx / length, y: dy / length, z: dz / length };
+  const interiorHit = raycastInteriors(colliders, previous, direction, length);
+  if (!terrainHit) return interiorHit;
+  if (!interiorHit) return terrainHit;
+  return interiorHit.distance <= terrainHit.distance ? interiorHit : terrainHit;
+}
+
+/** The `marchTerrain`-shaped sibling of `worldHitAlongSegment`, for an origin+direction+range
+ *  ray rather than a previous->current tick segment — the shape `nearestHitscanTarget`'s
+ *  occlusion check needs. */
+function worldMarch(
+  world: World,
+  origin: Vec3,
+  direction: Vec3,
+  length: number,
+  shooterTeam: number,
+): { distance: number } | null {
+  const terrainHit = marchTerrain(world.terrain, origin, direction, length);
+  const colliders = collidersFor(world, shooterTeam);
+  if (colliders.length === 0) return terrainHit;
+  const interiorHit = raycastInteriors(colliders, origin, direction, length);
+  if (!terrainHit) return interiorHit;
+  if (!interiorHit) return terrainHit;
+  return interiorHit.distance <= terrainHit.distance ? interiorHit : terrainHit;
+}
+
 /** Shape resolveImpact needs from a weapon's or the hand grenade's data: enough to explode
  *  (radiusDamage > 0) or apply a single direct hit (directDamage), nothing else. */
 interface ImpactData {
@@ -140,6 +203,8 @@ export function createProjectileStore(capacity = PROJECTILE_CAPACITY): Projectil
     type: new Uint8Array(capacity),
     weaponId: new Uint8Array(capacity),
     ownerId: new Int16Array(capacity),
+    team: new Uint8Array(capacity),
+    sourceTurretId: new Int16Array(capacity).fill(-1),
     position: new Float64Array(capacity * 3),
     velocity: new Float64Array(capacity * 3),
     expiresAtTick: new Float64Array(capacity),
@@ -221,6 +286,8 @@ function spawnStored(
   store.type[id] = type;
   store.weaponId[id] = weaponId;
   store.ownerId[id] = event.playerId;
+  store.team[id] = world.players.team[event.playerId] ?? 0;
+  store.sourceTurretId[id] = -1; // Reset on every (re)allocation -- see this field's own comment.
   store.position.set([event.origin.x, event.origin.y, event.origin.z], id * 3);
   const velocity = velocityFor(event.direction, speed, event.shooterVelocity, velInherit);
   store.velocity.set([velocity.x, velocity.y, velocity.z], id * 3);
@@ -240,14 +307,15 @@ function explode(
 ): void {
   for (let id = 0; id < world.players.count; id += 1) {
     if (!world.players.active[id] || !world.players.alive[id]) continue;
-    const hitbox = playerHitbox(world, id, LIGHT_ARMOR);
+    const armor = armorFor(world, id);
+    const hitbox = playerHitbox(world, id, armor);
     const dx = hitbox.center.x - point.x,
       dy = hitbox.center.y - point.y,
       dz = hitbox.center.z - point.z;
     const distance = Math.hypot(dx, dy, dz);
     const falloff = radiusFalloff(distance, radius);
     if (falloff <= 0) continue;
-    applyDamage(world, id, radiusDamage * falloff, ownerId, LIGHT_ARMOR);
+    applyDamage(world, id, radiusDamage * falloff, ownerId, armor);
     const length = distance || 1;
     applyKickback(
       world,
@@ -255,9 +323,42 @@ function explode(
       { x: dx / length, y: dy / length, z: dz / length },
       kickback,
       falloff,
-      LIGHT_ARMOR,
+      armor,
     );
   }
+}
+
+function distanceToPoint(positions: Float64Array, base: number, point: Vec3): number {
+  return Math.hypot(
+    (positions[base] ?? 0) - point.x,
+    (positions[base + 1] ?? 0) - point.y,
+    (positions[base + 2] ?? 0) - point.z,
+  );
+}
+
+function explodeBaseObjects(world: World, point: Vec3, radiusDamage: number, radius: number): void {
+  const bases = world.baseObjects;
+  for (let id = 0; id < bases.count; id += 1) {
+    if (bases.destroyed[id]) continue;
+    const falloff = radiusFalloff(distanceToPoint(bases.position, id * 3, point), radius);
+    if (falloff > 0) applyBaseObjectDamage(world, id, radiusDamage * falloff);
+  }
+}
+
+function explodeTurrets(world: World, point: Vec3, radiusDamage: number, radius: number): void {
+  const turrets = world.turrets;
+  for (let id = 0; id < turrets.count; id += 1) {
+    if (turrets.destroyed[id]) continue;
+    const falloff = radiusFalloff(distanceToPoint(turrets.position, id * 3, point), radius);
+    if (falloff > 0) applyTurretDamage(world, id, radiusDamage * falloff);
+  }
+}
+
+/** Splash also reaches a base object or turret standing in the blast: same falloff math,
+ *  reusing radiusFalloff against the structure's own hit-sphere center. */
+function explodeStructures(world: World, point: Vec3, radiusDamage: number, radius: number): void {
+  explodeBaseObjects(world, point, radiusDamage, radius);
+  explodeTurrets(world, point, radiusDamage, radius);
 }
 
 /** Finds the *nearest* player hit along the previous->current swept segment, not the first
@@ -286,7 +387,7 @@ function findDirectHitFrom(
   let nearest: { playerId: number; distance: number } | null = null;
   for (let playerId = 0; playerId < world.players.count; playerId += 1) {
     if (!isValidTarget(world, playerId, ownerId)) continue;
-    const hitbox = playerHitbox(world, playerId, LIGHT_ARMOR);
+    const hitbox = playerHitbox(world, playerId, armorFor(world, playerId));
     const distance = raySphereDistance(previous, direction, hitbox);
     if (distance === null || distance > length || (nearest && distance >= nearest.distance))
       continue;
@@ -302,6 +403,115 @@ function findDirectHit(
   current: Vec3,
 ): { playerId: number; distance: number } | null {
   return findDirectHitFrom(world, world.projectiles.ownerId[id] ?? -1, previous, current);
+}
+
+export const BASE_OBJECT_HIT_RADIUS = 1.5; // Ours — see this plan's "ours" numbers table.
+export const TURRET_HIT_RADIUS = 1.2; // Ours.
+
+interface StructureHit {
+  kind: 'baseObject' | 'turret';
+  id: number;
+  distance: number;
+}
+
+/** Same "nearest along the swept segment" search `findDirectHitFrom` runs for players, over
+ *  base objects and turrets instead — a projectile can hit whichever of the three (player,
+ *  base object, turret) is nearest; `stepLinearOrTracer` compares all three results. No team
+ *  filter on the hit-test itself (matches M3's existing player-vs-player model, where any
+ *  weapon can damage a teammate) — only turret target *acquisition* excludes a turret's own
+ *  team, not a hit-test against one. */
+interface StructureArray {
+  count: number;
+  position: Float64Array;
+  destroyed: Uint8Array;
+  radius: number;
+  kind: StructureHit['kind'];
+  skip?: (id: number) => boolean;
+}
+
+/** Nearest hit along a segment against one structure array (base objects, or turrets) --
+ *  shared by both halves of `nearestStructureHitFrom` so each stays under the complexity
+ *  budget instead of duplicating the same scan-and-compare loop twice. */
+function positionAt(positions: Float64Array, base: number): Vec3 {
+  return { x: positions[base] ?? 0, y: positions[base + 1] ?? 0, z: positions[base + 2] ?? 0 };
+}
+
+function structureCandidateDistance(
+  previous: Vec3,
+  direction: Vec3,
+  array: StructureArray,
+  id: number,
+): number | null {
+  const hitbox: PlayerHitbox = {
+    center: positionAt(array.position, id * 3),
+    radius: array.radius,
+    headY: Infinity,
+  };
+  return raySphereDistance(previous, direction, hitbox);
+}
+
+function nearestFromArray(
+  previous: Vec3,
+  direction: Vec3,
+  length: number,
+  array: StructureArray,
+): StructureHit | null {
+  let nearest: StructureHit | null = null;
+  for (let id = 0; id < array.count; id += 1) {
+    if (array.destroyed[id] || array.skip?.(id)) continue;
+    const distance = structureCandidateDistance(previous, direction, array, id);
+    if (distance === null || distance > length || (nearest && distance >= nearest.distance))
+      continue;
+    nearest = { kind: array.kind, id, distance };
+  }
+  return nearest;
+}
+
+function nearestStructureHitFrom(
+  world: World,
+  previous: Vec3,
+  current: Vec3,
+  excludeTurretId: number,
+): StructureHit | null {
+  const dx = current.x - previous.x,
+    dy = current.y - previous.y,
+    dz = current.z - previous.z;
+  const length = Math.hypot(dx, dy, dz) || 1;
+  const direction: Vec3 = { x: dx / length, y: dy / length, z: dz / length };
+  const bases = world.baseObjects;
+  const baseHit = nearestFromArray(previous, direction, length, {
+    count: bases.count,
+    position: bases.position,
+    destroyed: bases.destroyed,
+    radius: BASE_OBJECT_HIT_RADIUS,
+    kind: 'baseObject',
+    // Force fields are hittable only as the plane geometry activeForceFieldBlockers/
+    // worldHitAlongSegment already resolve, never as a generic point sphere — the plan's own
+    // "ours" table scopes this 1.5 m hit-sphere to Generator/Sensor/StationInventory/
+    // StationVehiclePad only. Without this skip, a shot that legitimately passes a friendly
+    // (non-blocking) or already-bypassed force field would still "hit" the field's own
+    // BaseObjectStore entry at its exact position and detonate there instead of continuing
+    // on to whatever lies beyond it.
+    skip: (id) => bases.kind[id] === BaseObjectKind.ForceField,
+  });
+  const turrets = world.turrets;
+  const turretHit = nearestFromArray(previous, direction, length, {
+    count: turrets.count,
+    position: turrets.position,
+    destroyed: turrets.destroyed,
+    radius: TURRET_HIT_RADIUS,
+    kind: 'turret',
+    // Excludes the turret that fired this exact shot -- see ProjectileStore.sourceTurretId.
+    skip: (id) => id === excludeTurretId,
+  });
+  if (!baseHit) return turretHit;
+  if (!turretHit) return baseHit;
+  return baseHit.distance <= turretHit.distance ? baseHit : turretHit;
+}
+
+function applyStructureDamage(structure: StructureHit, amount: number, world: World): void {
+  if (structure.kind === 'baseObject') applyBaseObjectDamage(world, structure.id, amount);
+  else applyTurretDamage(world, structure.id, amount);
 }
 
 /** Distance to hitbox contact this tick: 0 if `current` already overlaps it, else the swept
@@ -350,7 +560,7 @@ function grenadeHitPlayer(
   let nearest: { playerId: number; distance: number } | null = null;
   for (let playerId = 0; playerId < world.players.count; playerId += 1) {
     if (!isValidTarget(world, playerId, ownerId)) continue;
-    const hitbox = playerHitbox(world, playerId, LIGHT_ARMOR);
+    const hitbox = playerHitbox(world, playerId, armorFor(world, playerId));
     const distance = sphereContactDistance(previous, current, direction, length, hitbox);
     if (distance === null || (nearest && distance >= nearest.distance)) continue;
     nearest = { playerId, distance };
@@ -389,12 +599,16 @@ function resolveImpact(
   data: ImpactData,
   point: Vec3,
   hitPlayerId: number | null,
+  hitStructure: StructureHit | null = null,
 ): void {
   const owner = world.projectiles.ownerId[id] ?? -1;
   if (data.radiusDamage > 0) {
     explode(world, point, data.radiusDamage, data.radius, data.kickback, owner);
+    explodeStructures(world, point, data.radiusDamage, data.radius);
+  } else if (hitStructure) {
+    applyStructureDamage(hitStructure, data.directDamage ?? 0, world);
   } else if (hitPlayerId !== null) {
-    applyDamage(world, hitPlayerId, data.directDamage ?? 0, owner, LIGHT_ARMOR);
+    applyDamage(world, hitPlayerId, data.directDamage ?? 0, owner, armorFor(world, hitPlayerId));
   }
   free(world.projectiles, id);
 }
@@ -431,14 +645,77 @@ export interface HitResult {
 }
 const NO_HIT: HitResult = { hitPlayerId: -1, hitPoint: null };
 
+/** `ProjectileStore.weaponId` is a `Uint8Array` shared by both player weapons (`WeaponId`,
+ *  0-4) and turret barrels (`TurretBarrelId`, 0-2); this offset keeps the two ranges from
+ *  colliding on the wire. */
+const TURRET_WEAPON_ID_OFFSET = 100;
+
+function dataForStoredWeapon(weaponId: number): WeaponData | TurretBarrelData {
+  return weaponId >= TURRET_WEAPON_ID_OFFSET
+    ? TURRET_BARREL_DATA[(weaponId - TURRET_WEAPON_ID_OFFSET) as TurretBarrelId]
+    : WEAPON_DATA[weaponId as WeaponId];
+}
+
+/** `a`/`b`/`c` are each either null or an object carrying a `distance` — returns whichever is
+ *  nearest, or null if all three are. Used by `stepLinearOrTracer` to pick among a terrain/
+ *  interior/force-field hit, a structure hit, and a player hit on the same segment. */
+function nearestOfThree<
+  A extends { distance: number } | null,
+  B extends { distance: number } | null,
+  C extends { distance: number } | null,
+>(a: A, b: B, c: C): A | B | C {
+  let best: A | B | C = a;
+  if (b && (!best || b.distance < best.distance)) best = b;
+  if (c && (!best || c.distance < best.distance)) best = c;
+  return best;
+}
+
 /** Steps one non-grenade projectile (Linear or Tracer) a tick and resolves whichever it hits
- *  first along the previous->current segment: terrain or a player. Both checks run every
- *  tick and the closer of the two wins -- checking player-hit alone and only falling back to
- *  terrain on a miss (this used to) let a shot that crossed a ridge first still detonate on
- *  a player standing behind it, since the player-hit check never knew the ridge was in the
- *  way (Codex review round 2, finding 1). Returns this tick's HitResult so spawnFromEvent's
- *  same-tick Tracer resolution can record it onto the FireEvent that spawned it; the normal
- *  per-tick loop in stepProjectiles ignores the return value. */
+ *  first along the previous->current segment: terrain/interior/force-field, a base object or
+ *  turret, or a player. All three checks run every tick and the closest wins -- checking
+ *  player-hit alone and only falling back to terrain on a miss (this used to) let a shot that
+ *  crossed a ridge first still detonate on a player standing behind it, since the player-hit
+ *  check never knew the ridge was in the way (Codex review round 2, finding 1). Returns this
+ *  tick's HitResult so spawnFromEvent's same-tick Tracer resolution can record it onto the
+ *  FireEvent that spawned it; the normal per-tick loop in stepProjectiles ignores the return
+ *  value. */
+/** The three-way hit resolution `stepLinearOrTracer` needs, split out to keep that function's
+ *  own complexity under budget: resolves whichever of a terrain/interior/force-field hit, a
+ *  base-object/turret hit, or a player hit is nearest along the segment, or returns null when
+ *  the segment hit nothing at all (the caller then only has expiry left to check). */
+function resolveLinearHit(
+  world: World,
+  id: number,
+  data: WeaponData | TurretBarrelData,
+  previous: Vec3,
+  current: Vec3,
+  worldHit: ReturnType<typeof worldHitAlongSegment>,
+  structureHit: StructureHit | null,
+  directHit: { playerId: number; distance: number } | null,
+): HitResult | null {
+  const nearest = nearestOfThree(worldHit, directHit, structureHit);
+  if (nearest === worldHit && worldHit) {
+    resolveImpact(world, id, data, worldHit.point, null);
+    return NO_HIT;
+  }
+  if (nearest === structureHit && structureHit) {
+    const hitPoint = pointAlongSegment(previous, current, structureHit.distance);
+    resolveImpact(world, id, data, hitPoint, null, structureHit);
+    return NO_HIT;
+  }
+  if (nearest === directHit && directHit) {
+    // The actual point of contact along the segment, NOT the segment's raw endpoint -- a
+    // fast projectile (a 90+ m/s Spinfusor disc, say) can travel several meters past the
+    // hit distance in a single 32 ms tick, so resolving at `current` instead put radius
+    // falloff and kickback several meters from where the collision geometrically happened
+    // (Codex review round 3, finding 3).
+    const hitPoint = pointAlongSegment(previous, current, directHit.distance);
+    resolveImpact(world, id, data, hitPoint, directHit.playerId);
+    return { hitPlayerId: directHit.playerId, hitPoint };
+  }
+  return null;
+}
+
 function stepLinearOrTracer(world: World, id: number, dt: number): HitResult {
   const store = world.projectiles;
   const base = id * 3;
@@ -450,23 +727,26 @@ function stepLinearOrTracer(world: World, id: number, dt: number): HitResult {
     z: previous.z + velocity.z * dt,
   };
   writeVec3(store.position, base, current);
-  const data = WEAPON_DATA[store.weaponId[id] as WeaponId];
+  const data = dataForStoredWeapon(store.weaponId[id] ?? 0);
   const directHit = findDirectHit(world, id, previous, current);
-  const terrainHit = terrainHitAlongSegment(world.terrain, previous, current);
-  if (terrainHit && (!directHit || terrainHit.distance <= directHit.distance)) {
-    resolveImpact(world, id, data, terrainHit.point, null);
-    return NO_HIT;
-  }
-  if (directHit) {
-    // The actual point of contact along the segment, NOT the segment's raw endpoint -- a
-    // fast projectile (a 90+ m/s Spinfusor disc, say) can travel several meters past the
-    // hit distance in a single 32 ms tick, so resolving at `current` instead put radius
-    // falloff and kickback several meters from where the collision geometrically happened
-    // (Codex review round 3, finding 3).
-    const hitPoint = pointAlongSegment(previous, current, directHit.distance);
-    resolveImpact(world, id, data, hitPoint, directHit.playerId);
-    return { hitPlayerId: directHit.playerId, hitPoint };
-  }
+  const structureHit = nearestStructureHitFrom(
+    world,
+    previous,
+    current,
+    store.sourceTurretId[id] ?? -1,
+  );
+  const worldHit = worldHitAlongSegment(world, previous, current, store.team[id] ?? 0);
+  const resolved = resolveLinearHit(
+    world,
+    id,
+    data,
+    previous,
+    current,
+    worldHit,
+    structureHit,
+    directHit,
+  );
+  if (resolved) return resolved;
   if (expireOneTick(store, id, data.lifetime)) free(store, id);
   return NO_HIT;
 }
@@ -526,6 +806,29 @@ function finalizeGrenadeLifetime(
   else free(world.projectiles, id);
 }
 
+/** A terrain hit carries its normal on `sample`; an interior/force-field hit (from
+ *  `worldHitAlongSegment`'s `raycastInteriors` branch) carries it directly on `normal`. Split
+ *  out of `stepGrenade` to keep the `??`/`?.` chain from counting against that function's own
+ *  complexity budget. */
+function bounceNormalFor(hit: ReturnType<typeof worldHitAlongSegment>): Vec3 {
+  return hit?.sample?.normal ?? hit?.normal ?? { x: 0, y: 1, z: 0 };
+}
+
+/** The armed-grenade contact check for this tick, or null while unarmed or on a miss. Split
+ *  out of `stepGrenade` to keep that function's own complexity budget clear. */
+function grenadeContactThisTick(
+  world: World,
+  id: number,
+  previous: Vec3,
+  current: Vec3,
+  armed: boolean,
+  terrainHit: ReturnType<typeof worldHitAlongSegment>,
+): { point: Vec3; playerId: number | null } | null {
+  if (!armed) return null;
+  const hitPlayer = grenadeHitPlayer(world, id, previous, current);
+  return nearerGrenadeContact(previous, current, terrainHit, hitPlayer);
+}
+
 function stepGrenade(world: World, id: number, dt: number): void {
   const store = world.projectiles;
   const previous = readVec3(store.position, id * 3);
@@ -535,18 +838,17 @@ function stepGrenade(world: World, id: number, dt: number): void {
   store.expiresAtTick[id] = elapsed;
   armGrenadeIfDue(store, id, elapsed, isMortar);
 
-  const terrainHit = terrainHitAlongSegment(world.terrain, previous, current);
+  const terrainHit = worldHitAlongSegment(world, previous, current, store.team[id] ?? 0);
   const armed = store.armed[id] === 1;
-  const hitPlayer = armed ? grenadeHitPlayer(world, id, previous, current) : null;
   const data: ImpactData = isMortar ? WEAPON_DATA[WeaponId.Mortar] : GRENADE_DATA;
-  const contact = armed ? nearerGrenadeContact(previous, current, terrainHit, hitPlayer) : null;
+  const contact = grenadeContactThisTick(world, id, previous, current, armed, terrainHit);
   if (contact) {
     resolveImpact(world, id, data, contact.point, contact.playerId);
     return;
   }
   if (terrainHit) {
     writeVec3(store.position, id * 3, terrainHit.point);
-    bounce(world, id, terrainHit.sample.normal);
+    bounce(world, id, bounceNormalFor(terrainHit));
   }
   if (elapsed >= grenadeLifetimeTicks(isMortar))
     finalizeGrenadeLifetime(world, id, data, current, armed);
@@ -562,12 +864,18 @@ function nearestHitscanTarget(
   event: FireEvent,
   maxRange: number,
 ): { playerId: number; distance: number } | null {
-  const terrainHit = marchTerrain(world.terrain, event.origin, event.direction, maxRange);
+  const terrainHit = worldMarch(
+    world,
+    event.origin,
+    event.direction,
+    maxRange,
+    world.players.team[event.playerId] ?? 0,
+  );
   const visibleRange = terrainHit ? terrainHit.distance : maxRange;
   let nearest: { playerId: number; distance: number } | null = null;
   for (let playerId = 0; playerId < world.players.count; playerId += 1) {
     if (!isValidTarget(world, playerId, event.playerId)) continue;
-    const hitbox = playerHitbox(world, playerId, LIGHT_ARMOR);
+    const hitbox = playerHitbox(world, playerId, armorFor(world, playerId));
     const distance = raySphereDistance(event.origin, event.direction, hitbox);
     if (distance === null || distance > visibleRange) continue;
     if (!nearest || distance < nearest.distance) nearest = { playerId, distance };
@@ -582,7 +890,7 @@ function resolveHitscan(world: World, event: FireEvent, data: WeaponData): void 
   event.resolved = true;
   const nearest = nearestHitscanTarget(world, event, data.maxRange ?? 0);
   if (!nearest) return;
-  const hitbox = playerHitbox(world, nearest.playerId, LIGHT_ARMOR);
+  const hitbox = playerHitbox(world, nearest.playerId, armorFor(world, nearest.playerId));
   const hitPoint: Vec3 = {
     x: event.origin.x + event.direction.x * nearest.distance,
     y: event.origin.y + event.direction.y * nearest.distance,
@@ -594,7 +902,7 @@ function resolveHitscan(world: World, event: FireEvent, data: WeaponData): void 
     nearest.playerId,
     data.directDamage * event.energyScale * multiplier,
     event.playerId,
-    LIGHT_ARMOR,
+    armorFor(world, nearest.playerId),
   );
   // Same-tick resolution: this weapon (the Laser Rifle) is one of the two hitscan/tracer
   // cases FireEvent's hitPlayerId/hitPoint comment calls out, so world.lastFireEvents can
@@ -632,7 +940,12 @@ function hitTestTracer(world: World, event: FireEvent, data: WeaponData, dt: num
     y: event.origin.y + velocity.y * dt,
     z: event.origin.z + velocity.z * dt,
   };
-  const terrainHit = terrainHitAlongSegment(world.terrain, event.origin, current);
+  const terrainHit = worldHitAlongSegment(
+    world,
+    event.origin,
+    current,
+    world.players.team[event.playerId] ?? 0,
+  );
   const directHit = findDirectHitFrom(world, event.playerId, event.origin, current);
   if (!directHit || (terrainHit && terrainHit.distance <= directHit.distance)) return NO_HIT;
   return {
@@ -728,6 +1041,41 @@ function spawnFromEvent(world: World, event: FireEvent, dt: number): void {
   }
 }
 
+/** Materializes one turret shot (Task 4's `stepTurrets`) as a real, damaging projectile —
+ *  the turret-fired sibling of `spawnFromEvent`, with no `FireEvent`/ammo/player identity to
+ *  read: `ownerId` is -1 (matches fall damage's own no-attribution convention) and `team`
+ *  comes straight from the event instead of a player lookup. A Tracer barrel (AABarrelLarge)
+ *  resolves same-tick just like a player's Chaingun shot does, for the same reason. */
+function spawnTurretShot(world: World, event: TurretFireEvent, dt: number): void {
+  const data = TURRET_BARREL_DATA[event.barrel];
+  const id = allocate(world.projectiles);
+  if (id === null) return; // Turrets have no ammo to refund — a full store just drops the shot.
+  const store = world.projectiles;
+  store.type[id] = data.projectile;
+  store.weaponId[id] = event.barrel + TURRET_WEAPON_ID_OFFSET;
+  store.ownerId[id] = -1; // No player identity; see this plan's "ours" table.
+  store.team[id] = event.team;
+  // Excludes the firing turret from its own shot's structure hit-test — see
+  // ProjectileStore.sourceTurretId's own comment for why this is needed.
+  store.sourceTurretId[id] = event.turretId;
+  store.position.set([event.origin.x, event.origin.y, event.origin.z], id * 3);
+  const velocity = {
+    x: event.direction.x * data.speed,
+    y: event.direction.y * data.speed,
+    z: event.direction.z * data.speed,
+  };
+  store.velocity.set([velocity.x, velocity.y, velocity.z], id * 3);
+  if (data.projectile === ProjectileType.Tracer) stepLinearOrTracer(world, id, dt);
+}
+
+/** Drains `world.pendingTurretFireEvents` (Task 4's `stepTurrets` already ran this same tick,
+ *  before `stepProjectiles` — see this plan's Global Constraints for the required call
+ *  order) into real projectiles, the same one-tick-latency shape `spawnFromEvent` gives
+ *  player shots. */
+function spawnPendingTurretShots(world: World, dt: number): void {
+  for (const event of world.pendingTurretFireEvents) spawnTurretShot(world, event, dt);
+}
+
 /**
  * Steps every already-flying projectile before materializing this tick's new shots, so a
  * projectile spawned this tick starts moving on the *next* call rather than integrating
@@ -754,4 +1102,6 @@ export function stepProjectiles(world: World, dt: number): void {
   world.lastFireEvents = world.pendingFireEvents;
   for (const event of world.pendingFireEvents) spawnFromEvent(world, event, dt);
   world.pendingFireEvents = [];
+  spawnPendingTurretShots(world, dt);
+  world.pendingTurretFireEvents = [];
 }

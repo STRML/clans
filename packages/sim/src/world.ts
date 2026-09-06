@@ -1,11 +1,11 @@
 import { ARMORS, ArmorId, armorFor } from './armor.js';
-import { createEmptyBaseObjects } from './baseObjects.js';
+import { createEmptyBaseObjects, stepPower } from './baseObjects.js';
 import { GameOverReason, stepFlags, TIME_LIMIT_TICKS } from './flags.js';
 import { stepPlayers } from './movement.js';
 import { createProjectileStore, stepProjectiles } from './projectiles.js';
 import type { Heightfield } from './terrain.js';
 import type { PlayerInput, Vec3, World } from './types.js';
-import { createEmptyTurrets } from './turrets.js';
+import { createEmptyTurrets, stepTurrets } from './turrets.js';
 import { resetLoadout, stepWeapons, WEAPON_COUNT } from './weapons.js';
 
 export const FIXED_TICK_MS = 32;
@@ -183,6 +183,8 @@ export function stepWorld(
   if (world.gameOver) return;
   stepPlayers(world, inputs, dt);
   stepWeapons(world, inputs, dt);
+  stepPower(world);
+  stepTurrets(world, dt);
   stepProjectiles(world, dt);
   stepFlags(world, dt);
   world.tick += 1;

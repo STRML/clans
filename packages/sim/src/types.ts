@@ -103,6 +103,19 @@ export interface ProjectileStore {
   type: Uint8Array;
   weaponId: Uint8Array;
   ownerId: Int16Array;
+  /** The shooter's team at spawn time (or a turret's own team for a turret-fired shot, which
+   *  has no ownerId to look one up through). Read once here rather than looked up through
+   *  ownerId on every later hit test — see baseObjects.ts's activeForceFieldBlockers, which
+   *  every hit-test call site in projectiles.ts consults with this field. */
+  team: Uint8Array;
+  /** -1 for a player-fired shot; the firing turret's own id for a turret-fired one. A turret
+   *  shot spawns at its own turret's exact position, which sits inside that same turret's own
+   *  TURRET_HIT_RADIUS hit-sphere — without this, the shot's very first hit-test would
+   *  register an immediate self-hit at distance 0 (`raySphereDistance`'s "origin already
+   *  inside the sphere" case) and detonate against the turret that just fired it, never
+   *  reaching its actual target. Mirrors how a player-fired shot already excludes its own
+   *  shooter via `ownerId`/`isValidTarget` — see `nearestStructureHitFrom`. */
+  sourceTurretId: Int16Array;
   position: Float64Array;
   velocity: Float64Array;
   /** Ticks this projectile has been alive, counted by stepProjectiles itself rather than
