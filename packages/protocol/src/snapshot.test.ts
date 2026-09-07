@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   addPlayer,
   ammoIndex,
+  ArmorId,
   createFlags,
+  HEAVY_ARMOR,
   createWorld,
   deserializePlayer,
   GameOverReason,
@@ -395,6 +397,62 @@ describe('snapshot codec', () => {
     const bytes = encodeSnapshot(1, source.tick, 0, players, null, emptyExtras());
     const decoded = decodeSnapshot(bytes, null);
     expect(decoded.players[0]).toMatchObject({ score: -5, godMode: 1 });
+  });
+
+  it('round-trips a Heavy armor + Repair Pack loadout through a full snapshot (Codex round 1, finding 2)', () => {
+    // sim/snapshot.ts's serializePlayer/deserializePlayer have carried armor/hasRepairPack
+    // since Task 6, and the sim-side round trip is already covered directly -- but
+    // writePlayerFull/readPlayerFull never actually put either field on the wire, so a
+    // decoded/reconstructed player always came back Light/no-pack regardless of what a real
+    // station visit (applyLoadoutRequest) had set. Exercise Heavy specifically, not just any
+    // nonzero armor: it's the armor id furthest from the 0 default this bug always produced.
+    const source = createWorld(terrain, 1);
+    const id = addPlayer(source, { x: 0, y: 0, z: 0 }, 1, ArmorId.Heavy);
+    source.players.hasRepairPack[id] = 1;
+    const players = serializeActivePlayers(source);
+    expect(players[0]).toMatchObject({ armor: ArmorId.Heavy, hasRepairPack: 1 });
+    const bytes = encodeSnapshot(1, source.tick, 0, players, null, emptyExtras());
+    const decoded = decodeSnapshot(bytes, null);
+    expect(decoded.players[0]).toMatchObject({ armor: ArmorId.Heavy, hasRepairPack: 1 });
+  });
+
+  it('marks armor/hasRepairPack dirty in a delta (sharing DIRTY_TEAM with team) and round-trips them', () => {
+    // Same shape as the score/godMode delta test above, but for armor/hasRepairPack, which
+    // share DIRTY_TEAM with team (identityChanged). health also legitimately changes here --
+    // not a bug this test is proving, but a real side effect of health being derived from
+    // armor's own maxDamage at serialize time (serializePlayer), so DIRTY_HEALTH is expected
+    // to be set alongside DIRTY_TEAM.
+    const source = createWorld(terrain, 1);
+    const id = addPlayer(source, { x: 0, y: 0, z: 0 }, 1);
+    const baselinePlayers = serializeActivePlayers(source);
+    const baselineBytes = encodeSnapshot(1, source.tick, 0, baselinePlayers, null, emptyExtras());
+    const decodedBaseline = decodeSnapshot(baselineBytes, null);
+
+    source.players.armor[id] = ArmorId.Heavy;
+    source.players.hasRepairPack[id] = 1;
+    const nextPlayers = serializeActivePlayers(source);
+    const deltaBytes = encodeSnapshot(
+      2,
+      source.tick,
+      0,
+      nextPlayers,
+      { snapshotId: 1, players: baselinePlayers },
+      emptyExtras(),
+    );
+    const decoded = decodeSnapshot(deltaBytes, {
+      snapshotId: 1,
+      players: decodedBaseline.players,
+    });
+    const [decodedPlayer] = decoded.players;
+    expect(decodedPlayer).toMatchObject({ armor: ArmorId.Heavy, hasRepairPack: 1 });
+    // f32 round trip, not exact -- same tolerance the rest of this file's float fields use.
+    expect(decodedPlayer?.health).toBeCloseTo(HEAVY_ARMOR.maxDamage, 5);
+    expect({ ...decoded.players[0], armor: 0, hasRepairPack: 0, health: 0 }).toEqual({
+      ...decodedBaseline.players[0],
+      armor: 0,
+      hasRepairPack: 0,
+      health: 0,
+    });
   });
 
   it('marks only score/godMode dirty in a delta when nothing else changed, and round-trips them', () => {
