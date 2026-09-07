@@ -10,6 +10,7 @@ import {
   RESPAWN_TICKS,
   setGodMode as setSimGodMode,
   stepWorld,
+  type ArmorId,
   type Heightfield,
   type PlayerInput,
   type PlayerSnapshotData,
@@ -26,10 +27,13 @@ import {
   encodeGod,
   encodeInput,
   encodeJoin,
+  encodeLoadout,
   peekSnapshotHeader,
+  type BaseObjectSnapshotData,
   type EventMessage,
   type FlagSnapshotData,
   type ProjectileSnapshotData,
+  type TurretSnapshotData,
 } from '@clans/protocol';
 import type { SnapshotBaseline } from '@clans/protocol';
 import type { Transport } from './transport.js';
@@ -100,6 +104,8 @@ export class NetClient {
   remoteSnapshots: RemoteSnapshot[] = [];
   projectiles: ProjectileSnapshotData[] = [];
   flags: FlagSnapshotData[] = [];
+  baseObjects: BaseObjectSnapshotData[] = [];
+  turrets: TurretSnapshotData[] = [];
   teamScores: [number, number] = [0, 0];
   gameOver = false;
   winnerTeam = 0;
@@ -219,6 +225,13 @@ export class NetClient {
   setGodMode(enabled: boolean): void {
     setSimGodMode(this.world, LOCAL_SLOT, enabled);
     this.transport.send(encodeGod({ enabled }));
+  }
+
+  /** Mirrors setGodMode's own shape: send-only, no local prediction of the loadout itself --
+   *  a station visit's own applyLoadoutRequest result reaches this client back through the
+   *  next snapshot, the same way every other player's own authoritative state does. */
+  sendLoadout(armor: ArmorId, repairPack: boolean): void {
+    this.transport.send(encodeLoadout({ armor, repairPack }));
   }
 
   private handleMessage(bytes: Uint8Array): void {
@@ -358,6 +371,8 @@ export class NetClient {
     );
     this.projectiles = decoded.projectiles;
     this.flags = decoded.flags;
+    this.baseObjects = decoded.baseObjects;
+    this.turrets = decoded.turrets;
     this.teamScores = decoded.teamScores;
     this.remoteTick = decoded.tick;
     this.remoteSnapshots.push({ tick: decoded.tick, players: this.remotePlayers });

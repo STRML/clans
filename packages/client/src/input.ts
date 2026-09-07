@@ -13,6 +13,8 @@ export class Input {
   fire = false;
   sensitivity = 0.002;
   private readonly keys = new Set<string>();
+  private wasUseHeld = false;
+  private wasCommandCircleHeld = false;
 
   constructor(private readonly target: HTMLElement) {}
 
@@ -56,10 +58,30 @@ export class Input {
     this.keys.clear();
     this.jet = false;
     this.fire = false;
+    this.wasUseHeld = false;
+    this.wasCommandCircleHeld = false;
   }
 
   isDown(code: string): boolean {
     return this.keys.has(code);
+  }
+
+  /** True on the call where `E` transitions from up to held since the last call --
+   *  mirrors movement.ts's own jump-edge convention (`wasJumpHeld`), consumed once per read
+   *  so a held key doesn't reopen a just-closed station menu every frame. */
+  usePressedThisFrame(): boolean {
+    const held = this.isDown('KeyE');
+    const pressed = held && !this.wasUseHeld;
+    this.wasUseHeld = held;
+    return pressed;
+  }
+
+  /** Same edge-triggered shape as `usePressedThisFrame`, for the `C` commander-map toggle. */
+  commandCirclePressedThisFrame(): boolean {
+    const held = this.isDown('KeyC');
+    const pressed = held && !this.wasCommandCircleHeld;
+    this.wasCommandCircleHeld = held;
+    return pressed;
   }
 
   /** The lowest held number key 1-5, or 0 if none are held — matches `weaponIdForSlot`. */
@@ -84,7 +106,7 @@ export class Input {
       fire: this.fire,
       altFire: this.isDown('KeyG'),
       slot: this.slotFromKeys(),
-      packActive: false,
+      packActive: this.isDown('KeyR'),
     };
   }
 }

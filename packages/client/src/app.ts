@@ -456,6 +456,9 @@ export function hudSourceFrom(
         timeRemainingS: net.timeRemainingS,
         gameOverReason: net.gameOverReason,
         recentEvents: net.recentEvents,
+        // Wired to a real raycast against base-object-view.ts's meshes once app.ts's frame
+        // loop calls this with a camera/view available -- see Task 14.
+        aimedStructure: null,
       }
     : {
         world,
@@ -470,6 +473,7 @@ export function hudSourceFrom(
         timeRemainingS: Math.max(0, (world.timeLimitTicks - world.tick) * FIXED_DT),
         gameOverReason: world.gameOverReason,
         recentEvents: [],
+        aimedStructure: null,
       };
 }
 
