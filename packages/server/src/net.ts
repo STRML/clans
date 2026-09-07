@@ -63,11 +63,16 @@ import {
 } from './lagcomp.js';
 import { applyInputMessage, createSession, recordAck, type Session } from './session.js';
 import { needsFullSnapshot } from './snapshot-policy.js';
+import { rebalanceTeams, stepBotManager, type BotManager } from './bots.js';
 import { smallerTeam, spawnPointFor, teamCount, type SceneSpawn } from './world.js';
 
 export interface NetServerOptions {
   world: World;
   spawns: SceneSpawn[];
+  /** Owns bot ids, per-bot runtime memory, and rebalancing toward TARGET_TEAM_SIZE. A
+   *  server always has one, even at `--bots 0` (an empty-budget manager that's a no-op
+   *  everywhere it's called) -- this milestone does not support running with none at all. */
+  botManager: BotManager;
   port: number;
   /** How long an accepted socket may stay unjoined before it is closed. */
   joinTimeoutMs?: number;
@@ -148,6 +153,7 @@ const HITSCAN_WEAPONS = new Set<WeaponId>([WeaponId.Chaingun, WeaponId.LaserRifl
 function handleJoin(
   world: World,
   spawns: SceneSpawn[],
+  botManager: BotManager,
   clients: Map<WebSocket, ClientEntry>,
   now: () => number,
   socket: WebSocket,
@@ -204,6 +210,11 @@ function handleJoin(
       spawnZ: z,
     }),
   );
+  // The joining human's team/id are already committed to world.players above, so
+  // rebalanceTeams sees an accurate count and, if that team is already at
+  // TARGET_TEAM_SIZE, removes exactly one bot on it before this join would push it over
+  // (failure matrix row 12) -- never the other way around.
+  rebalanceTeams(botManager, world, spawns);
 }
 
 function handleInput(
@@ -318,13 +329,14 @@ function handleVehicleSpawn(
 function handleMessage(
   world: World,
   spawns: SceneSpawn[],
+  botManager: BotManager,
   clients: Map<WebSocket, ClientEntry>,
   now: () => number,
   socket: WebSocket,
   bytes: Uint8Array,
 ): void {
   const type = bytes[0];
-  if (type === MessageType.Join) handleJoin(world, spawns, clients, now, socket, bytes);
+  if (type === MessageType.Join) handleJoin(world, spawns, botManager, clients, now, socket, bytes);
   else if (type === MessageType.Input) handleInput(clients, socket, bytes);
   else if (type === MessageType.Ack) handleAck(clients, now, socket, bytes);
   else if (type === MessageType.God) handleGod(world, clients, socket, bytes);
@@ -357,6 +369,8 @@ function dropFlagsCarriedBy(world: World, playerId: number): void {
 
 function handleClose(
   world: World,
+  spawns: SceneSpawn[],
+  botManager: BotManager,
   clients: Map<WebSocket, ClientEntry>,
   history: PositionHistory,
   socket: WebSocket,
@@ -365,6 +379,10 @@ function handleClose(
   if (!entry) return;
   dropFlagsCarriedBy(world, entry.session.playerId);
   removePlayer(world, entry.session.playerId);
+  // removePlayer has already run above, so rebalanceTeams sees an accurate post-leave
+  // count and backfills at most one bot on this team if budget remains (failure matrix
+  // row 13) -- never double-counting the departing id.
+  rebalanceTeams(botManager, world, spawns);
   // God mode lives on world.players.godMode now (setGodMode), and addPlayer already zeroes
   // that bit for a reused id -- no separate godPlayers Set to clean up here anymore.
   // Codex PR #9 round 2, finding 7: recordHistory only forgets an id once it notices that
@@ -779,6 +797,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
         handleMessage(
           options.world,
           options.spawns,
+          options.botManager,
           clients,
           now,
           socket,
@@ -793,7 +812,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
     });
     socket.on('close', () => {
       clearTimeout(joinTimeout);
-      handleClose(options.world, clients, history, socket);
+      handleClose(options.world, options.spawns, options.botManager, clients, history, socket);
     });
     // A malformed frame at the WebSocket protocol level itself (an invalid raw frame,
     // e.g. an unmasked client frame) fires 'error' on the socket before 'message' ever
@@ -802,7 +821,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
     // the process; this absorbs it the same way the server-level handler below does.
     socket.on('error', () => {
       clearTimeout(joinTimeout);
-      handleClose(options.world, clients, history, socket);
+      handleClose(options.world, options.spawns, options.botManager, clients, history, socket);
     });
   });
 
@@ -864,6 +883,12 @@ export function startNetServer(options: NetServerOptions): NetServer {
   // keep going out on the normal cadence so every client sees the frozen final state.
   function tick(tickNumber: number): void {
     const inputs = collectTickInputs(clients);
+    // A bot id is never also a socket-bound player id (a human never joins as an id a bot
+    // already occupies -- handleJoin's own addPlayer always allocates a fresh id), so the
+    // two maps' key sets never overlap and this merge order doesn't matter.
+    for (const [botId, input] of stepBotManager(options.botManager, options.world)) {
+      inputs.set(botId, input);
+    }
     if (!options.world.gameOver) runOneTick(inputs);
     if (tickNumber % SNAPSHOT_EVERY_N_TICKS !== 0) return;
     sendAllSnapshots();
