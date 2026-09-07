@@ -1981,15 +1981,24 @@ describe('NetClient', () => {
       expect(client.world.players.mountedVehicleId[0]).toBe(-1);
     });
 
-    it('local prediction actually applies this players own input to their driven vehicle even when their real server id is not 0 (Codex review round 2, finding 1)', () => {
-      // Before this fix, world.vehicles.driverId held the real server-assigned playerId
+    it('local prediction applies this players own input to their vehicle AND seat-locks their own transform to it, even when their real server id is not 0 (Codex review rounds 2 and 3, findings 1)', () => {
+      // Round 2, finding 1: world.vehicles.driverId held the real server-assigned playerId
       // (had to -- occupancy checks and mountedVehicleId derivation both need it truthful
       // for every vehicle, not just this player's own), but every local prediction tick
-      // keyed its input map by LOCAL_SLOT (0) only. stepOneVehicle's own lookup is
-      // `inputs.get(driverId)` using that real id, so it only ever found this player's
-      // input when their real id happened to BE 0 -- true for whichever player connected
-      // first, false for everyone else. Using playerId 7 here (deliberately not 0, and not
-      // LOCAL_SLOT) reproduces the common case, not the coincidental one.
+      // keyed its input map by LOCAL_SLOT (0) only, so stepOneVehicle's own
+      // `inputs.get(driverId)` lookup only ever found this player's input when their real
+      // id happened to BE 0 -- true for whichever player connected first, false for
+      // everyone else. Round 3, finding 1 (a second, deeper P1 the round-2 fix's own
+      // input-map-duplication approach didn't reach): seatDriver/ejectPilot/mount-cleanup
+      // ALSO index world.players (position, velocity, mountedVehicleId) by driverId, and
+      // this client's own world.players has no row at any index but LOCAL_SLOT -- so even
+      // once the vehicle responded to input, the DRIVER's own transform never followed it;
+      // movement.ts skips a mounted player's own stepPlayer entirely, so nothing else wrote
+      // their position either. Both are fixed together now by remapping driverId itself
+      // (remapVehicleDriverId) rather than layering a second, narrower fix on top -- see
+      // that function's own doc comment. Using playerId 7 here (deliberately not 0, and not
+      // LOCAL_SLOT) reproduces the common case (any player who didn't connect first), not
+      // the coincidental one only real id 0 would have masked.
       const transport = makeTransport(makeLink({ value: 41 }));
       const client = new NetClient(transport, terrain, { now: () => clock.ms });
       client.playerId = 7;
@@ -2020,6 +2029,16 @@ describe('NetClient', () => {
       const vx = client.world.vehicles.velocity[5 * 3] ?? 0;
       const vz = client.world.vehicles.velocity[5 * 3 + 2] ?? 0;
       expect(Math.hypot(vx, vz)).toBeGreaterThan(0);
+      // seatDriver pins the driver's own position to the vehicle's own transform exactly --
+      // if it silently no-op'd (round 3's own finding), the player would still sit at their
+      // original (0,0,0) reconciled position while the vehicle itself moved out from
+      // under them.
+      expect(client.world.players.position[0]).toBeCloseTo(
+        client.world.vehicles.position[5 * 3] ?? 0,
+      );
+      expect(client.world.players.position[2]).toBeCloseTo(
+        client.world.vehicles.position[5 * 3 + 2] ?? 0,
+      );
     });
   });
 });
