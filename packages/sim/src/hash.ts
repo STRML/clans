@@ -224,6 +224,10 @@ function mixVehicle(hash: number, vehicles: World['vehicles'], id: number): numb
   h = mix(h, num(vehicles.padId, id));
   h = mix(h, num(vehicles.weaponTimer, id));
   h = mix(h, num(vehicles.onGround, id));
+  // Round 1 (this PR), sibling of finding 8's wasJumpHeld fix: real state that decides next
+  // tick's jump behavior, same class movement.ts's own wasJumpHeld already earns a slot in
+  // mixPlayer for.
+  h = mix(h, num(vehicles.wasJumpHeld, id));
   return h;
 }
 

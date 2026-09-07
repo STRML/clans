@@ -72,6 +72,24 @@ describe('spawnVehicleAtPad', () => {
     expect(spawnVehicleAtPad(world, 0, VehicleKind.Wildcat)).toBeNull();
   });
 
+  it('rejects an out-of-range kind without allocating or poisoning a slot (Codex review round 1, finding 1)', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const invalidKind = 255 as VehicleKind;
+    // Before this fix, spawnVehicleAtPad allocated the slot and marked it active BEFORE
+    // dereferencing VEHICLE_DATA[kind], so an invalid kind threw partway through, leaving an
+    // active-but-half-initialized vehicle the next stepVehicles call would crash on.
+    expect(() => spawnVehicleAtPad(world, padId, invalidKind)).not.toThrow();
+    expect(spawnVehicleAtPad(world, padId, invalidKind)).toBeNull();
+    expect(world.vehicles.count).toBe(0);
+    expect(activeVehicleCountForTeam(world, 1)).toBe(0);
+    // A subsequent legitimate spawn must still work -- proves no slot was burned or left
+    // half-initialized by the rejected attempt.
+    const id = spawnVehicleAtPad(world, padId, VehicleKind.Shrike);
+    expect(id).not.toBeNull();
+    expect(() => stepVehicles(world, new Map(), 1 / 32)).not.toThrow();
+  });
+
   it('spawning a second vehicle at the same pad destroys the first', () => {
     const world = createWorld(flat, 1);
     const padId = poweredPad(world);
@@ -266,6 +284,26 @@ describe('stepWildcat', () => {
     stepWildcat(world, id, jumping, 1 / 32);
     expect(world.vehicles.energy[id]).toBeLessThan(before);
   });
+
+  it('holding jump applies only one impulse, not one per tick (Codex review round 1, finding 8)', () => {
+    const { world, id } = wildcatWorld();
+    world.vehicles.onGround[id] = 1;
+    const jumping: PlayerInput = { ...idleInput, jump: true };
+    stepWildcat(world, id, jumping, 1 / 32);
+    const afterFirstTick = world.vehicles.velocity[id * 3 + 1] ?? 0;
+    // onGround stays 1 across ticks while the hover spring's own contact range holds the
+    // Wildcat near the ground -- holding jump for several more ticks, still grounded, must
+    // not add a second (or third...) impulse on top of the first.
+    world.vehicles.onGround[id] = 1;
+    stepWildcat(world, id, jumping, 1 / 32);
+    world.vehicles.onGround[id] = 1;
+    stepWildcat(world, id, jumping, 1 / 32);
+    // Gravity/the hover spring still act every tick, so velocity keeps changing regardless --
+    // the assertion is that it never gets ANOTHER +8.3 m/s (WILDCAT_JUMP_IMPULSE_PER_MASS)
+    // spike layered on top of tick 1's impulse.
+    const afterHolding = world.vehicles.velocity[id * 3 + 1] ?? 0;
+    expect(afterHolding).toBeLessThan(afterFirstTick + 8.3);
+  });
 });
 
 describe('resolveVehicleCollision', () => {
@@ -288,6 +326,37 @@ describe('resolveVehicleCollision', () => {
     world.vehicles.position.set([0, 5, 0], id * 3); // inside checkRadius (5.5) of the ground
     resolveVehicleCollision(world, id, { x: 0, y: 5.1, z: 0 }, 1 / 32); // ~3.2 m/s
     expect(world.vehicles.damage[id]).toBe(0);
+  });
+});
+
+describe('crash ejection is not overwritten by seat locking (Codex review round 1, finding 2)', () => {
+  it('a driver ejected by a mid-tick collision destruction keeps the ejection impulse, is not re-seated', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Shrike) as number;
+    world.vehicles.energy[vId] = 0; // no shield left to absorb the hit first
+    world.vehicles.position.set([0, 3, 0], vId * 3); // just above the flat terrain (height 0)
+    // clampShrikeSpeed caps this to a 100 m/s fall over one tick -- well past both
+    // collDamageThresholdVel (23) and groundImpactMinSpeed (10), so this single tick's
+    // ground impact alone exceeds the Shrike's maxDamage (1.4) and destroys it.
+    world.vehicles.velocity.set([0, -1e6, 0], vId * 3);
+    const playerId = addPlayer(world, { x: 0, y: 3, z: 0 }, 1);
+    world.vehicles.driverId[vId] = playerId;
+    world.players.mountedVehicleId[playerId] = vId;
+    stepVehicles(world, new Map(), 1 / 32);
+    expect(world.vehicles.destroyed[vId]).toBe(1);
+    expect(world.vehicles.driverId[vId]).toBe(-1);
+    expect(world.players.mountedVehicleId[playerId]).toBe(-1);
+    // ejectPilot (vehicles/vehicle.cs:237-260) applies a real, nonzero impulse. Before this
+    // fix, stepOneVehicle called seatDriver AGAIN afterward with the driverId captured
+    // BEFORE physics ran, re-pinning the just-ejected player onto the vehicle's own wreck
+    // position and zeroing this impulse straight back out.
+    const playerSpeed = Math.hypot(
+      world.players.velocity[playerId * 3] ?? 0,
+      world.players.velocity[playerId * 3 + 1] ?? 0,
+      world.players.velocity[playerId * 3 + 2] ?? 0,
+    );
+    expect(playerSpeed).toBeGreaterThan(0);
   });
 });
 

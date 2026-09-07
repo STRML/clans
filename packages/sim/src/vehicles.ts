@@ -86,6 +86,13 @@ export interface VehicleStore {
   padId: Int16Array; // originating BaseObjectStore id, -1 if none
   weaponTimer: Float64Array; // Shrike blaster cooldown; unused by Wildcat
   onGround: Uint8Array;
+  // Codex review round 1 (this PR), finding 8: the Wildcat's own jump was level-triggered
+  // on `input.jump` with no edge detection, so holding the key applied a fresh impulse every
+  // tick the hover spring's own contact range kept `onGround` at 1 (not a rare single-frame
+  // window -- easily several ticks). Mirrors PlayerStore.wasJumpHeld/movement.ts's own
+  // jumpEdge pattern, one tick simpler (no wasGrounded-based bunny-hop chaining needed for a
+  // vehicle jump).
+  wasJumpHeld: Uint8Array;
 }
 
 export const MOUNT_RANGE = 4; // real, both kinds; see VEHICLE_DATA.minMountDist per-kind above
@@ -114,6 +121,7 @@ export function createVehicleStore(capacity = VEHICLE_CAPACITY): VehicleStore {
     padId: new Int16Array(capacity).fill(-1),
     weaponTimer: new Float64Array(capacity),
     onGround: new Uint8Array(capacity),
+    wasJumpHeld: new Uint8Array(capacity),
   };
 }
 
@@ -205,6 +213,13 @@ function padSpawnTeam(world: World, padId: number): number | null {
 }
 
 export function spawnVehicleAtPad(world: World, padId: number, kind: VehicleKind): number | null {
+  // kind ultimately traces back to a wire byte (protocol/handshake.ts's decodeVehicleSpawn
+  // reads a raw u8 with no range check of its own) via server/net.ts's handleVehicleSpawn,
+  // so an out-of-range value must be rejected here, before anything below allocates a slot
+  // or reads VEHICLE_DATA[kind] -- both `if (kind !== VehicleKind.Shrike && kind !==
+  // VehicleKind.Wildcat)` would work, but this checks the actual backing table so a future
+  // third kind that forgets to also touch this guard fails closed, not open.
+  if (!(kind in VEHICLE_DATA)) return null;
   const team = padSpawnTeam(world, padId);
   if (team === null) return null;
 
@@ -240,6 +255,7 @@ export function spawnVehicleAtPad(world: World, padId: number, kind: VehicleKind
   vehicles.padId[id] = padId;
   vehicles.weaponTimer[id] = 0;
   vehicles.onGround[id] = 0;
+  vehicles.wasJumpHeld[id] = 0;
   return id;
 }
 
@@ -627,7 +643,13 @@ function applyWildcatThrust(
 }
 
 function applyWildcatJump(vehicles: VehicleStore, id: number, input: PlayerInput): void {
-  if (!input.jump || !vehicles.onGround[id]) return;
+  // Edge-triggered on the press, not the hold: `onGround` stays 1 for as long as the hover
+  // spring keeps the Wildcat within its own contact range (applyHoverSpring, below), which is
+  // easily several ticks in a row while parked or hovering low, not a single-frame window.
+  // Without wasJumpHeld, holding jump applied a fresh impulse every one of those ticks.
+  const jumpEdge = input.jump && !vehicles.wasJumpHeld[id];
+  vehicles.wasJumpHeld[id] = input.jump ? 1 : 0;
+  if (!jumpEdge || !vehicles.onGround[id]) return;
   if (at(vehicles.energy, id) < WILDCAT_MIN_JET_ENERGY) return;
   vehicles.velocity[id * 3 + 1] = at(vehicles.velocity, id * 3 + 1) + WILDCAT_JUMP_IMPULSE_PER_MASS;
   vehicles.energy[id] = at(vehicles.energy, id) - WILDCAT_JET_ENERGY_DRAIN;
@@ -1016,10 +1038,19 @@ function stepOneVehicle(
   const driverId = vehicles.driverId[vId] ?? -1;
   const input = driverId !== -1 ? (inputs.get(driverId) ?? idleVehicleInput()) : idleVehicleInput();
   stepOneVehiclePhysics(world, vId, input, dt);
-  if (vehicles.kind[vId] === VehicleKind.Shrike && driverId !== -1) {
+  // stepOneVehiclePhysics can destroy this vehicle via collision damage (resolveVehicleCollision
+  // -> applyVehicleDamage), which ejects the pilot and clears vehicles.driverId[vId] to -1. Using
+  // the driverId captured BEFORE physics for either of the two calls below would fire the weapon
+  // from an already-destroyed vehicle, or -- worse -- re-seat the just-ejected pilot straight back
+  // onto the wreck and zero the ejection impulse seatDriver's own velocity reset just applied,
+  // silently undoing "crash destruction ejects the pilot" the whole way ejectPilot exists to
+  // guarantee. Re-reading the current driver after physics makes both calls agree with whatever
+  // ejectPilot actually did this tick.
+  const currentDriverId = vehicles.driverId[vId] ?? -1;
+  if (vehicles.kind[vId] === VehicleKind.Shrike && currentDriverId !== -1) {
     tryFireShrikeBlaster(world, vId, input, dt);
   }
-  seatDriver(world, vId, driverId);
+  seatDriver(world, vId, currentDriverId);
 }
 
 export function stepVehicles(
