@@ -3,10 +3,15 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   addPlayer,
+  buildInteriorCollider,
+  createBaseObjects,
   createFlags,
+  createTurrets,
   createWorld,
   sampleTerrain,
   type Heightfield,
+  type InteriorInstance,
+  type InteriorTriangles,
   type World,
 } from '@clans/sim';
 
@@ -28,9 +33,30 @@ interface TerrainManifest {
   heights: string;
   emptySquares: number[];
 }
+interface SceneBaseObject {
+  kind: number;
+  team: number;
+  position: [number, number, number];
+  // ForceField placements only -- every other kind leaves both undefined.
+  rotation?: { axis: [number, number, number]; degrees: number };
+  scale?: [number, number, number];
+}
+interface SceneTurret {
+  barrel: number;
+  team: number;
+  position: [number, number, number];
+}
+interface SceneInterior {
+  shape: string;
+  position: [number, number, number];
+  rotation: { axis: [number, number, number]; degrees: number };
+}
 interface SceneData {
   spawns: SceneSpawn[];
   flagStands: SceneFlagStand[];
+  baseObjects: SceneBaseObject[];
+  turrets: SceneTurret[];
+  interiors: SceneInterior[];
 }
 
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -44,6 +70,33 @@ async function readHeights(manifest: TerrainManifest): Promise<Uint16Array> {
   const heights = new Uint16Array(bytes.byteLength / 2);
   for (let i = 0; i < heights.length; i += 1) heights[i] = view.getUint16(i * 2, true);
   return heights;
+}
+
+async function readCollisionTriangles(shape: string): Promise<InteriorTriangles> {
+  const bytes = await readFile(resolve(assetsRoot, 'collision', `${shape}.collision.bin`));
+  const view = new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+  return { positions: view };
+}
+
+async function loadInteriors(interiors: SceneInterior[]): Promise<InteriorInstance[]> {
+  const instances: InteriorInstance[] = [];
+  for (const placement of interiors) {
+    const triangles = await readCollisionTriangles(placement.shape);
+    instances.push(
+      buildInteriorCollider(triangles, {
+        position: { x: placement.position[0], y: placement.position[1], z: placement.position[2] },
+        rotation: {
+          axis: {
+            x: placement.rotation.axis[0],
+            y: placement.rotation.axis[1],
+            z: placement.rotation.axis[2],
+          },
+          degrees: placement.rotation.degrees,
+        },
+      }),
+    );
+  }
+  return instances;
 }
 
 export async function loadKatabaticWorld(
@@ -69,6 +122,30 @@ export async function loadKatabaticWorld(
     world,
     scene.flagStands.map(({ team, position: [x, y, z] }) => ({ team, position: { x, y, z } })),
   );
+  createBaseObjects(
+    world,
+    scene.baseObjects.map(({ kind, team, position: [x, y, z], rotation, scale }) => ({
+      kind,
+      team,
+      position: { x, y, z },
+      ...(rotation && {
+        rotation: {
+          axis: { x: rotation.axis[0], y: rotation.axis[1], z: rotation.axis[2] },
+          degrees: rotation.degrees,
+        },
+      }),
+      ...(scale && { scale: { x: scale[0], y: scale[1], z: scale[2] } }),
+    })),
+  );
+  createTurrets(
+    world,
+    scene.turrets.map(({ barrel, team, position: [x, y, z] }) => ({
+      barrel,
+      team,
+      position: { x, y, z },
+    })),
+  );
+  world.interiors = await loadInteriors(scene.interiors);
   return { world, spawns: scene.spawns };
 }
 

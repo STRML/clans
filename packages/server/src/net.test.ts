@@ -3,10 +3,13 @@ import { WebSocket } from 'ws';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   addPlayer,
+  BaseObjectKind,
+  createBaseObjects,
   createFlags,
   createWorld,
   FlagState,
   LIGHT_ARMOR,
+  stepPower,
   type Heightfield,
   type PlayerInput,
   type World,
@@ -18,11 +21,12 @@ import {
   encodeAck,
   encodeInput,
   encodeJoin,
+  encodeLoadout,
   EventKind,
   MessageType,
   type NetInputSample,
 } from '@clans/protocol';
-import { startNetServer, type NetServer } from './net.js';
+import { buildExtras, startNetServer, type NetServer } from './net.js';
 import type { SceneSpawn } from './world.js';
 
 const idleSample: PlayerInput = {
@@ -1397,5 +1401,46 @@ describe('startNetServer', () => {
     ];
     expect(posA).not.toEqual(posB);
     collideServer.close();
+  });
+
+  it('a Loadout message applies the requested armor and repair pack when the player is at a powered station', async () => {
+    // Arrange a world with one team-1 station within STATION_USE_RADIUS of the join spawn,
+    // powered by a living generator -- mirroring baseObjects.test.ts's own fixture shape.
+    const loadoutWorld = createWorld(terrain, 1, 8);
+    createBaseObjects(loadoutWorld, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 1, y: 0, z: 0 } },
+    ]);
+    stepPower(loadoutWorld);
+    const loadoutSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
+    const loadoutServer = startNetServer({
+      world: loadoutWorld,
+      spawns: loadoutSpawns,
+      port: TEST_PORT + 15,
+    });
+    await loadoutServer.ready;
+    const client = await connect(TEST_PORT + 15);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    client.send(encodeLoadout({ armor: 2, repairPack: true }));
+    await wait(10);
+    loadoutServer.tick(1);
+    expect(loadoutWorld.players.armor[0]).toBe(2);
+    expect(loadoutWorld.players.hasRepairPack[0]).toBe(1);
+    client.close();
+    loadoutServer.close();
+  });
+
+  it('buildExtras includes baseObjects and turrets', () => {
+    const extrasWorld = createWorld(terrain, 1, 8);
+    createBaseObjects(extrasWorld, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+    ]);
+    stepPower(extrasWorld);
+    const extras = buildExtras(extrasWorld);
+    expect(extras.baseObjects).toHaveLength(1);
+    expect(extras.baseObjects[0]?.powered).toBe(1);
   });
 });

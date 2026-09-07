@@ -9,6 +9,7 @@ import {
   WeaponId,
   addPlayer,
   applyDamage,
+  applyLoadoutRequest,
   deactivateProjectile,
   dueForRespawn,
   hitTestFireEvent,
@@ -35,13 +36,16 @@ import {
   decodeGod,
   decodeInput,
   decodeJoin,
+  decodeLoadout,
   encodeEvent,
   encodeSnapshot,
   encodeWelcome,
+  type BaseObjectSnapshotData,
   type EventMessage,
   type FlagSnapshotData,
   type ProjectileSnapshotData,
   type SnapshotBaseline,
+  type TurretSnapshotData,
   type WorldExtras,
 } from '@clans/protocol';
 import { isClientOverloaded } from './backpressure-policy.js';
@@ -251,6 +255,22 @@ function handleGod(
   setGodMode(world, entry.session.playerId, decodeGod(bytes).enabled);
 }
 
+/** A refused request (failure matrix row 4: not at a powered station, or not in range) is
+ *  silently a no-op, exactly like an out-of-turn God message already is -- the client's own
+ *  menu already only lets a request happen while `stationAt` says it can, so a refusal here
+ *  means the world changed between the click and the message arriving, not a client bug. */
+function handleLoadout(
+  world: World,
+  clients: Map<WebSocket, ClientEntry>,
+  socket: WebSocket,
+  bytes: Uint8Array,
+): void {
+  const entry = clients.get(socket);
+  if (!entry) return;
+  const { armor, repairPack } = decodeLoadout(bytes);
+  applyLoadoutRequest(world, entry.session.playerId, armor, repairPack);
+}
+
 function handleMessage(
   world: World,
   spawns: SceneSpawn[],
@@ -264,6 +284,7 @@ function handleMessage(
   else if (type === MessageType.Input) handleInput(clients, socket, bytes);
   else if (type === MessageType.Ack) handleAck(clients, now, socket, bytes);
   else if (type === MessageType.God) handleGod(world, clients, socket, bytes);
+  else if (type === MessageType.Loadout) handleLoadout(world, clients, socket, bytes);
 }
 
 /**
@@ -413,13 +434,43 @@ function snapshotWorldFlags(world: World): FlagSnapshotData[] {
   return flags;
 }
 
-function buildExtras(world: World): WorldExtras {
+function snapshotBaseObject(world: World, id: number): BaseObjectSnapshotData {
+  const store = world.baseObjects;
+  return {
+    id,
+    damage: store.damage[id] ?? 0,
+    destroyed: (store.destroyed[id] ? 1 : 0) as 0 | 1,
+    powered: (store.powered[id] ? 1 : 0) as 0 | 1,
+  };
+}
+function snapshotBaseObjects(world: World): BaseObjectSnapshotData[] {
+  const out: BaseObjectSnapshotData[] = [];
+  for (let id = 0; id < world.baseObjects.count; id += 1) out.push(snapshotBaseObject(world, id));
+  return out;
+}
+function snapshotTurret(world: World, id: number): TurretSnapshotData {
+  const store = world.turrets;
+  return {
+    id,
+    damage: store.damage[id] ?? 0,
+    destroyed: (store.destroyed[id] ? 1 : 0) as 0 | 1,
+    powered: (store.powered[id] ? 1 : 0) as 0 | 1,
+    targetId: store.targetId[id] ?? -1,
+    state: store.state[id] ?? 0,
+  };
+}
+function snapshotTurrets(world: World): TurretSnapshotData[] {
+  const out: TurretSnapshotData[] = [];
+  for (let id = 0; id < world.turrets.count; id += 1) out.push(snapshotTurret(world, id));
+  return out;
+}
+
+export function buildExtras(world: World): WorldExtras {
   return {
     projectiles: snapshotActiveProjectiles(world),
     flags: snapshotWorldFlags(world),
-    // Placeholder until Task 10 wires the real base-object/turret snapshot builders.
-    baseObjects: [],
-    turrets: [],
+    baseObjects: snapshotBaseObjects(world),
+    turrets: snapshotTurrets(world),
     teamScores: [world.teamScores[1] ?? 0, world.teamScores[2] ?? 0],
     gameOver: world.gameOver,
     winnerTeam: world.winnerTeam,
