@@ -105,7 +105,10 @@ pnpm assets:build  # regenerate assets/out from the T2 data files (downloads the
 - `packages/bots`: placeholder until milestone 6. The server's `--bots` are idle stand-ins.
 
 Every gameplay number (armor mass, jet force, speed caps) is copied from the T2 base scripts
-and cited in the spec. If a number looks wrong, check the script before changing it.
+and cited in the spec, except a handful of documented "ours" values where a script constant
+had no direct equivalent under this codebase's own physics model (each one commented at its
+definition and called out in the milestone's own PR). If a number looks wrong, check the
+script before changing it.
 
 ## Credits
 
