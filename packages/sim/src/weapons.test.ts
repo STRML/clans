@@ -32,6 +32,7 @@ const IDLE: PlayerInput = {
   fire: false,
   altFire: false,
   slot: 0,
+  packActive: false,
 };
 const FIXED_DT = 32 / 1000;
 const ticksFor = (seconds: number): number => Math.ceil(seconds / FIXED_DT);

@@ -12,6 +12,7 @@ const sample = (moveZ: number): NetInputSample => ({
   fire: false,
   altFire: false,
   slot: 0,
+  packActive: false,
 });
 const inputMessage = (
   sequence: number,

@@ -3,12 +3,15 @@ import { describe, expect, it } from 'vitest';
 import {
   addPlayer,
   applyDamage,
+  BaseObjectKind,
+  createBaseObjects,
   createFlags,
   createWorld,
   FIXED_DT,
   GameOverReason,
   LIGHT_ARMOR,
   RESPAWN_TICKS,
+  stepPower,
   type Heightfield,
   type PlayerInput,
   type PlayerSnapshotData,
@@ -20,6 +23,10 @@ import {
   type ProjectileSnapshotData,
 } from '@clans/protocol';
 import {
+  commanderMapPlayers,
+  debugIsStationPowered,
+  debugKillGenerator,
+  debugRepairGenerator,
   drainNewEvents,
   hudSourceFrom,
   positionOfPlayer,
@@ -44,6 +51,7 @@ const IDLE_INPUT: PlayerInput = {
   fire: false,
   altFire: false,
   slot: 0,
+  packActive: false,
 };
 
 const flat: Heightfield = {
@@ -83,7 +91,43 @@ const snapshot: PlayerSnapshotData = {
   score: 0,
   godMode: 0 as const,
   wasJumpHeld: 0 as const,
+  armor: 0,
+  hasRepairPack: 0 as const,
 };
+
+describe('commanderMapPlayers (Codex round 2 review of PR #11)', () => {
+  it('merges net.remotePlayers into the roster -- world.players alone never has them', () => {
+    // NetClient's own prediction world only ever holds the local player (netclient.ts's
+    // createWorld(terrain, 1, 1) -- capacity 1); every remote player's position lives
+    // entirely in net.remotePlayers, decoded off the wire. Before this fix, the commander
+    // map's player scan read world.players alone, so a networked client's map never showed
+    // a single enemy or teammate other than the local player.
+    const world = createWorld(flat, 1);
+    addPlayer(world, { x: 0, y: 0, z: 0 }, 1); // the local player, id 0
+    const remote: Pick<NetClient, 'remotePlayers'> = {
+      remotePlayers: new Map([[1, { ...snapshot, id: 1, team: 2, x: 42, z: 7 }]]),
+    };
+    const players = commanderMapPlayers(world, remote);
+    expect(players).toHaveLength(2);
+    const remotePlayer = players.find((p) => p.id === 1);
+    expect(remotePlayer).toMatchObject({ team: 2, x: 42, z: 7, alive: true });
+  });
+
+  it('a dead remote (health <= 0) is not reported alive', () => {
+    const world = createWorld(flat, 1);
+    const remote: Pick<NetClient, 'remotePlayers'> = {
+      remotePlayers: new Map([[1, { ...snapshot, id: 1, health: 0 }]]),
+    };
+    const players = commanderMapPlayers(world, remote);
+    expect(players.find((p) => p.id === 1)?.alive).toBe(false);
+  });
+
+  it('single-player (no net) reads only world.players', () => {
+    const world = createWorld(flat, 1);
+    addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    expect(commanderMapPlayers(world, null)).toHaveLength(1);
+  });
+});
 
 describe('updateRemotes', () => {
   it('timestamps a pushed remote sample with the caller clock, not the server tick counter', () => {
@@ -308,6 +352,34 @@ describe('teleportPlayerToFlag', () => {
   });
 });
 
+describe('debugKillGenerator / debugRepairGenerator', () => {
+  it("debugKillGenerator destroys both of a team's generators; debugRepairGenerator revives one", () => {
+    const world = createWorld(flat, 1, 8);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 5, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 10, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    debugKillGenerator(world, 1);
+    expect(world.baseObjects.powered[2]).toBe(0);
+    debugRepairGenerator(world, 1);
+    expect(world.baseObjects.powered[2]).toBe(1);
+  });
+
+  it("debugIsStationPowered reflects the team station's current powered bit", () => {
+    const world = createWorld(flat, 1, 8);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 5, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    expect(debugIsStationPowered(world, 1)).toBe(true);
+    debugKillGenerator(world, 1);
+    expect(debugIsStationPowered(world, 1)).toBe(false);
+  });
+});
+
 describe('stepSinglePlayer (Codex review round 4, finding 1)', () => {
   it('respawns a dead single-player once the timer elapses, instead of leaving them dead forever', () => {
     // Codex review round 4, finding 1 (PR #9): single-player has no server, and nothing else
@@ -448,6 +520,8 @@ describe('positionOfPlayer', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     const net: Pick<NetClient, 'playerId' | 'remotePlayers'> = {
       playerId: localId,

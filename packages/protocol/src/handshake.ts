@@ -22,6 +22,7 @@ import {
   type GodMessage,
   type InputMessage,
   type JoinMessage,
+  type LoadoutMessage,
   type NetInputSample,
   type WelcomeMessage,
 } from './messages.js';
@@ -42,7 +43,11 @@ function writeSample(cursor: Cursor, sample: NetInputSample): void {
   writeF32(cursor, sample.pitch);
   writeU8(
     cursor,
-    (sample.jump ? 1 : 0) | (sample.jet ? 2 : 0) | (sample.fire ? 4 : 0) | (sample.altFire ? 8 : 0),
+    (sample.jump ? 1 : 0) |
+      (sample.jet ? 2 : 0) |
+      (sample.fire ? 4 : 0) |
+      (sample.altFire ? 8 : 0) |
+      (sample.packActive ? 16 : 0),
   );
   writeU8(cursor, sample.slot);
 }
@@ -80,6 +85,7 @@ function readSample(cursor: Cursor): NetInputSample {
     fire: (flags & 4) !== 0,
     altFire: (flags & 8) !== 0,
     slot,
+    packActive: (flags & 16) !== 0,
   };
 }
 
@@ -181,4 +187,19 @@ export function decodeGod(bytes: Uint8Array): GodMessage {
   const cursor = createReader(bytes);
   expectType(cursor, MessageType.God);
   return { type: MessageType.God, enabled: readU8(cursor) !== 0 };
+}
+
+export function encodeLoadout(message: Omit<LoadoutMessage, 'type'>): Uint8Array {
+  const cursor = createWriter(3);
+  writeU8(cursor, MessageType.Loadout);
+  writeU8(cursor, message.armor);
+  writeU8(cursor, message.repairPack ? 1 : 0);
+  return bytesOf(cursor);
+}
+export function decodeLoadout(bytes: Uint8Array): LoadoutMessage {
+  const cursor = createReader(bytes);
+  expectType(cursor, MessageType.Loadout);
+  const armor = readU8(cursor);
+  const repairPack = readU8(cursor) !== 0;
+  return { type: MessageType.Loadout, armor, repairPack };
 }

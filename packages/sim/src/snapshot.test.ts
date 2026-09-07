@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LIGHT_ARMOR } from './armor.js';
+import { ArmorId, LIGHT_ARMOR } from './armor.js';
 import {
   addPlayer,
   createWorld,
@@ -57,6 +57,8 @@ describe('player snapshots', () => {
       score: 0,
       godMode: 0,
       wasJumpHeld: 0,
+      armor: ArmorId.Light,
+      hasRepairPack: 0,
     });
   });
 
@@ -97,6 +99,8 @@ describe('player snapshots', () => {
       score: -3,
       godMode: 1,
       wasJumpHeld: 1,
+      armor: ArmorId.Light,
+      hasRepairPack: 0,
     });
     expect(world.players.count).toBe(4);
     expect(world.players.active[3]).toBe(1);
@@ -127,6 +131,8 @@ describe('player snapshots', () => {
       score: -3,
       godMode: 1,
       wasJumpHeld: 1,
+      armor: ArmorId.Light,
+      hasRepairPack: 0,
     });
   });
 

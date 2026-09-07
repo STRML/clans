@@ -95,6 +95,8 @@ function mixPlayer(hash: number, players: World['players'], id: number): number 
   // precision than a correct encode/decode round trip can actually reproduce, a false
   // mismatch the wire was never designed to avoid.
   h = mix(h, num(players.respawnSeq, id) & 0xff);
+  h = mix(h, num(players.armor, id));
+  h = mix(h, num(players.hasRepairPack, id));
   return h;
 }
 
@@ -154,6 +156,38 @@ function mixFlags(hash: number, world: World): number {
   return h;
 }
 
+function mixBaseObjects(hash: number, world: World): number {
+  let h = hash;
+  const store = world.baseObjects;
+  for (let id = 0; id < store.count; id += 1) {
+    h = mix(h, id);
+    h = mix(h, num(store.kind, id));
+    h = mix(h, num(store.team, id));
+    h = mix(h, num(store.damage, id));
+    h = mix(h, num(store.destroyed, id));
+    h = mix(h, num(store.energy, id));
+    h = mix(h, num(store.powered, id));
+  }
+  return h;
+}
+
+function mixTurrets(hash: number, world: World): number {
+  let h = hash;
+  const store = world.turrets;
+  for (let id = 0; id < store.count; id += 1) {
+    h = mix(h, id);
+    h = mix(h, num(store.barrel, id));
+    h = mix(h, num(store.team, id));
+    h = mix(h, num(store.damage, id));
+    h = mix(h, num(store.destroyed, id));
+    h = mix(h, num(store.energy, id));
+    h = mix(h, num(store.powered, id));
+    h = mix(h, num(store.targetId, id));
+    h = mix(h, num(store.state, id));
+  }
+  return h;
+}
+
 /**
  * POLICY (Codex review round 15, PR #9, finding 3c -- closing out five straight review
  * rounds of "hashWorld is missing/including field X"): the spec's Testing section states
@@ -205,5 +239,9 @@ export function hashWorld(world: World): number {
   }
   hash = mixProjectiles(hash, world);
   hash = mixFlags(hash, world);
+  hash = mixBaseObjects(hash, world);
+  hash = mixTurrets(hash, world);
+  // pendingTurretFireEvents is deliberately not mixed — same one-tick-transient convention
+  // pendingFireEvents already follows per the POLICY comment above.
   return hash >>> 0;
 }

@@ -35,6 +35,20 @@ describe('server world bootstrap', () => {
     expect(world.flags.state.length).toBe(2);
   });
 
+  it('places every base object, turret, and interior from scene.json', async () => {
+    const { world } = await loadKatabaticWorld();
+    expect(world.baseObjects.count).toBeGreaterThan(0);
+    expect(world.turrets.count).toBeGreaterThan(0);
+    expect(world.interiors.length).toBeGreaterThan(0);
+    // Katabatic's real counts: 4 generators, 2 sensors, 18 stations, 2 pads, 2 force fields =
+    // 28 base objects; 4 TurretBaseLarge + 2 SentryTurret = 6 turrets; 29 interior placements
+    // (11 unique shapes).
+    expect(world.baseObjects.count).toBe(28);
+    expect(world.turrets.count).toBe(6);
+    expect(world.interiors.length).toBe(29);
+    expect(world.forceFields).toHaveLength(2);
+  });
+
   it('picks the team with fewer active players, team 1 on a tie', () => {
     const world = createWorld(terrain, 1);
     addPlayer(world, { x: 0, y: 0, z: 0 }, 1);

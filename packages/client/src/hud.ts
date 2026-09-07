@@ -2,9 +2,9 @@ import {
   FIXED_DT,
   FlagState,
   GameOverReason,
-  LIGHT_ARMOR,
   WeaponId,
   ammoIndex,
+  armorFor,
   type World,
 } from '@clans/sim';
 import { EventKind, type EventMessage, type FlagSnapshotData } from '@clans/protocol';
@@ -30,6 +30,9 @@ export interface HudSource {
   timeRemainingS: number;
   gameOverReason: GameOverReason;
   recentEvents: EventMessage[];
+  /** The base object or turret the local player is currently aimed at within a short range,
+   *  or null. Set by app.ts's raycastAimedStructure (base-object-view.ts). */
+  aimedStructure: { name: string; healthPercent: number } | null;
 }
 export interface HudRow {
   id: string;
@@ -50,13 +53,15 @@ function percent(value: number, max: number): number {
 }
 
 function healthRow(source: HudSource): HudRow {
-  const health = LIGHT_ARMOR.maxDamage - (source.world.players.damage[source.playerId] ?? 0);
-  return { id: 'hud-health', text: `${String(percent(health, LIGHT_ARMOR.maxDamage))}%` };
+  const armor = armorFor(source.world, source.playerId);
+  const health = armor.maxDamage - (source.world.players.damage[source.playerId] ?? 0);
+  return { id: 'hud-health', text: `${String(percent(health, armor.maxDamage))}%` };
 }
 
 function energyRow(source: HudSource): HudRow {
+  const armor = armorFor(source.world, source.playerId);
   const energy = source.world.players.energy[source.playerId] ?? 0;
-  return { id: 'hud-energy', text: `${String(percent(energy, LIGHT_ARMOR.maxEnergy))}%` };
+  return { id: 'hud-energy', text: `${String(percent(energy, armor.maxEnergy))}%` };
 }
 
 function weaponAmmoRows(source: HudSource): HudRow[] {
@@ -115,6 +120,12 @@ function clockRow(source: HudSource): HudRow {
   return { id: 'hud-clock', text: `${String(minutes)}:${seconds.toString().padStart(2, '0')}` };
 }
 
+function aimedStructureRow(source: HudSource): HudRow {
+  if (!source.aimedStructure) return { id: 'hud-aimed', text: '' };
+  const { name, healthPercent } = source.aimedStructure;
+  return { id: 'hud-aimed', text: `${name} ${String(healthPercent)}%` };
+}
+
 export function describeHud(source: HudSource): HudRow[] {
   return [
     healthRow(source),
@@ -125,6 +136,7 @@ export function describeHud(source: HudSource): HudRow[] {
     respawnRow(source),
     clockRow(source),
     gameOverRow(source),
+    aimedStructureRow(source),
   ];
 }
 

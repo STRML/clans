@@ -16,6 +16,8 @@ export interface PlayerInput {
   fire: boolean;
   altFire: boolean;
   slot: number; // 0 = no change, 1..5 = select that weapon slot (see weaponIdForSlot)
+  /** Repair Pack beam held down. Level-triggered, like `fire`. */
+  packActive: boolean;
 }
 export interface PlayerStore {
   count: number;
@@ -61,6 +63,12 @@ export interface PlayerStore {
    *  the narrower width is still safe. Reset to 0 by addPlayer on every join, including a
    *  reused id; never reset by anything else. */
   respawnSeq: Uint16Array;
+  /** ArmorId (armor.ts). Set by addPlayer/respawnPlayer/a station loadout change; every
+   *  system that used to hardcode LIGHT_ARMOR reads this through armor.ts's armorFor(world,
+   *  id) instead -- see the M4 plan's Global Constraints. */
+  armor: Uint8Array; // ArmorId
+  /** 0/1. Set by a Loadout request (Task 6); the only pack modeled this milestone. */
+  hasRepairPack: Uint8Array;
 }
 /** One id freed by `free()`, held out of `freeIds` until it has sat unallocated for at
  *  least PROJECTILE_ID_REUSE_DELAY_TICKS calls to `stepProjectiles` -- see that constant
@@ -97,6 +105,19 @@ export interface ProjectileStore {
   type: Uint8Array;
   weaponId: Uint8Array;
   ownerId: Int16Array;
+  /** The shooter's team at spawn time (or a turret's own team for a turret-fired shot, which
+   *  has no ownerId to look one up through). Read once here rather than looked up through
+   *  ownerId on every later hit test — see baseObjects.ts's activeForceFieldBlockers, which
+   *  every hit-test call site in projectiles.ts consults with this field. */
+  team: Uint8Array;
+  /** -1 for a player-fired shot; the firing turret's own id for a turret-fired one. A turret
+   *  shot spawns at its own turret's exact position, which sits inside that same turret's own
+   *  TURRET_HIT_RADIUS hit-sphere — without this, the shot's very first hit-test would
+   *  register an immediate self-hit at distance 0 (`raySphereDistance`'s "origin already
+   *  inside the sphere" case) and detonate against the turret that just fired it, never
+   *  reaching its actual target. Mirrors how a player-fired shot already excludes its own
+   *  shooter via `ownerId`/`isValidTarget` — see `nearestStructureHitFrom`. */
+  sourceTurretId: Int16Array;
   position: Float64Array;
   velocity: Float64Array;
   /** Ticks this projectile has been alive, counted by stepProjectiles itself rather than
@@ -120,6 +141,11 @@ export interface World {
   terrain: Heightfield;
   /** Below this height a player has fallen out of the world and returns to spawn. */
   killY: number;
+  interiors: import('./interiors.js').InteriorInstance[];
+  baseObjects: import('./baseObjects.js').BaseObjectStore;
+  forceFields: import('./baseObjects.js').ForceFieldGeometry[];
+  turrets: import('./turrets.js').TurretStore;
+  pendingTurretFireEvents: import('./turrets.js').TurretFireEvent[];
   players: PlayerStore;
   projectiles: ProjectileStore;
   pendingDeaths: Array<{ id: number; attackerId: number }>;

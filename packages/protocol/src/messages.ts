@@ -8,6 +8,7 @@ export enum MessageType {
   Ack = 5,
   Event = 6,
   God = 7,
+  Loadout = 8,
 }
 
 export const PROTOCOL_VERSION = 2; // M1/M2 carried no version field at all; this milestone starts at 2.
@@ -66,6 +67,11 @@ export interface GodMessage {
   type: MessageType.God;
   enabled: boolean;
 }
+export interface LoadoutMessage {
+  type: MessageType.Loadout;
+  armor: number; // ArmorId from @clans/sim
+  repairPack: boolean;
+}
 
 export const SNAPSHOT_EVERY_N_TICKS = 2;
 export const SNAPSHOT_FALLBACK_MS = 1000;
@@ -91,3 +97,5 @@ export const MAX_SNAPSHOT_PLAYERS = 256;
 export const MAX_SNAPSHOT_PROJECTILES = 256;
 // Two flags in this milestone's CTF map. A little headroom in case a future map adds more.
 export const MAX_SNAPSHOT_FLAGS = 8;
+export const MAX_SNAPSHOT_BASE_OBJECTS = 64; // Matches @clans/sim's BASE_OBJECT_CAPACITY.
+export const MAX_SNAPSHOT_TURRETS = 16; // Matches @clans/sim's TURRET_CAPACITY.

@@ -34,6 +34,7 @@ function baseSource(overrides: Partial<HudSource> = {}): HudSource {
     timeRemainingS: 0,
     gameOverReason: GameOverReason.CaptureLimit,
     recentEvents: [],
+    aimedStructure: null,
     ...overrides,
   };
 }
@@ -138,6 +139,13 @@ describe('describeHud', () => {
     expect(rowsOf(baseSource({ timeRemainingS: 90 }))['hud-clock']).toBe('1:30');
     expect(rowsOf(baseSource({ timeRemainingS: 5.2 }))['hud-clock']).toBe('0:06');
     expect(rowsOf(baseSource({ timeRemainingS: -1 }))['hud-clock']).toBe('0:00'); // clamped
+  });
+
+  it('shows a base-object health row when aimedStructure is set, and nothing when it is null', () => {
+    expect(rowsOf(baseSource({ aimedStructure: null }))['hud-aimed']).toBe('');
+    expect(
+      rowsOf(baseSource({ aimedStructure: { name: 'Generator', healthPercent: 62 } }))['hud-aimed'],
+    ).toBe('Generator 62%');
   });
 });
 

@@ -1,4 +1,5 @@
 export * from './armor.js';
+export * from './baseObjects.js';
 // damage.js and weapons.js both export a function named `respawnPlayer` (weapons.ts's
 // version wraps damage.ts's to also reset the weapon loadout on respawn), so two
 // unqualified `export *`s here would be an ambiguous re-export TypeScript rejects.
@@ -21,10 +22,13 @@ export {
 export { GRAVITY } from './movement.js';
 export * from './flags.js';
 export * from './hash.js';
+export * from './interiors.js';
 export * from './projectiles.js';
 export * from './random.js';
+export * from './repair.js';
 export * from './snapshot.js';
 export * from './terrain.js';
+export * from './turrets.js';
 export * from './types.js';
 export * from './weapons.js';
 export * from './world.js';

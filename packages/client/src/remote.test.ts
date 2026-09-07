@@ -30,6 +30,8 @@ const sample = (x: number, vx: number): PlayerSnapshotData => ({
   score: 0,
   godMode: 0 as const,
   wasJumpHeld: 0 as const,
+  armor: 0,
+  hasRepairPack: 0 as const,
 });
 
 describe('RemoteBuffer', () => {
