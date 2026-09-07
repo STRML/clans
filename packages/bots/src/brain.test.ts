@@ -6,9 +6,10 @@ import {
   createFlags,
   createWorld,
   stepPower,
+  stepWorld,
   type Heightfield,
 } from '@clans/sim';
-import { decideCombat, decideGoal, decideState, stepBot } from './brain.js';
+import { decideCombat, decideGoal, decideState, stepBot, stepBots } from './brain.js';
 import { buildWaypointGraph } from './waypoints.js';
 import { BotRole, BotState, createBotRuntimeState } from './types.js';
 
@@ -269,5 +270,28 @@ describe('stepBot', () => {
     ]);
     const input = stepBot(world, graph, runtime);
     expect(input.use).toBe(false);
+  });
+});
+
+describe('combat actually lands hits end to end (Codex review round 3, P1)', () => {
+  it('a bot firing at a stationary enemy 10 m away deals real damage within a few ticks', () => {
+    // Direct reproduction of the review's own probe: aimAndFire previously aimed and fired
+    // from the player's feet position instead of the real fire origin (MUZZLE_HEIGHT above
+    // it), so the ray missed the target's hit sphere every time even while this file's own
+    // tolerance check reported fire: true.
+    const world = createWorld(flat, 1, 4);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const enemy = addPlayer(world, { x: 0, y: 0, z: 10 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    const graph = buildWaypointGraph([
+      { position: { x: -100, y: 0, z: 0 }, label: 'homeFlag' },
+      { position: { x: 100, y: 0, z: 0 }, label: 'enemyFlag' },
+    ]);
+    for (let tick = 0; tick < 40; tick += 1) {
+      const inputs = stepBots(world, graph, new Map([[bot, runtime]]));
+      stepWorld(world, inputs);
+    }
+    expect(world.players.damage[enemy]).toBeGreaterThan(0);
   });
 });

@@ -1,6 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import { checkStuck, worldDirectionToLocalMove } from './steering.js';
+import { createWorld, LIGHT_ARMOR, type Heightfield } from '@clans/sim';
+import {
+  checkStuck,
+  STUCK_CHECK_TICKS,
+  STUCK_SKIP_THRESHOLD,
+  steerToward,
+  worldDirectionToLocalMove,
+} from './steering.js';
+import { buildWaypointGraph } from './waypoints.js';
 import { createBotRuntimeState, BotRole } from './types.js';
+
+const flat: Heightfield = {
+  gridSize: 2,
+  squareSize: 2000,
+  originX: -1000,
+  originY: 0,
+  originZ: 1000,
+  heightScale: 1,
+  heights: new Uint16Array(4),
+};
 
 describe('worldDirectionToLocalMove', () => {
   it('facing +Z (yaw 0), moving toward +Z gives pure forward', () => {
@@ -54,5 +72,31 @@ describe('checkStuck', () => {
     // Baseline reset to tick 61 / position (0,0,0) by the call above -- 60 ticks later with
     // real movement in between must NOT report stuck again immediately.
     expect(checkStuck(runtime, worldAt(90), { x: 5, y: 0, z: 0 })).toBe(false);
+  });
+});
+
+describe('steerToward stuck-skip (Codex review round 3, P1)', () => {
+  it('bypasses the graph and steers straight at the goal after STUCK_SKIP_THRESHOLD consecutive stalls, instead of retrying the identical unreachable route forever', () => {
+    const world = createWorld(flat, 1);
+    world.tick = 0;
+    const graph = buildWaypointGraph([
+      { position: { x: 0, y: 0, z: 0 }, label: 'a' },
+      { position: { x: 50, y: 0, z: 0 }, label: 'b' },
+      { position: { x: 100, y: 0, z: 0 }, label: 'c' },
+    ]);
+    const runtime = createBotRuntimeState(1, BotRole.Attacker, 1);
+    // The bot's position never actually changes across every call below -- simulating a
+    // waypoint the coarse graph offers but real movement can never reach (a wall, a cliff,
+    // any 3D obstacle a 2D straight-line edge can't see).
+    const stuckPosition = { x: 0, y: 0, z: 0 };
+    const goal = { x: 100, y: 0, z: 0 };
+    steerToward(graph, world, 1, runtime, 1, goal, 'goal:c', stuckPosition, LIGHT_ARMOR, 60);
+    expect(runtime.path.length).toBeGreaterThan(1); // still following the multi-node graph route
+    for (let i = 0; i < STUCK_SKIP_THRESHOLD; i += 1) {
+      world.tick += STUCK_CHECK_TICKS + 1;
+      steerToward(graph, world, 1, runtime, 1, goal, 'goal:c', stuckPosition, LIGHT_ARMOR, 60);
+    }
+    expect(runtime.path).toEqual([{ x: goal.x, z: goal.z }]);
+    expect(runtime.pathIndex).toBe(0);
   });
 });

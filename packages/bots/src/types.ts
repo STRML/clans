@@ -38,6 +38,19 @@ export interface BotRuntimeState {
   engagedTargetId: number; // -1 = none
   stuckBaselinePosition: { x: number; z: number };
   stuckBaselineTick: number;
+  /** Codex review round 3, finding (P1): consecutive stuck detections against the same
+   *  waypoint, without an intervening real waypoint reached. The coarse graph's edges
+   *  carry no terrain/collision awareness (Task 2's own explicit scope), so a repath from
+   *  the same stuck position to the same goal can recompute the identical unreachable
+   *  route forever -- see steering.ts's steerToward for what this counter drives once it
+   *  crosses STUCK_SKIP_THRESHOLD. */
+  stuckStreak: number;
+  /** The `pathIndex` the stuck baseline was last measured against. steering.ts's
+   *  handleStuck resets the baseline immediately whenever this no longer matches the
+   *  current `pathIndex` (a new waypoint, a repath, or the very first check), so a target
+   *  change is never misread as a burst of "progress" toward a DIFFERENT point than the
+   *  one the baseline actually measured. -1 = never measured yet. */
+  stuckTargetIndex: number;
   random: RandomState;
 }
 
@@ -58,6 +71,8 @@ export function createBotRuntimeState(
     engagedTargetId: -1,
     stuckBaselinePosition: { x: 0, z: 0 },
     stuckBaselineTick: 0,
+    stuckStreak: 0,
+    stuckTargetIndex: -1,
     random: { value: seed || 1 },
   };
 }
