@@ -115,4 +115,17 @@ describe('nearestNode', () => {
     expect(nearestNode(graph, { x: 10, y: 0, z: 0 })).toBe(0);
     expect(nearestNode(graph, { x: 90, y: 0, z: 0 })).toBe(1);
   });
+
+  it('returns -1 for an empty graph rather than a fallback id that does not exist', () => {
+    const graph = buildWaypointGraph([]);
+    expect(nearestNode(graph, { x: 0, y: 0, z: 0 })).toBe(-1);
+  });
+});
+
+describe('findPath on a landmark-less graph', () => {
+  it('returns null instead of crashing on an empty graph', () => {
+    const world = createWorld(flat, 1);
+    const graph = buildWaypointGraph([]);
+    expect(findPath(graph, world, 1, { x: 0, y: 0, z: 0 }, { x: 10, y: 0, z: 0 })).toBeNull();
+  });
 });

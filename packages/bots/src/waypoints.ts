@@ -121,7 +121,12 @@ export function buildWaypointGraph(
   return { nodes, edges };
 }
 
+/** -1 for an empty graph (no landmarks at all) -- callers (findPath below) must check
+ *  for this rather than trusting a fallback id that may not exist; a naive `best = 0`
+ *  default here previously crashed findPath's own final lookup (`graph.nodes[0]`) on a
+ *  landmark-less graph, since `graph.nodes` never gets a node with id 0 to begin with. */
 export function nearestNode(graph: WaypointGraph, position: Vec3): number {
+  if (graph.nodes.length === 0) return -1;
   let best = 0;
   let bestDist = Infinity;
   for (const node of graph.nodes) {
@@ -257,6 +262,10 @@ export function findPath(
   from: Vec3,
   to: Vec3,
 ): Vec3[] | null {
+  // No landmarks at all -- e.g. a caller that built the graph with an empty landmark
+  // list. Nothing to route through; the caller (steering.ts's ensurePath) already
+  // falls back to a direct path straight at the goal when findPath returns null.
+  if (graph.nodes.length === 0) return null;
   const startId = nearestNode(graph, from);
   const goalId = nearestNode(graph, to);
   const { dist, prev } = runDijkstra(graph, world, forTeam, startId, goalId);
