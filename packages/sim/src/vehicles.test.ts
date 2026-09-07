@@ -4,6 +4,7 @@ import { createWorld, type Heightfield, type PlayerInput } from './index.js';
 import {
   activeVehicleCountForTeam,
   createVehicleStore,
+  resolveVehicleCollision,
   spawnVehicleAtPad,
   stepShrike,
   stepWildcat,
@@ -242,5 +243,28 @@ describe('stepWildcat', () => {
     const jumping: PlayerInput = { ...idleInput, jump: true };
     stepWildcat(world, id, jumping, 1 / 32);
     expect(world.vehicles.energy[id]).toBeLessThan(before);
+  });
+});
+
+describe('resolveVehicleCollision', () => {
+  it('a Shrike flown into terrain stops at the surface, not through it', () => {
+    const { world, id } = shrikeWorld();
+    world.vehicles.position.set([0, -1, 0], id * 3); // below the flat terrain (ground height 0)
+    resolveVehicleCollision(world, id, { x: 0, y: 5, z: 0 }, 1 / 32);
+    expect(world.vehicles.position[id * 3 + 1]).toBeGreaterThanOrEqual(0);
+  });
+
+  it('a high-speed terrain impact applies collision damage above collDamageThresholdVel', () => {
+    const { world, id } = shrikeWorld();
+    world.vehicles.position.set([0, -1, 0], id * 3);
+    resolveVehicleCollision(world, id, { x: 0, y: 5, z: 0 }, 1 / 32); // ~192 m/s synthetic impact
+    expect(world.vehicles.damage[id]).toBeGreaterThan(0);
+  });
+
+  it('a low-speed landing (below collDamageThresholdVel and groundImpactMinSpeed) takes no damage', () => {
+    const { world, id } = shrikeWorld();
+    world.vehicles.position.set([0, 5, 0], id * 3); // inside checkRadius (5.5) of the ground
+    resolveVehicleCollision(world, id, { x: 0, y: 5.1, z: 0 }, 1 / 32); // ~3.2 m/s
+    expect(world.vehicles.damage[id]).toBe(0);
   });
 });

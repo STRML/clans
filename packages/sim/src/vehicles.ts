@@ -1,4 +1,5 @@
 import { BaseObjectKind, teamHasPower, type BaseObjectStore } from './baseObjects.js';
+import { raycastInteriors, resolveSphereAgainstInteriors } from './interiors.js';
 import { GRAVITY } from './movement.js';
 import { sampleTerrain } from './terrain.js';
 import type { PendingFreeId, PlayerInput, Vec3, World } from './types.js';
@@ -546,4 +547,131 @@ export function stepWildcat(world: World, id: number, input: PlayerInput, dt: nu
     at(vehicles.position, base + 1) + at(vehicles.velocity, base + 1) * dt;
   vehicles.position[base + 2] =
     at(vehicles.position, base + 2) + at(vehicles.velocity, base + 2) * dt;
+}
+
+// --- Terrain/interior collision, crash and ground-impact damage (Task 4) ----------------
+
+/** Stub, replaced by Task 7's real shield-aware version below (`applyVehicleDamage`'s final
+ *  definition further down this file shadows this one is NOT how JS works -- see Task 7's
+ *  own commit, which replaces this function body in place rather than adding a second
+ *  declaration). Task 4's own tests only assert `damage` increases, which this satisfies. */
+export function applyVehicleDamage(
+  world: World,
+  id: number,
+  amount: number,
+  attackerId: number,
+): void {
+  void attackerId;
+  const vehicles = world.vehicles;
+  if (amount <= 0 || !vehicles.active[id] || vehicles.destroyed[id]) return;
+  vehicles.damage[id] = at(vehicles.damage, id) + amount;
+}
+
+function applyCollisionDamage(world: World, id: number, impactSpeed: number): void {
+  const data = VEHICLE_DATA[world.vehicles.kind[id] as VehicleKind];
+  if (impactSpeed <= data.collDamageThresholdVel) return;
+  applyVehicleDamage(
+    world,
+    id,
+    (impactSpeed - data.collDamageThresholdVel) * data.collDamageMultiplier,
+    -1,
+  );
+}
+
+/** Ground contact: clamps the vehicle to sit on the terrain surface and zeroes downward
+ *  velocity, applying the ground-impact damage rule (a real, separately-cited T2 rule,
+ *  distinct from the generic object-collision one below) when the impact speed passed
+ *  groundImpactMinSpeed. */
+function resolveVehicleGround(world: World, id: number, current: Vec3, speed: number): boolean {
+  const vehicles = world.vehicles;
+  const data = VEHICLE_DATA[vehicles.kind[id] as VehicleKind];
+  const base = id * 3;
+  const ground = sampleTerrain(world.terrain, current.x, current.z).height;
+  if (current.y - data.checkRadius >= ground) return false;
+  vehicles.position[base + 1] = ground + data.checkRadius;
+  if (at(vehicles.velocity, base + 1) < 0) vehicles.velocity[base + 1] = 0;
+  if (speed > data.groundImpactMinSpeed) {
+    applyVehicleDamage(
+      world,
+      id,
+      (speed - data.groundImpactMinSpeed) * data.groundImpactSpeedDamageScale,
+      -1,
+    );
+  }
+  return true;
+}
+
+/** Sweeps the previous->current segment against interiors (a fast vehicle crossing a thin
+ *  wall within one 32 ms tick must still stop at it, not tunnel through -- failure matrix
+ *  row 14) then resolves any remaining sphere overlap at the vehicle's own checkRadius.
+ *  Mirrors movement.ts's own sweepChest pattern (M4's round-1 tunnelling fix): a normalized
+ *  direction and a scalar distance, not two raw points. */
+function resolveVehicleInteriors(world: World, id: number, previous: Vec3, current: Vec3): boolean {
+  const vehicles = world.vehicles;
+  const data = VEHICLE_DATA[vehicles.kind[id] as VehicleKind];
+  const base = id * 3;
+  const dx = current.x - previous.x;
+  const dy = current.y - previous.y;
+  const dz = current.z - previous.z;
+  const length = Math.hypot(dx, dy, dz);
+  const swept =
+    length > 0
+      ? raycastInteriors(
+          world.interiors,
+          previous,
+          { x: dx / length, y: dy / length, z: dz / length },
+          length,
+        )
+      : null;
+  let hit = false;
+  if (swept) {
+    vehicles.position.set([swept.point.x, swept.point.y, swept.point.z], base);
+    vehicles.velocity.set([0, 0, 0], base);
+    hit = true;
+  }
+  const resolvedCurrent: Vec3 = {
+    x: at(vehicles.position, base),
+    y: at(vehicles.position, base + 1),
+    z: at(vehicles.position, base + 2),
+  };
+  const push = resolveSphereAgainstInteriors(world.interiors, resolvedCurrent, data.checkRadius);
+  if (push) {
+    vehicles.position.set(
+      [resolvedCurrent.x + push.x, resolvedCurrent.y + push.y, resolvedCurrent.z + push.z],
+      base,
+    );
+    hit = true;
+  }
+  return hit;
+}
+
+export function resolveVehicleCollision(
+  world: World,
+  id: number,
+  previousPosition: Vec3,
+  dt: number,
+): void {
+  const vehicles = world.vehicles;
+  const base = id * 3;
+  const current: Vec3 = {
+    x: at(vehicles.position, base),
+    y: at(vehicles.position, base + 1),
+    z: at(vehicles.position, base + 2),
+  };
+  const speed = Math.hypot(
+    (current.x - previousPosition.x) / dt,
+    (current.y - previousPosition.y) / dt,
+    (current.z - previousPosition.z) / dt,
+  );
+
+  const hitGround = resolveVehicleGround(world, id, current, speed);
+  const hitInterior = resolveVehicleInteriors(world, id, previousPosition, current);
+  // Ground contact already applied the ground-impact rule (groundImpactMinSpeed/
+  // groundImpactSpeedDamageScale) above, in resolveVehicleGround, when the impact was fast
+  // enough to trip it. This is the separate, generic object-collision rule
+  // (collDamageThresholdVel/collDamageMultiplier) the plan's own numbers table cites as
+  // distinct from that one -- it applies whenever the vehicle hit *anything* solid this tick
+  // (ground or interior) and stacks on top of the ground-impact figure for a genuinely hard
+  // hit, matching a real crash doing more than one kind of damage at once.
+  if (hitGround || hitInterior) applyCollisionDamage(world, id, speed);
 }
