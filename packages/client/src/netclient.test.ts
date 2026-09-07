@@ -131,6 +131,7 @@ describe('NetClient', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     };
     // Like the real server: step with the newest input received, idle until the first arrives.
     let serverInput: PlayerInput = {
@@ -143,6 +144,7 @@ describe('NetClient', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     };
     const totalTicks = Math.ceil(3 / FIXED_DT);
     // Prediction is judged at equal input sequence: the client's position right after it
@@ -235,6 +237,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     const state1 = { ...base, x: 1, z: 0 };
     const state2 = { ...base, x: 2, z: 0 };
@@ -314,6 +318,7 @@ describe('NetClient', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     };
     for (let i = 0; i < 5; i += 1) client.tick(forward);
     expect(client.world.players.velocity[2]).not.toBe(0);
@@ -351,6 +356,7 @@ describe('NetClient', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     };
     // Well past the ceiling (4x MAX_REPLAY_TICKS), and well past the existing "40 ticks,
     // then reconcile hard-snaps" scenario this must not disturb.
@@ -381,6 +387,7 @@ describe('NetClient', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     };
     for (let i = 0; i < 20_000; i += 1) client.tick(idleInput);
     expect((client as unknown as { sequence: number }).sequence).toBe(0);
@@ -422,6 +429,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     const delta = encodeSnapshot(
       7,
@@ -444,6 +453,7 @@ describe('NetClient', () => {
         fire: false,
         altFire: false,
         slot: 0,
+        packActive: false,
       }),
     ).not.toThrow();
   });
@@ -484,6 +494,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(() =>
@@ -511,6 +523,7 @@ describe('NetClient', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     };
     for (let tick = 0; tick < 40; tick += 1) {
       clock.ms += FIXED_TICK_MS;
@@ -545,6 +558,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
 
@@ -576,6 +591,7 @@ describe('NetClient', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     };
     for (let i = 0; i < 5; i += 1) client.tick(skiInput);
     const pending = (client as unknown as { pendingInputs: unknown[] }).pendingInputs;
@@ -648,6 +664,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
     expect(client.world.players.wasGrounded[0]).toBe(0);
@@ -682,6 +700,7 @@ describe('NetClient', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     };
     client.tick(heldJump); // queues pendingInputs[0] (sequence 1); predicts no new jump
     expect(client.world.players.velocity[1]).toBeCloseTo(0, 5);
@@ -713,6 +732,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 1 as const, // the server also saw this as a continued hold, not a fresh press
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     // lastInputSequence 0: the server has not acked sequence 1 yet, so reconcile() replays it.
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
@@ -745,6 +766,8 @@ describe('NetClient', () => {
         },
       ],
       flags: [{ id: 0, team: 1, state: 1, x: 5, y: 0, z: 5, carrierId: 0, returnInS: -1 }],
+      baseObjects: [],
+      turrets: [],
       teamScores: [100, 0],
       gameOver: false,
       winnerTeam: 0,
@@ -758,6 +781,42 @@ describe('NetClient', () => {
     expect(client.gameOver).toBe(false);
     expect(client.timeRemainingS).toBeCloseTo(1200.5, 1);
     expect(client.gameOverReason).toBe(0);
+  });
+
+  it('a snapshot with base objects populates net.world.baseObjects (Codex round 1, finding 1)', () => {
+    // Before this fix, a NetClient's world was created empty (no base objects/turrets ever
+    // placed into it -- that only happened for the single-player path in app.ts) and nothing
+    // in handleSnapshot ever wrote decoded base-object/turret state onto world.baseObjects/
+    // world.turrets at all; net.baseObjects/net.turrets (below) were the only place decoded
+    // state landed, and those feed rendering only, not the sim store movement prediction,
+    // stationAt (the loadout menu), and the commander map all read directly.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 22 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    expect(client.world.baseObjects.count).toBe(0); // sanity: empty before any snapshot
+    const extras: WorldExtras = {
+      ...emptyExtras(),
+      baseObjects: [{ id: 0, damage: 0.4, destroyed: 0, powered: 1 }],
+      turrets: [{ id: 0, damage: 0.1, destroyed: 0, powered: 1, targetId: 5, state: 2 }],
+    };
+    transport.pump([encodeSnapshot(1, 0, 0, [], null, extras)]);
+
+    // rendering's own decoded copy, unchanged by this fix -- damage round-trips through an
+    // f32 wire field, not exact, so compare it separately from the rest.
+    expect(client.baseObjects[0]?.damage).toBeCloseTo(0.4, 5);
+    expect({ ...client.baseObjects[0], damage: 0 }).toEqual({
+      ...extras.baseObjects[0],
+      damage: 0,
+    });
+    expect(client.world.baseObjects.count).toBe(1);
+    expect(client.world.baseObjects.damage[0]).toBeCloseTo(0.4, 5);
+    expect(client.world.baseObjects.destroyed[0]).toBe(0);
+    expect(client.world.baseObjects.powered[0]).toBe(1);
+    expect(client.world.turrets.count).toBe(1);
+    expect(client.world.turrets.damage[0]).toBeCloseTo(0.1, 5);
+    expect(client.world.turrets.targetId[0]).toBe(5);
+    expect(client.world.turrets.state[0]).toBe(2);
   });
 
   it('mirrors gameOver/winnerTeam/gameOverReason onto world so stepWorld freezes prediction', () => {
@@ -774,6 +833,8 @@ describe('NetClient', () => {
     const extras: WorldExtras = {
       projectiles: [],
       flags: [],
+      baseObjects: [],
+      turrets: [],
       teamScores: [3, 1],
       gameOver: true,
       winnerTeam: 1,
@@ -798,6 +859,7 @@ describe('NetClient', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     });
     expect(client.world.players.position[0] ?? 0).toBe(beforeX);
   });
@@ -823,6 +885,7 @@ describe('NetClient', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     };
     // Leave this input unacknowledged: the snapshot below names lastInputSequence 0,
     // so reconcile() will still find it pending and eligible for replay.
@@ -856,10 +919,14 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     const extras: WorldExtras = {
       projectiles: [],
       flags: [],
+      baseObjects: [],
+      turrets: [],
       teamScores: [3, 1],
       gameOver: true,
       winnerTeam: 1,
@@ -924,10 +991,14 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     const extras: WorldExtras = {
       projectiles: [],
       flags: [],
+      baseObjects: [],
+      turrets: [],
       teamScores: [0, 0],
       gameOver: false,
       winnerTeam: 0,
@@ -952,6 +1023,7 @@ describe('NetClient', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     });
 
     expect(client.world.tick).toBe(serverTick + 1);
@@ -990,6 +1062,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(client.localHealth).toBeCloseTo(0.4);
@@ -1111,6 +1185,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -1177,6 +1253,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [alive], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -1248,6 +1326,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [fullHealth], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -1296,6 +1376,7 @@ describe('NetClient', () => {
       fire: true,
       altFire: false,
       slot: 0,
+      packActive: false,
     };
     client.tick(fireInput); // sequence 1: predicts a Spinfusor shot, decrementing local ammo
     expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(14);
@@ -1334,6 +1415,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 5, 2, [serverState], null, emptyExtras())]);
 
@@ -1367,6 +1450,7 @@ describe('NetClient', () => {
       fire: true,
       altFire: false,
       slot: 0,
+      packActive: false,
     };
     // sequence 1: predicts a Spinfusor shot locally -- this input never actually reaches
     // the server (lost or evicted), exactly like the ammo self-heal test above.
@@ -1407,6 +1491,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
 
@@ -1455,6 +1541,7 @@ describe('NetClient', () => {
       fire: false,
       altFire: true,
       slot: 0,
+      packActive: false,
     };
     // sequence 1: predicts a grenade throw locally -- this input never actually reaches the
     // server (lost or evicted), exactly like the ammo/weapon-state self-heal tests above.
@@ -1495,6 +1582,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
 
@@ -1550,6 +1639,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -1602,6 +1693,7 @@ describe('NetClient', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     };
     client.tick(idleInput);
 
@@ -1653,6 +1745,8 @@ describe('NetClient', () => {
       score: 0,
       godMode: 0 as const,
       wasJumpHeld: 0 as const,
+      armor: 0,
+      hasRepairPack: 0 as const,
     };
     const dead = { ...alive, health: 0 };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
@@ -1700,6 +1794,7 @@ describe('NetClient', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     };
     client.world.players.position[1] = client.world.killY - 1;
     client.tick(noInput);
@@ -1725,6 +1820,7 @@ describe('NetClient', () => {
       fire: true,
       altFire: false,
       slot: 1, // Spinfusor
+      packActive: false,
     };
     client.tick(fireSpinfusor); // fire before Welcome ever arrives
 

@@ -5,12 +5,14 @@ import {
   decodeGod,
   decodeInput,
   decodeJoin,
+  decodeLoadout,
   decodeWelcome,
   encodeAck,
   encodeEvent,
   encodeGod,
   encodeInput,
   encodeJoin,
+  encodeLoadout,
   encodeWelcome,
 } from './handshake.js';
 import {
@@ -19,6 +21,7 @@ import {
   PROTOCOL_VERSION,
   WelcomeStatus,
   type InputMessage,
+  type NetInputSample,
 } from './messages.js';
 
 describe('handshake codec', () => {
@@ -75,6 +78,7 @@ describe('handshake codec', () => {
           fire: true,
           altFire: false,
           slot: 2,
+          packActive: false,
         },
         {
           moveX: 0,
@@ -86,6 +90,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: true,
           slot: 0,
+          packActive: false,
         },
         {
           moveX: -1,
@@ -97,6 +102,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
       ],
     };
@@ -159,6 +165,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
         {
           moveX: 0,
@@ -170,6 +177,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
         {
           moveX: 0,
@@ -181,6 +189,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
       ],
     };
@@ -201,6 +210,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
         {
           moveX: 0,
@@ -212,6 +222,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
         {
           moveX: 0,
@@ -223,6 +234,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
       ],
     };
@@ -262,6 +274,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
         {
           moveX: 0,
@@ -273,6 +286,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
         {
           moveX: 0,
@@ -284,6 +298,7 @@ describe('handshake codec', () => {
           fire: false,
           altFire: false,
           slot: 0,
+          packActive: false,
         },
       ],
     };
@@ -298,6 +313,40 @@ describe('handshake codec', () => {
       fire: false,
       altFire: false,
       slot: 0,
+      packActive: false,
     });
+  });
+});
+
+describe('Loadout round trip', () => {
+  it('encodes and decodes armor and repairPack exactly', () => {
+    const bytes = encodeLoadout({ armor: 2, repairPack: true });
+    expect(decodeLoadout(bytes)).toEqual({ type: MessageType.Loadout, armor: 2, repairPack: true });
+  });
+  it('round-trips repairPack: false', () => {
+    const bytes = encodeLoadout({ armor: 0, repairPack: false });
+    expect(decodeLoadout(bytes).repairPack).toBe(false);
+  });
+});
+
+describe('packActive input bit', () => {
+  it('round-trips through encodeInput/decodeInput alongside every other flag', () => {
+    const sample: NetInputSample = {
+      moveX: 1,
+      moveZ: -1,
+      yaw: 0.5,
+      pitch: -0.2,
+      jump: true,
+      jet: false,
+      fire: true,
+      altFire: false,
+      slot: 3,
+      packActive: true,
+    };
+    const bytes = encodeInput({ sequence: 1, samples: [sample, sample, sample] });
+    const decoded = decodeInput(bytes);
+    expect(decoded.samples[0].packActive).toBe(true);
+    expect(decoded.samples[0].jump).toBe(true);
+    expect(decoded.samples[0].fire).toBe(true);
   });
 });

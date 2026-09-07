@@ -32,6 +32,10 @@ export interface ArmorData {
   maxWeapons: number;
   laserRifleAllowed: boolean;
   mortarAllowed: boolean;
+  /** Repair Pack heal rate per tick -- the spec's Armor numbers table gives 0.0033 for every
+   *  armor identically (`packs/repairpack.cs`'s DefaultRepairBeam is not armor-specific). Added
+   *  here in Task 6, which is the first system that reads it (repair.ts's stepRepairPacks). */
+  repairRate: number;
 }
 
 export const LIGHT_ARMOR: ArmorData = {
@@ -68,4 +72,98 @@ export const LIGHT_ARMOR: ArmorData = {
   maxWeapons: 3,
   laserRifleAllowed: true,
   mortarAllowed: false,
+  repairRate: 0.0033,
 };
+
+export enum ArmorId {
+  Light = 0,
+  Medium = 1,
+  Heavy = 2,
+}
+
+export const MEDIUM_ARMOR: ArmorData = {
+  mass: 130,
+  maxDamage: 1.1,
+  maxEnergy: 80,
+  rechargeRate: 0.256,
+  jetForce: 25.22 * 130,
+  jetEnergyDrain: 1.0,
+  minJetEnergy: 1,
+  runForce: 46 * 130,
+  maxForwardSpeed: 12,
+  maxBackwardSpeed: 10,
+  maxSideSpeed: 10,
+  jumpForce: 8.3 * 130,
+  jumpDelay: 0,
+  minJumpSpeed: 15,
+  maxJumpSpeed: 25,
+  horizMaxSpeed: 60,
+  horizResistSpeed: 28,
+  horizResistFactor: 0.32,
+  upMaxSpeed: 70,
+  upResistSpeed: 30,
+  upResistFactor: 0.23,
+  drag: 0.3,
+  boundingBox: [1.45, 1.45, 2.4],
+  runSurfaceAngle: 70,
+  jumpSurfaceAngle: 80,
+  speedDamageScale: 0.004,
+  discAmmo: 15,
+  chaingunAmmo: 150,
+  mortarAmmo: 0,
+  grenadeCount: 6,
+  maxWeapons: 4,
+  laserRifleAllowed: false,
+  mortarAllowed: false,
+  repairRate: 0.0033,
+};
+
+export const HEAVY_ARMOR: ArmorData = {
+  mass: 180,
+  maxDamage: 1.32,
+  maxEnergy: 110,
+  rechargeRate: 0.256,
+  jetForce: 22.47 * 180,
+  jetEnergyDrain: 1.1,
+  minJetEnergy: 1,
+  runForce: 40.25 * 180,
+  maxForwardSpeed: 7,
+  maxBackwardSpeed: 5,
+  maxSideSpeed: 5,
+  jumpForce: 8.3 * 180,
+  jumpDelay: 0,
+  minJumpSpeed: 20,
+  maxJumpSpeed: 30,
+  horizMaxSpeed: 52,
+  horizResistSpeed: 23,
+  horizResistFactor: 0.29,
+  upMaxSpeed: 60,
+  upResistSpeed: 35,
+  upResistFactor: 0.18,
+  drag: 0.33,
+  boundingBox: [1.63, 1.63, 2.6],
+  runSurfaceAngle: 70,
+  jumpSurfaceAngle: 80,
+  speedDamageScale: 0.004,
+  discAmmo: 15,
+  chaingunAmmo: 200,
+  mortarAmmo: 200,
+  grenadeCount: 8,
+  maxWeapons: 5,
+  laserRifleAllowed: false,
+  mortarAllowed: true,
+  repairRate: 0.0033,
+};
+
+export const ARMORS: Record<ArmorId, ArmorData> = {
+  [ArmorId.Light]: LIGHT_ARMOR,
+  [ArmorId.Medium]: MEDIUM_ARMOR,
+  [ArmorId.Heavy]: HEAVY_ARMOR,
+};
+
+/** The single place every system looks up a player's armor. Never read `LIGHT_ARMOR` (or any
+ *  other constant) directly for a per-player calculation again -- see the M4 plan's Global
+ *  Constraints. */
+export function armorFor(world: { players: { armor: Uint8Array } }, id: number): ArmorData {
+  return ARMORS[(world.players.armor[id] ?? ArmorId.Light) as ArmorId];
+}

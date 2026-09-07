@@ -16,9 +16,11 @@ import {
   type Cursor,
 } from './codec.js';
 import {
+  MAX_SNAPSHOT_BASE_OBJECTS,
   MAX_SNAPSHOT_FLAGS,
   MAX_SNAPSHOT_PLAYERS,
   MAX_SNAPSHOT_PROJECTILES,
+  MAX_SNAPSHOT_TURRETS,
   MessageType,
 } from './messages.js';
 
@@ -59,9 +61,25 @@ export interface FlagSnapshotData {
   carrierId: number; // -1 if not carried
   returnInS: number; // -1 if not counting down
 }
+export interface BaseObjectSnapshotData {
+  id: number;
+  damage: number;
+  destroyed: 0 | 1;
+  powered: 0 | 1;
+}
+export interface TurretSnapshotData {
+  id: number;
+  damage: number;
+  destroyed: 0 | 1;
+  powered: 0 | 1;
+  targetId: number; // -1 = none
+  state: number; // TurretState from @clans/sim
+}
 export interface WorldExtras {
   projectiles: ProjectileSnapshotData[];
   flags: FlagSnapshotData[];
+  baseObjects: BaseObjectSnapshotData[];
+  turrets: TurretSnapshotData[];
   teamScores: [number, number]; // [team1, team2]
   gameOver: boolean;
   winnerTeam: number;
@@ -72,6 +90,8 @@ export function emptyExtras(): WorldExtras {
   return {
     projectiles: [],
     flags: [],
+    baseObjects: [],
+    turrets: [],
     teamScores: [0, 0],
     gameOver: false,
     winnerTeam: 0,
@@ -88,6 +108,8 @@ export interface DecodedSnapshot {
   removedIds: number[];
   projectiles: ProjectileSnapshotData[];
   flags: FlagSnapshotData[];
+  baseObjects: BaseObjectSnapshotData[];
+  turrets: TurretSnapshotData[];
   teamScores: [number, number];
   gameOver: boolean;
   winnerTeam: number;
@@ -126,10 +148,20 @@ const HEADER_BYTES = 1 + 4 + 4 + 4 + 4 + 1; // type, snapshotId, baselineId, tic
 // actually carried. Codex review round 14 (PR #9), finding 1.
 // wasJumpHeld: no new bytes -- it packs into the existing status byte's bit 2 (statusByte's
 // own comment has the detail). Codex review round 15 (PR #9), finding 1.
-const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 4 + 1 + 4 + 2 + 1;
+// armor (u8, ArmorId) + hasRepairPack (u8, 0/1): sim/snapshot.ts's PlayerSnapshotData has
+// carried these since serializePlayer/deserializePlayer were written, and the sim-side round
+// trip (snapshot.test.ts in packages/sim) already exercised them -- but writePlayerFull/
+// readPlayerFull never actually put them on the WIRE, so every decoded player came back
+// hardcoded to Light/no-pack regardless of what a station visit (applyLoadoutRequest) had
+// set. A networked client's HUD, prediction (armorFor drives energy/speed caps and fall-
+// damage scaling), and reconcile() all silently disagreed with the server's real loadout.
+// Codex round 1, finding 2.
+const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 4 + 1 + 4 + 2 + 1 + 1 + 1;
 // id, type, weaponId, 6 f32 (pos+vel), ownerId, armed (round 15, PR #9, finding 2).
 const PROJECTILE_BYTES = 2 + 1 + 1 + 4 * 6 + 2 + 1;
 const FLAG_BYTES = 1 + 1 + 1 + 4 * 3 + 2 + 4; // id, team, state, 3 f32 (pos), carrierId i16, returnInS f32
+const BASE_OBJECT_BYTES = 2 + 4 + 1 + 1; // id, damage f32, destroyed, powered
+const TURRET_BYTES = 2 + 4 + 1 + 1 + 2 + 1; // id, damage f32, destroyed, powered, targetId i16, state
 const DELTA_FLAG = 1;
 const DIRTY_TRANSFORM = 1;
 const DIRTY_ENERGY = 2;
@@ -228,6 +260,8 @@ function writePlayerFull(cursor: Cursor, data: PlayerSnapshotData): void {
   writeF32(cursor, data.grenadeCooldown);
   writeI16(cursor, data.score);
   writeU8(cursor, data.godMode);
+  writeU8(cursor, data.armor);
+  writeU8(cursor, data.hasRepairPack);
 }
 function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const id = readU16(cursor);
@@ -254,6 +288,8 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const grenadeCooldown = readF32(cursor);
   const score = readI16(cursor);
   const godMode = readU8(cursor) ? 1 : 0;
+  const armor = readU8(cursor);
+  const hasRepairPack = readU8(cursor) ? 1 : 0;
   assertFinite([x, y, z, vx, vy, vz, yaw, energy, health, weaponTimer, grenadeCooldown]);
   return {
     id,
@@ -282,6 +318,8 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
     grenadeCooldown,
     score,
     godMode,
+    armor,
+    hasRepairPack,
   };
 }
 
@@ -337,11 +375,48 @@ function readFlag(cursor: Cursor): FlagSnapshotData {
   return { id, team, state, x, y, z, carrierId, returnInS };
 }
 
+function writeBaseObject(cursor: Cursor, o: BaseObjectSnapshotData): void {
+  writeU16(cursor, o.id);
+  writeF32(cursor, o.damage);
+  writeU8(cursor, o.destroyed);
+  writeU8(cursor, o.powered);
+}
+function readBaseObject(cursor: Cursor): BaseObjectSnapshotData {
+  const id = readU16(cursor);
+  const damage = readF32(cursor);
+  assertFinite([damage]);
+  const destroyed = (readU8(cursor) ? 1 : 0) as 0 | 1;
+  const powered = (readU8(cursor) ? 1 : 0) as 0 | 1;
+  return { id, damage, destroyed, powered };
+}
+function writeTurret(cursor: Cursor, t: TurretSnapshotData): void {
+  writeU16(cursor, t.id);
+  writeF32(cursor, t.damage);
+  writeU8(cursor, t.destroyed);
+  writeU8(cursor, t.powered);
+  writeI16(cursor, t.targetId);
+  writeU8(cursor, t.state);
+}
+function readTurret(cursor: Cursor): TurretSnapshotData {
+  const id = readU16(cursor);
+  const damage = readF32(cursor);
+  assertFinite([damage]);
+  const destroyed = (readU8(cursor) ? 1 : 0) as 0 | 1;
+  const powered = (readU8(cursor) ? 1 : 0) as 0 | 1;
+  const targetId = readI16(cursor);
+  const state = readU8(cursor);
+  return { id, damage, destroyed, powered, targetId, state };
+}
+
 function writeExtras(cursor: Cursor, extras: WorldExtras): void {
   writeU16(cursor, extras.projectiles.length);
   for (const p of extras.projectiles) writeProjectile(cursor, p);
   writeU8(cursor, extras.flags.length);
   for (const f of extras.flags) writeFlag(cursor, f);
+  writeU8(cursor, extras.baseObjects.length);
+  for (const o of extras.baseObjects) writeBaseObject(cursor, o);
+  writeU8(cursor, extras.turrets.length);
+  for (const t of extras.turrets) writeTurret(cursor, t);
   writeU16(cursor, extras.teamScores[0]);
   writeU16(cursor, extras.teamScores[1]);
   writeU8(cursor, extras.gameOver ? 1 : 0);
@@ -364,13 +439,31 @@ function readExtras(cursor: Cursor): WorldExtras {
   assertPlausibleExtrasCount(flagCount, MAX_SNAPSHOT_FLAGS, 'flag');
   const flags: FlagSnapshotData[] = [];
   for (let i = 0; i < flagCount; i += 1) flags.push(readFlag(cursor));
+  const baseObjectCount = readU8(cursor);
+  assertPlausibleExtrasCount(baseObjectCount, MAX_SNAPSHOT_BASE_OBJECTS, 'baseObject');
+  const baseObjects: BaseObjectSnapshotData[] = [];
+  for (let i = 0; i < baseObjectCount; i += 1) baseObjects.push(readBaseObject(cursor));
+  const turretCount = readU8(cursor);
+  assertPlausibleExtrasCount(turretCount, MAX_SNAPSHOT_TURRETS, 'turret');
+  const turrets: TurretSnapshotData[] = [];
+  for (let i = 0; i < turretCount; i += 1) turrets.push(readTurret(cursor));
   const teamScores: [number, number] = [readU16(cursor), readU16(cursor)];
   const gameOver = readU8(cursor) !== 0;
   const winnerTeam = readU8(cursor);
   const timeRemainingS = readF32(cursor);
   const gameOverReason = readU8(cursor);
   assertFinite([timeRemainingS]);
-  return { projectiles, flags, teamScores, gameOver, winnerTeam, timeRemainingS, gameOverReason };
+  return {
+    projectiles,
+    flags,
+    baseObjects,
+    turrets,
+    teamScores,
+    gameOver,
+    winnerTeam,
+    timeRemainingS,
+    gameOverReason,
+  };
 }
 function extrasByteLength(extras: WorldExtras): number {
   return (
@@ -378,6 +471,10 @@ function extrasByteLength(extras: WorldExtras): number {
     extras.projectiles.length * PROJECTILE_BYTES +
     1 +
     extras.flags.length * FLAG_BYTES +
+    1 +
+    extras.baseObjects.length * BASE_OBJECT_BYTES +
+    1 +
+    extras.turrets.length * TURRET_BYTES +
     2 +
     2 +
     1 +
@@ -421,8 +518,15 @@ function energyChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
 function statusChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
   return a.onGround !== b.onGround || a.ski !== b.ski || a.wasJumpHeld !== b.wasJumpHeld;
 }
-function teamChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
-  return a.team !== b.team;
+// Codex round 1, finding 2: armor/hasRepairPack folded into the same bit team already used
+// (renamed from teamChanged) rather than claiming one of their own -- every mask bit is
+// already spoken for (see DIRTY_PREDICTION's own comment on the same constraint), and a
+// loadout change is, like a team change, a coarse, infrequent event: it fires once per
+// station visit, not every tick the way transform/energy do. Exact equality for both, like
+// respawnSeqChanged/ammoChanged above: armor is a small integer id and hasRepairPack a 0/1
+// flag, neither a float that needs EPSILON tolerance.
+function identityChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
+  return a.team !== b.team || a.armor !== b.armor || a.hasRepairPack !== b.hasRepairPack;
 }
 function healthChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
   return Math.abs(a.health - b.health) > EPSILON;
@@ -475,7 +579,7 @@ function dirtyMask(current: PlayerSnapshotData, previous: PlayerSnapshotData): n
   if (transformChanged(current, previous)) mask |= DIRTY_TRANSFORM;
   if (energyChanged(current, previous)) mask |= DIRTY_ENERGY;
   if (statusChanged(current, previous)) mask |= DIRTY_STATUS;
-  if (teamChanged(current, previous)) mask |= DIRTY_TEAM;
+  if (identityChanged(current, previous)) mask |= DIRTY_TEAM;
   if (healthChanged(current, previous)) mask |= DIRTY_HEALTH;
   if (weaponChanged(current, previous)) mask |= DIRTY_WEAPON;
   if (respawnSeqChanged(current, previous)) mask |= DIRTY_RESPAWN;
@@ -513,7 +617,7 @@ function changedRecordBytes(mask: number): number {
   if (mask & DIRTY_TRANSFORM) bytes += 28;
   if (mask & DIRTY_ENERGY) bytes += 4;
   if (mask & DIRTY_STATUS) bytes += 1;
-  if (mask & DIRTY_TEAM) bytes += 1;
+  if (mask & DIRTY_TEAM) bytes += 3; // team(1) + armor(1) + hasRepairPack(1) -- see identityChanged.
   if (mask & DIRTY_HEALTH) bytes += 4;
   if (mask & DIRTY_WEAPON) bytes += 1;
   if (mask & DIRTY_RESPAWN) bytes += 1;
@@ -553,7 +657,11 @@ function writeChangedPlayer(cursor: Cursor, data: PlayerSnapshotData, mask: numb
   if (mask & DIRTY_TRANSFORM) writeChangedTransform(cursor, data);
   if (mask & DIRTY_ENERGY) writeF32(cursor, data.energy);
   if (mask & DIRTY_STATUS) writeU8(cursor, statusByte(data));
-  if (mask & DIRTY_TEAM) writeU8(cursor, data.team);
+  if (mask & DIRTY_TEAM) {
+    writeU8(cursor, data.team);
+    writeU8(cursor, data.armor);
+    writeU8(cursor, data.hasRepairPack);
+  }
   if (mask & DIRTY_HEALTH) writeF32(cursor, data.health);
   if (mask & DIRTY_WEAPON) writeU8(cursor, data.weaponSlot);
   if (mask & DIRTY_RESPAWN) writeU8(cursor, data.respawnSeq);
@@ -689,6 +797,14 @@ function readChangedScoreGodMode(cursor: Cursor, next: PlayerSnapshotData): void
   next.score = readI16(cursor);
   next.godMode = readU8(cursor) ? 1 : 0;
 }
+// Split out like readChangedAmmo/readChangedWeaponMachine above, not inlined into
+// applyChangedPlayer's own DIRTY_TEAM branch -- the hasRepairPack ternary alone pushed that
+// function's cyclomatic complexity from 10 (already at budget) to 11.
+function readChangedIdentity(cursor: Cursor, next: PlayerSnapshotData): void {
+  next.team = readU8(cursor);
+  next.armor = readU8(cursor);
+  next.hasRepairPack = readU8(cursor) ? 1 : 0;
+}
 function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData>): void {
   const id = readU16(cursor);
   const mask = readU8(cursor);
@@ -698,7 +814,7 @@ function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData
   if (mask & DIRTY_TRANSFORM) readChangedTransform(cursor, next);
   if (mask & DIRTY_ENERGY) readChangedEnergy(cursor, next);
   if (mask & DIRTY_STATUS) readChangedStatus(cursor, next);
-  if (mask & DIRTY_TEAM) next.team = readU8(cursor);
+  if (mask & DIRTY_TEAM) readChangedIdentity(cursor, next);
   if (mask & DIRTY_HEALTH) readChangedHealth(cursor, next);
   if (mask & DIRTY_WEAPON) next.weaponSlot = readU8(cursor);
   if (mask & DIRTY_RESPAWN) next.respawnSeq = readU8(cursor);

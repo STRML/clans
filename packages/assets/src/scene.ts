@@ -14,6 +14,15 @@ export interface SceneData {
   spawns: Array<{ name: string | null; team: number; position: Vec3; radius: number }>;
   flags: Array<{ team: number; position: Vec3 }>;
   flagStands: Array<{ team: number; position: Vec3; rotation: AxisAngle }>;
+  baseObjects: Array<{
+    kind: number;
+    team: number;
+    position: Vec3;
+    rotation?: AxisAngle;
+    scale?: Vec3;
+  }>;
+  turrets: Array<{ barrel: number; team: number; position: Vec3 }>;
+  interiors: Array<{ shape: string; position: Vec3; rotation: AxisAngle }>;
 }
 
 /** A property that must be present. Mission files never omit these. */
@@ -52,6 +61,13 @@ export function torquePositionToYUp(value: string): Vec3 {
 export function torqueAxisAngleToYUp(value: string): AxisAngle {
   const [x = 0, y = 0, z = 0, degrees = 0] = numbers(value, 4);
   return { axis: [x, z, negate(y)], degrees };
+}
+
+/** Scale swaps the Y/Z axes exactly like position and rotation do (Torque Z-up to Y-up), but
+ *  is never negated — a scale magnitude is never signed the way a position offset can be. */
+export function torqueScaleToYUp(value: string): Vec3 {
+  const [x = 1, y = 1, z = 1] = numbers(value, 3);
+  return [x, z, y];
 }
 
 function color(value: string): Color4 {
@@ -182,6 +198,93 @@ function buildFlagStands(all: LocatedObject[]): SceneData['flagStands'] {
     }));
 }
 
+// Numeric values match @clans/sim's BaseObjectKind ordinals exactly (Generator = 0,
+// Sensor = 1, StationInventory = 2, StationVehiclePad = 3, ForceField = 4). packages/assets
+// takes no runtime dependency on @clans/sim, so this is a plain lookup table, not an
+// imported enum.
+const BASE_OBJECT_KIND_BY_DATA_BLOCK: Record<string, number> = {
+  GeneratorLarge: 0,
+  SensorLargePulse: 1,
+  StationInventory: 2,
+  StationVehiclePad: 3,
+};
+
+function buildBaseObjects(all: LocatedObject[]): SceneData['baseObjects'] {
+  return all
+    .filter(
+      ({ object }) =>
+        object.class === 'StaticShape' &&
+        (object.props.dataBlock ?? '') in BASE_OBJECT_KIND_BY_DATA_BLOCK,
+    )
+    .map(({ object, ancestors }) => ({
+      kind: BASE_OBJECT_KIND_BY_DATA_BLOCK[object.props.dataBlock as string] as number,
+      team: teamFor(ancestors),
+      position: torquePositionToYUp(object.props.position ?? ''),
+    }));
+}
+
+const FORCE_FIELD_KIND = 4; // Matches @clans/sim's BaseObjectKind.ForceField ordinal.
+
+/** Force fields are their own Torque class (`ForceFieldBare`), not a `StaticShape`/`dataBlock`
+ *  pair the way `buildBaseObjects` above filters. Folded into the same `baseObjects` array (not
+ *  a separate `SceneData` field) so the sim's `createBaseObjects` and the client's rendering
+ *  both already handle it through the generic per-kind loop every other base object kind
+ *  already goes through. */
+function buildForceFieldBaseObjects(all: LocatedObject[]): SceneData['baseObjects'] {
+  return all
+    .filter(({ object }) => object.class === 'ForceFieldBare')
+    .map(({ object, ancestors }) => ({
+      kind: FORCE_FIELD_KIND,
+      team: teamFor(ancestors),
+      position: torquePositionToYUp(object.props.position ?? ''),
+      rotation: torqueAxisAngleToYUp(object.props.rotation ?? '0 0 1 0'),
+      scale: torqueScaleToYUp(object.props.scale ?? '1 4 6'),
+    }));
+}
+
+// Numeric values match @clans/sim's TurretBarrelId ordinals exactly (PlasmaBarrelLarge = 0,
+// AABarrelLarge = 1, SentryTurretBarrel = 2).
+const TURRET_BARREL_BY_NAME: Record<string, number> = {
+  PlasmaBarrelLarge: 0,
+  AABarrelLarge: 1,
+  SentryTurretBarrel: 2,
+};
+
+function buildTurrets(all: LocatedObject[]): SceneData['turrets'] {
+  return all
+    .filter(({ object }) => object.class === 'Turret')
+    .map(({ object, ancestors }) => {
+      const barrel = TURRET_BARREL_BY_NAME[object.props.initialBarrel ?? ''];
+      if (barrel === undefined) {
+        throw new TypeError(`Unknown Turret initialBarrel "${String(object.props.initialBarrel)}"`);
+      }
+      return {
+        barrel,
+        team: teamFor(ancestors),
+        position: torquePositionToYUp(object.props.position ?? ''),
+      };
+    });
+}
+
+/** Strips the `.dif` extension so this matches the `.glb` shape name the fetch/convert step
+ *  produces under `assets/out/katabatic/interiors/` — one name, two extensions, never
+ *  duplicated as a string literal in two places. */
+function shapeNameFromInteriorFile(interiorFile: string): string {
+  return interiorFile.replace(/\.dif$/i, '');
+}
+
+function buildInteriors(all: LocatedObject[]): SceneData['interiors'] {
+  return all
+    .filter(({ object }) => object.class === 'InteriorInstance')
+    .map(({ object }) => ({
+      shape: shapeNameFromInteriorFile(
+        requiredString(object.props.interiorFile, 'InteriorInstance.interiorFile'),
+      ),
+      position: torquePositionToYUp(object.props.position ?? ''),
+      rotation: torqueAxisAngleToYUp(object.props.rotation ?? '0 0 1 0'),
+    }));
+}
+
 export function extractScene(objects: MissionObject[]): SceneData {
   const all = flatten(objects);
   return {
@@ -192,5 +295,8 @@ export function extractScene(objects: MissionObject[]): SceneData {
     spawns: buildSpawns(all),
     flags: buildFlags(all),
     flagStands: buildFlagStands(all),
+    baseObjects: [...buildBaseObjects(all), ...buildForceFieldBaseObjects(all)],
+    turrets: buildTurrets(all),
+    interiors: buildInteriors(all),
   };
 }

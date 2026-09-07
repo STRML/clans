@@ -1,4 +1,4 @@
-import { LIGHT_ARMOR, type ArmorData } from './armor.js';
+import { armorFor, type ArmorData, type ArmorId } from './armor.js';
 import { respawnPlayer as respawnHealth } from './damage.js';
 import type { PlayerInput, Vec3, World } from './types.js';
 
@@ -66,6 +66,7 @@ const IDLE_INPUT: PlayerInput = {
   fire: false,
   altFire: false,
   slot: 0,
+  packActive: false,
 };
 
 // Spec's Weapon numbers table, used exactly. Chaingun's spinDownTime (1.0 s) is kept for the
@@ -343,7 +344,7 @@ function energyScaleFor(world: World, id: number, data: WeaponData): number | nu
   if (data.energyPerShot === undefined) return 1;
   const energy = world.players.energy[id] ?? 0;
   if (energy < (data.minEnergy ?? 0)) return null;
-  const scale = Math.min(1, energy / LIGHT_ARMOR.maxEnergy);
+  const scale = Math.min(1, energy / armorFor(world, id).maxEnergy);
   world.players.energy[id] = energy - data.energyPerShot;
   return scale;
 }
@@ -482,7 +483,8 @@ export function resetLoadout(world: World, id: number, armor: ArmorData): void {
   players.grenades[id] = armor.grenadeCount;
 }
 
-export function respawnPlayer(world: World, id: number, spawn: Vec3): void {
+export function respawnPlayer(world: World, id: number, spawn: Vec3, armor?: ArmorId): void {
+  if (armor !== undefined) world.players.armor[id] = armor;
   respawnHealth(world, id, spawn);
-  resetLoadout(world, id, LIGHT_ARMOR);
+  resetLoadout(world, id, armorFor(world, id));
 }

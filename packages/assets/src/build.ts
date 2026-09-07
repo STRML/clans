@@ -1,6 +1,7 @@
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ASSET_SIZE_BUDGET_BYTES, extractTriangles, writeTriangleBinary } from './interiors.js';
 import { parseMission } from './mis.js';
 import { extractScene } from './scene.js';
 import { decodeTer } from './ter.js';
@@ -82,4 +83,77 @@ const manifest: TerrainManifest = {
   emptySquares: mission.terrain.emptySquares,
 };
 await writeFile(resolve(output, 'terrain.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-await writeFile(resolve(output, 'scene.json'), `${JSON.stringify(mission, null, 2)}\n`);
+
+// Base objects and turrets carry no shape filename in the mission itself — T2 resolves that
+// from the datablock script at load time (e.g. `GeneratorLarge -> station_generator_large.dts`,
+// staticShape.cs:451). These fixed per-kind/per-barrel tables reproduce that resolution here,
+// once, at build time, so the client/server never need the datablock scripts themselves.
+const SHAPE_FOR_BASE_OBJECT_KIND: Record<number, string> = {
+  0: 'station_generator_large', // Generator — staticShape.cs:451
+  1: 'sensor_pulse_large', // Sensor — staticShape.cs:346
+  2: 'station_inv_human', // StationInventory — station.cs:140
+  3: 'vehicle_pad', // StationVehiclePad — station.cs:239
+};
+const SHAPE_FOR_TURRET_BARREL: Record<number, string> = {
+  0: 'turret_fusion_large', // PlasmaBarrelLarge (the turret_base_large base is shared, rendered separately) — plasmaBarrelLarge.cs:246
+  1: 'turret_aa_large', // AABarrelLarge — aaBarrelLarge.cs
+  2: 'turret_sentry', // SentryTurretBarrel — sentryTurret.cs:141
+};
+const ALL_SHAPE_NAMES = [
+  'sbunk2',
+  'smisc3',
+  'srock6',
+  'srock7',
+  'srock8',
+  'sspir2',
+  'sspir3',
+  'sspir4',
+  'stowr4',
+  'stowr6',
+  'svpad',
+  'sensor_pulse_large',
+  'station_generator_large',
+  'station_inv_human',
+  'turret_aa_large',
+  'turret_base_large',
+  'turret_fusion_large',
+  'turret_muzzlepoint',
+  'turret_sentry',
+  'vehicle_pad',
+];
+
+const shapesDir = resolve(output, 'shapes');
+const collisionDir = resolve(output, 'collision');
+await mkdir(shapesDir, { recursive: true });
+await mkdir(collisionDir, { recursive: true });
+let totalBytes = 0;
+for (const name of ALL_SHAPE_NAMES) {
+  const sourceDir = mission.interiors.some((i) => i.shape === name)
+    ? 'interiors.vl2/interiors'
+    : 'shapes.vl2/shapes';
+  const glbBytes = await readFile(resolve(cache, sourceDir, `${name}.glb`));
+  await writeFile(resolve(shapesDir, `${name}.glb`), glbBytes);
+  totalBytes += glbBytes.byteLength;
+  const triangles = await extractTriangles(resolve(shapesDir, `${name}.glb`));
+  const collisionBytes = writeTriangleBinary(triangles);
+  await writeFile(resolve(collisionDir, `${name}.collision.bin`), collisionBytes);
+  totalBytes += collisionBytes.byteLength;
+}
+if (totalBytes > ASSET_SIZE_BUDGET_BYTES) {
+  throw new Error(
+    `Interior/shape assets total ${String(totalBytes)} bytes, over the ${String(ASSET_SIZE_BUDGET_BYTES)} byte budget`,
+  );
+}
+
+await writeFile(
+  resolve(output, 'scene.json'),
+  `${JSON.stringify(
+    {
+      ...mission,
+      shapesForBaseObjectKind: SHAPE_FOR_BASE_OBJECT_KIND,
+      shapesForTurretBarrel: SHAPE_FOR_TURRET_BARREL,
+    },
+    null,
+    2,
+  )}\n`,
+);

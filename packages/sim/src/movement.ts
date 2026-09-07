@@ -1,5 +1,11 @@
-import { LIGHT_ARMOR, type ArmorData } from './armor.js';
+import { armorFor, type ArmorData } from './armor.js';
+import { activeForceFieldBlockers } from './baseObjects.js';
 import { applyDamage, applyFallDamage } from './damage.js';
+import {
+  raycastInteriors,
+  resolveSphereAgainstInteriors,
+  type InteriorInstance,
+} from './interiors.js';
 import { sampleTerrain, type TerrainSample } from './terrain.js';
 import type { PlayerInput, PlayerStore, World } from './types.js';
 
@@ -19,6 +25,7 @@ const IDLE: PlayerInput = {
   fire: false,
   altFire: false,
   slot: 0,
+  packActive: false,
 };
 
 interface Body {
@@ -315,6 +322,142 @@ function writeState(
   players.wasJumpHeld[id] = input.jump ? 1 : 0;
 }
 
+// A real Katabatic interior mesh's closest-point-on-triangle math (interiors.ts) can return a
+// push whose depth is nonzero only by floating-point residue -- e.g. 1e-15 m, from a sphere
+// that grazes a triangle edge without meaningfully penetrating it. That never showed up
+// against the unit-test fixtures' simple boxes, but a real interior with thousands of
+// triangles (sbunk2.glb alone has 6,956) produces one on almost every tick somewhere nearby.
+// Applying that push's own direction to the velocity correction below divides a body-velocity
+// dot product by that same near-zero length, and floating-point division amplifies the noise
+// into a real, large velocity change -- confirmed live: a Light player running at 13.66 m/s
+// near Katabatic's own sbunk2 interior had its forward velocity zeroed outright on the tick a
+// 3e-15 m push landed, then stayed zeroed (airborne, no ground contact) for the rest of a
+// movement.spec.ts e2e run. A push below this floor is treated as "not actually touching
+// anything" and skipped entirely, position correction included -- moving a player by 1e-15 m
+// has no visible effect anyway, so there is nothing to lose by ignoring it.
+const MIN_PUSH_DEPTH = 1e-4; // 0.1 mm -- real contact is always far larger than this.
+
+/**
+ * Codex round 1, finding 4: both resolveInteriors and resolveForceFields below only ever
+ * tested the player's FINAL, already-integrated position for overlap -- never the segment
+ * it crossed to get there. At up to horizMaxSpeed (68 m/s Light-armor skiing), a single
+ * 32 ms tick covers up to 2.2 m, comfortably more than a thin wall or a force field's own
+ * near-zero-thickness collision plane (baseObjects.ts's forceFieldQuad is a flat quad), so a
+ * player moving fast enough could cross one entirely within a tick without either endpoint
+ * ever overlapping it -- tunneling straight through.
+ *
+ * Reuses the exact swept-segment raycast projectiles.ts already runs against the same
+ * `InteriorInstance` colliders (its own `worldHitAlongSegment`/`raycastInteriors` call), just
+ * from the player's own previous->current chest position instead of a shot's. Chest, not the
+ * raw body/feet position, to match the reference point the final-position overlap check below
+ * already uses -- a feet-height sweep would skim the very bottom edge of a field/wall whose
+ * placement (like the existing force-field tests') centers its vertical extent above ground
+ * level. Like projectiles, this sweeps a zero-radius ray, not the full two-sphere capsule the
+ * final-position check below uses -- ours: cheap enough for a browser demo, and precise enough
+ * to stop a fast player at a thin wall or field, which is this finding's actual complaint. A
+ * shot that only grazes a corner with the capsule's radius (not the chest's center point)
+ * still falls through to the final-position overlap check afterward, same as it always did.
+ */
+function sweepChest(
+  colliders: readonly InteriorInstance[],
+  prevChest: Vec3,
+  chest: Vec3,
+): { point: Vec3; normal: Vec3 } | null {
+  const dx = chest.x - prevChest.x,
+    dy = chest.y - prevChest.y,
+    dz = chest.z - prevChest.z;
+  const length = Math.hypot(dx, dy, dz);
+  if (length === 0) return null;
+  const direction: Vec3 = { x: dx / length, y: dy / length, z: dz / length };
+  const hit = raycastInteriors(colliders, prevChest, direction, length);
+  return hit && { point: hit.point, normal: hit.normal };
+}
+
+/** Stops the body at a chest-height swept-segment hit (if any) -- converting the hit point
+ *  back from chest space to the body's own feet-referenced x/y/z via `chestOffsetY` -- and
+ *  cancels the velocity component driving it further into the surface, the same into-surface
+ *  cancellation resolveInteriors's own final-position push-out already does below, just from
+ *  the sweep's hit normal instead of a penetration-depth push direction. */
+function stopAtSweepHit(
+  body: Body,
+  hit: { point: Vec3; normal: Vec3 } | null,
+  chestOffsetY: number,
+): void {
+  if (!hit) return;
+  body.x = hit.point.x;
+  body.y = hit.point.y - chestOffsetY;
+  body.z = hit.point.z;
+  const into = body.vx * hit.normal.x + body.vy * hit.normal.y + body.vz * hit.normal.z;
+  if (into < 0) {
+    body.vx -= into * hit.normal.x;
+    body.vy -= into * hit.normal.y;
+    body.vz -= into * hit.normal.z;
+  }
+}
+
+/** Ours: a two-sphere approximation of the player capsule (feet, chest) rather than a full
+ *  swept capsule — the sim already treats a player as one sphere for hit detection
+ *  (damage.ts's playerHitbox), so this reuses the same "close enough for a browser demo"
+ *  bar rather than introducing a second, more precise player shape only interiors use. */
+function resolveInteriors(world: World, body: Body, armor: ArmorData, previous: Vec3): void {
+  if (world.interiors.length === 0) return;
+  const [boxX, boxY, height] = armor.boundingBox;
+  const radius = Math.max(boxX, boxY) / 2;
+  const chestOffsetY = height - radius;
+  const prevChest = { x: previous.x, y: previous.y + chestOffsetY, z: previous.z };
+  const chestBeforePush = { x: body.x, y: body.y + chestOffsetY, z: body.z };
+  stopAtSweepHit(body, sweepChest(world.interiors, prevChest, chestBeforePush), chestOffsetY);
+  const feet = { x: body.x, y: body.y + radius, z: body.z };
+  const chest = { x: body.x, y: body.y + chestOffsetY, z: body.z };
+  const push =
+    resolveSphereAgainstInteriors(world.interiors, chest, radius) ??
+    resolveSphereAgainstInteriors(world.interiors, feet, radius);
+  const len = push ? Math.hypot(push.x, push.y, push.z) : 0;
+  if (!push || len < MIN_PUSH_DEPTH) return;
+  body.x += push.x;
+  body.y += push.y;
+  body.z += push.z;
+  const into = (body.vx * push.x + body.vy * push.y + body.vz * push.z) / len;
+  if (into < 0) {
+    body.vx -= (into * push.x) / len;
+    body.vy -= (into * push.y) / len;
+    body.vz -= (into * push.z) / len;
+  }
+}
+
+/** Reuses `resolveInteriors`'s own two-sphere push-out against whichever of the player's
+ *  team's opposing force fields are currently powered -- `activeForceFieldBlockers` already
+ *  excludes the player's own team's fields, so there is nothing else to filter here. A
+ *  friendly field never appears in the list this queries, which is what makes "always passes
+ *  your own team" true by construction rather than by an extra team check in this function --
+ *  failure matrix row 17. */
+function resolveForceFields(
+  world: World,
+  id: number,
+  body: Body,
+  armor: ArmorData,
+  previous: Vec3,
+): void {
+  const team = world.players.team[id] ?? 0;
+  const blockers = activeForceFieldBlockers(world, team);
+  if (blockers.length === 0) return;
+  const [boxX, boxY, height] = armor.boundingBox;
+  const radius = Math.max(boxX, boxY) / 2;
+  const chestOffsetY = height - radius;
+  const prevChest = { x: previous.x, y: previous.y + chestOffsetY, z: previous.z };
+  const chestBeforePush = { x: body.x, y: body.y + chestOffsetY, z: body.z };
+  stopAtSweepHit(body, sweepChest(blockers, prevChest, chestBeforePush), chestOffsetY);
+  const chest = { x: body.x, y: body.y + chestOffsetY, z: body.z };
+  const push = resolveSphereAgainstInteriors(blockers, chest, radius);
+  // Same floating-point-noise floor resolveInteriors applies above -- see MIN_PUSH_DEPTH's
+  // own comment. This function has no velocity correction to corrupt, but a push this small
+  // moves the player by less than a nanometer anyway, so skipping it changes nothing visible.
+  if (!push || Math.hypot(push.x, push.y, push.z) < MIN_PUSH_DEPTH) return;
+  body.x += push.x;
+  body.y += push.y;
+  body.z += push.z;
+}
+
 function stepPlayer(
   world: World,
   id: number,
@@ -324,11 +467,14 @@ function stepPlayer(
 ): void {
   const players = world.players;
   const body = readBody(players, id);
+  const previous: Vec3 = { x: body.x, y: body.y, z: body.z };
   players.yaw[id] = input.yaw;
   const ctx = classify(world, body, input, armor);
   const forces = applyForces(players, id, body, input, ctx, armor, dt);
   applyResistance(body, armor, dt);
   const contact = integrate(world, body, ctx.grounded, forces.jumped || forces.jetted, dt);
+  resolveInteriors(world, body, armor, previous);
+  resolveForceFields(world, id, body, armor, previous);
   // Falling out of the world is a real death, not a parallel "just move them back" shortcut
   // (Codex review round 9, PR #9, P1): the old position-only reset skipped pendingDeaths
   // entirely, so stepFlags never saw the death, a carried flag never dropped, and damage/
@@ -365,6 +511,6 @@ export function stepPlayers(
   for (let id = 0; id < world.players.count; id += 1) {
     if (!world.players.active[id] || !world.players.alive[id]) continue;
     const input = inputs.get(id) ?? { ...IDLE, yaw: world.players.yaw[id] ?? 0 };
-    stepPlayer(world, id, input, LIGHT_ARMOR, dt);
+    stepPlayer(world, id, input, armorFor(world, id), dt);
   }
 }
