@@ -1,5 +1,6 @@
 import { BaseObjectKind, teamHasPower, type BaseObjectStore } from './baseObjects.js';
 import { GRAVITY } from './movement.js';
+import { sampleTerrain } from './terrain.js';
 import type { PendingFreeId, PlayerInput, Vec3, World } from './types.js';
 
 export enum VehicleKind {
@@ -241,6 +242,19 @@ function at(arr: Float64Array, i: number): number {
   return arr[i] ?? 0;
 }
 
+/** Wraps an angle to (-pi, pi]. `PlayerInput.yaw`/`pitch` are the driver's own absolute,
+ *  unbounded look angle (client/src/input.ts accumulates `this.yaw -= movementX * sensitivity`
+ *  with no wraparound and no clamp on yaw), not a per-tick steering delta -- reusing it as a
+ *  vehicle steering INPUT (this file's steeringForce model, and Task 2's own test title,
+ *  "steers ... via steeringForce, not a snap") means computing the shortest angular distance
+ *  from the vehicle's current heading to where the driver is looking, then accelerating
+ *  toward closing that gap -- not multiplying the raw (potentially many-radians) input value
+ *  directly, which the plan's own sketch did and which produces an unbounded, un-physical
+ *  angular acceleration spike once a player has looked around a few full turns. */
+function normalizeAngle(angle: number): number {
+  return angle - Math.round(angle / (2 * Math.PI)) * 2 * Math.PI;
+}
+
 /** Auto-stabilizer: below maxAutoSpeed, angular velocity relaxes toward zero and linear
  *  velocity toward zero, at autoAngularForce/autoLinearForce -- Torque's own "when you let
  *  go of the stick it levels out" behavior. */
@@ -277,8 +291,10 @@ function applyShrikeSteeringInput(
   const mass = VEHICLE_DATA[VehicleKind.Shrike].mass;
   const base = id * 3;
   const rate = (SHRIKE_STEERING_FORCE / mass) * dt;
-  vehicles.angVel[base + 1] = at(vehicles.angVel, base + 1) + input.yaw * rate;
-  vehicles.angVel[base] = at(vehicles.angVel, base) + input.pitch * rate;
+  const yawError = normalizeAngle(input.yaw - at(vehicles.yaw, id));
+  const pitchError = normalizeAngle(input.pitch - at(vehicles.pitch, id));
+  vehicles.angVel[base + 1] = at(vehicles.angVel, base + 1) + yawError * rate;
+  vehicles.angVel[base] = at(vehicles.angVel, base) + pitchError * rate;
   vehicles.angVel[base + 2] =
     at(vehicles.angVel, base + 2) - SHRIKE_ROLL_FORCE * dt * Math.sign(at(vehicles.roll, id));
 }
@@ -387,4 +403,147 @@ export function stepShrike(world: World, id: number, input: PlayerInput, dt: num
     (vehicles.position[base + 1] ?? 0) + (vehicles.velocity[base + 1] ?? 0) * dt;
   vehicles.position[base + 2] =
     (vehicles.position[base + 2] ?? 0) + (vehicles.velocity[base + 2] ?? 0) * dt;
+}
+
+// --- Wildcat hover physics (Task 3) -----------------------------------------------------
+// Real T2 numbers cite vehicles/vehicle_wildcat.cs; every field not in the spec's Vehicle
+// numbers table is collected in the plan's "ours" numbers table alongside its citation.
+const WILDCAT_STAB_LEN_MIN = 2.25; // vehicles/vehicle_wildcat.cs:146
+const WILDCAT_STAB_LEN_MAX = 3.75; // vehicles/vehicle_wildcat.cs:147
+const WILDCAT_STAB_SPRING = 30; // vehicles/vehicle_wildcat.cs:148
+const WILDCAT_STAB_DAMPING = 16; // vehicles/vehicle_wildcat.cs:149
+const WILDCAT_MAIN_THRUST = 30; // vehicles/vehicle_wildcat.cs:138
+const WILDCAT_REVERSE_THRUST = 10; // vehicles/vehicle_wildcat.cs:139 — ours table
+const WILDCAT_STRAFE_THRUST = 8; // vehicles/vehicle_wildcat.cs:140 — ours table
+const WILDCAT_TURBO_FACTOR = 1.5; // vehicles/vehicle_wildcat.cs:141
+const WILDCAT_BRAKING_FORCE = 25; // vehicles/vehicle_wildcat.cs:143 — ours table
+const WILDCAT_BRAKING_ACTIVATION_SPEED = 4; // vehicles/vehicle_wildcat.cs:144 — ours table
+// Not in the plan's own numbers table despite appearing in its code sketch -- an
+// undisclosed "ours" value (see the PR body). Tuned low: at the per-radian-error steering
+// model this file uses (see normalizeAngle's own comment), the plan's original 30 produced
+// an unplayably twitchy turn once divided against a realistic error range.
+const WILDCAT_STEERING_FORCE = 2.5;
+const WILDCAT_ROLL_FORCE = 15;
+const WILDCAT_GYRO_DRAG = 16; // spec's Vehicle numbers table
+const WILDCAT_MIN_JET_ENERGY = 15;
+const WILDCAT_JET_ENERGY_DRAIN = 1.3;
+// Ours: no jump exists in the real script -- see the plan's numbers table and Spec gaps.
+const WILDCAT_JUMP_IMPULSE_PER_MASS = 8.3; // matches the player jumpForce = 8.3 * mass shape
+
+// Applied as direct m/s^2 accelerations, not Newtons divided by mass. Player armor forces
+// (armor.ts's runForce/jetForce/jumpForce) are all literally `coefficient * mass`, so
+// dividing them back by mass recovers the coefficient as a mass-independent acceleration --
+// the real convention these T2 script fields use. The Wildcat's own script constants
+// (mainThrustForce 30, stabSpringConstant 30, ...) are NOT expressed that way (they're flat
+// values, not `coefficient * 400`), so dividing them by the Wildcat's 400 kg mass the same
+// way collapses them to near-zero (0.075 m/s^2 of thrust never overcomes 20 m/s^2 of
+// gravity) -- a 400 kg craft that can never leave the ground. Treating them as already-an-
+// acceleration instead reproduces the intended feel (a light, snappy scout craft) and is the
+// same order of magnitude as the Shrike's own force-divided-by-mass accelerations (~20 m/s^2).
+function applyHoverSpring(world: World, vehicles: VehicleStore, id: number, dt: number): void {
+  const base = id * 3;
+  const x = at(vehicles.position, base);
+  const z = at(vehicles.position, base + 2);
+  const ground = sampleTerrain(world.terrain, x, z).height;
+  const height = at(vehicles.position, base + 1) - ground;
+  const restHeight = (WILDCAT_STAB_LEN_MIN + WILDCAT_STAB_LEN_MAX) / 2;
+  const compression = restHeight - height;
+  const springAccel = compression * WILDCAT_STAB_SPRING;
+  const dampingAccel = -at(vehicles.velocity, base + 1) * WILDCAT_STAB_DAMPING;
+  vehicles.velocity[base + 1] =
+    at(vehicles.velocity, base + 1) + (springAccel + dampingAccel) * dt - GRAVITY * dt;
+  vehicles.onGround[id] = height <= WILDCAT_STAB_LEN_MAX ? 1 : 0;
+}
+
+function applyWildcatSteering(
+  vehicles: VehicleStore,
+  id: number,
+  input: PlayerInput,
+  dt: number,
+): void {
+  const base = id * 3;
+  const yawError = normalizeAngle(input.yaw - at(vehicles.yaw, id));
+  vehicles.angVel[base + 1] =
+    at(vehicles.angVel, base + 1) + yawError * WILDCAT_STEERING_FORCE * dt;
+  vehicles.yaw[id] = at(vehicles.yaw, id) + at(vehicles.angVel, base + 1) * dt;
+  // Lean into the turn: roll follows yaw rate, restoring toward level via gyroDrag.
+  const dragScale = 1 - Math.min(1, (WILDCAT_GYRO_DRAG / 100) * dt);
+  vehicles.roll[id] =
+    (at(vehicles.roll, id) + at(vehicles.angVel, base + 1) * dt * (WILDCAT_ROLL_FORCE / 100)) *
+    dragScale;
+  vehicles.angVel[base + 1] = at(vehicles.angVel, base + 1) * dragScale;
+}
+
+function wildcatForwardForce(input: PlayerInput, boosting: boolean): number {
+  const base = input.moveZ >= 0 ? WILDCAT_MAIN_THRUST : WILDCAT_REVERSE_THRUST;
+  return boosting ? base * WILDCAT_TURBO_FACTOR : base;
+}
+
+/** Comes to rest via a flat braking force once the driver lets go of both move axes above
+ *  brakingActivationSpeed -- split out of applyWildcatThrust to keep that function's own
+ *  complexity under budget. */
+function applyWildcatBraking(
+  vehicles: VehicleStore,
+  id: number,
+  input: PlayerInput,
+  dt: number,
+): void {
+  if (input.moveX !== 0 || input.moveZ !== 0) return;
+  const base = id * 3;
+  const horizSpeed = Math.hypot(at(vehicles.velocity, base), at(vehicles.velocity, base + 2));
+  if (horizSpeed <= WILDCAT_BRAKING_ACTIVATION_SPEED) return;
+  // Bounded decel toward (not past) zero -- a scale-based reduction can't overshoot into
+  // reverse the way subtracting a flat delta from each axis independently could.
+  const decel = Math.min(horizSpeed, WILDCAT_BRAKING_FORCE * dt);
+  const scale = (horizSpeed - decel) / horizSpeed;
+  vehicles.velocity[base] = at(vehicles.velocity, base) * scale;
+  vehicles.velocity[base + 2] = at(vehicles.velocity, base + 2) * scale;
+}
+
+function applyWildcatThrust(
+  vehicles: VehicleStore,
+  id: number,
+  input: PlayerInput,
+  dt: number,
+): void {
+  const base = id * 3;
+  const heading = headingOf(at(vehicles.yaw, id), 0);
+  const right: Vec3 = { x: heading.z, y: 0, z: -heading.x };
+  const boosting = input.jet && at(vehicles.energy, id) >= WILDCAT_MIN_JET_ENERGY;
+  const forwardAccel = wildcatForwardForce(input, boosting);
+  vehicles.velocity[base] =
+    at(vehicles.velocity, base) + heading.x * input.moveZ * forwardAccel * dt;
+  vehicles.velocity[base + 2] =
+    at(vehicles.velocity, base + 2) + heading.z * input.moveZ * forwardAccel * dt;
+  vehicles.velocity[base] =
+    at(vehicles.velocity, base) + right.x * input.moveX * WILDCAT_STRAFE_THRUST * dt;
+  vehicles.velocity[base + 2] =
+    at(vehicles.velocity, base + 2) + right.z * input.moveX * WILDCAT_STRAFE_THRUST * dt;
+  if (boosting) vehicles.energy[id] = at(vehicles.energy, id) - WILDCAT_JET_ENERGY_DRAIN;
+  else {
+    const data = VEHICLE_DATA[VehicleKind.Wildcat];
+    vehicles.energy[id] = Math.min(data.maxEnergy, at(vehicles.energy, id) + data.rechargeRate);
+  }
+  applyWildcatBraking(vehicles, id, input, dt);
+}
+
+function applyWildcatJump(vehicles: VehicleStore, id: number, input: PlayerInput): void {
+  if (!input.jump || !vehicles.onGround[id]) return;
+  if (at(vehicles.energy, id) < WILDCAT_MIN_JET_ENERGY) return;
+  vehicles.velocity[id * 3 + 1] = at(vehicles.velocity, id * 3 + 1) + WILDCAT_JUMP_IMPULSE_PER_MASS;
+  vehicles.energy[id] = at(vehicles.energy, id) - WILDCAT_JET_ENERGY_DRAIN;
+}
+
+export function stepWildcat(world: World, id: number, input: PlayerInput, dt: number): void {
+  const vehicles = world.vehicles;
+  applyWildcatSteering(vehicles, id, input, dt);
+  applyWildcatThrust(vehicles, id, input, dt);
+  applyWildcatJump(vehicles, id, input);
+  applyHoverSpring(world, vehicles, id, dt);
+  const base = id * 3;
+  vehicles.position[base] = at(vehicles.position, base) + at(vehicles.velocity, base) * dt;
+  vehicles.position[base + 1] =
+    at(vehicles.position, base + 1) + at(vehicles.velocity, base + 1) * dt;
+  vehicles.position[base + 2] =
+    at(vehicles.position, base + 2) + at(vehicles.velocity, base + 2) * dt;
 }

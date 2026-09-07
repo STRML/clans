@@ -6,6 +6,7 @@ import {
   createVehicleStore,
   spawnVehicleAtPad,
   stepShrike,
+  stepWildcat,
   VEHICLE_DATA,
   VehicleKind,
   vehicleCapForTeam,
@@ -170,5 +171,76 @@ describe('stepShrike', () => {
     world.vehicles.velocity.set([1, 0, 0], id * 3); // well under maxAutoSpeed (15)
     stepShrike(world, id, idleInput, 1 / 32);
     expect(Math.abs(world.vehicles.angVel[id * 3] ?? 0)).toBeLessThan(2);
+  });
+});
+
+function wildcatWorld(): { world: ReturnType<typeof createWorld>; id: number } {
+  const world = createWorld(flat, 1);
+  world.vehicles = createVehicleStore();
+  world.vehicles.active[0] = 1;
+  world.vehicles.count = 1;
+  world.vehicles.kind[0] = VehicleKind.Wildcat;
+  world.vehicles.energy[0] = VEHICLE_DATA[VehicleKind.Wildcat].maxEnergy;
+  world.vehicles.position.set([0, 2.75, 0], 0); // flat terrain at height 0; 2.75 m up is inside the hover band
+  return { world, id: 0 };
+}
+
+describe('stepWildcat', () => {
+  it('holds hover height on the spring: settles between stabLenMin and stabLenMax above terrain', () => {
+    const { world, id } = wildcatWorld();
+    for (let tick = 0; tick < 200; tick += 1) stepWildcat(world, id, idleInput, 1 / 32);
+    const heightAboveGround = world.vehicles.position[id * 3 + 1] ?? 0;
+    expect(heightAboveGround).toBeGreaterThan(2.0);
+    expect(heightAboveGround).toBeLessThan(4.0);
+  });
+
+  it('forward thrust (moveZ) accelerates along heading at mainThrustForce', () => {
+    const { world, id } = wildcatWorld();
+    const forward: PlayerInput = { ...idleInput, moveZ: 1 };
+    for (let tick = 0; tick < 60; tick += 1) stepWildcat(world, id, forward, 1 / 32);
+    expect(Math.abs(world.vehicles.velocity[id * 3 + 2] ?? 0)).toBeGreaterThan(0.5);
+  });
+
+  it('strafe (moveX) accelerates sideways at strafeThrustForce, weaker than forward thrust', () => {
+    const { world, id } = wildcatWorld();
+    const strafing: PlayerInput = { ...idleInput, moveX: 1 };
+    for (let tick = 0; tick < 32; tick += 1) stepWildcat(world, id, strafing, 1 / 32);
+    const strafeSpeed = Math.abs(world.vehicles.velocity[id * 3] ?? 0);
+    const forwardWorld = wildcatWorld();
+    const forward: PlayerInput = { ...idleInput, moveZ: 1 };
+    for (let tick = 0; tick < 32; tick += 1)
+      stepWildcat(forwardWorld.world, forwardWorld.id, forward, 1 / 32);
+    const forwardSpeed = Math.abs(
+      forwardWorld.world.vehicles.velocity[forwardWorld.id * 3 + 2] ?? 0,
+    );
+    expect(strafeSpeed).toBeLessThan(forwardSpeed);
+  });
+
+  it('boost (jet input) multiplies forward thrust and drains jetEnergyDrain', () => {
+    const { world, id } = wildcatWorld();
+    const boosting: PlayerInput = { ...idleInput, moveZ: 1, jet: true };
+    const before = world.vehicles.energy[id] ?? 0;
+    stepWildcat(world, id, boosting, 1 / 32);
+    expect(world.vehicles.energy[id]).toBeLessThan(before);
+  });
+
+  it('jump applies a one-shot vertical impulse gated by boost energy, refused below minJetEnergy', () => {
+    const { world, id } = wildcatWorld();
+    world.vehicles.onGround[id] = 1;
+    world.vehicles.energy[id] = 14; // below minJetEnergy (15)
+    const before = world.vehicles.velocity[id * 3 + 1] ?? 0;
+    const jumping: PlayerInput = { ...idleInput, jump: true };
+    stepWildcat(world, id, jumping, 1 / 32);
+    // No jump impulse applied -- only the hover spring/gravity integration moved velocity.
+    expect(world.vehicles.velocity[id * 3 + 1]).not.toBe(before + 8.3);
+  });
+
+  it('a grounded jump above minJetEnergy applies the impulse and drains energy', () => {
+    const { world, id } = wildcatWorld();
+    world.vehicles.onGround[id] = 1;
+    const before = world.vehicles.energy[id] ?? 0;
+    const jumping: PlayerInput = { ...idleInput, jump: true };
+    stepWildcat(world, id, jumping, 1 / 32);
+    expect(world.vehicles.energy[id]).toBeLessThan(before);
   });
 });
