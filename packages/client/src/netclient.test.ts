@@ -777,6 +777,7 @@ describe('NetClient', () => {
       flags: [{ id: 0, team: 1, state: 1, x: 5, y: 0, z: 5, carrierId: 0, returnInS: -1 }],
       baseObjects: [],
       turrets: [],
+      vehicles: [],
       teamScores: [100, 0],
       gameOver: false,
       winnerTeam: 0,
@@ -808,6 +809,7 @@ describe('NetClient', () => {
       ...emptyExtras(),
       baseObjects: [{ id: 0, damage: 0.4, destroyed: 0, powered: 1 }],
       turrets: [{ id: 0, damage: 0.1, destroyed: 0, powered: 1, targetId: 5, state: 2 }],
+      vehicles: [],
     };
     transport.pump([encodeSnapshot(1, 0, 0, [], null, extras)]);
 
@@ -844,6 +846,7 @@ describe('NetClient', () => {
       flags: [],
       baseObjects: [],
       turrets: [],
+      vehicles: [],
       teamScores: [3, 1],
       gameOver: true,
       winnerTeam: 1,
@@ -938,6 +941,7 @@ describe('NetClient', () => {
       flags: [],
       baseObjects: [],
       turrets: [],
+      vehicles: [],
       teamScores: [3, 1],
       gameOver: true,
       winnerTeam: 1,
@@ -1010,6 +1014,7 @@ describe('NetClient', () => {
       flags: [],
       baseObjects: [],
       turrets: [],
+      vehicles: [],
       teamScores: [0, 0],
       gameOver: false,
       winnerTeam: 0,

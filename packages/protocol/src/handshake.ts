@@ -24,6 +24,7 @@ import {
   type JoinMessage,
   type LoadoutMessage,
   type NetInputSample,
+  type VehicleSpawnMessage,
   type WelcomeMessage,
 } from './messages.js';
 
@@ -47,7 +48,8 @@ function writeSample(cursor: Cursor, sample: NetInputSample): void {
       (sample.jet ? 2 : 0) |
       (sample.fire ? 4 : 0) |
       (sample.altFire ? 8 : 0) |
-      (sample.packActive ? 16 : 0),
+      (sample.packActive ? 16 : 0) |
+      (sample.use ? 32 : 0),
   );
   writeU8(cursor, sample.slot);
 }
@@ -86,7 +88,7 @@ function readSample(cursor: Cursor): NetInputSample {
     altFire: (flags & 8) !== 0,
     slot,
     packActive: (flags & 16) !== 0,
-    use: false, // placeholder until Task 10 adds the real wire bit (bit 5, value 32)
+    use: (flags & 32) !== 0,
   };
 }
 
@@ -203,4 +205,19 @@ export function decodeLoadout(bytes: Uint8Array): LoadoutMessage {
   const armor = readU8(cursor);
   const repairPack = readU8(cursor) !== 0;
   return { type: MessageType.Loadout, armor, repairPack };
+}
+
+export function encodeVehicleSpawn(message: Omit<VehicleSpawnMessage, 'type'>): Uint8Array {
+  const cursor = createWriter(4);
+  writeU8(cursor, MessageType.VehicleSpawn);
+  writeU16(cursor, message.padId);
+  writeU8(cursor, message.kind);
+  return bytesOf(cursor);
+}
+export function decodeVehicleSpawn(bytes: Uint8Array): VehicleSpawnMessage {
+  const cursor = createReader(bytes);
+  expectType(cursor, MessageType.VehicleSpawn);
+  const padId = readU16(cursor);
+  const kind = readU8(cursor);
+  return { type: MessageType.VehicleSpawn, padId, kind };
 }

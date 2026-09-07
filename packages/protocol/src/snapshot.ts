@@ -1,4 +1,4 @@
-import type { PlayerSnapshotData } from '@clans/sim';
+import type { PlayerSnapshotData, VehicleSnapshotData } from '@clans/sim';
 import {
   bytesOf,
   createReader,
@@ -21,6 +21,7 @@ import {
   MAX_SNAPSHOT_PLAYERS,
   MAX_SNAPSHOT_PROJECTILES,
   MAX_SNAPSHOT_TURRETS,
+  MAX_SNAPSHOT_VEHICLES,
   MessageType,
 } from './messages.js';
 
@@ -80,6 +81,7 @@ export interface WorldExtras {
   flags: FlagSnapshotData[];
   baseObjects: BaseObjectSnapshotData[];
   turrets: TurretSnapshotData[];
+  vehicles: VehicleSnapshotData[];
   teamScores: [number, number]; // [team1, team2]
   gameOver: boolean;
   winnerTeam: number;
@@ -92,6 +94,7 @@ export function emptyExtras(): WorldExtras {
     flags: [],
     baseObjects: [],
     turrets: [],
+    vehicles: [],
     teamScores: [0, 0],
     gameOver: false,
     winnerTeam: 0,
@@ -110,6 +113,7 @@ export interface DecodedSnapshot {
   flags: FlagSnapshotData[];
   baseObjects: BaseObjectSnapshotData[];
   turrets: TurretSnapshotData[];
+  vehicles: VehicleSnapshotData[];
   teamScores: [number, number];
   gameOver: boolean;
   winnerTeam: number;
@@ -408,6 +412,40 @@ function readTurret(cursor: Cursor): TurretSnapshotData {
   return { id, damage, destroyed, powered, targetId, state };
 }
 
+function writeVehicle(cursor: Cursor, v: VehicleSnapshotData): void {
+  writeU16(cursor, v.id);
+  writeU8(cursor, v.kind);
+  writeU8(cursor, v.team);
+  writeF32(cursor, v.x);
+  writeF32(cursor, v.y);
+  writeF32(cursor, v.z);
+  writeF32(cursor, v.yaw);
+  writeF32(cursor, v.pitch);
+  writeF32(cursor, v.roll);
+  writeF32(cursor, v.energy);
+  writeF32(cursor, v.damage);
+  writeU8(cursor, v.destroyed);
+  writeI16(cursor, v.driverId);
+}
+function readVehicle(cursor: Cursor): VehicleSnapshotData {
+  const id = readU16(cursor);
+  const kind = readU8(cursor);
+  const team = readU8(cursor);
+  const x = readF32(cursor);
+  const y = readF32(cursor);
+  const z = readF32(cursor);
+  const yaw = readF32(cursor);
+  const pitch = readF32(cursor);
+  const roll = readF32(cursor);
+  const energy = readF32(cursor);
+  const damage = readF32(cursor);
+  assertFinite([x, y, z, yaw, pitch, roll, energy, damage]);
+  const destroyed = (readU8(cursor) ? 1 : 0) as 0 | 1;
+  const driverId = readI16(cursor);
+  return { id, kind, team, x, y, z, yaw, pitch, roll, energy, damage, destroyed, driverId };
+}
+const VEHICLE_BYTES = 2 + 1 + 1 + 4 * 8 + 1 + 2; // id, kind, team, 8 f32 fields, destroyed, driverId i16
+
 function writeExtras(cursor: Cursor, extras: WorldExtras): void {
   writeU16(cursor, extras.projectiles.length);
   for (const p of extras.projectiles) writeProjectile(cursor, p);
@@ -417,6 +455,15 @@ function writeExtras(cursor: Cursor, extras: WorldExtras): void {
   for (const o of extras.baseObjects) writeBaseObject(cursor, o);
   writeU8(cursor, extras.turrets.length);
   for (const t of extras.turrets) writeTurret(cursor, t);
+  // Unlike the unchecked u8 writes above (a pre-existing gap tracked separately, issue #16 --
+  // a count of 256 silently wraps to 0 on the wire with no error), this is new code, so it
+  // doesn't inherit that gap: VehicleStore's own capacity (8) makes this practically
+  // unreachable, but the guard is cheap and the discipline is worth keeping regardless.
+  if (extras.vehicles.length > 255) {
+    throw new RangeError('Snapshot vehicle count exceeds 255');
+  }
+  writeU8(cursor, extras.vehicles.length);
+  for (const v of extras.vehicles) writeVehicle(cursor, v);
   writeU16(cursor, extras.teamScores[0]);
   writeU16(cursor, extras.teamScores[1]);
   writeU8(cursor, extras.gameOver ? 1 : 0);
@@ -447,6 +494,10 @@ function readExtras(cursor: Cursor): WorldExtras {
   assertPlausibleExtrasCount(turretCount, MAX_SNAPSHOT_TURRETS, 'turret');
   const turrets: TurretSnapshotData[] = [];
   for (let i = 0; i < turretCount; i += 1) turrets.push(readTurret(cursor));
+  const vehicleCount = readU8(cursor);
+  assertPlausibleExtrasCount(vehicleCount, MAX_SNAPSHOT_VEHICLES, 'vehicle');
+  const vehicles: VehicleSnapshotData[] = [];
+  for (let i = 0; i < vehicleCount; i += 1) vehicles.push(readVehicle(cursor));
   const teamScores: [number, number] = [readU16(cursor), readU16(cursor)];
   const gameOver = readU8(cursor) !== 0;
   const winnerTeam = readU8(cursor);
@@ -458,6 +509,7 @@ function readExtras(cursor: Cursor): WorldExtras {
     flags,
     baseObjects,
     turrets,
+    vehicles,
     teamScores,
     gameOver,
     winnerTeam,
@@ -475,6 +527,8 @@ function extrasByteLength(extras: WorldExtras): number {
     extras.baseObjects.length * BASE_OBJECT_BYTES +
     1 +
     extras.turrets.length * TURRET_BYTES +
+    1 +
+    extras.vehicles.length * VEHICLE_BYTES +
     2 +
     2 +
     1 +

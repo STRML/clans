@@ -18,6 +18,7 @@ import {
   respawnPlayer,
   sampleTerrain,
   serializeActivePlayers,
+  serializeActiveVehicles,
   setGodMode,
   stepWorld,
   type FireEvent,
@@ -472,6 +473,11 @@ export function buildExtras(world: World): WorldExtras {
     flags: snapshotWorldFlags(world),
     baseObjects: snapshotBaseObjects(world),
     turrets: snapshotTurrets(world),
+    // Reuses @clans/sim's own serializeActiveVehicles rather than a hand-rolled per-field
+    // builder like the base-object/turret ones above -- VehicleSnapshotData's shape is
+    // already the sim type, not a separately duplicated protocol-side shape (see snapshot.ts's
+    // WorldExtras.vehicles).
+    vehicles: serializeActiveVehicles(world),
     teamScores: [world.teamScores[1] ?? 0, world.teamScores[2] ?? 0],
     gameOver: world.gameOver,
     winnerTeam: world.winnerTeam,

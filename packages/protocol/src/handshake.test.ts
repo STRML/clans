@@ -6,6 +6,7 @@ import {
   decodeInput,
   decodeJoin,
   decodeLoadout,
+  decodeVehicleSpawn,
   decodeWelcome,
   encodeAck,
   encodeEvent,
@@ -13,6 +14,7 @@ import {
   encodeInput,
   encodeJoin,
   encodeLoadout,
+  encodeVehicleSpawn,
   encodeWelcome,
 } from './handshake.js';
 import {
@@ -362,5 +364,61 @@ describe('packActive input bit', () => {
     expect(decoded.samples[0].packActive).toBe(true);
     expect(decoded.samples[0].jump).toBe(true);
     expect(decoded.samples[0].fire).toBe(true);
+  });
+});
+
+describe('use input bit (M5)', () => {
+  it('round-trips through encodeInput/decodeInput alongside every other flag', () => {
+    const sample: NetInputSample = {
+      moveX: 1,
+      moveZ: -1,
+      yaw: 0.5,
+      pitch: -0.2,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 2,
+      packActive: false,
+      use: true,
+    };
+    const bytes = encodeInput({ sequence: 1, samples: [sample, sample, sample] });
+    expect(decodeInput(bytes).samples[0].use).toBe(true);
+  });
+
+  it('does not leak into packActive or vice versa', () => {
+    const sample: NetInputSample = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+      packActive: true,
+      use: false,
+    };
+    const bytes = encodeInput({ sequence: 1, samples: [sample, sample, sample] });
+    const decoded = decodeInput(bytes);
+    expect(decoded.samples[0].packActive).toBe(true);
+    expect(decoded.samples[0].use).toBe(false);
+  });
+});
+
+describe('VehicleSpawn round trip (M5)', () => {
+  it('encodes and decodes padId and kind exactly', () => {
+    const bytes = encodeVehicleSpawn({ padId: 4, kind: 1 });
+    expect(decodeVehicleSpawn(bytes)).toEqual({
+      type: MessageType.VehicleSpawn,
+      padId: 4,
+      kind: 1,
+    });
+  });
+
+  it('round-trips a padId above 255 (u16, not u8)', () => {
+    const bytes = encodeVehicleSpawn({ padId: 300, kind: 0 });
+    expect(decodeVehicleSpawn(bytes).padId).toBe(300);
   });
 });

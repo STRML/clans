@@ -101,6 +101,7 @@ describe('snapshot codec', () => {
       ],
       baseObjects: [],
       turrets: [],
+      vehicles: [],
       teamScores: [300, 100],
       gameOver: true,
       winnerTeam: 1,
@@ -188,6 +189,7 @@ describe('snapshot codec', () => {
       flags,
       baseObjects: [],
       turrets: [],
+      vehicles: [],
       teamScores: [100, 200],
       gameOver: true,
       winnerTeam: 1,
@@ -693,5 +695,76 @@ describe('WorldExtras: baseObjects and turrets', () => {
     const bytes = encodeSnapshot(1, 0, 0, [], null, extras);
     const decoded = decodeSnapshot(bytes, null);
     expect(decoded.turrets[0]).toEqual(extras.turrets[0]);
+  });
+});
+
+describe('WorldExtras: vehicles (M5)', () => {
+  it('emptyExtras includes an empty vehicles array', () => {
+    expect(emptyExtras().vehicles).toEqual([]);
+  });
+
+  it('a full snapshot round-trips vehicles exactly, including energy', () => {
+    const extras = {
+      ...emptyExtras(),
+      vehicles: [
+        {
+          id: 0,
+          kind: 0,
+          team: 1,
+          x: 10.5,
+          y: 20.25,
+          z: -30.125,
+          yaw: 0.5,
+          pitch: -0.2,
+          roll: 0.1,
+          energy: 150.5,
+          damage: 0.25,
+          destroyed: 0 as const,
+          driverId: 3,
+        },
+      ],
+    };
+    const bytes = encodeSnapshot(1, 100, 5, [], null, extras);
+    const decoded = decodeSnapshot(bytes, null);
+    expect(decoded.vehicles).toHaveLength(1);
+    const vehicle = decoded.vehicles[0] as (typeof decoded.vehicles)[number];
+    expect(vehicle.id).toBe(0);
+    expect(vehicle.kind).toBe(0);
+    expect(vehicle.team).toBe(1);
+    expect(vehicle.x).toBeCloseTo(10.5, 3);
+    expect(vehicle.y).toBeCloseTo(20.25, 3);
+    expect(vehicle.z).toBeCloseTo(-30.125, 3);
+    expect(vehicle.yaw).toBeCloseTo(0.5, 5);
+    expect(vehicle.energy).toBeCloseTo(150.5, 3);
+    expect(vehicle.damage).toBeCloseTo(0.25, 5);
+    expect(vehicle.destroyed).toBe(0);
+    expect(vehicle.driverId).toBe(3);
+  });
+
+  it('a destroyed, unpiloted vehicle carries destroyed: 1 and driverId -1', () => {
+    const extras = {
+      ...emptyExtras(),
+      vehicles: [
+        {
+          id: 1,
+          kind: 1,
+          team: 2,
+          x: 0,
+          y: 0,
+          z: 0,
+          yaw: 0,
+          pitch: 0,
+          roll: 0,
+          energy: 0,
+          damage: 0.6,
+          destroyed: 1 as const,
+          driverId: -1,
+        },
+      ],
+    };
+    const bytes = encodeSnapshot(1, 0, 0, [], null, extras);
+    const decoded = decodeSnapshot(bytes, null);
+    expect(decoded.vehicles[0]?.destroyed).toBe(1);
+    expect(decoded.vehicles[0]?.driverId).toBe(-1);
   });
 });
