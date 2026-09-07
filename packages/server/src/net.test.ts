@@ -1530,4 +1530,65 @@ describe('startNetServer', () => {
     client.close();
     vehicleServer.close();
   });
+
+  it('a VehicleSpawn message for an enemy team pad is rejected (Codex review round 2, finding 2)', async () => {
+    // Before this fix, the only check was proximity -- no check that the pad belongs to
+    // the sender's own team. spawnVehicleAtPad creates the vehicle under the PAD's team
+    // (never the sender's), and unconditionally destroys whatever the pad already hosts
+    // BEFORE the cap check -- so standing within range of an enemy pad let any connected
+    // client destroy or replace that enemy team's vehicle for free.
+    const vehicleWorld = createWorld(terrain, 1, 8);
+    createBaseObjects(vehicleWorld, [
+      { kind: BaseObjectKind.Generator, team: 2, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationVehiclePad, team: 2, position: { x: 1, y: 0, z: 0 } },
+    ]);
+    stepPower(vehicleWorld);
+    // The connecting player spawns on team 1, right next to team 2's own pad.
+    const vehicleSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
+    const vehicleServer = startNetServer({
+      world: vehicleWorld,
+      spawns: vehicleSpawns,
+      port: TEST_PORT + 18,
+    });
+    await vehicleServer.ready;
+    const client = await connect(TEST_PORT + 18);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    client.send(encodeVehicleSpawn({ padId: 1, kind: VehicleKind.Shrike }));
+    await wait(10);
+    vehicleServer.tick(1);
+    expect(vehicleWorld.vehicles.count).toBe(0);
+    client.close();
+    vehicleServer.close();
+  });
+
+  it('a VehicleSpawn message from a dead player is rejected (Codex review round 2, finding 2)', async () => {
+    const vehicleWorld = createWorld(terrain, 1, 8);
+    createBaseObjects(vehicleWorld, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: 1, y: 0, z: 0 } },
+    ]);
+    stepPower(vehicleWorld);
+    const vehicleSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
+    const vehicleServer = startNetServer({
+      world: vehicleWorld,
+      spawns: vehicleSpawns,
+      port: TEST_PORT + 19,
+    });
+    await vehicleServer.ready;
+    const client = await connect(TEST_PORT + 19);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+    vehicleWorld.players.alive[0] = 0; // the first joiner is always allocated id 0
+
+    client.send(encodeVehicleSpawn({ padId: 1, kind: VehicleKind.Shrike }));
+    await wait(10);
+    vehicleServer.tick(1);
+    expect(vehicleWorld.vehicles.count).toBe(0);
+    client.close();
+    vehicleServer.close();
+  });
 });

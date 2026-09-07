@@ -1028,6 +1028,32 @@ function seatDriver(world: World, vId: number, driverId: number): void {
 /** One active, non-destroyed vehicle's whole tick: physics, the Shrike blaster (piloted
  *  only), and seat-locking its driver -- split out of stepVehicles to keep that function's
  *  own complexity under budget. */
+/** True if `vId`'s current driver should keep driving this tick -- false only when the
+ *  driver's own PlayerStore row explicitly says dead (`active === 1 && alive === 0`).
+ *  Codex review round 2 (this PR), finding 2 (P2/P1 hardening): under this milestone's own
+ *  rules a mounted player can only die via ejectPilot (which clears both sides of the
+ *  mount relationship atomically -- direct hits and splash both exclude mounted players,
+ *  and movement.ts's own stepPlayer skips a mounted player entirely, so there is no
+ *  fall-damage path either), so this should never fire on the authoritative server today.
+ *  It exists as the same defense-in-depth damage.ts's respawnPlayer already documents for
+ *  the player side of this relationship.
+ *
+ *  Deliberately does NOT treat `active === 0` as evidence of death: a networked CLIENT's
+ *  own local world only ever populates PlayerStore for its own remapped LOCAL_SLOT index
+ *  (netclient.ts never calls deserializePlayer for any other id), so every OTHER player's
+ *  own driverId reads active === 0 there -- not because that player is gone, but because
+ *  this client was never told anything about them. Treating that as "dead" would have
+ *  self-un-mounted the LOCAL player's own driven vehicle every single tick (its driverId is
+ *  the real server-assigned id, per finding 1's own fix, which the client's local world
+ *  never has a PlayerStore row for either). A truly removed player already has their
+ *  driverId cleared at removal time (world.ts's removePlayer), so `active === 0` here is
+ *  never a case this function needs to catch in the first place. */
+function driverIsLive(world: World, driverId: number): boolean {
+  if (driverId === -1) return false;
+  if (world.players.active[driverId] !== 1) return true; // no data here isn't evidence of death
+  return world.players.alive[driverId] === 1;
+}
+
 function stepOneVehicle(
   world: World,
   vId: number,
@@ -1035,7 +1061,16 @@ function stepOneVehicle(
   dt: number,
 ): void {
   const vehicles = world.vehicles;
-  const driverId = vehicles.driverId[vId] ?? -1;
+  let driverId = vehicles.driverId[vId] ?? -1;
+  if (driverId !== -1 && !driverIsLive(world, driverId)) {
+    // Self-heals a mount relationship a dead/removed driver left dangling on the vehicle's
+    // own side (world.players.mountedVehicleId may already be clear -- see driverIsLive's
+    // own comment -- but this makes the fix correct even if some future path kills a
+    // mounted player without going through ejectPilot).
+    world.players.mountedVehicleId[driverId] = -1;
+    vehicles.driverId[vId] = -1;
+    driverId = -1;
+  }
   const input = driverId !== -1 ? (inputs.get(driverId) ?? idleVehicleInput()) : idleVehicleInput();
   stepOneVehiclePhysics(world, vId, input, dt);
   // stepOneVehiclePhysics can destroy this vehicle via collision damage (resolveVehicleCollision

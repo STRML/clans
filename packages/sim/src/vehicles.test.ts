@@ -360,6 +360,28 @@ describe('crash ejection is not overwritten by seat locking (Codex review round 
   });
 });
 
+describe('a dead driver is treated as unpiloted (Codex review round 2, finding 2)', () => {
+  it('self-heals a dangling vehicle-side mount if the driver is no longer alive', () => {
+    // Under this milestone's own rules a mounted player can only die via ejectPilot, which
+    // already clears both sides of this relationship atomically -- so this specific state
+    // (alive: 0 while still the vehicle's own driverId) cannot occur through any live code
+    // path today. Set up directly, bypassing normal mount/damage flow, to prove
+    // stepOneVehicle's defensive symmetry actually works regardless -- the same
+    // defense-in-depth damage.ts's respawnPlayer already documents for the player side of
+    // this exact relationship.
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat) as number;
+    const playerId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.vehicles.driverId[vId] = playerId;
+    world.players.mountedVehicleId[playerId] = vId;
+    world.players.alive[playerId] = 0;
+    stepVehicles(world, new Map(), 1 / 32);
+    expect(world.vehicles.driverId[vId]).toBe(-1);
+    expect(world.players.mountedVehicleId[playerId]).toBe(-1);
+  });
+});
+
 const useInput = (use: boolean): PlayerInput => ({ ...idleInput, use });
 
 describe('stepVehicles: mount/dismount', () => {

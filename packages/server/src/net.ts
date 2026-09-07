@@ -298,7 +298,18 @@ function handleVehicleSpawn(
   if (!entry) return;
   const { padId, kind } = decodeVehicleSpawn(bytes);
   if (padId < 0 || padId >= world.baseObjects.count) return;
-  const [px, py, pz] = positionAt(world.players.position, entry.session.playerId * 3);
+  const playerId = entry.session.playerId;
+  // Codex review round 2 (this PR), finding 2 (P1): the only check here was proximity --
+  // no check that the sender is alive, and no check that the pad belongs to the sender's
+  // own team. spawnVehicleAtPad creates the vehicle under the PAD's team
+  // (padSpawnTeam(world, padId)), and destroys whatever the pad already hosts BEFORE the
+  // cap check unconditionally (vehicles.ts's own documented Task 1 behavior) -- so a raw
+  // VehicleSpawn message sent while merely standing within VEHICLE_PAD_USE_RADIUS of an
+  // ENEMY pad let any connected client destroy or replace that enemy team's vehicle for
+  // free, and a dead player's still-open connection could do the same before respawning.
+  if (!world.players.active[playerId] || !world.players.alive[playerId]) return;
+  if (world.baseObjects.team[padId] !== world.players.team[playerId]) return;
+  const [px, py, pz] = positionAt(world.players.position, playerId * 3);
   const [bx, by, bz] = positionAt(world.baseObjects.position, padId * 3);
   if (Math.hypot(px - bx, py - by, pz - bz) > VEHICLE_PAD_USE_RADIUS) return;
   spawnVehicleAtPad(world, padId, kind);
