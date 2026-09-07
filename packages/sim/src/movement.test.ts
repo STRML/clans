@@ -12,6 +12,11 @@ import {
   type Heightfield,
   type PlayerInput,
 } from './index.js';
+import {
+  buildInteriorCollider,
+  type InteriorPlacement,
+  type InteriorTriangles,
+} from './interiors.js';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -516,5 +521,83 @@ describe('force fields block enemy movement, pass friendly movement (failure mat
     const forward: PlayerInput = { ...idle, yaw: Math.PI / 2, moveZ: 1 };
     for (let tick = 0; tick < 30; tick += 1) stepWorld(world, new Map([[id, forward]]));
     expect(world.players.position[id * 3] ?? 0).toBeGreaterThan(5);
+  });
+});
+
+describe('MIN_PUSH_DEPTH: floating-point-noise-level interior contact (M4 regression)', () => {
+  // A wide quad wall perpendicular to X, tall and deep enough that the player's chest sphere
+  // hits its face regardless of the exact y/z it arrives at.
+  function wallAt(x: number): InteriorTriangles {
+    const positions = new Float32Array([
+      x,
+      -10,
+      -10,
+      x,
+      10,
+      -10,
+      x,
+      10,
+      10,
+      x,
+      -10,
+      -10,
+      x,
+      10,
+      10,
+      x,
+      -10,
+      10,
+    ]);
+    return { positions };
+  }
+  const wallPlacement: InteriorPlacement = {
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 },
+  };
+  // yaw 90 deg faces +X (see the force-field tests above for the same convention).
+  const forward: PlayerInput = { ...idle, yaw: Math.PI / 2, moveZ: 1 };
+  const radius = 0.6; // LIGHT_ARMOR boundingBox [1.2, 1.2, 2.3] -> max(boxX, boxY) / 2
+
+  it('a floating-point-noise-level push does not zero velocity, but a real one still stops the player', () => {
+    // Reference run: no interiors at all, so `resolveInteriors` is a no-op every tick, and the
+    // position/velocity after tick 61 are exactly what the physics alone integrates to -- the
+    // same numbers `resolveInteriors` would see as `body` on tick 61 of a world that only gains
+    // a wall on that final tick. This is what lets the two cases below place a wall at an exact,
+    // predetermined penetration depth instead of hoping a live run happens to graze one.
+    const reference = createWorld(flat, 1);
+    const refId = addPlayer(reference, { x: 0, y: 0, z: 0 }, 1);
+    for (let tick = 0; tick < 61; tick += 1) stepWorld(reference, new Map([[refId, forward]]));
+    const refX = reference.players.position[refId * 3] ?? 0;
+    const refVX = reference.players.velocity[refId * 3] ?? 0;
+    expect(refVX).toBeGreaterThan(1); // sanity: the player is actually running by tick 61
+
+    // Noise case: the wall's face sits 1e-6 m inside the chest sphere on tick 61 -- the same
+    // order of magnitude as the floating-point residue a real Katabatic mesh produced in
+    // production (see MIN_PUSH_DEPTH's own comment in movement.ts). Before that fix, dividing
+    // the velocity correction by this push's own ~1e-6 m length amplified the noise into a
+    // spurious, large velocity change; MIN_PUSH_DEPTH must treat this as "not touching" instead.
+    const noiseDepth = 1e-6;
+    const noiseWorld = createWorld(flat, 1);
+    const noiseId = addPlayer(noiseWorld, { x: 0, y: 0, z: 0 }, 1);
+    for (let tick = 0; tick < 60; tick += 1) stepWorld(noiseWorld, new Map([[noiseId, forward]]));
+    noiseWorld.interiors = [
+      buildInteriorCollider(wallAt(refX + radius - noiseDepth), wallPlacement),
+    ];
+    stepWorld(noiseWorld, new Map([[noiseId, forward]]));
+    const noiseVX = noiseWorld.players.velocity[noiseId * 3] ?? 0;
+    expect(noiseVX).toBeGreaterThan(refVX * 0.5);
+
+    // Real case: the same wall, but with a genuine 0.5 m penetration -- MIN_PUSH_DEPTH must not
+    // suppress real collision response, or the fix would just trade one bug for another.
+    const realDepth = 0.5;
+    const realWorld = createWorld(flat, 1);
+    const realId = addPlayer(realWorld, { x: 0, y: 0, z: 0 }, 1);
+    for (let tick = 0; tick < 60; tick += 1) stepWorld(realWorld, new Map([[realId, forward]]));
+    realWorld.interiors = [buildInteriorCollider(wallAt(refX + radius - realDepth), wallPlacement)];
+    stepWorld(realWorld, new Map([[realId, forward]]));
+    const realVX = realWorld.players.velocity[realId * 3] ?? 0;
+    const realX = realWorld.players.position[realId * 3] ?? 0;
+    expect(realX).toBeLessThan(refX);
+    expect(realVX).toBeLessThan(refVX * 0.5);
   });
 });

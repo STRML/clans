@@ -1,5 +1,12 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import {
+  BASE_OBJECT_DATA,
+  BaseObjectKind,
+  baseFor,
+  type TurretBarrelId,
+  type World,
+} from '@clans/sim';
 import type { BaseObjectSnapshotData, TurretSnapshotData } from '@clans/protocol';
 import { shapeUrl, type KatabaticAssets } from './assets.js';
 
@@ -99,6 +106,10 @@ function addBaseObjectMesh(
   if (placement.kind !== FORCE_FIELD_KIND) {
     loadRealShape(mesh, assets.scene.shapesForBaseObjectKind[placement.kind]);
   }
+  // Stashed for raycastAimedStructure below, which reads a raycast hit's own mesh back out
+  // without needing to search baseObjectMeshes/turretMeshes for it.
+  mesh.userData.structureKind = 'baseObject';
+  mesh.userData.structureId = id;
   scene.add(mesh);
   meshes.set(id, mesh);
 }
@@ -113,6 +124,8 @@ function addTurretMesh(
   const mesh = placeholderMesh();
   mesh.position.fromArray(placement.position);
   loadRealShape(mesh, assets.scene.shapesForTurretBarrel[placement.barrel]);
+  mesh.userData.structureKind = 'turret';
+  mesh.userData.structureId = id;
   scene.add(mesh);
   meshes.set(id, mesh);
 }
@@ -179,4 +192,94 @@ export function createBaseObjectView(
       syncTurrets(turretMeshes, turrets);
     },
   };
+}
+
+const BASE_OBJECT_NAME: Record<number, string> = {
+  [BaseObjectKind.Generator]: 'Generator',
+  [BaseObjectKind.Sensor]: 'Sensor',
+  [BaseObjectKind.StationInventory]: 'Station',
+  [BaseObjectKind.StationVehiclePad]: 'Vehicle Pad',
+  [BaseObjectKind.ForceField]: 'Force Field',
+};
+const AIM_RANGE = 50; // Ours: a reasonable "aimed at" range for the HUD callout.
+
+function healthPercentOf(damage: number, maxHealth: number): number {
+  if (maxHealth <= 0) return 100;
+  return Math.round(Math.max(0, 1 - damage / maxHealth) * 100);
+}
+
+function aimedBaseObjectInfo(world: World, id: number): { name: string; healthPercent: number } {
+  const kind = (world.baseObjects.kind[id] ?? BaseObjectKind.Generator) as BaseObjectKind;
+  const maxHealth = BASE_OBJECT_DATA[kind].maxHealth;
+  return {
+    name: BASE_OBJECT_NAME[kind] ?? 'Base Object',
+    healthPercent: healthPercentOf(world.baseObjects.damage[id] ?? 0, maxHealth),
+  };
+}
+
+function aimedTurretInfo(world: World, id: number): { name: string; healthPercent: number } {
+  const barrel = (world.turrets.barrel[id] ?? 0) as TurretBarrelId;
+  const maxHealth = baseFor(barrel).maxHealth;
+  return {
+    name: 'Turret',
+    healthPercent: healthPercentOf(world.turrets.damage[id] ?? 0, maxHealth),
+  };
+}
+
+/** Raycasts from the camera's forward direction against every base-object/turret mesh
+ *  within `AIM_RANGE`, reading the hit's own stashed `userData` (set at mesh-creation time
+ *  above) rather than searching `baseObjectMeshes`/`turretMeshes` for it. Feeds hud.ts's
+ *  aimedStructure row. */
+export function raycastAimedStructure(
+  camera: THREE.Camera,
+  view: Pick<BaseObjectView, 'baseObjectMeshes' | 'turretMeshes'>,
+  world: World,
+): { name: string; healthPercent: number } | null {
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+  raycaster.far = AIM_RANGE;
+  const objects = [...view.baseObjectMeshes.values(), ...view.turretMeshes.values()];
+  const hit = raycaster.intersectObjects(objects, false)[0];
+  if (!hit) return null;
+  const { structureKind, structureId } = hit.object.userData as {
+    structureKind?: 'baseObject' | 'turret';
+    structureId?: number;
+  };
+  if (structureId === undefined) return null;
+  if (structureKind === 'baseObject') return aimedBaseObjectInfo(world, structureId);
+  if (structureKind === 'turret') return aimedTurretInfo(world, structureId);
+  return null;
+}
+
+/** Single-player has no server snapshot; read the sim's own base-object store directly --
+ *  same convention flag-view.ts's flagsFromWorld already uses. */
+export function baseObjectsFromWorld(world: World): BaseObjectSnapshotData[] {
+  const out: BaseObjectSnapshotData[] = [];
+  const store = world.baseObjects;
+  for (let id = 0; id < store.count; id += 1) {
+    out.push({
+      id,
+      damage: store.damage[id] ?? 0,
+      destroyed: (store.destroyed[id] ? 1 : 0) as 0 | 1,
+      powered: (store.powered[id] ? 1 : 0) as 0 | 1,
+    });
+  }
+  return out;
+}
+
+/** Single-player equivalent of baseObjectsFromWorld, for turrets. */
+export function turretsFromWorld(world: World): TurretSnapshotData[] {
+  const out: TurretSnapshotData[] = [];
+  const store = world.turrets;
+  for (let id = 0; id < store.count; id += 1) {
+    out.push({
+      id,
+      damage: store.damage[id] ?? 0,
+      destroyed: (store.destroyed[id] ? 1 : 0) as 0 | 1,
+      powered: (store.powered[id] ? 1 : 0) as 0 | 1,
+      targetId: store.targetId[id] ?? -1,
+      state: store.state[id] ?? 0,
+    });
+  }
+  return out;
 }

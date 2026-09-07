@@ -3,12 +3,15 @@ import { describe, expect, it } from 'vitest';
 import {
   addPlayer,
   applyDamage,
+  BaseObjectKind,
+  createBaseObjects,
   createFlags,
   createWorld,
   FIXED_DT,
   GameOverReason,
   LIGHT_ARMOR,
   RESPAWN_TICKS,
+  stepPower,
   type Heightfield,
   type PlayerInput,
   type PlayerSnapshotData,
@@ -20,6 +23,9 @@ import {
   type ProjectileSnapshotData,
 } from '@clans/protocol';
 import {
+  debugIsStationPowered,
+  debugKillGenerator,
+  debugRepairGenerator,
   drainNewEvents,
   hudSourceFrom,
   positionOfPlayer,
@@ -308,6 +314,34 @@ describe('teleportPlayerToFlag', () => {
     teleportPlayerToFlag(world, id, 2);
 
     expect([...world.players.position.slice(id * 3, id * 3 + 3)]).toEqual([5, 5, 5]);
+  });
+});
+
+describe('debugKillGenerator / debugRepairGenerator', () => {
+  it("debugKillGenerator destroys both of a team's generators; debugRepairGenerator revives one", () => {
+    const world = createWorld(flat, 1, 8);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 5, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 10, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    debugKillGenerator(world, 1);
+    expect(world.baseObjects.powered[2]).toBe(0);
+    debugRepairGenerator(world, 1);
+    expect(world.baseObjects.powered[2]).toBe(1);
+  });
+
+  it("debugIsStationPowered reflects the team station's current powered bit", () => {
+    const world = createWorld(flat, 1, 8);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 5, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    expect(debugIsStationPowered(world, 1)).toBe(true);
+    debugKillGenerator(world, 1);
+    expect(debugIsStationPowered(world, 1)).toBe(false);
   });
 });
 

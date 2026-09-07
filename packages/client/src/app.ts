@@ -1,27 +1,48 @@
 import * as THREE from 'three';
 import {
+  applyBaseObjectDamage,
+  applyLoadoutRequest,
+  BASE_OBJECT_DATA,
+  BaseObjectKind,
   FIXED_DT,
   FIXED_TICK_MS,
   addPlayer,
+  createBaseObjects,
   createFlags,
+  createTurrets,
   createWorld,
   dueForRespawn,
   respawnPlayer,
   sampleTerrain,
   setGodMode,
+  stepPower,
   stepWorld,
+  type ArmorId,
   type Heightfield,
   type PlayerInput,
   type World,
 } from '@clans/sim';
-import type { ProjectileSnapshotData } from '@clans/protocol';
+import type {
+  BaseObjectSnapshotData,
+  ProjectileSnapshotData,
+  TurretSnapshotData,
+} from '@clans/protocol';
 import { loadKatabatic, type KatabaticAssets } from './assets.js';
+import {
+  baseObjectsFromWorld,
+  createBaseObjectView,
+  raycastAimedStructure,
+  turretsFromWorld,
+} from './base-object-view.js';
+import { drawCommanderMap, friendlySensorCircles, sensedEnemyIds } from './commander-map.js';
 import { flagsFromWorld, syncFlagMeshes } from './flag-view.js';
 import { createHud, type HudSource } from './hud.js';
 import { Input } from './input.js';
+import { loadInteriorColliders } from './interior-collision.js';
 import { advance, type Accumulator } from './loop.js';
 import { NetClient, type RemoteSnapshot, type TimestampedEvent } from './netclient.js';
 import { RemoteBuffer, syncRemoteMeshes } from './remote.js';
+import { createStationMenu, stationMenuVisible, type StationMenu } from './stationMenu.js';
 import { addEnvironment, createTerrain } from './terrain.js';
 import { WebSocketTransport } from './transport.js';
 import {
@@ -88,6 +109,9 @@ export interface App {
   stats: AppStats;
   frame(dtSeconds: number): void;
   debugTeleportToFlag(team: number): void;
+  debugKillGenerator(team: number): void;
+  debugRepairGenerator(team: number): void;
+  debugIsStationPowered(team: number): boolean;
 }
 
 function toHeightfield(assets: KatabaticAssets): Heightfield {
@@ -259,6 +283,61 @@ export function drainNewEvents(
   const newest = events.at(-1);
   if (newest) cursor.seq = newest.seq;
   return newEvents;
+}
+
+interface BaseAssetsViewState {
+  world: World;
+  playerId: number;
+  net: NetClient | null;
+  input: Input;
+  assets: KatabaticAssets;
+  camera: THREE.Camera;
+  hud: { update(source: HudSource): void };
+  baseObjectView: ReturnType<typeof createBaseObjectView>;
+  stationMenu: StationMenu;
+  stationMenuState: { open: boolean };
+  commanderMapCanvas: HTMLCanvasElement;
+}
+
+function drawCommanderMapForTeam(state: BaseAssetsViewState): void {
+  const ctx = state.commanderMapCanvas.getContext('2d');
+  if (!ctx) return;
+  const localTeam = state.world.players.team[state.playerId] ?? 1;
+  const circles = friendlySensorCircles(state.world, localTeam);
+  const sensedIds = sensedEnemyIds(state.world, localTeam, circles);
+  drawCommanderMap(ctx, state.assets, state.world, localTeam, sensedIds);
+}
+
+/** Syncs base-object/turret meshes, the station menu, the commander map, and the HUD's
+ *  aimedStructure row -- everything Tasks 11-13 added -- to the latest sim or net state.
+ *  Pulled out of `frame` for the same reason `syncWorldView` already is: keeping `frame`'s
+ *  own branching under this repo's complexity budget. */
+function syncBaseAssetsView(state: BaseAssetsViewState): void {
+  const { world, playerId, net, input } = state;
+  const connected = net ? net.connected : true;
+  const baseObjectData: BaseObjectSnapshotData[] =
+    net && connected ? net.baseObjects : baseObjectsFromWorld(world);
+  const turretData: TurretSnapshotData[] = net && connected ? net.turrets : turretsFromWorld(world);
+  state.baseObjectView.sync(baseObjectData, turretData);
+
+  if (input.usePressedThisFrame()) state.stationMenuState.open = !state.stationMenuState.open;
+  state.stationMenuState.open = stationMenuVisible(world, playerId, state.stationMenuState.open);
+  if (state.stationMenuState.open) state.stationMenu.show();
+  else state.stationMenu.hide();
+
+  if (input.commandCirclePressedThisFrame()) {
+    state.commanderMapCanvas.hidden = !state.commanderMapCanvas.hidden;
+  }
+  if (!state.commanderMapCanvas.hidden) drawCommanderMapForTeam(state);
+
+  // A second, redundant hud.update immediately after syncWorldView's own -- see
+  // hudSourceFrom's own comment for why aimedStructure isn't computed inside that
+  // already-tested pure function (it needs the camera and the base-object view, neither of
+  // which hudSourceFrom's signature carries).
+  state.hud.update({
+    ...hudSourceFrom(world, playerId, net),
+    aimedStructure: raycastAimedStructure(state.camera, state.baseObjectView, world),
+  });
 }
 
 /**
@@ -496,6 +575,45 @@ export function teleportPlayerToFlag(world: World, playerId: number, team: numbe
   );
 }
 
+/** Exported for a focused unit test, mirroring teleportPlayerToFlag's own shape. Overkills
+ *  every one of the team's generators directly via applyBaseObjectDamage and re-derives
+ *  power -- bypassing real weapon damage timings on purpose, so the e2e test this backs is
+ *  fast and deterministic rather than waiting out a Chaingun's real fire rate. */
+export function debugKillGenerator(world: World, team: number): void {
+  const bases = world.baseObjects;
+  for (let id = 0; id < bases.count; id += 1) {
+    if (bases.kind[id] !== BaseObjectKind.Generator || bases.team[id] !== team) continue;
+    applyBaseObjectDamage(world, id, BASE_OBJECT_DATA[BaseObjectKind.Generator].maxHealth * 10);
+  }
+  stepPower(world);
+}
+
+/** Revives exactly one of the team's generators (real T2 has no in-mission generator
+ *  rebuild either -- this is a debug-only capability, not a Repair Pack simulation; Repair
+ *  Pack correctly refuses to revive a destroyed generator, see repair.test.ts's failure
+ *  matrix row 15 case). */
+export function debugRepairGenerator(world: World, team: number): void {
+  const bases = world.baseObjects;
+  for (let id = 0; id < bases.count; id += 1) {
+    if (bases.kind[id] !== BaseObjectKind.Generator || bases.team[id] !== team) continue;
+    bases.damage[id] = 0;
+    bases.destroyed[id] = 0;
+    bases.energy[id] = BASE_OBJECT_DATA[BaseObjectKind.Generator].maxEnergy;
+    stepPower(world);
+    return;
+  }
+}
+
+export function debugIsStationPowered(world: World, team: number): boolean {
+  const bases = world.baseObjects;
+  for (let id = 0; id < bases.count; id += 1) {
+    if (bases.kind[id] === BaseObjectKind.StationInventory && bases.team[id] === team) {
+      return bases.powered[id] === 1;
+    }
+  }
+  return false;
+}
+
 export async function createApp(container: HTMLElement, options: AppOptions = {}): Promise<App> {
   const assets = await loadKatabatic();
   const terrain = toHeightfield(assets);
@@ -521,6 +639,36 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         position: { x, y, z },
       })),
     );
+    // Single-player has no server; seed base objects/turrets locally from the same scene
+    // data the server would read (server/world.ts's loadKatabaticWorld does the equivalent
+    // for the networked path). Without this, single-player has no generators/stations/
+    // turrets at all -- debugIsStationPowered always reads false, and every station/turret
+    // is silently absent from the sim (though base-object-view.ts still renders their
+    // placeholder meshes from assets.scene, which is asset data, not sim state).
+    createBaseObjects(
+      world,
+      assets.scene.baseObjects.map(({ kind, team, position: [x, y, z], rotation, scale }) => ({
+        kind,
+        team,
+        position: { x, y, z },
+        ...(rotation && {
+          rotation: {
+            axis: { x: rotation.axis[0], y: rotation.axis[1], z: rotation.axis[2] },
+            degrees: rotation.degrees,
+          },
+        }),
+        ...(scale && { scale: { x: scale[0], y: scale[1], z: scale[2] } }),
+      })),
+    );
+    createTurrets(
+      world,
+      assets.scene.turrets.map(({ barrel, team, position: [x, y, z] }) => ({
+        barrel,
+        team,
+        position: { x, y, z },
+      })),
+    );
+    stepPower(world);
   }
 
   const scene = new THREE.Scene();
@@ -528,6 +676,11 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   scene.add(await createTerrain(assets));
   const sky = scene.getObjectByName('sky');
   if (!sky) throw new Error('addEnvironment did not add the sky');
+  // Local prediction resolves interior/force-field collision identically to the server
+  // (Task 11) -- without this, a client walking into a wall or a powered force field would
+  // predict straight through it until the next snapshot corrected the mispredict.
+  world.interiors = await loadInteriorColliders(assets);
+  const baseObjectView = createBaseObjectView(scene, assets);
 
   const camera = new THREE.PerspectiveCamera(
     90,
@@ -550,6 +703,20 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const effects: Effect[] = [];
   const seenEventSeq = { seq: 0 };
   const hud = createHud(document.body, hudSourceFrom(world, playerId, net));
+  const stationMenuState = { open: false };
+  const stationMenu: StationMenu = createStationMenu(
+    document.body,
+    (armor: ArmorId, repairPack) => {
+      if (net) net.sendLoadout(armor, repairPack);
+      else applyLoadoutRequest(world, playerId, armor, repairPack);
+    },
+  );
+  const commanderMapCanvas = document.createElement('canvas');
+  commanderMapCanvas.id = 'commander-map';
+  commanderMapCanvas.width = 512;
+  commanderMapCanvas.height = 512;
+  commanderMapCanvas.hidden = true;
+  document.body.appendChild(commanderMapCanvas);
   // Backs the `godMode` accessor below. A plain data property here would just record
   // whatever the debug UI last set, the way it used to, leaving frame() to poll it every
   // tick and react after the fact (Codex review round 4, finding 5) -- the accessor's
@@ -594,6 +761,15 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     debugTeleportToFlag(team: number): void {
       teleportPlayerToFlag(world, playerId, team);
     },
+    debugKillGenerator(team: number): void {
+      debugKillGenerator(world, team);
+    },
+    debugRepairGenerator(team: number): void {
+      debugRepairGenerator(world, team);
+    },
+    debugIsStationPowered(team: number): boolean {
+      return debugIsStationPowered(world, team);
+    },
     frame(dtSeconds: number): void {
       const frameStart = performance.now();
       let steps = advance(acc, dtSeconds, app.paused ? 0 : app.timeScale, FIXED_DT);
@@ -625,6 +801,20 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         seenEventSeq,
         dtSeconds,
       );
+
+      syncBaseAssetsView({
+        world,
+        playerId,
+        net,
+        input,
+        assets,
+        camera,
+        hud,
+        baseObjectView,
+        stationMenu,
+        stationMenuState,
+        commanderMapCanvas,
+      });
 
       if (app.freeCam) moveFreeCam(app, dtSeconds);
       placeCamera(app, sky);

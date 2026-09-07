@@ -318,6 +318,21 @@ function writeState(
   players.wasJumpHeld[id] = input.jump ? 1 : 0;
 }
 
+// A real Katabatic interior mesh's closest-point-on-triangle math (interiors.ts) can return a
+// push whose depth is nonzero only by floating-point residue -- e.g. 1e-15 m, from a sphere
+// that grazes a triangle edge without meaningfully penetrating it. That never showed up
+// against the unit-test fixtures' simple boxes, but a real interior with thousands of
+// triangles (sbunk2.glb alone has 6,956) produces one on almost every tick somewhere nearby.
+// Applying that push's own direction to the velocity correction below divides a body-velocity
+// dot product by that same near-zero length, and floating-point division amplifies the noise
+// into a real, large velocity change -- confirmed live: a Light player running at 13.66 m/s
+// near Katabatic's own sbunk2 interior had its forward velocity zeroed outright on the tick a
+// 3e-15 m push landed, then stayed zeroed (airborne, no ground contact) for the rest of a
+// movement.spec.ts e2e run. A push below this floor is treated as "not actually touching
+// anything" and skipped entirely, position correction included -- moving a player by 1e-15 m
+// has no visible effect anyway, so there is nothing to lose by ignoring it.
+const MIN_PUSH_DEPTH = 1e-4; // 0.1 mm -- real contact is always far larger than this.
+
 /** Ours: a two-sphere approximation of the player capsule (feet, chest) rather than a full
  *  swept capsule — the sim already treats a player as one sphere for hit detection
  *  (damage.ts's playerHitbox), so this reuses the same "close enough for a browser demo"
@@ -331,11 +346,11 @@ function resolveInteriors(world: World, body: Body, armor: ArmorData): void {
   const push =
     resolveSphereAgainstInteriors(world.interiors, chest, radius) ??
     resolveSphereAgainstInteriors(world.interiors, feet, radius);
-  if (!push) return;
+  const len = push ? Math.hypot(push.x, push.y, push.z) : 0;
+  if (!push || len < MIN_PUSH_DEPTH) return;
   body.x += push.x;
   body.y += push.y;
   body.z += push.z;
-  const len = Math.hypot(push.x, push.y, push.z) || 1;
   const into = (body.vx * push.x + body.vy * push.y + body.vz * push.z) / len;
   if (into < 0) {
     body.vx -= (into * push.x) / len;
@@ -358,7 +373,10 @@ function resolveForceFields(world: World, id: number, body: Body, armor: ArmorDa
   const radius = Math.max(boxX, boxY) / 2;
   const chest = { x: body.x, y: body.y + height - radius, z: body.z };
   const push = resolveSphereAgainstInteriors(blockers, chest, radius);
-  if (!push) return;
+  // Same floating-point-noise floor resolveInteriors applies above -- see MIN_PUSH_DEPTH's
+  // own comment. This function has no velocity correction to corrupt, but a push this small
+  // moves the player by less than a nanometer anyway, so skipping it changes nothing visible.
+  if (!push || Math.hypot(push.x, push.y, push.z) < MIN_PUSH_DEPTH) return;
   body.x += push.x;
   body.y += push.y;
   body.z += push.z;
