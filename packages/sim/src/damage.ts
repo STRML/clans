@@ -1,4 +1,4 @@
-import { LIGHT_ARMOR, type ArmorData } from './armor.js';
+import { armorFor, type ArmorData } from './armor.js';
 import type { Vec3, World } from './types.js';
 
 export const RESPAWN_SECONDS = 5; // Ours: the spec asks for a pick, not a T2 number.
@@ -151,11 +151,11 @@ export function respawnPlayer(world: World, id: number, spawn: Vec3): void {
   // Codex review round 2, finding 4: this reset health/position/velocity but left energy,
   // ground contact, and jump-edge state exactly where death interrupted them, so a player
   // who died mid-jet came back alive with drained energy and had to recharge gradually
-  // instead of spawning full. LIGHT_ARMOR (not a passed-in armor param) because this file's
-  // respawnPlayer already has no armor parameter, and every armor-dependent value elsewhere
-  // in the sim -- explode()'s hitbox, resetPlayerToSpawn's energy -- uses LIGHT_ARMOR
-  // directly too: it's the only armor this milestone has.
-  players.energy[id] = LIGHT_ARMOR.maxEnergy;
+  // instead of spawning full. armorFor(world, id), not a hardcoded armor, because by the
+  // time this runs, world.players.armor[id] already holds the player's actual armor (either
+  // freshly passed by weapons.ts's respawnPlayer, or their last-selected one -- nothing else
+  // resets it on death).
+  players.energy[id] = armorFor(world, id).maxEnergy;
   players.onGround[id] = 0;
   // Codex review round 13, PR #9, finding 3: this reset onGround/wasGrounded/wasJumpHeld but
   // left ski exactly where death interrupted it, unlike the initial-spawn reset
