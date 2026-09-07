@@ -1,6 +1,9 @@
+import { armorFor } from './armor.js';
 import { BaseObjectKind, teamHasPower, type BaseObjectStore } from './baseObjects.js';
+import { applyDamage } from './damage.js';
 import { raycastInteriors, resolveSphereAgainstInteriors } from './interiors.js';
 import { GRAVITY } from './movement.js';
+import { nextRandom } from './random.js';
 import { sampleTerrain } from './terrain.js';
 import type { PendingFreeId, PlayerInput, Vec3, World } from './types.js';
 
@@ -551,20 +554,65 @@ export function stepWildcat(world: World, id: number, input: PlayerInput, dt: nu
 
 // --- Terrain/interior collision, crash and ground-impact damage (Task 4) ----------------
 
-/** Stub, replaced by Task 7's real shield-aware version below (`applyVehicleDamage`'s final
- *  definition further down this file shadows this one is NOT how JS works -- see Task 7's
- *  own commit, which replaces this function body in place rather than adding a second
- *  declaration). Task 4's own tests only assert `damage` increases, which this satisfies. */
+/** Real, real, real impulse magnitudes (vehicles/vehicle.cs:237-260), converted to a
+ *  velocity change by dividing by the ejected pilot's own mass -- Torque's own applyImpulse
+ *  convention, since this sim has no rigid-body integrator to reproduce instead. See the
+ *  plan's numbers table for why this is an adaptation, not a direct port. */
+function ejectPilot(world: World, vehicleId: number): void {
+  const driverId = world.vehicles.driverId[vehicleId] ?? -1;
+  if (driverId === -1 || !world.players.active[driverId]) return;
+  const armor = armorFor(world, driverId);
+  const rand = (): number => nextRandom(world.random);
+  const impulse: Vec3 = {
+    x: 250 - rand() * 500,
+    y: rand() * 100 + 50,
+    z: 250 - rand() * 500,
+  };
+  const base = driverId * 3;
+  world.players.velocity[base] = at(world.players.velocity, base) + impulse.x / armor.mass;
+  world.players.velocity[base + 1] = at(world.players.velocity, base + 1) + impulse.y / armor.mass;
+  world.players.velocity[base + 2] = at(world.players.velocity, base + 2) + impulse.z / armor.mass;
+  world.players.mountedVehicleId[driverId] = -1;
+  world.vehicles.driverId[vehicleId] = -1;
+  applyDamage(world, driverId, 0.4, -1, armor); // vehicles/vehicle.cs:260
+}
+
+/** Same shielded-damage rule the spec states for players and M4 already established for base
+ *  objects/turrets: spends `min(energy / energyPerDamagePoint, amount)` worth of a hit
+ *  against `energy` first, the remainder against `damage`, clamped at `maxDamage` and
+ *  destroying exactly once (failure matrix row 16) -- never a repeat `pendingVehicleDestroyed`
+ *  push or a repeat ejection for an already-destroyed vehicle (failure matrix row 17).
+ *  `attackerId` is accepted for signature symmetry with applyDamage/applyBaseObjectDamage and
+ *  a future kill-feed line; this milestone does not score a vehicle kill off it (Spec gaps). */
 export function applyVehicleDamage(
   world: World,
   id: number,
   amount: number,
-  attackerId: number,
+  _attackerId: number,
 ): void {
-  void attackerId;
   const vehicles = world.vehicles;
   if (amount <= 0 || !vehicles.active[id] || vehicles.destroyed[id]) return;
-  vehicles.damage[id] = at(vehicles.damage, id) + amount;
+  const data = VEHICLE_DATA[vehicles.kind[id] as VehicleKind];
+  const energy = at(vehicles.energy, id);
+  const perPoint = data.energyPerDamagePoint;
+  const spentFromShield = perPoint > 0 ? Math.min(energy / perPoint, amount) : 0;
+  vehicles.energy[id] = energy - spentFromShield * perPoint;
+  const remaining = amount - spentFromShield;
+  vehicles.damage[id] = Math.min(at(vehicles.damage, id) + remaining, data.maxDamage);
+  if (at(vehicles.damage, id) < data.maxDamage) return;
+
+  vehicles.destroyed[id] = 1;
+  const base = id * 3;
+  world.pendingVehicleDestroyed.push({
+    id,
+    position: {
+      x: at(vehicles.position, base),
+      y: at(vehicles.position, base + 1),
+      z: at(vehicles.position, base + 2),
+    },
+    team: at(vehicles.team, id),
+  });
+  ejectPilot(world, id);
 }
 
 function applyCollisionDamage(world: World, id: number, impactSpeed: number): void {

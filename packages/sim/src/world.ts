@@ -51,6 +51,7 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
     pendingTurretFireEvents: [],
     vehicles: createVehicleStore(),
     pendingVehicleFireEvents: [],
+    pendingVehicleDestroyed: [],
     players: {
       count: 0,
       freeIds: [],

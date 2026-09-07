@@ -183,6 +183,9 @@ export interface World {
   flags: FlagStore;
   vehicles: import('./vehicles.js').VehicleStore;
   pendingVehicleFireEvents: import('./vehicles.js').VehicleFireEvent[];
+  /** One entry per vehicle destroyed this tick, read by the client's explosion FX and the
+   *  HUD/e2e hooks (Task 13/14) -- mirrors pendingDeaths's own one-tick-only shape. */
+  pendingVehicleDestroyed: Array<{ id: number; position: Vec3; team: number }>;
   teamScores: Uint16Array;
   gameOver: boolean;
   winnerTeam: number;

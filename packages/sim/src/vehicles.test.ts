@@ -9,6 +9,7 @@ import {
 } from './index.js';
 import {
   activeVehicleCountForTeam,
+  applyVehicleDamage,
   createVehicleStore,
   resolveVehicleCollision,
   spawnVehicleAtPad,
@@ -444,5 +445,48 @@ describe('Shrike blaster', () => {
     world.pendingVehicleFireEvents.length = 0;
     stepVehicles(world, new Map([[playerId, { ...idleInput, fire: true }]]), 1 / 32);
     expect(world.pendingVehicleFireEvents.length).toBe(0);
+  });
+});
+
+describe('applyVehicleDamage: shield, clamp, destruction', () => {
+  it('spends shield energy before damage, matching the base-object/turret shield rule', () => {
+    const world = createWorld(flat, 1);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Wildcat;
+    world.vehicles.energy[0] = 75; // exactly energyPerDamagePoint (75) -- absorbs one full point
+    applyVehicleDamage(world, 0, 1, -1);
+    expect(world.vehicles.energy[0]).toBe(0);
+    expect(world.vehicles.damage[0]).toBe(0);
+  });
+
+  it('clamps damage at maxDamage and destroys exactly once past it', () => {
+    const world = createWorld(flat, 1);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Wildcat;
+    world.vehicles.energy[0] = 0;
+    applyVehicleDamage(world, 0, 10, -1); // wildly past maxDamage (0.6)
+    expect(world.vehicles.damage[0]).toBe(0.6);
+    expect(world.vehicles.destroyed[0]).toBe(1);
+    const eventsAfterFirst = world.pendingVehicleDestroyed.length;
+    applyVehicleDamage(world, 0, 10, -1); // already destroyed -- must be a no-op
+    expect(world.pendingVehicleDestroyed.length).toBe(eventsAfterFirst);
+  });
+
+  it('destroying a piloted vehicle ejects the pilot once with 0.4 crash damage', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat) as number;
+    const pos = vehiclePos(world, vId);
+    const playerId = addPlayer(world, pos, 1);
+    stepVehicles(world, new Map([[playerId, useInput(true)]]), 1 / 32);
+    world.vehicles.energy[vId] = 0;
+    applyVehicleDamage(world, vId, 10, -1);
+    expect(world.players.mountedVehicleId[playerId]).toBe(-1);
+    expect(world.players.damage[playerId]).toBeCloseTo(0.4, 5);
+    const damageAfterFirstEject = world.players.damage[playerId];
+    applyVehicleDamage(world, vId, 10, -1); // already destroyed -- ejection must not repeat
+    expect(world.players.damage[playerId]).toBe(damageAfterFirstEject);
   });
 });
