@@ -21,9 +21,11 @@ import { bytesOf, createWriter, writeU16, writeU32, writeU8 } from './codec.js';
 import {
   MAX_SNAPSHOT_BOTS,
   MAX_SNAPSHOT_FLAGS,
+  MAX_SNAPSHOT_ORDERS,
   MAX_SNAPSHOT_PLAYERS,
   MAX_SNAPSHOT_PROJECTILES,
   MessageType,
+  OrderKind,
 } from './messages.js';
 import {
   decodeSnapshot,
@@ -32,6 +34,7 @@ import {
   type BotDebugSnapshotData,
   type DecodedSnapshot,
   type FlagSnapshotData,
+  type OrderSnapshotData,
   type ProjectileSnapshotData,
   type WorldExtras,
 } from './snapshot.js';
@@ -110,6 +113,7 @@ describe('snapshot codec', () => {
       timeRemainingS: 0,
       gameOverReason: GameOverReason.CaptureLimit,
       bots: [],
+      orders: [],
     };
     const bytes = encodeSnapshot(1, source.tick, 0, players, null, extras);
     const decoded = decodeSnapshot(bytes, null);
@@ -204,6 +208,7 @@ describe('snapshot codec', () => {
       timeRemainingS: 723.4,
       gameOverReason: 0,
       bots,
+      orders: [],
     });
     const decoded = decodeSnapshot(bytes, null);
     expect(decoded.projectiles).toEqual(projectiles);
@@ -823,5 +828,38 @@ describe('WorldExtras: vehicles (M5)', () => {
     const decoded = decodeSnapshot(bytes, null);
     expect(decoded.vehicles[0]?.destroyed).toBe(1);
     expect(decoded.vehicles[0]?.driverId).toBe(-1);
+  });
+});
+
+describe('WorldExtras: orders (M7)', () => {
+  it('emptyExtras includes an empty orders array', () => {
+    expect(emptyExtras().orders).toEqual([]);
+  });
+
+  it('round-trips WorldExtras.orders through a full snapshot', () => {
+    const orders: OrderSnapshotData[] = [
+      { team: 1, kind: OrderKind.Repair, x: 10, z: -5, expiresInS: 42.5 },
+    ];
+    const extras = { ...emptyExtras(), orders };
+    const bytes = encodeSnapshot(1, 0, 0, [], null, extras);
+    const decoded = decodeSnapshot(bytes, null);
+    expect(decoded.orders[0]?.team).toBe(1);
+    expect(decoded.orders[0]?.kind).toBe(OrderKind.Repair);
+    expect(decoded.orders[0]?.x).toBeCloseTo(10, 3);
+    expect(decoded.orders[0]?.z).toBeCloseTo(-5, 3);
+    expect(decoded.orders[0]?.expiresInS).toBeCloseTo(42.5, 1);
+  });
+
+  it('rejects an orders array longer than MAX_SNAPSHOT_ORDERS', () => {
+    const orders: OrderSnapshotData[] = Array.from({ length: MAX_SNAPSHOT_ORDERS + 1 }, () => ({
+      team: 1,
+      kind: OrderKind.Attack,
+      x: 0,
+      z: 0,
+      expiresInS: 1,
+    }));
+    expect(() => encodeSnapshot(1, 0, 0, [], null, { ...emptyExtras(), orders })).toThrow(
+      RangeError,
+    );
   });
 });

@@ -18,6 +18,8 @@ import {
   MessageType,
   PROTOCOL_VERSION,
   type AckMessage,
+  type CommandOrderMessage,
+  type OrderKind,
   type EventMessage,
   type GodMessage,
   type InputMessage,
@@ -25,6 +27,7 @@ import {
   type LoadoutMessage,
   type NetInputSample,
   type VehicleSpawnMessage,
+  type VoiceBindMessage,
   type WelcomeMessage,
 } from './messages.js';
 
@@ -220,4 +223,33 @@ export function decodeVehicleSpawn(bytes: Uint8Array): VehicleSpawnMessage {
   const padId = readU16(cursor);
   const kind = readU8(cursor);
   return { type: MessageType.VehicleSpawn, padId, kind };
+}
+
+export function encodeCommandOrder(message: Omit<CommandOrderMessage, 'type'>): Uint8Array {
+  const cursor = createWriter(10);
+  writeU8(cursor, MessageType.CommandOrder);
+  writeU8(cursor, message.kind);
+  writeF32(cursor, message.x);
+  writeF32(cursor, message.z);
+  return bytesOf(cursor);
+}
+export function decodeCommandOrder(bytes: Uint8Array): CommandOrderMessage {
+  const cursor = createReader(bytes);
+  expectType(cursor, MessageType.CommandOrder);
+  const kind = readU8(cursor) as OrderKind;
+  const x = readF32(cursor);
+  const z = readF32(cursor);
+  return { type: MessageType.CommandOrder, kind, x, z };
+}
+
+export function encodeVoiceBind(message: Omit<VoiceBindMessage, 'type'>): Uint8Array {
+  const cursor = createWriter(2);
+  writeU8(cursor, MessageType.VoiceBind);
+  writeU8(cursor, message.lineId);
+  return bytesOf(cursor);
+}
+export function decodeVoiceBind(bytes: Uint8Array): VoiceBindMessage {
+  const cursor = createReader(bytes);
+  expectType(cursor, MessageType.VoiceBind);
+  return { type: MessageType.VoiceBind, lineId: readU8(cursor) };
 }

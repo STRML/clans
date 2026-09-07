@@ -1,25 +1,30 @@
 import { describe, expect, it } from 'vitest';
 import {
   decodeAck,
+  decodeCommandOrder,
   decodeEvent,
   decodeGod,
   decodeInput,
   decodeJoin,
   decodeLoadout,
   decodeVehicleSpawn,
+  decodeVoiceBind,
   decodeWelcome,
   encodeAck,
+  encodeCommandOrder,
   encodeEvent,
   encodeGod,
   encodeInput,
   encodeJoin,
   encodeLoadout,
   encodeVehicleSpawn,
+  encodeVoiceBind,
   encodeWelcome,
 } from './handshake.js';
 import {
   EventKind,
   MessageType,
+  OrderKind,
   PROTOCOL_VERSION,
   WelcomeStatus,
   type InputMessage,
@@ -420,5 +425,30 @@ describe('VehicleSpawn round trip (M5)', () => {
   it('round-trips a padId above 255 (u16, not u8)', () => {
     const bytes = encodeVehicleSpawn({ padId: 300, kind: 0 });
     expect(decodeVehicleSpawn(bytes).padId).toBe(300);
+  });
+});
+
+describe('CommandOrder codec (M7)', () => {
+  it('round-trips kind and a world position', () => {
+    const bytes = encodeCommandOrder({ kind: OrderKind.Attack, x: 123.5, z: -40.25 });
+    const decoded = decodeCommandOrder(bytes);
+    expect(decoded).toEqual({
+      type: MessageType.CommandOrder,
+      kind: OrderKind.Attack,
+      x: 123.5,
+      z: -40.25,
+    });
+  });
+
+  it('carries no team field at all', () => {
+    const bytes = encodeCommandOrder({ kind: OrderKind.Defend, x: 0, z: 0 });
+    expect(decodeCommandOrder(bytes)).not.toHaveProperty('team');
+  });
+});
+
+describe('VoiceBind codec (M7)', () => {
+  it('round-trips a line id', () => {
+    const bytes = encodeVoiceBind({ lineId: 4 });
+    expect(decodeVoiceBind(bytes)).toEqual({ type: MessageType.VoiceBind, lineId: 4 });
   });
 });

@@ -537,6 +537,8 @@ export function buildExtras(world: World, botManager?: BotManager): WorldExtras 
           .filter((runtime) => world.players.active[runtime.playerId])
           .map((runtime) => ({ playerId: runtime.playerId, state: runtime.state }))
       : [],
+    // Wired for real in Task 2 (OrderBoard threaded through buildExtras); empty until then.
+    orders: [],
   };
 }
 

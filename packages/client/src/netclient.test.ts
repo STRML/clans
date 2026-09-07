@@ -789,6 +789,7 @@ describe('NetClient', () => {
         { playerId: 3, state: 0 },
         { playerId: 7, state: 1 },
       ],
+      orders: [],
     };
     transport.pump([encodeSnapshot(1, 0, 0, [], null, extras)]);
     expect(client.projectiles).toEqual(extras.projectiles);
@@ -860,6 +861,7 @@ describe('NetClient', () => {
       timeRemainingS: 0,
       gameOverReason: 1,
       bots: [],
+      orders: [],
     };
     transport.pump([encodeSnapshot(1, 0, 0, [], null, extras)]);
 
@@ -956,6 +958,7 @@ describe('NetClient', () => {
       timeRemainingS: 0,
       gameOverReason: 1,
       bots: [],
+      orders: [],
     };
     transport.pump([encodeSnapshot(1, 1, 0, [serverState], null, extras)]);
 
@@ -1030,6 +1033,7 @@ describe('NetClient', () => {
       timeRemainingS,
       gameOverReason: 0,
       bots: [],
+      orders: [],
     };
     transport.pump([encodeSnapshot(1, serverTick, 0, [serverState], null, extras)]);
 
