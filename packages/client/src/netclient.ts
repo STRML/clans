@@ -64,6 +64,32 @@ const LOCAL_SLOT = 0;
 function findMountedVehicleId(vehicles: readonly VehicleSnapshotData[], playerId: number): number {
   return vehicles.find((v) => v.driverId === playerId)?.id ?? -1;
 }
+
+/**
+ * Codex review round 2 (this PR), finding 1 (P1): world.vehicles.driverId (written by
+ * deserializeVehicle) always holds the REAL server-assigned playerId -- it has to, so
+ * occupancy checks (findUnoccupiedVehicleInRange) and the mountedVehicleId derivation
+ * above stay truthful for every vehicle, not just the local player's own. But every local
+ * prediction tick (both here and reconcile()'s replay loop below) keyed its input map by
+ * LOCAL_SLOT only, because world.players itself only has meaningful local-prediction state
+ * at that one index. stepOneVehicle's own input lookup is `inputs.get(driverId)` using
+ * that real id -- so it only ever found this player's input when their real server id
+ * happened to BE 0 (LOCAL_SLOT's value), coincidentally. Every other player's own driven
+ * vehicle received idle input from local prediction every tick between snapshots: it
+ * simply never responded locally to the very input that was driving it.
+ *
+ * Rather than rewrite driverId (which would have broken the occupancy/mount truthfulness
+ * above), this adds a SECOND map entry for the same PlayerInput, keyed by the real
+ * playerId -- world.players' own array indexing is untouched (still LOCAL_SLOT-only), but
+ * stepOneVehicle's driverId-keyed lookup now finds it too. Guarded by `playerId !== -1`
+ * (not yet welcomed) and `!== LOCAL_SLOT` (would just be a redundant duplicate key) rather
+ * than always inserting a second entry.
+ */
+function localInputMap(playerId: number, input: PlayerInput): ReadonlyMap<number, PlayerInput> {
+  const inputs = new Map([[LOCAL_SLOT, input]]);
+  if (playerId !== -1 && playerId !== LOCAL_SLOT) inputs.set(playerId, input);
+  return inputs;
+}
 // Bounds the interpolation queue below in case a caller ever stops draining it. Under
 // normal operation it holds at most a couple of entries: render frames (~60/s) happen far
 // more often than snapshots (every SNAPSHOT_EVERY_N_TICKS ticks), so the render loop
@@ -197,7 +223,7 @@ export class NetClient {
   }
 
   tick(input: PlayerInput): void {
-    stepWorld(this.world, new Map([[LOCAL_SLOT, input]]));
+    stepWorld(this.world, localInputMap(this.playerId, input));
     // Once the transport is closed it never delivers another snapshot to reconcile
     // against or prune these on, so tracking more of them here would only grow forever.
     // Local prediction keeps running (the stepWorld above); there is just nothing left
@@ -510,7 +536,7 @@ export class NetClient {
     }
     this.stats.predictionErrorM = 0;
     for (const pending of this.pendingInputs)
-      stepWorld(this.world, new Map([[LOCAL_SLOT, pending.input]]));
+      stepWorld(this.world, localInputMap(this.playerId, pending.input));
   }
 
   /**

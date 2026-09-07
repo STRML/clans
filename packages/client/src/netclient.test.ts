@@ -1980,5 +1980,46 @@ describe('NetClient', () => {
       ]);
       expect(client.world.players.mountedVehicleId[0]).toBe(-1);
     });
+
+    it('local prediction actually applies this players own input to their driven vehicle even when their real server id is not 0 (Codex review round 2, finding 1)', () => {
+      // Before this fix, world.vehicles.driverId held the real server-assigned playerId
+      // (had to -- occupancy checks and mountedVehicleId derivation both need it truthful
+      // for every vehicle, not just this player's own), but every local prediction tick
+      // keyed its input map by LOCAL_SLOT (0) only. stepOneVehicle's own lookup is
+      // `inputs.get(driverId)` using that real id, so it only ever found this player's
+      // input when their real id happened to BE 0 -- true for whichever player connected
+      // first, false for everyone else. Using playerId 7 here (deliberately not 0, and not
+      // LOCAL_SLOT) reproduces the common case, not the coincidental one.
+      const transport = makeTransport(makeLink({ value: 41 }));
+      const client = new NetClient(transport, terrain, { now: () => clock.ms });
+      client.playerId = 7;
+      transport.pump([
+        encodeSnapshot(1, 1, 0, [defaultServerState({ id: 7 })], null, {
+          ...emptyExtras(),
+          // kind 0 (Shrike, see vehicleSnapshot's own default): forward thrust (moveZ) only
+          // ever touches horizontal (x/z) velocity -- vertical (y) is gravity/lift, which
+          // acts every tick regardless of input, so isolating x/z rules out a false pass
+          // from gravity alone.
+          vehicles: [vehicleSnapshot({ id: 5, driverId: 7, y: 50 })],
+        }),
+      ]);
+      const forward: PlayerInput = {
+        moveX: 0,
+        moveZ: 1,
+        yaw: 0,
+        pitch: 0,
+        jump: false,
+        jet: false,
+        fire: false,
+        altFire: false,
+        slot: 0,
+        packActive: false,
+        use: false,
+      };
+      for (let i = 0; i < 30; i += 1) client.tick(forward);
+      const vx = client.world.vehicles.velocity[5 * 3] ?? 0;
+      const vz = client.world.vehicles.velocity[5 * 3 + 2] ?? 0;
+      expect(Math.hypot(vx, vz)).toBeGreaterThan(0);
+    });
   });
 });
