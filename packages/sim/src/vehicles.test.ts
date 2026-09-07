@@ -14,6 +14,7 @@ import {
   resolveVehicleCollision,
   spawnVehicleAtPad,
   stepShrike,
+  vehiclePadAt,
   stepVehicles,
   stepWildcat,
   VEHICLE_DATA,
@@ -488,5 +489,48 @@ describe('applyVehicleDamage: shield, clamp, destruction', () => {
     const damageAfterFirstEject = world.players.damage[playerId];
     applyVehicleDamage(world, vId, 10, -1); // already destroyed -- ejection must not repeat
     expect(world.players.damage[playerId]).toBe(damageAfterFirstEject);
+  });
+});
+
+describe('vehiclePadAt', () => {
+  it('finds a powered pad belonging to the player own team within VEHICLE_PAD_USE_RADIUS', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const padPos = {
+      x: world.baseObjects.position[padId * 3] ?? 0,
+      y: world.baseObjects.position[padId * 3 + 1] ?? 0,
+      z: world.baseObjects.position[padId * 3 + 2] ?? 0,
+    };
+    const playerId = addPlayer(world, padPos, 1);
+    expect(vehiclePadAt(world, playerId)).toBe(padId);
+  });
+
+  it('returns null outside the use radius', () => {
+    const world = createWorld(flat, 1);
+    poweredPad(world);
+    const playerId = addPlayer(world, { x: 500, y: 0, z: 500 }, 1);
+    expect(vehiclePadAt(world, playerId)).toBeNull();
+  });
+
+  it('returns null for an enemy team pad', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world, 1);
+    const padPos = {
+      x: world.baseObjects.position[padId * 3] ?? 0,
+      y: world.baseObjects.position[padId * 3 + 1] ?? 0,
+      z: world.baseObjects.position[padId * 3 + 2] ?? 0,
+    };
+    const playerId = addPlayer(world, padPos, 2); // enemy team
+    expect(vehiclePadAt(world, playerId)).toBeNull();
+  });
+
+  it('returns null for an unpowered pad', () => {
+    const world = createWorld(flat, 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: 0, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    const playerId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    expect(vehiclePadAt(world, playerId)).toBeNull();
   });
 });

@@ -216,6 +216,37 @@ export function spawnVehicleAtPad(world: World, padId: number, kind: VehicleKind
   return id;
 }
 
+/** The id of a powered `StationVehiclePad` belonging to the player's own team within
+ *  `VEHICLE_PAD_USE_RADIUS`, or `null` -- the vehicle-pad sibling of baseObjects.ts's
+ *  `stationAt`, same shape (never an enemy pad, never an unpowered one). Ours: this helper
+ *  is not itself one of Task 1's own listed exports, but the client's pad menu (Task 13)
+ *  needs exactly this "am I standing at a usable pad" check and it belongs in sim, not
+ *  duplicated in client code, for the same reason stationAt does. */
+export function vehiclePadAt(world: World, playerId: number): number | null {
+  const baseObjects = world.baseObjects;
+  const players = world.players;
+  const pBase = playerId * 3;
+  const playerPos: Vec3 = {
+    x: at(players.position, pBase),
+    y: at(players.position, pBase + 1),
+    z: at(players.position, pBase + 2),
+  };
+  const team = players.team[playerId] ?? 0;
+  for (let id = 0; id < baseObjects.count; id += 1) {
+    if (baseObjects.kind[id] !== BaseObjectKind.StationVehiclePad) continue;
+    if (baseObjects.team[id] !== team || !baseObjects.powered[id]) continue;
+    const base = id * 3;
+    const padPos: Vec3 = {
+      x: at(baseObjects.position, base),
+      y: at(baseObjects.position, base + 1),
+      z: at(baseObjects.position, base + 2),
+    };
+    const dist = Math.hypot(playerPos.x - padPos.x, playerPos.y - padPos.y, playerPos.z - padPos.z);
+    if (dist <= VEHICLE_PAD_USE_RADIUS) return id;
+  }
+  return null;
+}
+
 // --- Shrike flight physics (Task 2) -----------------------------------------------------
 // Real T2 numbers cite vehicles/vehicle_shrike.cs; every field not in the spec's Vehicle
 // numbers table is collected in the plan's "ours" numbers table alongside its citation.

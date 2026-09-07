@@ -1,4 +1,5 @@
 import type { PlayerSnapshotData, VehicleSnapshotData } from '@clans/sim';
+export type { VehicleSnapshotData } from '@clans/sim';
 import {
   bytesOf,
   createReader,

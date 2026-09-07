@@ -52,6 +52,16 @@ export interface ClientSceneData {
   }>;
   shapesForBaseObjectKind: Record<number, string>;
   shapesForTurretBarrel: Record<number, string>;
+  /** M5: which fallback tier packages/assets's build.ts actually resolved for each vehicle
+   *  shape (both real T2 .glb this session, per the plan's own source-confirmation note) and
+   *  the shape file name (already sitting in shapes/, same directory shapeUrl already reads
+   *  from -- no separate URL scheme needed). vehicle-view.ts reads `source` once at mesh-
+   *  creation time to pick a real-shape load, an STL-converted load, or a procedural
+   *  placeholder, without re-probing the network to find out which tier landed. */
+  vehicles: {
+    shrike: { source: 'glb' | 'stl' | 'procedural'; shape: string };
+    wildcat: { source: 'glb' | 'stl' | 'procedural'; shape: string };
+  };
 }
 export interface KatabaticAssets {
   terrain: TerrainManifest;

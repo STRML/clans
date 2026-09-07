@@ -5,6 +5,7 @@ import {
   createProjectileStore,
   createWorld,
   deserializePlayer,
+  deserializeVehicle,
   FIXED_DT,
   LIGHT_ARMOR,
   resetLoadout,
@@ -16,6 +17,7 @@ import {
   type Heightfield,
   type PlayerInput,
   type PlayerSnapshotData,
+  type VehicleSnapshotData,
   type World,
 } from '@clans/sim';
 import {
@@ -30,6 +32,7 @@ import {
   encodeInput,
   encodeJoin,
   encodeLoadout,
+  encodeVehicleSpawn,
   peekSnapshotHeader,
   type BaseObjectSnapshotData,
   type EventMessage,
@@ -108,6 +111,7 @@ export class NetClient {
   flags: FlagSnapshotData[] = [];
   baseObjects: BaseObjectSnapshotData[] = [];
   turrets: TurretSnapshotData[] = [];
+  vehicles: VehicleSnapshotData[] = [];
   teamScores: [number, number] = [0, 0];
   gameOver = false;
   winnerTeam = 0;
@@ -236,6 +240,13 @@ export class NetClient {
     this.transport.send(encodeLoadout({ armor, repairPack }));
   }
 
+  /** Send-only, same shape as sendLoadout: the pad menu's own choice is a one-shot request,
+   *  not per-tick input, and the server's spawnVehicleAtPad result reaches this client back
+   *  through the next snapshot's vehicles array like every other authoritative state does. */
+  sendVehicleSpawn(padId: number, kind: number): void {
+    this.transport.send(encodeVehicleSpawn({ padId, kind }));
+  }
+
   private handleMessage(bytes: Uint8Array): void {
     const type = bytes[0];
     try {
@@ -360,6 +371,19 @@ export class NetClient {
     // whatever limit the server is actually configured with.
     this.world.timeLimitTicks = decoded.tick + Math.round(decoded.timeRemainingS / FIXED_DT);
 
+    // Must land BEFORE reconcile() below, not after (unlike baseObjects/turrets further
+    // down): reconcile() replays this client's own unacknowledged inputs through stepWorld,
+    // which now also steps stepVehicles every tick (Task 9). If this player is mounted, that
+    // replay moves THIS vehicle -- so the vehicle's own authoritative correction has to be
+    // applied first, exactly like `self`'s own predicted position is corrected before its
+    // replay, or the replay runs against a stale pre-snapshot vehicle transform. Vehicles
+    // also have no mission-file placement to pre-seed from the way baseObjects/turrets do
+    // (app.ts seeds those once, before any snapshot); deserializeVehicle is the only place a
+    // client-side vehicle id is ever created, not a "patch dynamic fields onto an id we
+    // already placed" step. This is exactly the M4 round-1 defect class for base objects,
+    // not repeated here.
+    for (const data of decoded.vehicles) deserializeVehicle(this.world, data);
+
     const self = decoded.players.find((player) => player.id === this.playerId);
     if (self) {
       this.reconcile(self, decoded.tick, decoded.lastInputSequence);
@@ -386,6 +410,7 @@ export class NetClient {
     // predicted state in sync with the server's.
     for (const data of decoded.baseObjects) applyBaseObjectSnapshot(this.world, data);
     for (const data of decoded.turrets) applyTurretSnapshot(this.world, data);
+    this.vehicles = decoded.vehicles; // raw decoded array, for vehicle-view.ts's renderer
     this.teamScores = decoded.teamScores;
     this.remoteTick = decoded.tick;
     this.remoteSnapshots.push({ tick: decoded.tick, players: this.remotePlayers });

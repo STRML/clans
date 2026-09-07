@@ -6,6 +6,8 @@ import {
   BaseObjectKind,
   FIXED_DT,
   FIXED_TICK_MS,
+  VEHICLE_DATA,
+  VehicleKind,
   addPlayer,
   createBaseObjects,
   createFlags,
@@ -15,8 +17,10 @@ import {
   respawnPlayer,
   sampleTerrain,
   setGodMode,
+  spawnVehicleAtPad,
   stepPower,
   stepWorld,
+  vehiclePadAt,
   type ArmorId,
   type Heightfield,
   type PlayerInput,
@@ -27,6 +31,7 @@ import type {
   BaseObjectSnapshotData,
   ProjectileSnapshotData,
   TurretSnapshotData,
+  VehicleSnapshotData,
 } from '@clans/protocol';
 import { loadKatabatic, type KatabaticAssets } from './assets.js';
 import {
@@ -52,6 +57,12 @@ import { RemoteBuffer, syncRemoteMeshes } from './remote.js';
 import { createStationMenu, stationMenuVisible, type StationMenu } from './stationMenu.js';
 import { addEnvironment, createTerrain } from './terrain.js';
 import { WebSocketTransport } from './transport.js';
+import { createVehicleView, vehiclesFromWorld, type VehicleView } from './vehicle-view.js';
+import {
+  createVehiclePadMenu,
+  vehiclePadMenuVisible,
+  type VehiclePadMenu,
+} from './vehiclePadMenu.js';
 import {
   projectilesFromWorld,
   spawnExplosionsForExpired,
@@ -176,11 +187,56 @@ function moveFreeCam(app: App, dt: number): void {
   if (app.input.isDown('ControlLeft')) app.freeCamPosition.y -= speed;
 }
 
-function placeCamera(app: App, sky: THREE.Object3D): void {
-  aimCamera(app.camera, app.input.yaw, app.input.pitch);
+/** Third-person chase camera while mounted (M5, Task 13): positioned cameraMaxDist behind
+ *  and cameraOffset above the vehicle along its own current heading (not the player's own
+ *  look direction -- input.yaw/pitch instead steer the vehicle itself, see vehicles.ts's
+ *  normalizeAngle-based steering), smoothed toward that target by cameraLag rather than
+ *  snapping there every frame, the same "not a hard snap" feel moveFreeCam's own free-cam
+ *  movement already has. Numbers are real, per vehicle kind (vehicles/vehicle_shrike.cs:
+ *  112-114, vehicles/vehicle_wildcat.cs:98-100).
+ *  Returns whether it placed a vehicle camera; `placeCamera` falls back to the player's own
+ *  first-person view when this returns false (not mounted). */
+function placeVehicleCamera(app: App, vehicleId: number, dt: number): boolean {
+  const vehicles = app.world.vehicles;
+  const kind = vehicles.kind[vehicleId] as VehicleKind;
+  const data = VEHICLE_DATA[kind];
+  const base = vehicleId * 3;
+  const vehiclePos = new THREE.Vector3(
+    vehicles.position[base] ?? 0,
+    vehicles.position[base + 1] ?? 0,
+    vehicles.position[base + 2] ?? 0,
+  );
+  const yaw = vehicles.yaw[vehicleId] ?? 0;
+  const pitch = vehicles.pitch[vehicleId] ?? 0;
+  const heading = new THREE.Vector3(
+    Math.sin(yaw) * Math.cos(pitch),
+    Math.sin(pitch),
+    Math.cos(yaw) * Math.cos(pitch),
+  );
+  const desired = vehiclePos
+    .clone()
+    .addScaledVector(heading, -data.cameraMaxDist)
+    .add(new THREE.Vector3(0, data.cameraOffset, 0));
+  // cameraLag as a per-second smoothing rate: at dt = FIXED_DT (32 ms) this closes
+  // cameraLag's own fraction of the remaining distance each tick, so the Shrike's 0.9 feels
+  // noticeably looser (trails longer) than the Wildcat's 0.5 -- matching the real numbers'
+  // own relative ordering, since neither script exposes the smoothing formula itself, only
+  // the tuning constant (see the plan's numbers table).
+  const t = 1 - Math.pow(1 - data.cameraLag, dt / FIXED_DT);
+  app.camera.position.lerp(desired, t);
+  app.camera.lookAt(vehiclePos);
+  return true;
+}
+
+function placeCamera(app: App, sky: THREE.Object3D, dt: number): void {
+  const mountedVehicleId = app.world.players.mountedVehicleId[app.playerId] ?? -1;
   if (app.freeCam) {
+    aimCamera(app.camera, app.input.yaw, app.input.pitch);
     app.camera.position.copy(app.freeCamPosition);
+  } else if (mountedVehicleId !== -1) {
+    placeVehicleCamera(app, mountedVehicleId, dt);
   } else {
+    aimCamera(app.camera, app.input.yaw, app.input.pitch);
     const base = app.playerId * 3;
     const position = app.world.players.position;
     app.camera.position.set(
@@ -304,6 +360,9 @@ interface BaseAssetsViewState {
   baseObjectView: ReturnType<typeof createBaseObjectView>;
   stationMenu: StationMenu;
   stationMenuState: { open: boolean };
+  vehicleView: VehicleView;
+  vehiclePadMenu: VehiclePadMenu;
+  vehiclePadMenuState: { open: boolean };
   commanderMapCanvas: HTMLCanvasElement;
 }
 
@@ -339,6 +398,30 @@ function drawCommanderMapForTeam(state: BaseAssetsViewState): void {
  *  aimedStructure row -- everything Tasks 11-13 added -- to the latest sim or net state.
  *  Pulled out of `frame` for the same reason `syncWorldView` already is: keeping `frame`'s
  *  own branching under this repo's complexity budget. */
+/** The station menu and the vehicle pad menu react to the exact same edge-triggered E press
+ *  (`pressed`, read once by the caller -- usePressedThisFrame() is stateful and consumed on
+ *  read, so it cannot be called twice for one frame). Split out of syncBaseAssetsView to keep
+ *  that function's own complexity under budget. */
+function syncMenus(state: BaseAssetsViewState, pressed: boolean): void {
+  const { world, playerId } = state;
+  if (pressed) {
+    state.stationMenuState.open = !state.stationMenuState.open;
+    state.vehiclePadMenuState.open = !state.vehiclePadMenuState.open;
+  }
+  state.stationMenuState.open = stationMenuVisible(world, playerId, state.stationMenuState.open);
+  if (state.stationMenuState.open) state.stationMenu.show();
+  else state.stationMenu.hide();
+
+  state.vehiclePadMenuState.open = vehiclePadMenuVisible(
+    world,
+    playerId,
+    state.vehiclePadMenuState.open,
+  );
+  const padId = state.vehiclePadMenuState.open ? vehiclePadAt(world, playerId) : null;
+  if (padId !== null) state.vehiclePadMenu.show(padId);
+  else state.vehiclePadMenu.hide();
+}
+
 function syncBaseAssetsView(state: BaseAssetsViewState): void {
   const { world, playerId, net, input } = state;
   const connected = net ? net.connected : true;
@@ -346,11 +429,13 @@ function syncBaseAssetsView(state: BaseAssetsViewState): void {
     net && connected ? net.baseObjects : baseObjectsFromWorld(world);
   const turretData: TurretSnapshotData[] = net && connected ? net.turrets : turretsFromWorld(world);
   state.baseObjectView.sync(baseObjectData, turretData);
+  const vehicleData: VehicleSnapshotData[] =
+    net && connected ? net.vehicles : vehiclesFromWorld(world);
+  state.vehicleView.sync(vehicleData);
 
-  if (input.usePressedThisFrame()) state.stationMenuState.open = !state.stationMenuState.open;
-  state.stationMenuState.open = stationMenuVisible(world, playerId, state.stationMenuState.open);
-  if (state.stationMenuState.open) state.stationMenu.show();
-  else state.stationMenu.hide();
+  // Task 14 layers the wire-level `use` bit (mounting a vehicle) on top of this same press
+  // elsewhere; that send is independent of these two client-local menu toggles.
+  syncMenus(state, input.usePressedThisFrame());
 
   if (input.commandCirclePressedThisFrame()) {
     state.commanderMapCanvas.hidden = !state.commanderMapCanvas.hidden;
@@ -720,6 +805,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   // predict straight through it until the next snapshot corrected the mispredict.
   world.interiors = await loadInteriorColliders(assets);
   const baseObjectView = createBaseObjectView(scene, assets);
+  const vehicleView = createVehicleView(scene, assets);
 
   const camera = new THREE.PerspectiveCamera(
     90,
@@ -748,6 +834,15 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     (armor: ArmorId, repairPack) => {
       if (net) net.sendLoadout(armor, repairPack);
       else applyLoadoutRequest(world, playerId, armor, repairPack);
+    },
+  );
+  const vehiclePadMenuState = { open: false };
+  const vehiclePadMenu: VehiclePadMenu = createVehiclePadMenu(
+    document.body,
+    (padId: number, kind: VehicleKind) => {
+      if (net) net.sendVehicleSpawn(padId, kind);
+      else spawnVehicleAtPad(world, padId, kind);
+      vehiclePadMenuState.open = false;
     },
   );
   const commanderMapCanvas = document.createElement('canvas');
@@ -852,11 +947,14 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         baseObjectView,
         stationMenu,
         stationMenuState,
+        vehicleView,
+        vehiclePadMenu,
+        vehiclePadMenuState,
         commanderMapCanvas,
       });
 
       if (app.freeCam) moveFreeCam(app, dtSeconds);
-      placeCamera(app, sky);
+      placeCamera(app, sky, dtSeconds);
       renderer.render(scene, camera);
       app.stats.frameMs = performance.now() - frameStart;
       updateFps(app, frameStart, fps);
