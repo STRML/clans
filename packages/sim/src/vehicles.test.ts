@@ -20,6 +20,17 @@ import {
   vehicleCapForTeam,
 } from './vehicles.js';
 
+function vehiclePos(
+  world: ReturnType<typeof createWorld>,
+  vId: number,
+): { x: number; y: number; z: number } {
+  return {
+    x: world.vehicles.position[vId * 3] ?? 0,
+    y: world.vehicles.position[vId * 3 + 1] ?? 0,
+    z: world.vehicles.position[vId * 3 + 2] ?? 0,
+  };
+}
+
 const flat: Heightfield = {
   gridSize: 2,
   squareSize: 1000,
@@ -393,5 +404,45 @@ describe('removePlayer clears dangling driverId', () => {
     stepVehicles(world, new Map([[playerId, useInput(true)]]), 1 / 32);
     removePlayer(world, playerId);
     expect(world.vehicles.driverId[vId]).toBe(-1);
+  });
+});
+
+describe('Shrike blaster', () => {
+  it('a mounted driver holding fire produces a VehicleFireEvent at the fire cadence', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Shrike) as number;
+    const pos = vehiclePos(world, vId);
+    const playerId = addPlayer(world, pos, 1);
+    stepVehicles(world, new Map([[playerId, useInput(true)]]), 1 / 32); // mount
+    world.pendingVehicleFireEvents.length = 0;
+    stepVehicles(world, new Map([[playerId, { ...idleInput, fire: true }]]), 1 / 32);
+    expect(world.pendingVehicleFireEvents.length).toBeGreaterThan(0);
+    expect(world.pendingVehicleFireEvents[0]?.vehicleId).toBe(vId);
+  });
+
+  it('a Wildcat driver holding fire produces no fire event -- the Wildcat has no weapon', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat) as number;
+    const pos = vehiclePos(world, vId);
+    const playerId = addPlayer(world, pos, 1);
+    stepVehicles(world, new Map([[playerId, useInput(true)]]), 1 / 32);
+    world.pendingVehicleFireEvents.length = 0;
+    stepVehicles(world, new Map([[playerId, { ...idleInput, fire: true }]]), 1 / 32);
+    expect(world.pendingVehicleFireEvents.length).toBe(0);
+  });
+
+  it('a Shrike blaster shot refuses to fire below minEnergy', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Shrike) as number;
+    const pos = vehiclePos(world, vId);
+    const playerId = addPlayer(world, pos, 1);
+    stepVehicles(world, new Map([[playerId, useInput(true)]]), 1 / 32);
+    world.vehicles.energy[vId] = 4; // below minEnergy (5)
+    world.pendingVehicleFireEvents.length = 0;
+    stepVehicles(world, new Map([[playerId, { ...idleInput, fire: true }]]), 1 / 32);
+    expect(world.pendingVehicleFireEvents.length).toBe(0);
   });
 });

@@ -239,7 +239,7 @@ function headingOf(yaw: number, pitch: number): Vec3 {
  *  reads a typed array many times per tick, and each inline `?? 0` counts as its own branch
  *  toward that function's own ESLint `complexity` budget. Moving the fallback in here keeps
  *  the reading code flat without inflating every caller. */
-function at(arr: Float64Array, i: number): number {
+function at(arr: Float64Array | Uint8Array | Int16Array, i: number): number {
   return arr[i] ?? 0;
 }
 
@@ -763,6 +763,59 @@ function stepOneVehiclePhysics(world: World, vId: number, input: PlayerInput, dt
   resolveVehicleCollision(world, vId, previous, dt);
 }
 
+// --- Shrike blaster (Task 6) --------------------------------------------------------------
+
+/** A pending Shrike-blaster shot, drained by projectiles.ts's spawnVehicleShot the same tick
+ *  stepVehicles produces it -- exactly parallel to TurretFireEvent/spawnTurretShot (M4). */
+export interface VehicleFireEvent {
+  vehicleId: number;
+  team: number;
+  origin: Vec3;
+  direction: Vec3;
+  velocity: Vec3;
+}
+
+export const SHRIKE_BLASTER_DATA = {
+  directDamage: 0.125, // weapons/chaingun.cs:503
+  speed: 425, // weapons/chaingun.cs:512
+  lifetime: 1, // weapons/chaingun.cs:516 (lifetimeMS 1000)
+  fireInterval: 0.125, // vehicles/vehicle_shrike.cs:257 (fireTimeout 125ms) -- ours: single
+  // timer, not twin barrels; see the plan's numbers table.
+  minEnergy: 5, // vehicles/vehicle_shrike.cs:255-256
+};
+
+/** Only the Shrike has a weapon (the Wildcat defines none, matching vehicle_wildcat.cs and
+ *  the spec's own Vehicle numbers table) -- reads the driver's own `fire` input directly,
+ *  since a mounted player's own weapon system is inert (weapons.ts's stepOnePlayer guard). */
+function tryFireShrikeBlaster(world: World, vId: number, input: PlayerInput, dt: number): void {
+  const vehicles = world.vehicles;
+  vehicles.weaponTimer[vId] = Math.max(0, at(vehicles.weaponTimer, vId) - dt);
+  if (!input.fire) return;
+  if (at(vehicles.weaponTimer, vId) > 0) return;
+  if (at(vehicles.energy, vId) < SHRIKE_BLASTER_DATA.minEnergy) return;
+  vehicles.weaponTimer[vId] = SHRIKE_BLASTER_DATA.fireInterval;
+  vehicles.energy[vId] = at(vehicles.energy, vId) - SHRIKE_BLASTER_DATA.minEnergy;
+  const direction = headingOf(at(vehicles.yaw, vId), at(vehicles.pitch, vId));
+  const base = vId * 3;
+  const origin: Vec3 = {
+    x: at(vehicles.position, base),
+    y: at(vehicles.position, base + 1),
+    z: at(vehicles.position, base + 2),
+  };
+  const velocity: Vec3 = {
+    x: at(vehicles.velocity, base),
+    y: at(vehicles.velocity, base + 1),
+    z: at(vehicles.velocity, base + 2),
+  };
+  world.pendingVehicleFireEvents.push({
+    vehicleId: vId,
+    team: at(vehicles.team, vId),
+    origin,
+    direction,
+    velocity,
+  });
+}
+
 function seatDriver(world: World, vId: number, driverId: number): void {
   if (driverId === -1 || !world.players.active[driverId]) return;
   const seat = seatPosition(world.vehicles, vId);
@@ -775,6 +828,25 @@ function seatDriver(world: World, vId: number, driverId: number): void {
  *  tick's mount/dismount requests, then steps every active vehicle's physics -- piloted or
  *  not, matching a real T2 vehicle idling at its pad -- and seat-locks its driver's position
  *  to the vehicle's own transform. */
+/** One active, non-destroyed vehicle's whole tick: physics, the Shrike blaster (piloted
+ *  only), and seat-locking its driver -- split out of stepVehicles to keep that function's
+ *  own complexity under budget. */
+function stepOneVehicle(
+  world: World,
+  vId: number,
+  inputs: ReadonlyMap<number, PlayerInput>,
+  dt: number,
+): void {
+  const vehicles = world.vehicles;
+  const driverId = vehicles.driverId[vId] ?? -1;
+  const input = driverId !== -1 ? (inputs.get(driverId) ?? idleVehicleInput()) : idleVehicleInput();
+  stepOneVehiclePhysics(world, vId, input, dt);
+  if (vehicles.kind[vId] === VehicleKind.Shrike && driverId !== -1) {
+    tryFireShrikeBlaster(world, vId, input, dt);
+  }
+  seatDriver(world, vId, driverId);
+}
+
 export function stepVehicles(
   world: World,
   inputs: ReadonlyMap<number, PlayerInput>,
@@ -794,10 +866,6 @@ export function stepVehicles(
       dismountWithoutDamage(world, vId);
       continue;
     }
-    const driverId = vehicles.driverId[vId] ?? -1;
-    const input =
-      driverId !== -1 ? (inputs.get(driverId) ?? idleVehicleInput()) : idleVehicleInput();
-    stepOneVehiclePhysics(world, vId, input, dt);
-    seatDriver(world, vId, driverId);
+    stepOneVehicle(world, vId, inputs, dt);
   }
 }

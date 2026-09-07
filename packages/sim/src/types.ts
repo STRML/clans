@@ -132,6 +132,10 @@ export interface ProjectileStore {
    *  reaching its actual target. Mirrors how a player-fired shot already excludes its own
    *  shooter via `ownerId`/`isValidTarget` — see `nearestStructureHitFrom`. */
   sourceTurretId: Int16Array;
+  /** -1 for every non-vehicle-fired shot; the firing vehicle's own id for a Shrike blaster
+   *  shot. Same self-hit-exclusion reason as sourceTurretId (M4): the shot spawns at its own
+   *  vehicle's exact position, inside that vehicle's own checkRadius hit-sphere. */
+  sourceVehicleId: Int16Array;
   position: Float64Array;
   velocity: Float64Array;
   /** Ticks this projectile has been alive, counted by stepProjectiles itself rather than
@@ -178,6 +182,7 @@ export interface World {
   pendingAmmoRefunds: import('./weapons.js').AmmoRefund[];
   flags: FlagStore;
   vehicles: import('./vehicles.js').VehicleStore;
+  pendingVehicleFireEvents: import('./vehicles.js').VehicleFireEvent[];
   teamScores: Uint16Array;
   gameOver: boolean;
   winnerTeam: number;
