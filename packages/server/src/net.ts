@@ -528,7 +528,14 @@ function snapshotTurrets(world: World): TurretSnapshotData[] {
   return out;
 }
 
-export function buildExtras(world: World): WorldExtras {
+/** `botManager` is optional here (unlike `NetServerOptions.botManager`, required) purely
+ *  so every existing direct caller of this exported function -- net.test.ts builds
+ *  `WorldExtras` fixtures against a bare `World` with no bot manager in play at all --
+ *  keeps working unchanged; the real snapshot path (sendAllSnapshots below) always
+ *  passes one. Debug-overlay data only (Task 12): playerId + BotState, one entry per
+ *  currently-active bot, bounds-checked against MAX_SNAPSHOT_BOTS the same as every
+ *  other extras array. */
+export function buildExtras(world: World, botManager?: BotManager): WorldExtras {
   return {
     projectiles: snapshotActiveProjectiles(world),
     flags: snapshotWorldFlags(world),
@@ -544,6 +551,11 @@ export function buildExtras(world: World): WorldExtras {
     winnerTeam: world.winnerTeam,
     timeRemainingS: Math.max(0, (world.timeLimitTicks - world.tick) * FIXED_DT),
     gameOverReason: world.gameOverReason,
+    bots: botManager
+      ? [...botManager.runtimes.values()]
+          .filter((runtime) => world.players.active[runtime.playerId])
+          .map((runtime) => ({ playerId: runtime.playerId, state: runtime.state }))
+      : [],
   };
 }
 
@@ -827,7 +839,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
 
   function sendAllSnapshots(): void {
     const players = serializeActivePlayers(options.world);
-    const extras = buildExtras(options.world);
+    const extras = buildExtras(options.world, options.botManager);
     nextSnapshotId += 1;
     for (const entry of clients.values()) {
       // Codex round 14 (PR #4): sending unconditionally let a slow or unresponsive
