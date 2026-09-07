@@ -783,6 +783,42 @@ describe('NetClient', () => {
     expect(client.gameOverReason).toBe(0);
   });
 
+  it('a snapshot with base objects populates net.world.baseObjects (Codex round 1, finding 1)', () => {
+    // Before this fix, a NetClient's world was created empty (no base objects/turrets ever
+    // placed into it -- that only happened for the single-player path in app.ts) and nothing
+    // in handleSnapshot ever wrote decoded base-object/turret state onto world.baseObjects/
+    // world.turrets at all; net.baseObjects/net.turrets (below) were the only place decoded
+    // state landed, and those feed rendering only, not the sim store movement prediction,
+    // stationAt (the loadout menu), and the commander map all read directly.
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 22 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    expect(client.world.baseObjects.count).toBe(0); // sanity: empty before any snapshot
+    const extras: WorldExtras = {
+      ...emptyExtras(),
+      baseObjects: [{ id: 0, damage: 0.4, destroyed: 0, powered: 1 }],
+      turrets: [{ id: 0, damage: 0.1, destroyed: 0, powered: 1, targetId: 5, state: 2 }],
+    };
+    transport.pump([encodeSnapshot(1, 0, 0, [], null, extras)]);
+
+    // rendering's own decoded copy, unchanged by this fix -- damage round-trips through an
+    // f32 wire field, not exact, so compare it separately from the rest.
+    expect(client.baseObjects[0]?.damage).toBeCloseTo(0.4, 5);
+    expect({ ...client.baseObjects[0], damage: 0 }).toEqual({
+      ...extras.baseObjects[0],
+      damage: 0,
+    });
+    expect(client.world.baseObjects.count).toBe(1);
+    expect(client.world.baseObjects.damage[0]).toBeCloseTo(0.4, 5);
+    expect(client.world.baseObjects.destroyed[0]).toBe(0);
+    expect(client.world.baseObjects.powered[0]).toBe(1);
+    expect(client.world.turrets.count).toBe(1);
+    expect(client.world.turrets.damage[0]).toBeCloseTo(0.1, 5);
+    expect(client.world.turrets.targetId[0]).toBe(5);
+    expect(client.world.turrets.state[0]).toBe(2);
+  });
+
   it('mirrors gameOver/winnerTeam/gameOverReason onto world so stepWorld freezes prediction', () => {
     // Codex review round 2 (PR #9), finding 3: round 1 added an early-return freeze guard
     // to stepWorld that checks world.gameOver, but the snapshot handler only ever updated

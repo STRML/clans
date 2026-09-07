@@ -295,6 +295,28 @@ export function stationAt(world: World, playerId: number): number | null {
  * away) simply finds no station and returns false, leaving every field of the player's
  * current loadout untouched.
  */
+/**
+ * Codex round 1, finding 1: writes a decoded snapshot's DYNAMIC base-object fields
+ * (damage/destroyed/powered) onto the store by id, growing `store.count` to fit an id that's
+ * never been locally placed yet -- mirrors sim/snapshot.ts's `deserializePlayer`/`growTo` for
+ * players. Static placement (kind/team/position) is never on the wire and doesn't need to be:
+ * app.ts seeds it once from the same shared scene asset data the server's own
+ * `loadKatabaticWorld` places objects from, in the same array order, so ids already line up
+ * before the first snapshot ever arrives -- only the server-authoritative dynamic fields
+ * need to travel over the wire and land here on every snapshot a NetClient decodes.
+ */
+export function applyBaseObjectSnapshot(
+  world: World,
+  data: { id: number; damage: number; destroyed: 0 | 1; powered: 0 | 1 },
+): void {
+  const store = world.baseObjects;
+  if (data.id >= BASE_OBJECT_CAPACITY) return;
+  if (data.id >= store.count) store.count = data.id + 1;
+  store.damage[data.id] = data.damage;
+  store.destroyed[data.id] = data.destroyed;
+  store.powered[data.id] = data.powered;
+}
+
 export function applyLoadoutRequest(
   world: World,
   playerId: number,

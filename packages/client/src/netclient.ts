@@ -1,5 +1,7 @@
 import {
   addPlayer,
+  applyBaseObjectSnapshot,
+  applyTurretSnapshot,
   createProjectileStore,
   createWorld,
   deserializePlayer,
@@ -373,6 +375,17 @@ export class NetClient {
     this.flags = decoded.flags;
     this.baseObjects = decoded.baseObjects;
     this.turrets = decoded.turrets;
+    // Codex round 1, finding 1: this.baseObjects/this.turrets above are read directly by
+    // base-object-view.ts's `sync` for rendering, but nothing ever applied the same decoded
+    // dynamic state onto `this.world`'s own baseObjects/turrets stores -- the ones movement
+    // prediction (interior/force-field collision, stationAt), the loadout station menu, and
+    // the commander map all actually read. Static placement (kind/team/position) is seeded
+    // once from the shared scene asset data (app.ts, mirroring the server's own
+    // loadKatabaticWorld), so ids already line up; only these dynamic fields need applying
+    // here, every snapshot, the same way reconcile() above keeps the local player's own
+    // predicted state in sync with the server's.
+    for (const data of decoded.baseObjects) applyBaseObjectSnapshot(this.world, data);
+    for (const data of decoded.turrets) applyTurretSnapshot(this.world, data);
     this.teamScores = decoded.teamScores;
     this.remoteTick = decoded.tick;
     this.remoteSnapshots.push({ tick: decoded.tick, players: this.remotePlayers });

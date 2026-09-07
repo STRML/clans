@@ -232,6 +232,34 @@ export function applyTurretDamage(world: World, id: number, amount: number): voi
   }
 }
 
+/**
+ * Codex round 1, finding 1: writes a decoded snapshot's DYNAMIC turret fields (damage/
+ * destroyed/powered/targetId/state) onto the store by id, growing `store.count` to fit an id
+ * that's never been locally placed yet -- the turret-store sibling of baseObjects.ts's
+ * `applyBaseObjectSnapshot`; see that function's own comment for why static placement
+ * (barrel/team/position) never needs to be on the wire at all.
+ */
+export function applyTurretSnapshot(
+  world: World,
+  data: {
+    id: number;
+    damage: number;
+    destroyed: 0 | 1;
+    powered: 0 | 1;
+    targetId: number;
+    state: number;
+  },
+): void {
+  const store = world.turrets;
+  if (data.id >= TURRET_CAPACITY) return;
+  if (data.id >= store.count) store.count = data.id + 1;
+  store.damage[data.id] = data.damage;
+  store.destroyed[data.id] = data.destroyed;
+  store.powered[data.id] = data.powered;
+  store.targetId[data.id] = data.targetId;
+  store.state[data.id] = data.state;
+}
+
 /** Mirrors `baseObjects.ts`'s `stepPower`, but turrets are always `needsPower: true` (a
  *  turret has no power-independent counterpart the way a generator does), so this is a
  *  straight team-power lookup with no branch. */

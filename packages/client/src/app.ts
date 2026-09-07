@@ -629,8 +629,50 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   // (its "own" flag never matched), silently breaking CTF in single-player. spawnPoint already
   // picks the team 1 spawn, so team 1 here is the fix, not a new choice.
   const playerId = net ? 0 : addPlayer(world, localSpawn, 1);
+  // Codex round 1, finding 1: base objects/turrets are seeded from the same shared scene
+  // asset data for BOTH the single-player and networked paths now, not just single-player --
+  // the server's own loadKatabaticWorld (server/world.ts) places its base objects/turrets
+  // from this identical array, in this identical order, so a NetClient's ids already line up
+  // with the server's before a single snapshot ever arrives. Without this, a networked
+  // client's world.baseObjects/world.turrets stayed permanently empty: movement prediction
+  // never saw a force field or interior to collide with, stationAt (the loadout menu) never
+  // found a station to use, and the commander map (which reads world.baseObjects/turrets
+  // directly, not the wire-decoded net.baseObjects/net.turrets rendering already uses) drew
+  // nothing at all. netclient.ts's handleSnapshot applies each snapshot's dynamic fields
+  // (damage/destroyed/powered/...) onto this same store by id once a connection exists.
+  createBaseObjects(
+    world,
+    assets.scene.baseObjects.map(({ kind, team, position: [x, y, z], rotation, scale }) => ({
+      kind,
+      team,
+      position: { x, y, z },
+      ...(rotation && {
+        rotation: {
+          axis: { x: rotation.axis[0], y: rotation.axis[1], z: rotation.axis[2] },
+          degrees: rotation.degrees,
+        },
+      }),
+      ...(scale && { scale: { x: scale[0], y: scale[1], z: scale[2] } }),
+    })),
+  );
+  createTurrets(
+    world,
+    assets.scene.turrets.map(({ barrel, team, position: [x, y, z] }) => ({
+      barrel,
+      team,
+      position: { x, y, z },
+    })),
+  );
+  // Seeds a real initial powered state from the locally-placed generators above rather than
+  // leaving every object at createBaseObjects's own powered=1 creation default -- harmless for
+  // the networked path even before a snapshot arrives (the next one overwrites it with the
+  // server's authoritative value regardless), and correct immediately for single-player, which
+  // has no snapshot to ever correct it.
+  stepPower(world);
   // Single-player has no server; seed CTF locally from the same scene data the server would
-  // read (Task 7's loadKatabaticWorld does the equivalent for the networked path).
+  // read (Task 7's loadKatabaticWorld does the equivalent for the networked path). Flags stay
+  // server-authoritative-only for the networked path (net.flags, read straight off the wire),
+  // so this alone stays single-player-only.
   if (!net) {
     createFlags(
       world,
@@ -639,36 +681,6 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         position: { x, y, z },
       })),
     );
-    // Single-player has no server; seed base objects/turrets locally from the same scene
-    // data the server would read (server/world.ts's loadKatabaticWorld does the equivalent
-    // for the networked path). Without this, single-player has no generators/stations/
-    // turrets at all -- debugIsStationPowered always reads false, and every station/turret
-    // is silently absent from the sim (though base-object-view.ts still renders their
-    // placeholder meshes from assets.scene, which is asset data, not sim state).
-    createBaseObjects(
-      world,
-      assets.scene.baseObjects.map(({ kind, team, position: [x, y, z], rotation, scale }) => ({
-        kind,
-        team,
-        position: { x, y, z },
-        ...(rotation && {
-          rotation: {
-            axis: { x: rotation.axis[0], y: rotation.axis[1], z: rotation.axis[2] },
-            degrees: rotation.degrees,
-          },
-        }),
-        ...(scale && { scale: { x: scale[0], y: scale[1], z: scale[2] } }),
-      })),
-    );
-    createTurrets(
-      world,
-      assets.scene.turrets.map(({ barrel, team, position: [x, y, z] }) => ({
-        barrel,
-        team,
-        position: { x, y, z },
-      })),
-    );
-    stepPower(world);
   }
 
   const scene = new THREE.Scene();
