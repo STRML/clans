@@ -124,6 +124,32 @@ function allocate(store: VehicleStore): number | null {
   return id;
 }
 
+// Mirrors ProjectileStore's own PROJECTILE_ID_REUSE_DELAY_TICKS/pendingFreeIds pattern (M3),
+// for the same reason: without it, VehicleStore's capacity (8) would be exhausted for the
+// rest of the match after only 8 total spawns across the whole game, cumulative -- every pad
+// respawn or combat destruction would otherwise burn an id forever (destroyExistingAtPad and
+// applyVehicleDamage only ever set `destroyed`, never actually free the slot), and every
+// later spawn attempt at either team's pad would silently fail once `count` hit capacity.
+// Freeing after a short delay rather than immediately keeps failure matrix row 18 true: a
+// destroyed vehicle's id must still read back as destroyed=1 for at least one further
+// stepVehicles call, not vanish or get reused within the same tick a client's next snapshot
+// needed to observe it destroyed.
+const VEHICLE_ID_REUSE_DELAY_TICKS = 3;
+
+function queueVehicleIdFree(vehicles: VehicleStore, id: number): void {
+  vehicles.pendingFreeIds.push({ id, ticksRemaining: VEHICLE_ID_REUSE_DELAY_TICKS });
+}
+
+function flushPendingVehicleFreeIds(vehicles: VehicleStore): void {
+  const stillPending: PendingFreeId[] = [];
+  for (const entry of vehicles.pendingFreeIds) {
+    entry.ticksRemaining -= 1;
+    if (entry.ticksRemaining <= 0) vehicles.freeIds.push(entry.id);
+    else stillPending.push(entry);
+  }
+  vehicles.pendingFreeIds = stillPending;
+}
+
 function poweredPadsForTeam(baseObjects: BaseObjectStore, world: World, team: number): number[] {
   const ids: number[] = [];
   // BaseObjectStore has no `active` field on main -- a base object is never removed once
@@ -158,6 +184,7 @@ function destroyExistingAtPad(world: World, padId: number): void {
       // Task 7 owns the real destruction/ejection path; Task 1 only needs the flag set so
       // the new spawn below is never blocked by "old vehicle still counts against the cap."
       vehicles.destroyed[id] = 1;
+      queueVehicleIdFree(vehicles, id);
     }
   }
 }
@@ -670,6 +697,7 @@ export function applyVehicleDamage(
   if (at(vehicles.damage, id) < data.maxDamage) return;
 
   vehicles.destroyed[id] = 1;
+  queueVehicleIdFree(vehicles, id);
   const base = id * 3;
   world.pendingVehicleDestroyed.push({
     id,
@@ -1000,6 +1028,7 @@ export function stepVehicles(
   dt: number,
 ): void {
   const vehicles = world.vehicles;
+  flushPendingVehicleFreeIds(vehicles);
 
   const ids = [...inputs.keys()].sort((a, b) => a - b);
   for (const playerId of ids) {

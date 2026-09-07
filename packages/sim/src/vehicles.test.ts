@@ -573,3 +573,30 @@ describe('canSendVehicleUse', () => {
     expect(canSendVehicleUse(world, bystander)).toBe(false);
   });
 });
+
+describe('vehicle id retention and reuse', () => {
+  it('a destroyed vehicle id becomes reusable after the retention delay elapses', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const first = spawnVehicleAtPad(world, padId, VehicleKind.Shrike) as number;
+    // Re-spawning at the same pad destroys `first` and queues its id for freeing.
+    spawnVehicleAtPad(world, padId, VehicleKind.Wildcat);
+    for (let tick = 0; tick < 10; tick += 1) stepVehicles(world, new Map(), 1 / 32);
+    const third = spawnVehicleAtPad(world, padId, VehicleKind.Shrike) as number;
+    // The freed id was reused rather than growing the store further.
+    expect(third).toBe(first);
+  });
+
+  it("repeatedly destroying and respawning at one pad never exhausts VehicleStore's capacity", () => {
+    // VehicleStore's own capacity is 8 (see the plan's numbers table) -- without freeing
+    // destroyed ids, the 9th cumulative spawn at this single pad would return null forever,
+    // silently disabling the pad for the rest of the match.
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    for (let spawn = 0; spawn < 20; spawn += 1) {
+      const id = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat);
+      expect(id).not.toBeNull();
+      for (let tick = 0; tick < 5; tick += 1) stepVehicles(world, new Map(), 1 / 32);
+    }
+  });
+});
