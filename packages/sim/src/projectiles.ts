@@ -326,6 +326,13 @@ function explode(
 ): void {
   for (let id = 0; id < world.players.count; id += 1) {
     if (!world.players.active[id] || !world.players.alive[id]) continue;
+    // Same mounted-player exclusion as isValidTarget's own comment explains for direct hits:
+    // a mounted player's position is seat-locked to their vehicle's transform, so splash that
+    // reaches the vehicle (explodeVehicles, below) would ALSO land on the pilot's own hitbox
+    // sitting at that identical point, double-dipping one hit into damage against both the
+    // vehicle's shield/health pool and the pilot's, when real T2 has no separate pilot hitbox
+    // while mounted at all.
+    if (world.players.mountedVehicleId[id] !== -1) continue;
     const armor = armorFor(world, id);
     const hitbox = playerHitbox(world, id, armor);
     const dx = hitbox.center.x - point.x,

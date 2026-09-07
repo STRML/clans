@@ -811,6 +811,23 @@ describe('projectiles vs vehicles', () => {
     expect(world.vehicles.damage[0]).toBeGreaterThan(0);
   });
 
+  it('splash that reaches a mounted vehicle does not also damage its pilot (Codex review round 1, finding 5)', () => {
+    const world = createWorld(flat, 1);
+    placeVehicle(world, VehicleKind.Shrike, 2, 20);
+    const pilot = addPlayer(world, { x: 0, y: 1.6, z: 20 }, 2);
+    world.players.mountedVehicleId[pilot] = 0;
+    world.vehicles.driverId[0] = pilot;
+    const pilotDamageBefore = world.players.damage[pilot];
+    fire(world, { playerId: -1, origin: { x: 0, y: 1.6, z: 0 }, direction: { x: 0, y: 0, z: 1 } });
+    for (let tick = 0; tick < 60; tick += 1) stepProjectiles(world, FIXED_DT);
+    // explode() applies splash to every alive player in radius with no mounted exclusion --
+    // before this fix, the pilot's own hitbox (seat-locked to the exact same point as the
+    // vehicle it's sitting inside) double-dipped the same blast, taking damage on top of the
+    // vehicle's own shield/health pool real T2 has no separate pilot hitbox for while mounted.
+    expect(world.vehicles.damage[0]).toBeGreaterThan(0);
+    expect(world.players.damage[pilot]).toBe(pilotDamageBefore);
+  });
+
   it('a mounted player is not directly hittable -- the shot damages the vehicle, not the pilot', () => {
     const world = createWorld(flat, 1);
     placeVehicle(world, VehicleKind.Wildcat, 2, 10);
