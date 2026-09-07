@@ -182,12 +182,13 @@ export function spawnPointFor(
   return [x, Math.max(y, ground + 0.1), z];
 }
 
+export function addOneBot(world: World, spawns: SceneSpawn[], team: number): number {
+  const [x, y, z] = spawnPointFor(world.terrain, spawns, team, teamCount(world, team));
+  return addPlayer(world, { x, y, z }, team);
+}
+
 export function addBots(world: World, spawns: SceneSpawn[], count: number): number[] {
   const ids: number[] = [];
-  for (let i = 0; i < count; i += 1) {
-    const team = smallerTeam(world);
-    const [x, y, z] = spawnPointFor(world.terrain, spawns, team, teamCount(world, team));
-    ids.push(addPlayer(world, { x, y, z }, team));
-  }
+  for (let i = 0; i < count; i += 1) ids.push(addOneBot(world, spawns, smallerTeam(world)));
   return ids;
 }

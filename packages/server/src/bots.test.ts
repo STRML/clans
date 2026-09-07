@@ -1,0 +1,80 @@
+import { describe, expect, it } from 'vitest';
+import { addPlayer, createWorld, type Heightfield } from '@clans/sim';
+import { BotRole } from '@clans/bots';
+import { createBotManager, rebalanceTeams, TARGET_TEAM_SIZE } from './bots.js';
+import { teamCount, type SceneSpawn } from './world.js';
+
+const flat: Heightfield = {
+  gridSize: 2,
+  squareSize: 2000,
+  originX: -1000,
+  originY: 0,
+  originZ: 1000,
+  heightScale: 1,
+  heights: new Uint16Array(4),
+};
+
+const spawns: SceneSpawn[] = [
+  { name: null, team: 1, position: [-100, 0, 0], radius: 5 },
+  { name: null, team: 1, position: [-90, 0, 0], radius: 5 },
+  { name: null, team: 2, position: [100, 0, 0], radius: 5 },
+  { name: null, team: 2, position: [90, 0, 0], radius: 5 },
+];
+
+describe('createBotManager', () => {
+  it('fills both teams to TARGET_TEAM_SIZE at construction with a full budget', () => {
+    const world = createWorld(flat, 1, 64);
+    const manager = createBotManager(world, spawns, [], TARGET_TEAM_SIZE * 2);
+    expect(teamCount(world, 1)).toBe(TARGET_TEAM_SIZE);
+    expect(teamCount(world, 2)).toBe(TARGET_TEAM_SIZE);
+    expect(manager.botIds.size).toBe(TARGET_TEAM_SIZE * 2);
+  });
+
+  it('constructs without throwing at maxBots = 1 and assigns that single bot the Attacker role (failure matrix row 14)', () => {
+    const world = createWorld(flat, 1, 64);
+    expect(() => createBotManager(world, spawns, [], 1)).not.toThrow();
+    const manager = createBotManager(createWorld(flat, 1, 64), spawns, [], 1);
+    expect(manager.botIds.size).toBe(1);
+    const [onlyBotId] = manager.botIds;
+    const runtime = manager.runtimes.get(onlyBotId as number);
+    expect(runtime?.role).toBe(BotRole.Attacker);
+  });
+});
+
+describe('rebalanceTeams', () => {
+  it('removes exactly one lowest-score bot when a human joins a team already at TARGET_TEAM_SIZE (failure matrix row 12)', () => {
+    const world = createWorld(flat, 1, 64);
+    const manager = createBotManager(world, spawns, [], TARGET_TEAM_SIZE * 2);
+    // Give every bot on team 1 a distinct score so "lowest" is unambiguous.
+    const team1BotIds = [...manager.botIds]
+      .filter((id) => world.players.team[id] === 1)
+      .sort((a, b) => a - b);
+    team1BotIds.forEach((id, index) => {
+      world.players.score[id] = index + 1;
+    });
+    const lowestScoreBotId = team1BotIds[0];
+    addPlayer(world, { x: -95, y: 0, z: 0 }, 1); // the joining human, team 1 already at 16
+    rebalanceTeams(manager, world, spawns);
+    expect(teamCount(world, 1)).toBe(TARGET_TEAM_SIZE);
+    expect(manager.botIds.has(lowestScoreBotId as number)).toBe(false);
+  });
+
+  it('backfills one bot when a human leaves and budget remains (failure matrix row 13)', () => {
+    const world = createWorld(flat, 1, 64);
+    const human = addPlayer(world, { x: -95, y: 0, z: 0 }, 1);
+    const manager = createBotManager(world, spawns, [], TARGET_TEAM_SIZE * 2);
+    expect(teamCount(world, 1)).toBe(TARGET_TEAM_SIZE);
+    world.players.active[human] = 0; // simulate removePlayer's own effect already applied
+    rebalanceTeams(manager, world, spawns);
+    expect(teamCount(world, 1)).toBe(TARGET_TEAM_SIZE);
+  });
+
+  it('never adds another bot once the manager already carries maxBots, even under TARGET_TEAM_SIZE', () => {
+    const world = createWorld(flat, 1, 64);
+    const manager = createBotManager(world, spawns, [], 2);
+    expect(manager.botIds.size).toBe(2);
+    rebalanceTeams(manager, world, spawns);
+    expect(manager.botIds.size).toBe(2);
+    expect(teamCount(world, 1)).toBeLessThan(TARGET_TEAM_SIZE);
+  });
+});
