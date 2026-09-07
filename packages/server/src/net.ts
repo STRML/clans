@@ -32,13 +32,16 @@ import {
   PROTOCOL_VERSION,
   SNAPSHOT_EVERY_N_TICKS,
   SNAPSHOT_HISTORY_DEPTH,
+  VOICE_LINE_COUNT,
   WelcomeStatus,
   decodeAck,
+  decodeCommandOrder,
   decodeGod,
   decodeInput,
   decodeJoin,
   decodeLoadout,
   decodeVehicleSpawn,
+  decodeVoiceBind,
   encodeEvent,
   encodeSnapshot,
   encodeWelcome,
@@ -59,6 +62,7 @@ import {
   rewindOthers,
   type PositionHistory,
 } from './lagcomp.js';
+import { currentOrder, issueOrder, type OrderBoard } from './orders.js';
 import { applyInputMessage, createSession, recordAck, type Session } from './session.js';
 import { needsFullSnapshot } from './snapshot-policy.js';
 import { rebalanceTeams, stepBotManager, type BotManager } from './bots.js';
@@ -77,6 +81,9 @@ export interface NetServerOptions {
    *  server always has one, even at `--bots 0` (an empty-budget manager that's a no-op
    *  everywhere it's called) -- this milestone does not support running with none at all. */
   botManager: BotManager;
+  /** One active order per team, TTL-expired -- runtime memory, never part of World/hashWorld
+   *  (mirrors BotManager's own runtime-memory convention, M6 Global Constraints). */
+  board: OrderBoard;
   port: number;
   /** How long an accepted socket may stay unjoined before it is closed. */
   joinTimeoutMs?: number;
@@ -330,10 +337,58 @@ function handleVehicleSpawn(
   spawnVehicleAtPad(world, padId, kind);
 }
 
+/** Reads the sender's own team from world.players.team, never a wire-supplied one -- the
+ *  CommandOrderMessage shape carries no team field at all, so a client can only ever issue
+ *  an order for its own team (failure matrix row 19). Matches handleLoadout's own convention:
+ *  a stale click after the world changed is silently a no-op, not an error. */
+function handleCommandOrder(
+  world: World,
+  board: OrderBoard,
+  clients: Map<WebSocket, ClientEntry>,
+  socket: WebSocket,
+  bytes: Uint8Array,
+): void {
+  const entry = clients.get(socket);
+  if (!entry) return;
+  const { kind, x, z } = decodeCommandOrder(bytes);
+  const team = world.players.team[entry.session.playerId] ?? 0;
+  issueOrder(board, team, kind, x, z, world.tick);
+}
+
+export const VOICE_BIND_COOLDOWN_TICKS = 32; // Ours -- see M7 plan's "ours" numbers table.
+const lastVoiceBindAtTick = new Map<number, number>();
+
+/** Bounds-checks lineId against VOICE_LINE_COUNT (row 23) and enforces a per-player cooldown
+ *  server-side (row 22) -- a modified client could otherwise bypass either check, so neither
+ *  is trusted from the client alone. Both violations are silently dropped, matching
+ *  handleLoadout's "no such thing as a client bug here" convention: never a disconnect. */
+function handleVoiceBind(
+  world: World,
+  clients: Map<WebSocket, ClientEntry>,
+  socket: WebSocket,
+  bytes: Uint8Array,
+): void {
+  const entry = clients.get(socket);
+  if (!entry) return;
+  const { lineId } = decodeVoiceBind(bytes);
+  if (lineId < 0 || lineId >= VOICE_LINE_COUNT) return;
+  const playerId = entry.session.playerId;
+  const last = lastVoiceBindAtTick.get(playerId) ?? -Infinity;
+  if (world.tick - last < VOICE_BIND_COOLDOWN_TICKS) return;
+  lastVoiceBindAtTick.set(playerId, world.tick);
+  broadcastEvent(clients, {
+    type: MessageType.Event,
+    kind: EventKind.VoiceBindPlayed,
+    a: playerId,
+    b: lineId,
+  });
+}
+
 function handleMessage(
   world: World,
   spawns: SceneSpawn[],
   botManager: BotManager,
+  board: OrderBoard,
   clients: Map<WebSocket, ClientEntry>,
   now: () => number,
   socket: WebSocket,
@@ -346,6 +401,9 @@ function handleMessage(
   else if (type === MessageType.God) handleGod(world, clients, socket, bytes);
   else if (type === MessageType.Loadout) handleLoadout(world, clients, socket, bytes);
   else if (type === MessageType.VehicleSpawn) handleVehicleSpawn(world, clients, socket, bytes);
+  else if (type === MessageType.CommandOrder)
+    handleCommandOrder(world, board, clients, socket, bytes);
+  else if (type === MessageType.VoiceBind) handleVoiceBind(world, clients, socket, bytes);
 }
 
 function handleClose(
@@ -516,7 +574,11 @@ function snapshotTurrets(world: World): TurretSnapshotData[] {
  *  passes one. Debug-overlay data only (Task 12): playerId + BotState, one entry per
  *  currently-active bot, bounds-checked against MAX_SNAPSHOT_BOTS the same as every
  *  other extras array. */
-export function buildExtras(world: World, botManager?: BotManager): WorldExtras {
+export function buildExtras(
+  world: World,
+  botManager?: BotManager,
+  board?: OrderBoard,
+): WorldExtras {
   return {
     projectiles: snapshotActiveProjectiles(world),
     flags: snapshotWorldFlags(world),
@@ -537,9 +599,24 @@ export function buildExtras(world: World, botManager?: BotManager): WorldExtras 
           .filter((runtime) => world.players.active[runtime.playerId])
           .map((runtime) => ({ playerId: runtime.playerId, state: runtime.state }))
       : [],
-    // Wired for real in Task 2 (OrderBoard threaded through buildExtras); empty until then.
-    orders: [],
+    orders: board ? ordersForSnapshot(board, world) : [],
   };
+}
+
+function ordersForSnapshot(board: OrderBoard, world: World): WorldExtras['orders'] {
+  const orders: WorldExtras['orders'] = [];
+  for (const team of [1, 2] as const) {
+    const order = currentOrder(board, team, world.tick);
+    if (!order) continue;
+    orders.push({
+      team: order.team,
+      kind: order.kind,
+      x: order.x,
+      z: order.z,
+      expiresInS: (order.expiresAtTick - world.tick) * FIXED_DT,
+    });
+  }
+  return orders;
 }
 
 /** Clears a respawned id's position history the same way disconnect already does (see
@@ -793,6 +870,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
           options.world,
           options.spawns,
           options.botManager,
+          options.board,
           clients,
           now,
           socket,
@@ -822,7 +900,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
 
   function sendAllSnapshots(): void {
     const players = serializeActivePlayers(options.world);
-    const extras = buildExtras(options.world, options.botManager);
+    const extras = buildExtras(options.world, options.botManager, options.board);
     nextSnapshotId += 1;
     for (const entry of clients.values()) {
       // Codex round 14 (PR #4): sending unconditionally let a slow or unresponsive

@@ -2,6 +2,7 @@ import { createBotManager, TARGET_TEAM_SIZE } from './bots.js';
 import { parseArgs } from './cli.js';
 import { startTickLoop } from './loop.js';
 import { startNetServer } from './net.js';
+import { createOrderBoard } from './orders.js';
 import { loadKatabaticWorld } from './world.js';
 
 const options = parseArgs(process.argv.slice(2));
@@ -39,8 +40,9 @@ for (let id = 0; id < world.baseObjects.count; id += 1) {
   });
 }
 const botManager = createBotManager(world, spawns, landmarks, options.bots);
+const board = createOrderBoard();
 
-const net = startNetServer({ world, spawns, botManager, port: options.port });
+const net = startNetServer({ world, spawns, botManager, board, port: options.port });
 await net.ready;
 
 let overrunCount = 0;
