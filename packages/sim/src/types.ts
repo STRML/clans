@@ -163,6 +163,7 @@ export interface World {
    *  AmmoRefund and applyPendingAmmoRefunds. */
   pendingAmmoRefunds: import('./weapons.js').AmmoRefund[];
   flags: FlagStore;
+  vehicles: import('./vehicles.js').VehicleStore;
   teamScores: Uint16Array;
   gameOver: boolean;
   winnerTeam: number;
