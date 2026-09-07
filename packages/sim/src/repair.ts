@@ -2,11 +2,12 @@ import { armorFor } from './armor.js';
 import { playerHitbox, raySphereDistance, type PlayerHitbox } from './damage.js';
 import { BASE_OBJECT_HIT_RADIUS, TURRET_HIT_RADIUS } from './projectiles.js';
 import type { PlayerInput, Vec3, World } from './types.js';
+import { VEHICLE_DATA, type VehicleKind } from './vehicles.js';
 
 const BEAM_RANGE = 10; // packs/repairpack.cs:48 -- DefaultRepairBeam.beamRange.
 
 interface RepairCandidate {
-  kind: 'player' | 'baseObject' | 'turret';
+  kind: 'player' | 'baseObject' | 'turret' | 'vehicle';
   id: number;
   distance: number;
 }
@@ -122,6 +123,44 @@ function findDamagedTurretCandidate(
   return nearest;
 }
 
+/** M5, self-check finding (Codex review round 1, finding 7): the spec explicitly lists
+ *  "vehicle" among repairable targets, and a vehicle's own hit-sphere radius/center are
+ *  already established elsewhere (projectiles.ts's vehicle-aware nearestStructureHitFrom) --
+ *  same checkRadius-per-kind convention reused here rather than a new one invented. Only a
+ *  DESTROYED vehicle is excluded, matching baseObject/turret's own "destroyed structures
+ *  aren't healable, only their still-standing damaged siblings are" rule; energy (shield) is
+ *  deliberately left untouched, matching those same two candidate kinds -- it already
+ *  recharges passively every tick inside stepShrike/stepWildcat, so a repair beam heals
+ *  `damage` only, never energy, for any of the three structure kinds. */
+function findDamagedVehicleCandidate(
+  world: World,
+  origin: Vec3,
+  direction: Vec3,
+): RepairCandidate | null {
+  const vehicles = world.vehicles;
+  let nearest: RepairCandidate | null = null;
+  for (let id = 0; id < vehicles.count; id += 1) {
+    if (!vehicles.active[id] || vehicles.destroyed[id] || (vehicles.damage[id] ?? 0) <= 0) {
+      continue;
+    }
+    const base = id * 3;
+    const hitbox: PlayerHitbox = {
+      center: {
+        x: vehicles.position[base] ?? 0,
+        y: vehicles.position[base + 1] ?? 0,
+        z: vehicles.position[base + 2] ?? 0,
+      },
+      radius: VEHICLE_DATA[vehicles.kind[id] as VehicleKind].checkRadius,
+      headY: Infinity,
+    };
+    nearest = nearerCandidate(
+      nearest,
+      candidateFromHitbox('vehicle', id, hitbox, origin, direction),
+    );
+  }
+  return nearest;
+}
+
 function findRepairTarget(
   world: World,
   healerId: number,
@@ -131,15 +170,15 @@ function findRepairTarget(
   const player = findDamagedPlayerCandidate(world, healerId, origin, direction);
   const baseObject = findDamagedBaseObjectCandidate(world, origin, direction);
   const turret = findDamagedTurretCandidate(world, origin, direction);
-  return nearerCandidate(nearerCandidate(player, baseObject), turret);
+  const vehicle = findDamagedVehicleCandidate(world, origin, direction);
+  return nearerCandidate(nearerCandidate(nearerCandidate(player, baseObject), turret), vehicle);
 }
 
 /** Spec: "Repair Pack fires a repair beam that adds repairRate per tick to any damaged asset,
  *  vehicle, or player." repairRate is the same 0.0033/tick for every armor (the spec's Armor
  *  numbers table), applied as a flat per-call reduction -- stepRepairPacks always runs once
  *  per fixed 32 ms tick via stepWorld, the same convention applyJet's jetEnergyDrain already
- *  uses. Vehicles are milestone 5; only players, base objects, and turrets are healable this
- *  milestone. */
+ *  uses. */
 function healCandidate(world: World, healerId: number, candidate: RepairCandidate): void {
   const rate = armorFor(world, healerId).repairRate;
   if (candidate.kind === 'player') {
@@ -152,10 +191,15 @@ function healCandidate(world: World, healerId: number, candidate: RepairCandidat
       0,
       (world.baseObjects.damage[candidate.id] ?? 0) - rate,
     );
-  } else {
+  } else if (candidate.kind === 'turret') {
     world.turrets.damage[candidate.id] = Math.max(
       0,
       (world.turrets.damage[candidate.id] ?? 0) - rate,
+    );
+  } else {
+    world.vehicles.damage[candidate.id] = Math.max(
+      0,
+      (world.vehicles.damage[candidate.id] ?? 0) - rate,
     );
   }
 }

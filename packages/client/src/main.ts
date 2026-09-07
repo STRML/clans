@@ -8,6 +8,7 @@ declare global {
       killGenerator(team: number): void;
       repairGenerator(team: number): void;
       isStationPowered(team: number): boolean;
+      teleportToVehiclePad(team: number): void;
     };
   }
 }
@@ -22,6 +23,7 @@ window.__clansDebug = {
   killGenerator: (team) => app.debugKillGenerator(team),
   repairGenerator: (team) => app.debugRepairGenerator(team),
   isStationPowered: (team) => app.debugIsStationPowered(team),
+  teleportToVehiclePad: (team) => app.debugTeleportToVehiclePad(team),
 };
 const debug = createDebug(app, document.body);
 let last = performance.now();

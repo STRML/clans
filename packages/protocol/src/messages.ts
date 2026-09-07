@@ -9,9 +9,14 @@ export enum MessageType {
   Event = 6,
   God = 7,
   Loadout = 8,
+  VehicleSpawn = 9,
 }
 
-export const PROTOCOL_VERSION = 2; // M1/M2 carried no version field at all; this milestone starts at 2.
+// M5 bumps 2 -> 3: a new MessageType (VehicleSpawn), a new PlayerInput flag bit (`use`), and
+// a new WorldExtras field (vehicles) are all wire-format changes an M4 client cannot safely
+// ignore -- WelcomeStatus.VersionMismatch exists specifically to reject a stale client rather
+// than let it desync.
+export const PROTOCOL_VERSION = 3;
 
 export enum WelcomeStatus {
   Ok = 0,
@@ -72,6 +77,11 @@ export interface LoadoutMessage {
   armor: number; // ArmorId from @clans/sim
   repairPack: boolean;
 }
+export interface VehicleSpawnMessage {
+  type: MessageType.VehicleSpawn;
+  padId: number;
+  kind: number; // VehicleKind from @clans/sim, kept as a raw number the same way other wire enums are
+}
 
 export const SNAPSHOT_EVERY_N_TICKS = 2;
 export const SNAPSHOT_FALLBACK_MS = 1000;
@@ -99,3 +109,6 @@ export const MAX_SNAPSHOT_PROJECTILES = 256;
 export const MAX_SNAPSHOT_FLAGS = 8;
 export const MAX_SNAPSHOT_BASE_OBJECTS = 64; // Matches @clans/sim's BASE_OBJECT_CAPACITY.
 export const MAX_SNAPSHOT_TURRETS = 16; // Matches @clans/sim's TURRET_CAPACITY.
+export const MAX_SNAPSHOT_VEHICLES = 255; // Matches @clans/sim's VehicleStore capacity (8) with
+// headroom; capped at 255 (not 256) because the wire count is a single unchecked-write u8 --
+// see snapshot.ts's writeExtras for why 255 is the real ceiling, not just a round number.

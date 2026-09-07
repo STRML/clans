@@ -22,6 +22,7 @@ import {
   TurretBarrelId,
   TurretBaseId,
 } from './turrets.js';
+import { SHRIKE_BLASTER_DATA, VehicleKind, type VehicleFireEvent } from './vehicles.js';
 import { WeaponId, type FireEvent } from './weapons.js';
 import { hitTestFireEvent, stepProjectiles } from './projectiles.js';
 
@@ -771,6 +772,146 @@ describe('turret-fired shots become real, damaging projectiles', () => {
       stepProjectiles(world, FIXED_DT);
     }
     expect(world.players.damage[enemy]).toBeGreaterThan(before ?? 0);
+  });
+});
+
+describe('projectiles vs vehicles', () => {
+  function placeVehicle(
+    world: ReturnType<typeof createWorld>,
+    kind: VehicleKind,
+    team: number,
+    z: number,
+  ): void {
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = kind;
+    world.vehicles.team[0] = team;
+    world.vehicles.energy[0] = 0; // so a hit lands on damage, not the shield -- simpler assertions
+    world.vehicles.position.set([0, 1.6, z], 0);
+  }
+
+  it('a direct-hit weapon (Chaingun bullet) damages a vehicle within its checkRadius', () => {
+    const world = createWorld(flat, 1);
+    placeVehicle(world, VehicleKind.Wildcat, 2, 10);
+    fire(world, {
+      playerId: -1,
+      weaponId: WeaponId.Chaingun,
+      origin: { x: 0, y: 1.6, z: 0 },
+      direction: { x: 0, y: 0, z: 1 },
+    });
+    stepProjectiles(world, FIXED_DT); // Tracer resolves same-tick.
+    expect(world.vehicles.damage[0]).toBeGreaterThan(0);
+  });
+
+  it('a Spinfusor splash reaches a vehicle standing in the blast', () => {
+    const world = createWorld(flat, 1);
+    placeVehicle(world, VehicleKind.Shrike, 2, 20);
+    fire(world, { playerId: -1, origin: { x: 0, y: 1.6, z: 0 }, direction: { x: 0, y: 0, z: 1 } });
+    for (let tick = 0; tick < 60; tick += 1) stepProjectiles(world, FIXED_DT);
+    expect(world.vehicles.damage[0]).toBeGreaterThan(0);
+  });
+
+  it('splash that reaches a mounted vehicle does not also damage its pilot (Codex review round 1, finding 5)', () => {
+    const world = createWorld(flat, 1);
+    placeVehicle(world, VehicleKind.Shrike, 2, 20);
+    const pilot = addPlayer(world, { x: 0, y: 1.6, z: 20 }, 2);
+    world.players.mountedVehicleId[pilot] = 0;
+    world.vehicles.driverId[0] = pilot;
+    const pilotDamageBefore = world.players.damage[pilot];
+    fire(world, { playerId: -1, origin: { x: 0, y: 1.6, z: 0 }, direction: { x: 0, y: 0, z: 1 } });
+    for (let tick = 0; tick < 60; tick += 1) stepProjectiles(world, FIXED_DT);
+    // explode() applies splash to every alive player in radius with no mounted exclusion --
+    // before this fix, the pilot's own hitbox (seat-locked to the exact same point as the
+    // vehicle it's sitting inside) double-dipped the same blast, taking damage on top of the
+    // vehicle's own shield/health pool real T2 has no separate pilot hitbox for while mounted.
+    expect(world.vehicles.damage[0]).toBeGreaterThan(0);
+    expect(world.players.damage[pilot]).toBe(pilotDamageBefore);
+  });
+
+  it('a mounted player is not directly hittable -- the shot damages the vehicle, not the pilot', () => {
+    const world = createWorld(flat, 1);
+    placeVehicle(world, VehicleKind.Wildcat, 2, 10);
+    const pilot = addPlayer(world, { x: 0, y: 1.6, z: 10 }, 2);
+    world.players.mountedVehicleId[pilot] = 0;
+    world.vehicles.driverId[0] = pilot;
+    const damageBefore = world.players.damage[pilot];
+    fire(world, {
+      playerId: -1,
+      weaponId: WeaponId.Chaingun,
+      origin: { x: 0, y: 1.6, z: 0 },
+      direction: { x: 0, y: 0, z: 1 },
+    });
+    stepProjectiles(world, FIXED_DT);
+    expect(world.vehicles.damage[0]).toBeGreaterThan(0);
+    expect(world.players.damage[pilot]).toBe(damageBefore);
+  });
+
+  it('a destroyed vehicle cannot be damaged further', () => {
+    const world = createWorld(flat, 1);
+    placeVehicle(world, VehicleKind.Wildcat, 2, 10);
+    world.vehicles.destroyed[0] = 1;
+    fire(world, {
+      playerId: -1,
+      weaponId: WeaponId.Chaingun,
+      origin: { x: 0, y: 1.6, z: 0 },
+      direction: { x: 0, y: 0, z: 1 },
+    });
+    stepProjectiles(world, FIXED_DT);
+    expect(world.vehicles.damage[0]).toBe(0);
+  });
+});
+
+describe('the Shrike blaster becomes a real, damaging projectile', () => {
+  function fireVehicle(
+    world: ReturnType<typeof createWorld>,
+    event: Partial<VehicleFireEvent>,
+  ): void {
+    world.pendingVehicleFireEvents = [
+      {
+        vehicleId: 0,
+        team: 1,
+        origin: { x: 0, y: 1.6, z: 0 },
+        direction: { x: 0, y: 0, z: 1 },
+        velocity: { x: 0, y: 0, z: 0 },
+        ...event,
+      },
+    ];
+  }
+
+  it('damages an enemy player it hits on a later tick', () => {
+    const world = createWorld(flat, 1);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.position.set([0, 1.6, 0], 0);
+    const enemy = addPlayer(world, { x: 0, y: 0, z: 10 }, 2); // hitbox center ends up at y=1.15, within 0.6 of the shot's y=1.6
+    const before = world.players.damage[enemy] ?? 0;
+    fireVehicle(world, {});
+    for (let tick = 0; tick < 5; tick += 1) stepProjectiles(world, FIXED_DT);
+    expect(world.players.damage[enemy]).toBeGreaterThan(before);
+  });
+
+  it('does not immediately self-hit the vehicle that fired it', () => {
+    const world = createWorld(flat, 1);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.position.set([0, 1.6, 0], 0);
+    fireVehicle(world, {});
+    stepProjectiles(world, FIXED_DT); // Tracer resolves same-tick -- must not hit its own origin vehicle.
+    expect(world.vehicles.damage[0]).toBe(0);
+  });
+
+  it('inherits the firing vehicle velocity at full strength', () => {
+    const world = createWorld(flat, 1);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.position.set([0, 1.6, -50], 0); // clear of the shot's own spawn-point hit-sphere
+    fireVehicle(world, { origin: { x: 0, y: 1.6, z: -50 }, velocity: { x: 0, y: 0, z: 20 } });
+    stepProjectiles(world, FIXED_DT);
+    const id = firstProjectile(world);
+    expect(world.projectiles.velocity[id * 3 + 2]).toBeCloseTo(SHRIKE_BLASTER_DATA.speed + 20, 5);
   });
 });
 

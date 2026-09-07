@@ -9,7 +9,9 @@ import {
   createWorld,
   FlagState,
   LIGHT_ARMOR,
+  spawnVehicleAtPad,
   stepPower,
+  VehicleKind,
   type Heightfield,
   type PlayerInput,
   type World,
@@ -22,6 +24,7 @@ import {
   encodeInput,
   encodeJoin,
   encodeLoadout,
+  encodeVehicleSpawn,
   EventKind,
   MessageType,
   type NetInputSample,
@@ -40,6 +43,7 @@ const idleSample: PlayerInput = {
   altFire: false,
   slot: 0,
   packActive: false,
+  use: false,
 };
 
 const terrain: Heightfield = {
@@ -221,6 +225,7 @@ describe('startNetServer', () => {
             altFire: false,
             slot: 0,
             packActive: false,
+            use: false,
           },
           idleSample,
           idleSample,
@@ -269,6 +274,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.send(encodeInput({ sequence: 3, samples: [idleSample, forward, idleSample] }));
     await wait(10);
@@ -312,6 +318,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.send(encodeInput({ sequence: 1, samples: [forward, idleSample, idleSample] }));
     for (let sequence = 2; sequence <= 12; sequence += 1) {
@@ -377,6 +384,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.send(encodeInput({ sequence: 3, samples: [idleSample, forward, idleSample] }));
     await wait(10);
@@ -596,6 +604,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 1,
       packActive: false,
+      use: false,
     };
     shooter.send(encodeInput({ sequence: 1, samples: [fire, fire, fire] }));
     await wait(20);
@@ -640,6 +649,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // Walk the target across the shot line for a few ticks (recorded into lag-comp history),
     // then jump it far away right before the shot — the laggy shooter's screen still shows
@@ -726,6 +736,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     for (let step = 0; step < 5; step += 1) {
       world.players.position.set([0, 0, 8], targetId * 3);
@@ -813,6 +824,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // The carrier holds the shot line for a few ticks, recorded into lag-comp history...
     for (let step = 0; step < 5; step += 1) {
@@ -873,6 +885,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.send(
       encodeInput({
@@ -943,6 +956,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // The carrier holds the shot line for a few ticks (recorded into lag-comp history), then
     // jumps far away right before the shot resolves: the laggy shooter's screen still shows
@@ -1022,6 +1036,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     shooter.send(
       encodeInput({
@@ -1088,6 +1103,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // Walk targetA across the shot line for a few ticks (recorded into lag-comp history),
     // then jump it far away right before the shot -- the laggy shooter's screen still shows
@@ -1243,6 +1259,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     for (let step = 0; step < 5; step += 1) {
       respawnWorld.players.position.set([0, 0, 8], targetId * 3);
@@ -1335,6 +1352,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     rttServer.tick(3); // call 2: history@1 = on the line
     rttServer.tick(4); // call 3: history@2 = on the line
@@ -1442,5 +1460,135 @@ describe('startNetServer', () => {
     const extras = buildExtras(extrasWorld);
     expect(extras.baseObjects).toHaveLength(1);
     expect(extras.baseObjects[0]?.powered).toBe(1);
+  });
+
+  it('buildExtras includes vehicles', () => {
+    const extrasWorld = createWorld(terrain, 1, 8);
+    createBaseObjects(extrasWorld, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: 5, y: 0, z: 0 } },
+    ]);
+    stepPower(extrasWorld);
+    spawnVehicleAtPad(extrasWorld, 1, VehicleKind.Wildcat);
+    const extras = buildExtras(extrasWorld);
+    expect(extras.vehicles).toHaveLength(1);
+    expect(extras.vehicles[0]?.kind).toBe(VehicleKind.Wildcat);
+  });
+
+  it('a VehicleSpawn message from a player near a powered pad spawns a vehicle', async () => {
+    const vehicleWorld = createWorld(terrain, 1, 8);
+    createBaseObjects(vehicleWorld, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: 1, y: 0, z: 0 } },
+    ]);
+    stepPower(vehicleWorld);
+    const vehicleSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
+    const vehicleServer = startNetServer({
+      world: vehicleWorld,
+      spawns: vehicleSpawns,
+      port: TEST_PORT + 16,
+    });
+    await vehicleServer.ready;
+    const client = await connect(TEST_PORT + 16);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    client.send(encodeVehicleSpawn({ padId: 1, kind: VehicleKind.Shrike }));
+    await wait(10);
+    vehicleServer.tick(1);
+    expect(vehicleWorld.vehicles.count).toBe(1);
+    expect(vehicleWorld.vehicles.active[0]).toBe(1);
+    expect(vehicleWorld.vehicles.kind[0]).toBe(VehicleKind.Shrike);
+    client.close();
+    vehicleServer.close();
+  });
+
+  it('a VehicleSpawn message from a player too far from the named pad is silently ignored', async () => {
+    const vehicleWorld = createWorld(terrain, 1, 8);
+    createBaseObjects(vehicleWorld, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: 500, y: 0, z: 0 } },
+    ]);
+    stepPower(vehicleWorld);
+    const farSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [0, 0, 0], radius: 5 }];
+    const vehicleServer = startNetServer({
+      world: vehicleWorld,
+      spawns: farSpawns,
+      port: TEST_PORT + 17,
+    });
+    await vehicleServer.ready;
+    const client = await connect(TEST_PORT + 17);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    client.send(encodeVehicleSpawn({ padId: 1, kind: VehicleKind.Shrike }));
+    await wait(10);
+    vehicleServer.tick(1);
+    expect(vehicleWorld.vehicles.count).toBe(0);
+    client.close();
+    vehicleServer.close();
+  });
+
+  it('a VehicleSpawn message for an enemy team pad is rejected (Codex review round 2, finding 2)', async () => {
+    // Before this fix, the only check was proximity -- no check that the pad belongs to
+    // the sender's own team. spawnVehicleAtPad creates the vehicle under the PAD's team
+    // (never the sender's), and unconditionally destroys whatever the pad already hosts
+    // BEFORE the cap check -- so standing within range of an enemy pad let any connected
+    // client destroy or replace that enemy team's vehicle for free.
+    const vehicleWorld = createWorld(terrain, 1, 8);
+    createBaseObjects(vehicleWorld, [
+      { kind: BaseObjectKind.Generator, team: 2, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationVehiclePad, team: 2, position: { x: 1, y: 0, z: 0 } },
+    ]);
+    stepPower(vehicleWorld);
+    // The connecting player spawns on team 1, right next to team 2's own pad.
+    const vehicleSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
+    const vehicleServer = startNetServer({
+      world: vehicleWorld,
+      spawns: vehicleSpawns,
+      port: TEST_PORT + 18,
+    });
+    await vehicleServer.ready;
+    const client = await connect(TEST_PORT + 18);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    client.send(encodeVehicleSpawn({ padId: 1, kind: VehicleKind.Shrike }));
+    await wait(10);
+    vehicleServer.tick(1);
+    expect(vehicleWorld.vehicles.count).toBe(0);
+    client.close();
+    vehicleServer.close();
+  });
+
+  it('a VehicleSpawn message from a dead player is rejected (Codex review round 2, finding 2)', async () => {
+    const vehicleWorld = createWorld(terrain, 1, 8);
+    createBaseObjects(vehicleWorld, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: 1, y: 0, z: 0 } },
+    ]);
+    stepPower(vehicleWorld);
+    const vehicleSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
+    const vehicleServer = startNetServer({
+      world: vehicleWorld,
+      spawns: vehicleSpawns,
+      port: TEST_PORT + 19,
+    });
+    await vehicleServer.ready;
+    const client = await connect(TEST_PORT + 19);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+    vehicleWorld.players.alive[0] = 0; // the first joiner is always allocated id 0
+
+    client.send(encodeVehicleSpawn({ padId: 1, kind: VehicleKind.Shrike }));
+    await wait(10);
+    vehicleServer.tick(1);
+    expect(vehicleWorld.vehicles.count).toBe(0);
+    client.close();
+    vehicleServer.close();
   });
 });

@@ -166,6 +166,12 @@ export function respawnPlayer(world: World, id: number, spawn: Vec3): void {
   players.ski[id] = 0;
   players.wasGrounded[id] = 0;
   players.wasJumpHeld[id] = 0;
+  // Defense in depth: the only normal path to a mounted player taking lethal damage is
+  // vehicle-destruction ejection (vehicles.ts's ejectPilot), which already clears this and
+  // the vehicle's own driverId the instant it fires. Clearing it again here means a respawn
+  // can never leave a player's PlayerStore row claiming a vehicle it no longer drives, no
+  // matter which path got them here.
+  players.mountedVehicleId[id] = -1;
   // Codex review round 8, PR #9: health/alive alone cannot tell a full-health-to-full-health
   // respawn apart from "nothing happened" when the dead tick's snapshot never reaches a
   // client. This counter is the explicit, always-correct signal that closes that gap -- see

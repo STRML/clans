@@ -18,8 +18,11 @@ import {
   respawnPlayer,
   sampleTerrain,
   serializeActivePlayers,
+  serializeActiveVehicles,
   setGodMode,
+  spawnVehicleAtPad,
   stepWorld,
+  VEHICLE_PAD_USE_RADIUS,
   type FireEvent,
   type HitResult,
   type PlayerInput,
@@ -37,6 +40,7 @@ import {
   decodeInput,
   decodeJoin,
   decodeLoadout,
+  decodeVehicleSpawn,
   encodeEvent,
   encodeSnapshot,
   encodeWelcome,
@@ -124,6 +128,7 @@ const IDLE_INPUT: PlayerInput = {
   altFire: false,
   slot: 0,
   packActive: false,
+  use: false,
 };
 // Bounds a client's catch-up queue. Each Input message contributes at most 3 samples and
 // a duplicate/reordered sequence is dropped in applyInputMessage, so this only guards the
@@ -271,6 +276,45 @@ function handleLoadout(
   applyLoadoutRequest(world, entry.session.playerId, armor, repairPack);
 }
 
+/** A refused request (unpowered pad, team already at its pad-derived cap, bad pad id, or the
+ *  sender too far from the named pad) is silently a no-op, matching handleLoadout's own
+ *  convention above: the client's pad menu (Task 13) already only offers a choice while
+ *  standing in a powered pad's use radius, so a legitimate client rarely sends a doomed
+ *  request in the first place -- see the M5 plan's Task 12 notes. `spawnVehicleAtPad` itself
+ *  already re-checks power/cap at call time (never trusts an earlier "in range" result), so
+ *  this handler's own job is only the proximity check spawnVehicleAtPad has no player
+ *  position to make on its own. */
+function positionAt(arr: Float64Array, base: number): [number, number, number] {
+  return [arr[base] ?? 0, arr[base + 1] ?? 0, arr[base + 2] ?? 0];
+}
+
+function handleVehicleSpawn(
+  world: World,
+  clients: Map<WebSocket, ClientEntry>,
+  socket: WebSocket,
+  bytes: Uint8Array,
+): void {
+  const entry = clients.get(socket);
+  if (!entry) return;
+  const { padId, kind } = decodeVehicleSpawn(bytes);
+  if (padId < 0 || padId >= world.baseObjects.count) return;
+  const playerId = entry.session.playerId;
+  // Codex review round 2 (this PR), finding 2 (P1): the only check here was proximity --
+  // no check that the sender is alive, and no check that the pad belongs to the sender's
+  // own team. spawnVehicleAtPad creates the vehicle under the PAD's team
+  // (padSpawnTeam(world, padId)), and destroys whatever the pad already hosts BEFORE the
+  // cap check unconditionally (vehicles.ts's own documented Task 1 behavior) -- so a raw
+  // VehicleSpawn message sent while merely standing within VEHICLE_PAD_USE_RADIUS of an
+  // ENEMY pad let any connected client destroy or replace that enemy team's vehicle for
+  // free, and a dead player's still-open connection could do the same before respawning.
+  if (!world.players.active[playerId] || !world.players.alive[playerId]) return;
+  if (world.baseObjects.team[padId] !== world.players.team[playerId]) return;
+  const [px, py, pz] = positionAt(world.players.position, playerId * 3);
+  const [bx, by, bz] = positionAt(world.baseObjects.position, padId * 3);
+  if (Math.hypot(px - bx, py - by, pz - bz) > VEHICLE_PAD_USE_RADIUS) return;
+  spawnVehicleAtPad(world, padId, kind);
+}
+
 function handleMessage(
   world: World,
   spawns: SceneSpawn[],
@@ -285,6 +329,7 @@ function handleMessage(
   else if (type === MessageType.Ack) handleAck(clients, now, socket, bytes);
   else if (type === MessageType.God) handleGod(world, clients, socket, bytes);
   else if (type === MessageType.Loadout) handleLoadout(world, clients, socket, bytes);
+  else if (type === MessageType.VehicleSpawn) handleVehicleSpawn(world, clients, socket, bytes);
 }
 
 /**
@@ -471,6 +516,11 @@ export function buildExtras(world: World): WorldExtras {
     flags: snapshotWorldFlags(world),
     baseObjects: snapshotBaseObjects(world),
     turrets: snapshotTurrets(world),
+    // Reuses @clans/sim's own serializeActiveVehicles rather than a hand-rolled per-field
+    // builder like the base-object/turret ones above -- VehicleSnapshotData's shape is
+    // already the sim type, not a separately duplicated protocol-side shape (see snapshot.ts's
+    // WorldExtras.vehicles).
+    vehicles: serializeActiveVehicles(world),
     teamScores: [world.teamScores[1] ?? 0, world.teamScores[2] ?? 0],
     gameOver: world.gameOver,
     winnerTeam: world.winnerTeam,

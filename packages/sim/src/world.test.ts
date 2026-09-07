@@ -151,6 +151,7 @@ describe('fixed world', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     stepWorld(world, new Map([[a, input]]));
     expect(world.tick).toBe(tickBefore);

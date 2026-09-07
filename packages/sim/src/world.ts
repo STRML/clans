@@ -7,6 +7,7 @@ import { stepRepairPacks } from './repair.js';
 import type { Heightfield } from './terrain.js';
 import type { PlayerInput, Vec3, World } from './types.js';
 import { createEmptyTurrets, stepTurrets } from './turrets.js';
+import { createVehicleStore, stepVehicles } from './vehicles.js';
 import { resetLoadout, stepWeapons, WEAPON_COUNT } from './weapons.js';
 
 export const FIXED_TICK_MS = 32;
@@ -48,6 +49,9 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
     forceFields: [],
     turrets: createEmptyTurrets(),
     pendingTurretFireEvents: [],
+    vehicles: createVehicleStore(),
+    pendingVehicleFireEvents: [],
+    pendingVehicleDestroyed: [],
     players: {
       count: 0,
       freeIds: [],
@@ -78,6 +82,8 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
       respawnSeq: new Uint16Array(capacity),
       armor: new Uint8Array(capacity),
       hasRepairPack: new Uint8Array(capacity),
+      mountedVehicleId: new Int16Array(capacity).fill(-1),
+      wasUseHeld: new Uint8Array(capacity),
     },
     projectiles: createProjectileStore(),
     pendingDeaths: [],
@@ -119,6 +125,8 @@ export function resetPlayerToSpawn(world: World, id: number, spawn: Vec3): void 
   players.wasGrounded[id] = 0;
   players.wasJumpHeld[id] = 0;
   players.landingSpeed[id] = 0;
+  players.mountedVehicleId[id] = -1;
+  players.wasUseHeld[id] = 0;
 }
 
 export function addPlayer(world: World, spawn: Vec3, team = 0, armor = ArmorId.Light): number {
@@ -157,6 +165,12 @@ export function removePlayer(world: World, id: number): void {
   // not touch the deeper reused-id identity problem (stale projectile ownerId self-exclusion),
   // which is already tracked separately at github.com/STRML/clans/issues/8.
   world.pendingAmmoRefunds = world.pendingAmmoRefunds.filter((refund) => refund.playerId !== id);
+  // Failure matrix row 12 (M5): a vehicle's driver disconnecting must not leave the vehicle
+  // pointing at a removed player id forever. The vehicle itself survives, unpiloted, wherever
+  // it was -- only the dangling driverId is cleared, not the vehicle's position/velocity.
+  for (let vId = 0; vId < world.vehicles.count; vId += 1) {
+    if (world.vehicles.driverId[vId] === id) world.vehicles.driverId[vId] = -1;
+  }
 }
 
 /**
@@ -184,6 +198,12 @@ export function stepWorld(
   if (world.gameOver) return;
   stepPlayers(world, inputs, dt);
   stepWeapons(world, inputs, dt);
+  // Runs before stepTurrets so the AA barrel sees this tick's vehicle positions before it
+  // decides whether to acquire or fire, and before stepProjectiles so a Shrike blaster shot
+  // fired this tick is already in pendingVehicleFireEvents for stepProjectiles to materialize
+  // in the SAME tick -- exactly the relationship stepTurrets -> stepProjectiles already has
+  // for turret shots (M5 plan, Global Constraints).
+  stepVehicles(world, inputs, dt);
   stepTurrets(world, dt);
   stepProjectiles(world, dt);
   // Codex round 1, finding 5: this used to run before stepProjectiles, so a generator

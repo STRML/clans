@@ -11,6 +11,7 @@ import {
   TurretBarrelId,
   TurretBaseId,
 } from './turrets.js';
+import { VehicleKind } from './vehicles.js';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -282,5 +283,91 @@ describe('applyTurretDamage', () => {
     expect(world.turrets.destroyed[turret]).toBe(1);
     stepTurrets(world, FIXED_DT);
     expect(world.pendingTurretFireEvents).toHaveLength(0);
+  });
+});
+
+describe('AA barrel vehicle targeting (M5, failure matrix row 15)', () => {
+  it('a powered AA barrel with line of sight to an enemy vehicle in range acquires it', () => {
+    const world = createWorld(flat, 1);
+    const turret = poweredTurret(world, TurretBarrelId.AABarrelLarge);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.team[0] = 2; // enemy
+    world.vehicles.position.set([50, 5, 0], 0); // within the 200 m attackRadius
+    stepTurrets(world, FIXED_DT);
+    expect(world.turrets.targetId[turret]).toBe(0);
+    expect(world.turrets.targetKind[turret]).toBe(1);
+  });
+
+  it('the AA barrel does not target a friendly vehicle', () => {
+    const world = createWorld(flat, 1);
+    const turret = poweredTurret(world, TurretBarrelId.AABarrelLarge);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.team[0] = 1; // friendly
+    world.vehicles.position.set([50, 5, 0], 0);
+    stepTurrets(world, FIXED_DT);
+    expect(world.turrets.targetId[turret]).toBe(-1);
+  });
+
+  it('ignores a vehicle outside attackRadius', () => {
+    const world = createWorld(flat, 1);
+    const turret = poweredTurret(world, TurretBarrelId.AABarrelLarge);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.team[0] = 2;
+    world.vehicles.position.set([500, 5, 0], 0); // past the 200 m attackRadius
+    stepTurrets(world, FIXED_DT);
+    expect(world.turrets.targetId[turret]).toBe(-1);
+  });
+
+  it('a hill between the AA barrel and an in-range vehicle blocks acquisition (row 16)', () => {
+    const world = createWorld(hillBetween(10), 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: -8, y: 0, z: 0 } },
+    ]);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.AABarrelLarge, team: 1, position: { x: -8, y: 2, z: 0 } },
+    ]);
+    stepPower(world);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.team[0] = 2;
+    world.vehicles.position.set([8, 0, 0], 0); // beyond the ridge at world x=0
+    stepTurrets(world, FIXED_DT);
+    expect(world.turrets.targetId[0]).toBe(-1);
+  });
+
+  it('fires on the acquired vehicle: a pending fire event points at it, not a player', () => {
+    const world = createWorld(flat, 1);
+    const turret = poweredTurret(world, TurretBarrelId.AABarrelLarge);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.team[0] = 2;
+    world.vehicles.position.set([50, 5, 0], 0);
+    stepTurrets(world, FIXED_DT); // a fresh turret starts Ready, so acquire+fire land the same tick
+    expect(world.pendingTurretFireEvents).toHaveLength(1);
+    expect(world.turrets.targetId[turret]).toBe(0);
+    expect(world.turrets.targetKind[turret]).toBe(1);
+  });
+
+  it('re-acquires a vehicle target that is destroyed mid-engagement', () => {
+    const world = createWorld(flat, 1);
+    const turret = poweredTurret(world, TurretBarrelId.AABarrelLarge);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.team[0] = 2;
+    world.vehicles.position.set([50, 5, 0], 0);
+    stepTurrets(world, FIXED_DT);
+    expect(world.turrets.targetId[turret]).toBe(0);
+    world.vehicles.destroyed[0] = 1;
+    stepTurrets(world, FIXED_DT);
+    expect(world.turrets.targetId[turret]).toBe(-1);
   });
 });

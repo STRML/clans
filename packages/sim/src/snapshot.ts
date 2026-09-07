@@ -186,3 +186,116 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   players.godMode[data.id] = data.godMode;
   players.wasJumpHeld[data.id] = data.wasJumpHeld;
 }
+
+/** The wire shape of one vehicle. Unlike base objects/turrets, vehicles have no mission-file
+ *  placement to pre-seed from -- Katabatic's .mis places only the pad, never a vehicle --
+ *  every field here is genuinely dynamic, including `kind`/`team`, which for a base object or
+ *  turret would be static placement data never carried on the wire at all. `energy` is
+ *  included deliberately (unlike BaseObjectSnapshotData/TurretSnapshotData, which omit it,
+ *  issue #14): a vehicle's shield depletion needs to reach the client the same way its
+ *  health does. */
+/**
+ * Codex review round 1 (this PR), finding 4: vx/vy/vz, angVelYaw/Pitch/Roll, padId,
+ * weaponTimer, onGround, and wasJumpHeld were all real VehicleStore state hashWorld's own
+ * mixVehicle already covers -- state stepVehicles mutates every tick and depends on to
+ * decide next tick's behavior -- but none of them reached the wire. A client reconstructing
+ * a vehicle purely from the fields above got a physically frozen snapshot: zero velocity/
+ * angular velocity every tick regardless of the vehicle's actual motion, which starved the
+ * mounted driver's own client-side prediction replay (reconcile() in netclient.ts) of the
+ * one thing it most needs to continue simulating from -- and would have desynced hashWorld
+ * against a decoded world the instant any vehicle was moving.
+ */
+export interface VehicleSnapshotData {
+  id: number;
+  kind: number;
+  team: number;
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  yaw: number;
+  pitch: number;
+  roll: number;
+  angVelYaw: number;
+  angVelPitch: number;
+  angVelRoll: number;
+  energy: number;
+  damage: number;
+  destroyed: 0 | 1;
+  driverId: number;
+  padId: number;
+  weaponTimer: number;
+  onGround: 0 | 1;
+  wasJumpHeld: 0 | 1;
+}
+
+export function serializeVehicle(world: World, id: number): VehicleSnapshotData {
+  const v = world.vehicles;
+  const base = id * 3;
+  return {
+    id,
+    kind: num(v.kind, id),
+    team: num(v.team, id),
+    x: num(v.position, base),
+    y: num(v.position, base + 1),
+    z: num(v.position, base + 2),
+    vx: num(v.velocity, base),
+    vy: num(v.velocity, base + 1),
+    vz: num(v.velocity, base + 2),
+    yaw: num(v.yaw, id),
+    pitch: num(v.pitch, id),
+    roll: num(v.roll, id),
+    angVelYaw: num(v.angVel, base),
+    angVelPitch: num(v.angVel, base + 1),
+    angVelRoll: num(v.angVel, base + 2),
+    energy: num(v.energy, id),
+    damage: num(v.damage, id),
+    destroyed: bit(v.destroyed, id),
+    driverId: num(v.driverId, id),
+    padId: num(v.padId, id),
+    weaponTimer: num(v.weaponTimer, id),
+    onGround: bit(v.onGround, id),
+    wasJumpHeld: bit(v.wasJumpHeld, id),
+  };
+}
+
+export function serializeActiveVehicles(world: World): VehicleSnapshotData[] {
+  const out: VehicleSnapshotData[] = [];
+  for (let id = 0; id < world.vehicles.count; id += 1) {
+    if (world.vehicles.active[id]) out.push(serializeVehicle(world, id));
+  }
+  return out;
+}
+
+/**
+ * Writes a decoded snapshot's vehicle fields onto `world.vehicles` by id, growing the store
+ * to fit -- the vehicle sibling of `deserializePlayer`'s own `growTo`, but for vehicles this
+ * is not a rare "id we've never locally placed" fallback: because there is no mission-file
+ * placement to pre-seed from (see this interface's own doc comment), `deserializeVehicle` is
+ * the ONLY path a client-side vehicle id is ever created. Every field, including `kind`/
+ * `team`, is written every call rather than assumed already-seeded.
+ */
+export function deserializeVehicle(world: World, data: VehicleSnapshotData): void {
+  const v = world.vehicles;
+  if (data.id >= v.active.length) return;
+  if (data.id >= v.count) v.count = data.id + 1;
+  v.active[data.id] = 1;
+  v.kind[data.id] = data.kind;
+  v.team[data.id] = data.team;
+  v.position.set([data.x, data.y, data.z], data.id * 3);
+  v.velocity.set([data.vx, data.vy, data.vz], data.id * 3);
+  v.yaw[data.id] = data.yaw;
+  v.pitch[data.id] = data.pitch;
+  v.roll[data.id] = data.roll;
+  v.angVel.set([data.angVelYaw, data.angVelPitch, data.angVelRoll], data.id * 3);
+  v.energy[data.id] = data.energy;
+  v.damage[data.id] = data.damage;
+  v.destroyed[data.id] = data.destroyed;
+  v.driverId[data.id] = data.driverId;
+  v.padId[data.id] = data.padId;
+  v.weaponTimer[data.id] = data.weaponTimer;
+  v.onGround[data.id] = data.onGround;
+  v.wasJumpHeld[data.id] = data.wasJumpHeld;
+}

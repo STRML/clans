@@ -15,7 +15,9 @@ import {
   stepWorld,
   type Heightfield,
   type PlayerInput,
+  type PlayerSnapshotData,
   type RandomState,
+  type VehicleSnapshotData,
   type World,
 } from '@clans/sim';
 import {
@@ -132,6 +134,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // Like the real server: step with the newest input received, idle until the first arrives.
     let serverInput: PlayerInput = {
@@ -145,6 +148,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     const totalTicks = Math.ceil(3 / FIXED_DT);
     // Prediction is judged at equal input sequence: the client's position right after it
@@ -319,6 +323,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     for (let i = 0; i < 5; i += 1) client.tick(forward);
     expect(client.world.players.velocity[2]).not.toBe(0);
@@ -357,6 +362,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // Well past the ceiling (4x MAX_REPLAY_TICKS), and well past the existing "40 ticks,
     // then reconcile hard-snaps" scenario this must not disturb.
@@ -388,6 +394,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     for (let i = 0; i < 20_000; i += 1) client.tick(idleInput);
     expect((client as unknown as { sequence: number }).sequence).toBe(0);
@@ -454,6 +461,7 @@ describe('NetClient', () => {
         altFire: false,
         slot: 0,
         packActive: false,
+        use: false,
       }),
     ).not.toThrow();
   });
@@ -524,6 +532,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     for (let tick = 0; tick < 40; tick += 1) {
       clock.ms += FIXED_TICK_MS;
@@ -592,6 +601,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     for (let i = 0; i < 5; i += 1) client.tick(skiInput);
     const pending = (client as unknown as { pendingInputs: unknown[] }).pendingInputs;
@@ -701,6 +711,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.tick(heldJump); // queues pendingInputs[0] (sequence 1); predicts no new jump
     expect(client.world.players.velocity[1]).toBeCloseTo(0, 5);
@@ -768,6 +779,7 @@ describe('NetClient', () => {
       flags: [{ id: 0, team: 1, state: 1, x: 5, y: 0, z: 5, carrierId: 0, returnInS: -1 }],
       baseObjects: [],
       turrets: [],
+      vehicles: [],
       teamScores: [100, 0],
       gameOver: false,
       winnerTeam: 0,
@@ -799,6 +811,7 @@ describe('NetClient', () => {
       ...emptyExtras(),
       baseObjects: [{ id: 0, damage: 0.4, destroyed: 0, powered: 1 }],
       turrets: [{ id: 0, damage: 0.1, destroyed: 0, powered: 1, targetId: 5, state: 2 }],
+      vehicles: [],
     };
     transport.pump([encodeSnapshot(1, 0, 0, [], null, extras)]);
 
@@ -835,6 +848,7 @@ describe('NetClient', () => {
       flags: [],
       baseObjects: [],
       turrets: [],
+      vehicles: [],
       teamScores: [3, 1],
       gameOver: true,
       winnerTeam: 1,
@@ -860,6 +874,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     });
     expect(client.world.players.position[0] ?? 0).toBe(beforeX);
   });
@@ -886,6 +901,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // Leave this input unacknowledged: the snapshot below names lastInputSequence 0,
     // so reconcile() will still find it pending and eligible for replay.
@@ -927,6 +943,7 @@ describe('NetClient', () => {
       flags: [],
       baseObjects: [],
       turrets: [],
+      vehicles: [],
       teamScores: [3, 1],
       gameOver: true,
       winnerTeam: 1,
@@ -999,6 +1016,7 @@ describe('NetClient', () => {
       flags: [],
       baseObjects: [],
       turrets: [],
+      vehicles: [],
       teamScores: [0, 0],
       gameOver: false,
       winnerTeam: 0,
@@ -1024,6 +1042,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     });
 
     expect(client.world.tick).toBe(serverTick + 1);
@@ -1377,6 +1396,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.tick(fireInput); // sequence 1: predicts a Spinfusor shot, decrementing local ammo
     expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(14);
@@ -1451,6 +1471,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // sequence 1: predicts a Spinfusor shot locally -- this input never actually reaches
     // the server (lost or evicted), exactly like the ammo self-heal test above.
@@ -1542,6 +1563,7 @@ describe('NetClient', () => {
       altFire: true,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // sequence 1: predicts a grenade throw locally -- this input never actually reaches the
     // server (lost or evicted), exactly like the ammo/weapon-state self-heal tests above.
@@ -1694,6 +1716,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.tick(idleInput);
 
@@ -1795,6 +1818,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.world.players.position[1] = client.world.killY - 1;
     client.tick(noInput);
@@ -1821,6 +1845,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 1, // Spinfusor
       packActive: false,
+      use: false,
     };
     client.tick(fireSpinfusor); // fire before Welcome ever arrives
 
@@ -1845,5 +1870,175 @@ describe('NetClient', () => {
     expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
     expect(client.world.projectiles.count).toBe(0);
     expect(Array.from(client.world.projectiles.active).every((flag) => flag === 0)).toBe(true);
+  });
+
+  // Codex review round 1 (this PR), finding 3: deserializeVehicle wrote each vehicle's own
+  // driverId onto world.vehicles, but nothing ever wrote the other side of that relationship
+  // -- world.players.mountedVehicleId, which movement.ts's stepPlayer and weapons.ts's
+  // stepOnePlayer both check before simulating this player at all. Without it, a client that
+  // lost a mount race (or was ejected by a crash the client hadn't itself predicted) stayed
+  // locally "mounted" forever.
+  describe('vehicle mount reconciliation', () => {
+    function defaultServerState(overrides: Partial<PlayerSnapshotData> = {}): PlayerSnapshotData {
+      return {
+        id: 0,
+        team: 1,
+        x: 0,
+        y: 0,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        yaw: 0,
+        energy: 60,
+        health: 60,
+        weaponSlot: 4,
+        onGround: 1 as const,
+        ski: 0 as const,
+        respawnSeq: 0,
+        discAmmo: 15,
+        chaingunAmmo: 100,
+        mortarAmmo: 0,
+        grenades: 5,
+        weaponState: 1,
+        weaponTimer: 0,
+        spunUp: 0 as const,
+        grenadeCooldown: 0,
+        score: 0,
+        godMode: 0 as const,
+        wasJumpHeld: 0 as const,
+        armor: 0,
+        hasRepairPack: 0 as const,
+        ...overrides,
+      };
+    }
+    function vehicleSnapshot(overrides: Partial<VehicleSnapshotData> = {}): VehicleSnapshotData {
+      return {
+        id: 5,
+        kind: 0,
+        team: 1,
+        x: 0,
+        y: 0,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        yaw: 0,
+        pitch: 0,
+        roll: 0,
+        angVelYaw: 0,
+        angVelPitch: 0,
+        angVelRoll: 0,
+        energy: 100,
+        damage: 0,
+        destroyed: 0 as const,
+        driverId: -1,
+        padId: -1,
+        weaponTimer: 0,
+        onGround: 0 as const,
+        wasJumpHeld: 0 as const,
+        ...overrides,
+      };
+    }
+
+    it('sets players.mountedVehicleId[LOCAL_SLOT] when the snapshot reports this player driving a vehicle', () => {
+      const transport = makeTransport(makeLink({ value: 41 }));
+      const client = new NetClient(transport, terrain, { now: () => clock.ms });
+      client.playerId = 0;
+      const extras: WorldExtras = {
+        ...emptyExtras(),
+        // driverId is a real server-assigned playerId (0, matching client.playerId here),
+        // never the client's own remapped LOCAL_SLOT world.players index.
+        vehicles: [vehicleSnapshot({ id: 5, driverId: 0 })],
+      };
+      transport.pump([encodeSnapshot(1, 1, 0, [defaultServerState()], null, extras)]);
+      expect(client.world.players.mountedVehicleId[0]).toBe(5);
+    });
+
+    it('clears a stale local mount once the snapshot no longer reports this player as any vehicle driver', () => {
+      const transport = makeTransport(makeLink({ value: 41 }));
+      const client = new NetClient(transport, terrain, { now: () => clock.ms });
+      client.playerId = 0;
+      transport.pump([
+        encodeSnapshot(1, 1, 0, [defaultServerState()], null, {
+          ...emptyExtras(),
+          vehicles: [vehicleSnapshot({ id: 5, driverId: 0 })],
+        }),
+      ]);
+      expect(client.world.players.mountedVehicleId[0]).toBe(5);
+
+      // The server no longer lists this player as any vehicle's driver -- a lost mount race,
+      // or an ejection (crash, destruction) this client hadn't itself predicted yet. Before
+      // this fix, mountedVehicleId simply never got corrected back down: this player stayed
+      // locally "mounted" on vehicle 5 forever, and movement.ts/weapons.ts kept skipping
+      // their own simulation because of it.
+      transport.pump([
+        encodeSnapshot(2, 2, 0, [defaultServerState()], null, {
+          ...emptyExtras(),
+          vehicles: [vehicleSnapshot({ id: 5, driverId: -1 })],
+        }),
+      ]);
+      expect(client.world.players.mountedVehicleId[0]).toBe(-1);
+    });
+
+    it('local prediction applies this players own input to their vehicle AND seat-locks their own transform to it, even when their real server id is not 0 (Codex review rounds 2 and 3, findings 1)', () => {
+      // Round 2, finding 1: world.vehicles.driverId held the real server-assigned playerId
+      // (had to -- occupancy checks and mountedVehicleId derivation both need it truthful
+      // for every vehicle, not just this player's own), but every local prediction tick
+      // keyed its input map by LOCAL_SLOT (0) only, so stepOneVehicle's own
+      // `inputs.get(driverId)` lookup only ever found this player's input when their real
+      // id happened to BE 0 -- true for whichever player connected first, false for
+      // everyone else. Round 3, finding 1 (a second, deeper P1 the round-2 fix's own
+      // input-map-duplication approach didn't reach): seatDriver/ejectPilot/mount-cleanup
+      // ALSO index world.players (position, velocity, mountedVehicleId) by driverId, and
+      // this client's own world.players has no row at any index but LOCAL_SLOT -- so even
+      // once the vehicle responded to input, the DRIVER's own transform never followed it;
+      // movement.ts skips a mounted player's own stepPlayer entirely, so nothing else wrote
+      // their position either. Both are fixed together now by remapping driverId itself
+      // (remapVehicleDriverId) rather than layering a second, narrower fix on top -- see
+      // that function's own doc comment. Using playerId 7 here (deliberately not 0, and not
+      // LOCAL_SLOT) reproduces the common case (any player who didn't connect first), not
+      // the coincidental one only real id 0 would have masked.
+      const transport = makeTransport(makeLink({ value: 41 }));
+      const client = new NetClient(transport, terrain, { now: () => clock.ms });
+      client.playerId = 7;
+      transport.pump([
+        encodeSnapshot(1, 1, 0, [defaultServerState({ id: 7 })], null, {
+          ...emptyExtras(),
+          // kind 0 (Shrike, see vehicleSnapshot's own default): forward thrust (moveZ) only
+          // ever touches horizontal (x/z) velocity -- vertical (y) is gravity/lift, which
+          // acts every tick regardless of input, so isolating x/z rules out a false pass
+          // from gravity alone.
+          vehicles: [vehicleSnapshot({ id: 5, driverId: 7, y: 50 })],
+        }),
+      ]);
+      const forward: PlayerInput = {
+        moveX: 0,
+        moveZ: 1,
+        yaw: 0,
+        pitch: 0,
+        jump: false,
+        jet: false,
+        fire: false,
+        altFire: false,
+        slot: 0,
+        packActive: false,
+        use: false,
+      };
+      for (let i = 0; i < 30; i += 1) client.tick(forward);
+      const vx = client.world.vehicles.velocity[5 * 3] ?? 0;
+      const vz = client.world.vehicles.velocity[5 * 3 + 2] ?? 0;
+      expect(Math.hypot(vx, vz)).toBeGreaterThan(0);
+      // seatDriver pins the driver's own position to the vehicle's own transform exactly --
+      // if it silently no-op'd (round 3's own finding), the player would still sit at their
+      // original (0,0,0) reconciled position while the vehicle itself moved out from
+      // under them.
+      expect(client.world.players.position[0]).toBeCloseTo(
+        client.world.vehicles.position[5 * 3] ?? 0,
+      );
+      expect(client.world.players.position[2]).toBeCloseTo(
+        client.world.vehicles.position[5 * 3 + 2] ?? 0,
+      );
+    });
   });
 });

@@ -37,6 +37,7 @@ const idle: PlayerInput = {
   altFire: false,
   slot: 0,
   packActive: false,
+  use: false,
 };
 
 describe('pickup, capture, and scoring', () => {

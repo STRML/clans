@@ -20,6 +20,13 @@ import {
   type TurretFireEvent,
 } from './turrets.js';
 import {
+  applyVehicleDamage,
+  SHRIKE_BLASTER_DATA,
+  VEHICLE_DATA,
+  VehicleKind,
+  type VehicleFireEvent,
+} from './vehicles.js';
+import {
   GRENADE_DATA,
   ProjectileType,
   WEAPON_DATA,
@@ -185,12 +192,22 @@ function pointAlongSegment(previous: Vec3, current: Vec3, distance: number): Vec
 
 /** A player counts as a valid hit target when it's alive and isn't the one who fired the
  *  shot -- shared by the direct-hit, grenade-contact, and hitscan target searches so the
- *  "skip inactive/dead/self" rule lives in exactly one place. */
+ *  "skip inactive/dead/self" rule lives in exactly one place.
+ *
+ *  A MOUNTED player is never a valid target (M5): their position is seat-locked to their
+ *  vehicle's own transform (vehicles.ts's stepVehicles), so without this exclusion a shot
+ *  would test both the vehicle's own hit-sphere (nearestStructureHitFrom, now vehicle-aware)
+ *  AND the tiny player hitbox sitting at that exact same point -- and since a player hitbox
+ *  is far smaller than a vehicle's checkRadius, findDirectHitFrom would almost always win the
+ *  nearestOfThree race with a shorter distance, landing every hit on the PILOT directly and
+ *  bypassing the vehicle's shield/health pool entirely. Real T2 has no separate pilot hitbox
+ *  while mounted; only the vehicle can be shot. */
 function isValidTarget(world: World, playerId: number, ownerId: number): boolean {
   return (
     world.players.active[playerId] === 1 &&
     world.players.alive[playerId] === 1 &&
-    playerId !== ownerId
+    playerId !== ownerId &&
+    world.players.mountedVehicleId[playerId] === -1
   );
 }
 
@@ -205,6 +222,7 @@ export function createProjectileStore(capacity = PROJECTILE_CAPACITY): Projectil
     ownerId: new Int16Array(capacity),
     team: new Uint8Array(capacity),
     sourceTurretId: new Int16Array(capacity).fill(-1),
+    sourceVehicleId: new Int16Array(capacity).fill(-1),
     position: new Float64Array(capacity * 3),
     velocity: new Float64Array(capacity * 3),
     expiresAtTick: new Float64Array(capacity),
@@ -288,6 +306,7 @@ function spawnStored(
   store.ownerId[id] = event.playerId;
   store.team[id] = world.players.team[event.playerId] ?? 0;
   store.sourceTurretId[id] = -1; // Reset on every (re)allocation -- see this field's own comment.
+  store.sourceVehicleId[id] = -1; // Same reset, for the M5 sibling field.
   store.position.set([event.origin.x, event.origin.y, event.origin.z], id * 3);
   const velocity = velocityFor(event.direction, speed, event.shooterVelocity, velInherit);
   store.velocity.set([velocity.x, velocity.y, velocity.z], id * 3);
@@ -307,6 +326,13 @@ function explode(
 ): void {
   for (let id = 0; id < world.players.count; id += 1) {
     if (!world.players.active[id] || !world.players.alive[id]) continue;
+    // Same mounted-player exclusion as isValidTarget's own comment explains for direct hits:
+    // a mounted player's position is seat-locked to their vehicle's transform, so splash that
+    // reaches the vehicle (explodeVehicles, below) would ALSO land on the pilot's own hitbox
+    // sitting at that identical point, double-dipping one hit into damage against both the
+    // vehicle's shield/health pool and the pilot's, when real T2 has no separate pilot hitbox
+    // while mounted at all.
+    if (world.players.mountedVehicleId[id] !== -1) continue;
     const armor = armorFor(world, id);
     const hitbox = playerHitbox(world, id, armor);
     const dx = hitbox.center.x - point.x,
@@ -354,11 +380,40 @@ function explodeTurrets(world: World, point: Vec3, radiusDamage: number, radius:
   }
 }
 
-/** Splash also reaches a base object or turret standing in the blast: same falloff math,
- *  reusing radiusFalloff against the structure's own hit-sphere center. */
-function explodeStructures(world: World, point: Vec3, radiusDamage: number, radius: number): void {
+/** M5: splash also reaches a vehicle standing in the blast, same falloff math against its
+ *  own position. Not in the plan's own Task 6 text (which only extended the direct-hit/
+ *  tracer search), but the file structure's own summary calls vehicles a "hittable/blocking
+ *  category" alongside players/base objects/turrets with no splash-shaped carve-out, and a
+ *  Spinfusor or Mortar that can blow up a generator but never scratch a parked Wildcat next
+ *  to it would be a real, player-visible gap -- not worth leaving in given how cheap the fix
+ *  is (see the PR body for this judgment call). */
+function explodeVehicles(
+  world: World,
+  point: Vec3,
+  radiusDamage: number,
+  radius: number,
+  attackerId: number,
+): void {
+  const vehicles = world.vehicles;
+  for (let id = 0; id < vehicles.count; id += 1) {
+    if (!vehicles.active[id] || vehicles.destroyed[id]) continue;
+    const falloff = radiusFalloff(distanceToPoint(vehicles.position, id * 3, point), radius);
+    if (falloff > 0) applyVehicleDamage(world, id, radiusDamage * falloff, attackerId);
+  }
+}
+
+/** Splash also reaches a base object, turret, or vehicle standing in the blast: same falloff
+ *  math, reusing radiusFalloff against the structure's own hit-sphere center. */
+function explodeStructures(
+  world: World,
+  point: Vec3,
+  radiusDamage: number,
+  radius: number,
+  attackerId: number,
+): void {
   explodeBaseObjects(world, point, radiusDamage, radius);
   explodeTurrets(world, point, radiusDamage, radius);
+  explodeVehicles(world, point, radiusDamage, radius, attackerId);
 }
 
 /** Finds the *nearest* player hit along the previous->current swept segment, not the first
@@ -409,29 +464,32 @@ export const BASE_OBJECT_HIT_RADIUS = 1.5; // Ours — see this plan's "ours" nu
 export const TURRET_HIT_RADIUS = 1.2; // Ours.
 
 interface StructureHit {
-  kind: 'baseObject' | 'turret';
+  kind: 'baseObject' | 'turret' | 'vehicle';
   id: number;
   distance: number;
 }
 
 /** Same "nearest along the swept segment" search `findDirectHitFrom` runs for players, over
- *  base objects and turrets instead — a projectile can hit whichever of the three (player,
- *  base object, turret) is nearest; `stepLinearOrTracer` compares all three results. No team
- *  filter on the hit-test itself (matches M3's existing player-vs-player model, where any
- *  weapon can damage a teammate) — only turret target *acquisition* excludes a turret's own
- *  team, not a hit-test against one. */
+ *  base objects, turrets, and (M5) vehicles instead — a projectile can hit whichever of the
+ *  four (player, base object, turret, vehicle) is nearest; `stepLinearOrTracer` compares
+ *  every result. No team filter on the hit-test itself (matches M3's existing player-vs-
+ *  player model, where any weapon can damage a teammate) — only turret target *acquisition*
+ *  excludes a turret's own team, not a hit-test against one. */
 interface StructureArray {
   count: number;
   position: Float64Array;
   destroyed: Uint8Array;
   radius: number;
+  /** Per-id override for a store whose hit-sphere radius isn't uniform (vehicles: Shrike
+   *  5.5 m vs. Wildcat 1.7785 m) -- falls back to `radius` above when absent. */
+  radiusFor?: (id: number) => number;
   kind: StructureHit['kind'];
   skip?: (id: number) => boolean;
 }
 
-/** Nearest hit along a segment against one structure array (base objects, or turrets) --
- *  shared by both halves of `nearestStructureHitFrom` so each stays under the complexity
- *  budget instead of duplicating the same scan-and-compare loop twice. */
+/** Nearest hit along a segment against one structure array (base objects, turrets, or
+ *  vehicles) -- shared by every half of `nearestStructureHitFrom` so each stays under the
+ *  complexity budget instead of duplicating the same scan-and-compare loop three times. */
 function positionAt(positions: Float64Array, base: number): Vec3 {
   return { x: positions[base] ?? 0, y: positions[base + 1] ?? 0, z: positions[base + 2] ?? 0 };
 }
@@ -444,7 +502,7 @@ function structureCandidateDistance(
 ): number | null {
   const hitbox: PlayerHitbox = {
     center: positionAt(array.position, id * 3),
-    radius: array.radius,
+    radius: array.radiusFor?.(id) ?? array.radius,
     headY: Infinity,
   };
   return raySphereDistance(previous, direction, hitbox);
@@ -472,6 +530,7 @@ function nearestStructureHitFrom(
   previous: Vec3,
   current: Vec3,
   excludeTurretId: number,
+  excludeVehicleId = -1,
 ): StructureHit | null {
   const dx = current.x - previous.x,
     dy = current.y - previous.y,
@@ -504,14 +563,43 @@ function nearestStructureHitFrom(
     // Excludes the turret that fired this exact shot -- see ProjectileStore.sourceTurretId.
     skip: (id) => id === excludeTurretId,
   });
-  if (!baseHit) return turretHit;
-  if (!turretHit) return baseHit;
-  return baseHit.distance <= turretHit.distance ? baseHit : turretHit;
+  const vehicles = world.vehicles;
+  const vehicleHit = nearestFromArray(previous, direction, length, {
+    count: vehicles.count,
+    position: vehicles.position,
+    destroyed: vehicles.destroyed,
+    radius: 0,
+    radiusFor: (id) => VEHICLE_DATA[vehicles.kind[id] as VehicleKind].checkRadius,
+    kind: 'vehicle',
+    // Excludes the firing vehicle from its own shot -- see ProjectileStore.sourceVehicleId.
+    skip: (id) => id === excludeVehicleId,
+  });
+  return nearestOfStructures(baseHit, turretHit, vehicleHit);
 }
 
-function applyStructureDamage(structure: StructureHit, amount: number, world: World): void {
+/** Whichever of up to three structure candidates has the smallest `distance`, or null if all
+ *  three missed -- split out of `nearestStructureHitFrom` to keep that function's own
+ *  complexity under budget. */
+function nearestOfStructures(
+  baseHit: StructureHit | null,
+  turretHit: StructureHit | null,
+  vehicleHit: StructureHit | null,
+): StructureHit | null {
+  let nearest = baseHit;
+  if (turretHit && (!nearest || turretHit.distance < nearest.distance)) nearest = turretHit;
+  if (vehicleHit && (!nearest || vehicleHit.distance < nearest.distance)) nearest = vehicleHit;
+  return nearest;
+}
+
+function applyStructureDamage(
+  structure: StructureHit,
+  amount: number,
+  world: World,
+  attackerId: number,
+): void {
   if (structure.kind === 'baseObject') applyBaseObjectDamage(world, structure.id, amount);
-  else applyTurretDamage(world, structure.id, amount);
+  else if (structure.kind === 'turret') applyTurretDamage(world, structure.id, amount);
+  else applyVehicleDamage(world, structure.id, amount, attackerId);
 }
 
 /** Distance to hitbox contact this tick: 0 if `current` already overlaps it, else the swept
@@ -604,9 +692,9 @@ function resolveImpact(
   const owner = world.projectiles.ownerId[id] ?? -1;
   if (data.radiusDamage > 0) {
     explode(world, point, data.radiusDamage, data.radius, data.kickback, owner);
-    explodeStructures(world, point, data.radiusDamage, data.radius);
+    explodeStructures(world, point, data.radiusDamage, data.radius, owner);
   } else if (hitStructure) {
-    applyStructureDamage(hitStructure, data.directDamage ?? 0, world);
+    applyStructureDamage(hitStructure, data.directDamage ?? 0, world, owner);
   } else if (hitPlayerId !== null) {
     applyDamage(world, hitPlayerId, data.directDamage ?? 0, owner, armorFor(world, hitPlayerId));
   }
@@ -649,8 +737,30 @@ const NO_HIT: HitResult = { hitPlayerId: -1, hitPoint: null };
  *  0-4) and turret barrels (`TurretBarrelId`, 0-2); this offset keeps the two ranges from
  *  colliding on the wire. */
 const TURRET_WEAPON_ID_OFFSET = 100;
+/** Same collision-avoidance offset, one range over, for the Shrike blaster -- the only
+ *  vehicle weapon this milestone ships (the Wildcat has none), so a single sentinel value is
+ *  enough; a second vehicle weapon would need its own small enum the way TurretBarrelId has. */
+const VEHICLE_WEAPON_ID_OFFSET = 150;
+/** `dataForStoredWeapon`'s vehicle-weapon case, shaped like `TurretBarrelData` (not a fourth
+ *  union member) since every field `stepLinearOrTracer`/`resolveImpact` read off it already
+ *  exists on that interface. Sourced from `SHRIKE_BLASTER_DATA` (vehicles.ts) so the fire
+ *  cadence/damage/speed numbers stay defined in exactly one place. */
+const SHRIKE_BLASTER_PROJECTILE_DATA: TurretBarrelData = {
+  projectile: ProjectileType.Tracer,
+  speed: SHRIKE_BLASTER_DATA.speed,
+  velInherit: 1.0, // weapons/chaingun.cs:514 -- full inheritance, already baked into spawnVehicleShot
+  directDamage: SHRIKE_BLASTER_DATA.directDamage,
+  radiusDamage: 0,
+  radius: 0,
+  kickback: 0,
+  fireTime: SHRIKE_BLASTER_DATA.fireInterval,
+  reloadTime: 0,
+  lifetime: SHRIKE_BLASTER_DATA.lifetime,
+  attackRadius: 0, // unused for a driver-fired shot; fire cadence is weaponTimer, not range
+};
 
 function dataForStoredWeapon(weaponId: number): WeaponData | TurretBarrelData {
+  if (weaponId === VEHICLE_WEAPON_ID_OFFSET) return SHRIKE_BLASTER_PROJECTILE_DATA;
   return weaponId >= TURRET_WEAPON_ID_OFFSET
     ? TURRET_BARREL_DATA[(weaponId - TURRET_WEAPON_ID_OFFSET) as TurretBarrelId]
     : WEAPON_DATA[weaponId as WeaponId];
@@ -734,6 +844,7 @@ function stepLinearOrTracer(world: World, id: number, dt: number): HitResult {
     previous,
     current,
     store.sourceTurretId[id] ?? -1,
+    store.sourceVehicleId[id] ?? -1,
   );
   const worldHit = worldHitAlongSegment(world, previous, current, store.team[id] ?? 0);
   const resolved = resolveLinearHit(
@@ -1071,6 +1182,7 @@ function spawnTurretShot(world: World, event: TurretFireEvent, dt: number): void
   // Excludes the firing turret from its own shot's structure hit-test — see
   // ProjectileStore.sourceTurretId's own comment for why this is needed.
   store.sourceTurretId[id] = event.turretId;
+  store.sourceVehicleId[id] = -1; // A turret shot is never vehicle-sourced.
   store.position.set([event.origin.x, event.origin.y, event.origin.z], id * 3);
   const velocity = {
     x: event.direction.x * data.speed,
@@ -1087,6 +1199,44 @@ function spawnTurretShot(world: World, event: TurretFireEvent, dt: number): void
  *  player shots. */
 function spawnPendingTurretShots(world: World, dt: number): void {
   for (const event of world.pendingTurretFireEvents) spawnTurretShot(world, event, dt);
+}
+
+/** Materializes one Shrike-blaster shot (Task 6's `stepVehicles`/`tryFireShrikeBlaster`) as a
+ *  real projectile — the vehicle-fired sibling of `spawnTurretShot`, same no-ammo/no-player-
+ *  identity shape: `ownerId` is -1 and `team` comes straight from the event. Velocity
+ *  inherits the firing vehicle's own velocity at full strength (`velInheritFactor = 1.0`,
+ *  `weapons/chaingun.cs:514`), unlike the player Chaingun's own lower inheritance. A Tracer
+ *  shot resolves same-tick, exactly like spawnTurretShot's own AA-barrel case. */
+function spawnVehicleShot(world: World, event: VehicleFireEvent, dt: number): void {
+  const id = allocate(world.projectiles);
+  if (id === null) return; // A vehicle has no ammo to refund — a full store just drops the shot.
+  const store = world.projectiles;
+  store.type[id] = ProjectileType.Tracer;
+  store.weaponId[id] = VEHICLE_WEAPON_ID_OFFSET;
+  store.ownerId[id] = -1; // No player identity; matches spawnTurretShot's own convention.
+  store.team[id] = event.team;
+  store.sourceTurretId[id] = -1;
+  // Excludes the firing vehicle from its own shot's structure hit-test — same reason
+  // sourceTurretId excludes a turret from its own shot; see that field's own comment.
+  store.sourceVehicleId[id] = event.vehicleId;
+  store.position.set([event.origin.x, event.origin.y, event.origin.z], id * 3);
+  store.velocity.set(
+    [
+      event.direction.x * SHRIKE_BLASTER_DATA.speed + event.velocity.x,
+      event.direction.y * SHRIKE_BLASTER_DATA.speed + event.velocity.y,
+      event.direction.z * SHRIKE_BLASTER_DATA.speed + event.velocity.z,
+    ],
+    id * 3,
+  );
+  stepLinearOrTracer(world, id, dt);
+}
+
+/** Drains `world.pendingVehicleFireEvents` (Task 5's `stepVehicles` already ran this same
+ *  tick, before `stepProjectiles`) into real projectiles, exactly parallel to
+ *  `spawnPendingTurretShots`. */
+function spawnPendingVehicleShots(world: World, dt: number): void {
+  for (const event of world.pendingVehicleFireEvents) spawnVehicleShot(world, event, dt);
+  world.pendingVehicleFireEvents = [];
 }
 
 /**
@@ -1117,4 +1267,5 @@ export function stepProjectiles(world: World, dt: number): void {
   world.pendingFireEvents = [];
   spawnPendingTurretShots(world, dt);
   world.pendingTurretFireEvents = [];
+  spawnPendingVehicleShots(world, dt);
 }

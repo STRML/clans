@@ -18,6 +18,10 @@ export interface PlayerInput {
   slot: number; // 0 = no change, 1..5 = select that weapon slot (see weaponIdForSlot)
   /** Repair Pack beam held down. Level-triggered, like `fire`. */
   packActive: boolean;
+  /** Mount/dismount a nearby vehicle. A real wire bit, not a client-local decision like
+   *  station use: which player controls which vehicle is authoritative state the server
+   *  alone decides (M5 plan, Global Constraints). Edge-triggered inside vehicles.ts. */
+  use: boolean;
 }
 export interface PlayerStore {
   count: number;
@@ -69,6 +73,16 @@ export interface PlayerStore {
   armor: Uint8Array; // ArmorId
   /** 0/1. Set by a Loadout request (Task 6); the only pack modeled this milestone. */
   hasRepairPack: Uint8Array;
+  /** -1 = not mounted, else the VehicleStore id this player is riding. movement.ts's
+   *  stepPlayer and weapons.ts's stepOnePlayer both no-op for a mounted id -- stepVehicles is
+   *  the only system that writes a mounted player's position/velocity (M5 plan, Global
+   *  Constraints). */
+  mountedVehicleId: Int16Array;
+  /** Edge-detect state for PlayerInput.use, private to vehicles.ts's stepVehicles (no other
+   *  system reads this). Lives on PlayerStore rather than a module-level Map so it resets
+   *  cleanly with every fresh World -- a bare module-level map keyed by player id would leak
+   *  state across separate World instances (every test in this file creates several). */
+  wasUseHeld: Uint8Array;
 }
 /** One id freed by `free()`, held out of `freeIds` until it has sat unallocated for at
  *  least PROJECTILE_ID_REUSE_DELAY_TICKS calls to `stepProjectiles` -- see that constant
@@ -118,6 +132,10 @@ export interface ProjectileStore {
    *  reaching its actual target. Mirrors how a player-fired shot already excludes its own
    *  shooter via `ownerId`/`isValidTarget` — see `nearestStructureHitFrom`. */
   sourceTurretId: Int16Array;
+  /** -1 for every non-vehicle-fired shot; the firing vehicle's own id for a Shrike blaster
+   *  shot. Same self-hit-exclusion reason as sourceTurretId (M4): the shot spawns at its own
+   *  vehicle's exact position, inside that vehicle's own checkRadius hit-sphere. */
+  sourceVehicleId: Int16Array;
   position: Float64Array;
   velocity: Float64Array;
   /** Ticks this projectile has been alive, counted by stepProjectiles itself rather than
@@ -163,6 +181,11 @@ export interface World {
    *  AmmoRefund and applyPendingAmmoRefunds. */
   pendingAmmoRefunds: import('./weapons.js').AmmoRefund[];
   flags: FlagStore;
+  vehicles: import('./vehicles.js').VehicleStore;
+  pendingVehicleFireEvents: import('./vehicles.js').VehicleFireEvent[];
+  /** One entry per vehicle destroyed this tick, read by the client's explosion FX and the
+   *  HUD/e2e hooks (Task 13/14) -- mirrors pendingDeaths's own one-tick-only shape. */
+  pendingVehicleDestroyed: Array<{ id: number; position: Vec3; team: number }>;
   teamScores: Uint16Array;
   gameOver: boolean;
   winnerTeam: number;

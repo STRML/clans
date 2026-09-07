@@ -969,5 +969,15 @@
     "0": "turret_fusion_large",
     "1": "turret_aa_large",
     "2": "turret_sentry"
+  },
+  "vehicles": {
+    "shrike": {
+      "source": "glb",
+      "shape": "vehicle_shrike.glb"
+    },
+    "wildcat": {
+      "source": "glb",
+      "shape": "vehicle_wildcat.glb"
+    }
   }
 }

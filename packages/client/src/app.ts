@@ -6,7 +6,10 @@ import {
   BaseObjectKind,
   FIXED_DT,
   FIXED_TICK_MS,
+  VEHICLE_DATA,
+  VehicleKind,
   addPlayer,
+  canSendVehicleUse,
   createBaseObjects,
   createFlags,
   createTurrets,
@@ -15,8 +18,10 @@ import {
   respawnPlayer,
   sampleTerrain,
   setGodMode,
+  spawnVehicleAtPad,
   stepPower,
   stepWorld,
+  vehiclePadAt,
   type ArmorId,
   type Heightfield,
   type PlayerInput,
@@ -27,6 +32,7 @@ import type {
   BaseObjectSnapshotData,
   ProjectileSnapshotData,
   TurretSnapshotData,
+  VehicleSnapshotData,
 } from '@clans/protocol';
 import { loadKatabatic, type KatabaticAssets } from './assets.js';
 import {
@@ -47,11 +53,28 @@ import { createHud, type HudSource } from './hud.js';
 import { Input } from './input.js';
 import { loadInteriorColliders } from './interior-collision.js';
 import { advance, type Accumulator } from './loop.js';
-import { NetClient, type RemoteSnapshot, type TimestampedEvent } from './netclient.js';
+import {
+  NetClient,
+  type RemoteSnapshot,
+  type RemoteVehicleSnapshot,
+  type TimestampedEvent,
+} from './netclient.js';
 import { RemoteBuffer, syncRemoteMeshes } from './remote.js';
 import { createStationMenu, stationMenuVisible, type StationMenu } from './stationMenu.js';
 import { addEnvironment, createTerrain } from './terrain.js';
 import { WebSocketTransport } from './transport.js';
+import {
+  createVehicleView,
+  vehicleRenderDataFrom,
+  vehiclesFromWorld,
+  VehicleBuffer,
+  type VehicleView,
+} from './vehicle-view.js';
+import {
+  createVehiclePadMenu,
+  vehiclePadMenuVisible,
+  type VehiclePadMenu,
+} from './vehiclePadMenu.js';
 import {
   projectilesFromWorld,
   spawnExplosionsForExpired,
@@ -76,6 +99,7 @@ const IDLE: PlayerInput = {
   altFire: false,
   slot: 0,
   packActive: false,
+  use: false,
 };
 
 export interface AppStats {
@@ -119,6 +143,7 @@ export interface App {
   debugKillGenerator(team: number): void;
   debugRepairGenerator(team: number): void;
   debugIsStationPowered(team: number): boolean;
+  debugTeleportToVehiclePad(team: number): void;
 }
 
 function toHeightfield(assets: KatabaticAssets): Heightfield {
@@ -175,11 +200,56 @@ function moveFreeCam(app: App, dt: number): void {
   if (app.input.isDown('ControlLeft')) app.freeCamPosition.y -= speed;
 }
 
-function placeCamera(app: App, sky: THREE.Object3D): void {
-  aimCamera(app.camera, app.input.yaw, app.input.pitch);
+/** Third-person chase camera while mounted (M5, Task 13): positioned cameraMaxDist behind
+ *  and cameraOffset above the vehicle along its own current heading (not the player's own
+ *  look direction -- input.yaw/pitch instead steer the vehicle itself, see vehicles.ts's
+ *  normalizeAngle-based steering), smoothed toward that target by cameraLag rather than
+ *  snapping there every frame, the same "not a hard snap" feel moveFreeCam's own free-cam
+ *  movement already has. Numbers are real, per vehicle kind (vehicles/vehicle_shrike.cs:
+ *  112-114, vehicles/vehicle_wildcat.cs:98-100).
+ *  Returns whether it placed a vehicle camera; `placeCamera` falls back to the player's own
+ *  first-person view when this returns false (not mounted). */
+function placeVehicleCamera(app: App, vehicleId: number, dt: number): boolean {
+  const vehicles = app.world.vehicles;
+  const kind = vehicles.kind[vehicleId] as VehicleKind;
+  const data = VEHICLE_DATA[kind];
+  const base = vehicleId * 3;
+  const vehiclePos = new THREE.Vector3(
+    vehicles.position[base] ?? 0,
+    vehicles.position[base + 1] ?? 0,
+    vehicles.position[base + 2] ?? 0,
+  );
+  const yaw = vehicles.yaw[vehicleId] ?? 0;
+  const pitch = vehicles.pitch[vehicleId] ?? 0;
+  const heading = new THREE.Vector3(
+    Math.sin(yaw) * Math.cos(pitch),
+    Math.sin(pitch),
+    Math.cos(yaw) * Math.cos(pitch),
+  );
+  const desired = vehiclePos
+    .clone()
+    .addScaledVector(heading, -data.cameraMaxDist)
+    .add(new THREE.Vector3(0, data.cameraOffset, 0));
+  // cameraLag as a per-second smoothing rate: at dt = FIXED_DT (32 ms) this closes
+  // cameraLag's own fraction of the remaining distance each tick, so the Shrike's 0.9 feels
+  // noticeably looser (trails longer) than the Wildcat's 0.5 -- matching the real numbers'
+  // own relative ordering, since neither script exposes the smoothing formula itself, only
+  // the tuning constant (see the plan's numbers table).
+  const t = 1 - Math.pow(1 - data.cameraLag, dt / FIXED_DT);
+  app.camera.position.lerp(desired, t);
+  app.camera.lookAt(vehiclePos);
+  return true;
+}
+
+function placeCamera(app: App, sky: THREE.Object3D, dt: number): void {
+  const mountedVehicleId = app.world.players.mountedVehicleId[app.playerId] ?? -1;
   if (app.freeCam) {
+    aimCamera(app.camera, app.input.yaw, app.input.pitch);
     app.camera.position.copy(app.freeCamPosition);
+  } else if (mountedVehicleId !== -1) {
+    placeVehicleCamera(app, mountedVehicleId, dt);
   } else {
+    aimCamera(app.camera, app.input.yaw, app.input.pitch);
     const base = app.playerId * 3;
     const position = app.world.players.position;
     app.camera.position.set(
@@ -303,6 +373,10 @@ interface BaseAssetsViewState {
   baseObjectView: ReturnType<typeof createBaseObjectView>;
   stationMenu: StationMenu;
   stationMenuState: { open: boolean };
+  vehicleView: VehicleView;
+  vehicleBuffers: Map<number, VehicleBuffer>;
+  vehiclePadMenu: VehiclePadMenu;
+  vehiclePadMenuState: { open: boolean };
   commanderMapCanvas: HTMLCanvasElement;
 }
 
@@ -338,18 +412,83 @@ function drawCommanderMapForTeam(state: BaseAssetsViewState): void {
  *  aimedStructure row -- everything Tasks 11-13 added -- to the latest sim or net state.
  *  Pulled out of `frame` for the same reason `syncWorldView` already is: keeping `frame`'s
  *  own branching under this repo's complexity budget. */
-function syncBaseAssetsView(state: BaseAssetsViewState): void {
+/** The station menu and the vehicle pad menu react to the exact same edge-triggered E press
+ *  (`pressed`, read once by the caller -- usePressedThisFrame() is stateful and consumed on
+ *  read, so it cannot be called twice for one frame). Split out of syncBaseAssetsView to keep
+ *  that function's own complexity under budget. */
+function syncMenus(state: BaseAssetsViewState, pressed: boolean): void {
+  const { world, playerId } = state;
+  const mounted = (world.players.mountedVehicleId[playerId] ?? -1) !== -1;
+  // A mounted player's own E press is exclusively about dismounting (canSendVehicleUse
+  // already covers that on the wire side) -- it must not also pop the pad menu open, which
+  // would otherwise happen every time simply because the vehicle sits within its own pad's
+  // use radius.
+  if (pressed && !mounted) {
+    state.stationMenuState.open = !state.stationMenuState.open;
+    state.vehiclePadMenuState.open = !state.vehiclePadMenuState.open;
+  }
+  state.stationMenuState.open = stationMenuVisible(world, playerId, state.stationMenuState.open);
+  if (state.stationMenuState.open) state.stationMenu.show();
+  else state.stationMenu.hide();
+
+  state.vehiclePadMenuState.open = vehiclePadMenuVisible(
+    world,
+    playerId,
+    state.vehiclePadMenuState.open,
+  );
+  const padId = state.vehiclePadMenuState.open ? vehiclePadAt(world, playerId) : null;
+  if (padId !== null) state.vehiclePadMenu.show(padId);
+  else state.vehiclePadMenu.hide();
+}
+
+/**
+ * Builds the flat array vehicle-view.ts's `sync` renders from -- single-player reads
+ * `world.vehicles` directly (no snapshot delay to smooth in the first place, exactly
+ * `commanderMapPlayers`' own local/networked split just above). Networked, the local
+ * player's OWN driven vehicle (if any) is drawn live off `world.vehicles` too -- the same
+ * source placeVehicleCamera already chases -- while every other vehicle comes out of
+ * `updateVehicleBuffers`' interpolation history (Codex review round 1, this PR, finding 9)
+ * instead of net.vehicles' single latest, snap-to-new-position-every-snapshot sample.
+ * Exported for a focused unit test.
+ */
+export function vehicleRenderData(state: {
+  world: World;
+  playerId: number;
+  net: Pick<NetClient, 'connected' | 'vehicleSnapshots'> | null;
+  vehicleBuffers: Map<number, VehicleBuffer>;
+}): VehicleSnapshotData[] {
+  const { world, playerId, net } = state;
+  const connected = net ? net.connected : true;
+  if (!net || !connected) {
+    // Mirrors updateRemotes' own disconnect handling: clears any stale interpolation
+    // history so a later reconnect doesn't resume blending from a socket-drop-stale sample.
+    state.vehicleBuffers.clear();
+    return vehiclesFromWorld(world);
+  }
+  const nowMs = performance.now();
+  updateVehicleBuffers(net, state.vehicleBuffers, nowMs);
+  const mountedId = world.players.mountedVehicleId[playerId] ?? -1;
+  const out = vehicleRenderDataFrom(state.vehicleBuffers, nowMs, mountedId);
+  if (mountedId !== -1) {
+    const mounted = vehiclesFromWorld(world).find((v) => v.id === mountedId);
+    if (mounted) out.push(mounted);
+  }
+  return out;
+}
+
+function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): void {
   const { world, playerId, net, input } = state;
   const connected = net ? net.connected : true;
   const baseObjectData: BaseObjectSnapshotData[] =
     net && connected ? net.baseObjects : baseObjectsFromWorld(world);
   const turretData: TurretSnapshotData[] = net && connected ? net.turrets : turretsFromWorld(world);
   state.baseObjectView.sync(baseObjectData, turretData);
+  state.vehicleView.sync(vehicleRenderData(state));
 
-  if (input.usePressedThisFrame()) state.stationMenuState.open = !state.stationMenuState.open;
-  state.stationMenuState.open = stationMenuVisible(world, playerId, state.stationMenuState.open);
-  if (state.stationMenuState.open) state.stationMenu.show();
-  else state.stationMenu.hide();
+  // `usePressed` is computed once by the caller (frame()), the same edge-triggered read
+  // that also gates the outgoing `use` wire bit -- see frame()'s own comment for why
+  // usePressedThisFrame() cannot be called a second time here.
+  syncMenus(state, usePressed);
 
   if (input.commandCirclePressedThisFrame()) {
     state.commanderMapCanvas.hidden = !state.commanderMapCanvas.hidden;
@@ -459,6 +598,55 @@ function pruneStaleRemoteBuffers(buffers: Map<number, RemoteBuffer>, latest: Rem
   for (const id of [...buffers.keys()]) {
     if (!latest.players.has(id)) buffers.delete(id);
   }
+}
+
+// --- Vehicle sibling of the remote-player interpolation pair just above (Codex review
+// round 1, this PR, finding 9) -- same shape, applied to RemoteVehicleSnapshot/VehicleBuffer
+// instead of RemoteSnapshot/RemoteBuffer.
+function applyVehicleRemoteSnapshot(
+  buffers: Map<number, VehicleBuffer>,
+  snapshot: RemoteVehicleSnapshot,
+  atMs: number,
+): void {
+  for (const vehicle of snapshot.vehicles) {
+    const buffer = buffers.get(vehicle.id) ?? new VehicleBuffer();
+    buffers.set(vehicle.id, buffer);
+    buffer.push(atMs, vehicle);
+  }
+}
+
+function pruneStaleVehicleBuffers(
+  buffers: Map<number, VehicleBuffer>,
+  latest: RemoteVehicleSnapshot,
+): void {
+  const liveIds = new Set(latest.vehicles.map((v) => v.id));
+  for (const id of [...buffers.keys()]) {
+    if (!liveIds.has(id)) buffers.delete(id);
+  }
+}
+
+/**
+ * Exported for a focused unit test, same convention as updateRemotes just above. Drains
+ * every queued vehicle snapshot (never just the latest -- see updateRemotes' own comment for
+ * why) into per-id VehicleBuffers, stamping each with the same tick-offset-behind-nowMs
+ * timestamp scheme.
+ */
+export function updateVehicleBuffers(
+  activeNet: Pick<NetClient, 'vehicleSnapshots' | 'connected'>,
+  buffers: Map<number, VehicleBuffer>,
+  nowMs: number,
+): void {
+  if (!activeNet.connected) {
+    buffers.clear();
+    return;
+  }
+  const pending = activeNet.vehicleSnapshots.splice(0, activeNet.vehicleSnapshots.length);
+  const latest = pending.at(-1);
+  for (const snapshot of pending) {
+    const atMs = latest ? nowMs - (latest.tick - snapshot.tick) * FIXED_TICK_MS : nowMs;
+    applyVehicleRemoteSnapshot(buffers, snapshot, atMs);
+  }
+  if (latest) pruneStaleVehicleBuffers(buffers, latest);
 }
 
 /**
@@ -601,6 +789,23 @@ export function teleportPlayerToFlag(world: World, playerId: number, team: numbe
   );
 }
 
+/** Exported for a focused unit test and the Playwright e2e spec's own fast setup (Task 14),
+ *  mirroring teleportPlayerToFlag's own shape: places the player at their team's vehicle
+ *  pad rather than walking there, so the spec can drive spawn/mount/dismount deterministically
+ *  without depending on WASD movement or the real terrain layout. */
+export function teleportPlayerToVehiclePad(world: World, playerId: number, team: number): void {
+  const bases = world.baseObjects;
+  for (let id = 0; id < bases.count; id += 1) {
+    if (bases.kind[id] !== BaseObjectKind.StationVehiclePad || bases.team[id] !== team) continue;
+    const base = id * 3;
+    world.players.position.set(
+      [bases.position[base] ?? 0, bases.position[base + 1] ?? 0, bases.position[base + 2] ?? 0],
+      playerId * 3,
+    );
+    return;
+  }
+}
+
 /** Exported for a focused unit test, mirroring teleportPlayerToFlag's own shape. Overkills
  *  every one of the team's generators directly via applyBaseObjectDamage and re-derives
  *  power -- bypassing real weapon damage timings on purpose, so the e2e test this backs is
@@ -719,6 +924,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   // predict straight through it until the next snapshot corrected the mispredict.
   world.interiors = await loadInteriorColliders(assets);
   const baseObjectView = createBaseObjectView(scene, assets);
+  const vehicleView = createVehicleView(scene, assets);
 
   const camera = new THREE.PerspectiveCamera(
     90,
@@ -734,6 +940,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const acc: Accumulator = { remainder: 0 };
   const remoteMeshes = new Map<number, THREE.Mesh>();
   const remoteBuffers = new Map<number, RemoteBuffer>();
+  const vehicleBuffers = new Map<number, VehicleBuffer>();
   const fps: FpsWindow = { windowStart: performance.now(), frames: 0 };
   const projectileMeshes = new Map<number, THREE.Mesh>();
   const previousProjectiles = new Map<number, ProjectileSnapshotData>();
@@ -747,6 +954,15 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     (armor: ArmorId, repairPack) => {
       if (net) net.sendLoadout(armor, repairPack);
       else applyLoadoutRequest(world, playerId, armor, repairPack);
+    },
+  );
+  const vehiclePadMenuState = { open: false };
+  const vehiclePadMenu: VehiclePadMenu = createVehiclePadMenu(
+    document.body,
+    (padId: number, kind: VehicleKind) => {
+      if (net) net.sendVehicleSpawn(padId, kind);
+      else spawnVehicleAtPad(world, padId, kind);
+      vehiclePadMenuState.open = false;
     },
   );
   const commanderMapCanvas = document.createElement('canvas');
@@ -808,6 +1024,9 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     debugIsStationPowered(team: number): boolean {
       return debugIsStationPowered(world, team);
     },
+    debugTeleportToVehiclePad(team: number): void {
+      teleportPlayerToVehiclePad(world, playerId, team);
+    },
     frame(dtSeconds: number): void {
       const frameStart = performance.now();
       let steps = advance(acc, dtSeconds, app.paused ? 0 : app.timeScale, FIXED_DT);
@@ -815,9 +1034,16 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         steps = 1;
         app.stepOnce = false;
       }
+      // usePressedThisFrame() is edge-triggered and consumed once per call, so it can only
+      // be read once per frame -- computed here and threaded through both the outgoing input
+      // (the wire-level `use` bit, gated by canSendVehicleUse so an E press near neither a
+      // vehicle nor while mounted doesn't spam the server with a meaningless mount attempt)
+      // and syncBaseAssetsView's own station/pad menu toggles below, rather than each calling
+      // it separately.
+      const usePressed = !app.freeCam && input.usePressedThisFrame();
       const currentInput = app.freeCam
         ? { ...IDLE, yaw: input.yaw, pitch: input.pitch }
-        : input.snapshot();
+        : { ...input.snapshot(), use: usePressed && canSendVehicleUse(world, playerId) };
       const simStart = performance.now();
       if (net) {
         stepNetworked(net, app.stats, currentInput, steps, scene, remoteMeshes, remoteBuffers);
@@ -840,22 +1066,29 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         dtSeconds,
       );
 
-      syncBaseAssetsView({
-        world,
-        playerId,
-        net,
-        input,
-        assets,
-        camera,
-        hud,
-        baseObjectView,
-        stationMenu,
-        stationMenuState,
-        commanderMapCanvas,
-      });
+      syncBaseAssetsView(
+        {
+          world,
+          playerId,
+          net,
+          input,
+          assets,
+          camera,
+          hud,
+          baseObjectView,
+          stationMenu,
+          stationMenuState,
+          vehicleView,
+          vehicleBuffers,
+          vehiclePadMenu,
+          vehiclePadMenuState,
+          commanderMapCanvas,
+        },
+        usePressed,
+      );
 
       if (app.freeCam) moveFreeCam(app, dtSeconds);
-      placeCamera(app, sky);
+      placeCamera(app, sky, dtSeconds);
       renderer.render(scene, camera);
       app.stats.frameMs = performance.now() - frameStart;
       updateFps(app, frameStart, fps);

@@ -101,6 +101,7 @@ describe('snapshot codec', () => {
       ],
       baseObjects: [],
       turrets: [],
+      vehicles: [],
       teamScores: [300, 100],
       gameOver: true,
       winnerTeam: 1,
@@ -188,6 +189,7 @@ describe('snapshot codec', () => {
       flags,
       baseObjects: [],
       turrets: [],
+      vehicles: [],
       teamScores: [100, 200],
       gameOver: true,
       winnerTeam: 1,
@@ -693,5 +695,111 @@ describe('WorldExtras: baseObjects and turrets', () => {
     const bytes = encodeSnapshot(1, 0, 0, [], null, extras);
     const decoded = decodeSnapshot(bytes, null);
     expect(decoded.turrets[0]).toEqual(extras.turrets[0]);
+  });
+});
+
+describe('WorldExtras: vehicles (M5)', () => {
+  it('emptyExtras includes an empty vehicles array', () => {
+    expect(emptyExtras().vehicles).toEqual([]);
+  });
+
+  it('a full snapshot round-trips vehicles exactly, including energy', () => {
+    const extras = {
+      ...emptyExtras(),
+      vehicles: [
+        {
+          id: 0,
+          kind: 0,
+          team: 1,
+          x: 10.5,
+          y: 20.25,
+          z: -30.125,
+          vx: 1.5,
+          vy: -2.5,
+          vz: 3.5,
+          yaw: 0.5,
+          pitch: -0.2,
+          roll: 0.1,
+          angVelYaw: 0.05,
+          angVelPitch: -0.06,
+          angVelRoll: 0.07,
+          energy: 150.5,
+          damage: 0.25,
+          destroyed: 0 as const,
+          driverId: 3,
+          padId: 2,
+          weaponTimer: 0.1,
+          onGround: 1 as const,
+          wasJumpHeld: 1 as const,
+        },
+      ],
+    };
+    const bytes = encodeSnapshot(1, 100, 5, [], null, extras);
+    const decoded = decodeSnapshot(bytes, null);
+    expect(decoded.vehicles).toHaveLength(1);
+    const vehicle = decoded.vehicles[0] as (typeof decoded.vehicles)[number];
+    expect(vehicle.id).toBe(0);
+    expect(vehicle.kind).toBe(0);
+    expect(vehicle.team).toBe(1);
+    expect(vehicle.x).toBeCloseTo(10.5, 3);
+    expect(vehicle.y).toBeCloseTo(20.25, 3);
+    expect(vehicle.z).toBeCloseTo(-30.125, 3);
+    // Codex review round 1 (this PR), finding 4: velocity/angVel/padId/weaponTimer/onGround/
+    // wasJumpHeld are new wire fields -- asserted here at the protocol layer, alongside
+    // sim/src/snapshot.test.ts's own round trip of the same fields through
+    // serializeVehicle/deserializeVehicle, so a regression in either the encode/decode byte
+    // layout or the sim-level (de)serializers is caught independently.
+    expect(vehicle.vx).toBeCloseTo(1.5, 3);
+    expect(vehicle.vy).toBeCloseTo(-2.5, 3);
+    expect(vehicle.vz).toBeCloseTo(3.5, 3);
+    expect(vehicle.yaw).toBeCloseTo(0.5, 5);
+    expect(vehicle.angVelYaw).toBeCloseTo(0.05, 5);
+    expect(vehicle.angVelPitch).toBeCloseTo(-0.06, 5);
+    expect(vehicle.angVelRoll).toBeCloseTo(0.07, 5);
+    expect(vehicle.energy).toBeCloseTo(150.5, 3);
+    expect(vehicle.damage).toBeCloseTo(0.25, 5);
+    expect(vehicle.destroyed).toBe(0);
+    expect(vehicle.driverId).toBe(3);
+    expect(vehicle.padId).toBe(2);
+    expect(vehicle.weaponTimer).toBeCloseTo(0.1, 5);
+    expect(vehicle.onGround).toBe(1);
+    expect(vehicle.wasJumpHeld).toBe(1);
+  });
+
+  it('a destroyed, unpiloted vehicle carries destroyed: 1 and driverId -1', () => {
+    const extras = {
+      ...emptyExtras(),
+      vehicles: [
+        {
+          id: 1,
+          kind: 1,
+          team: 2,
+          x: 0,
+          y: 0,
+          z: 0,
+          vx: 0,
+          vy: 0,
+          vz: 0,
+          yaw: 0,
+          pitch: 0,
+          roll: 0,
+          angVelYaw: 0,
+          angVelPitch: 0,
+          angVelRoll: 0,
+          energy: 0,
+          damage: 0.6,
+          destroyed: 1 as const,
+          driverId: -1,
+          padId: -1,
+          weaponTimer: 0,
+          onGround: 0 as const,
+          wasJumpHeld: 0 as const,
+        },
+      ],
+    };
+    const bytes = encodeSnapshot(1, 0, 0, [], null, extras);
+    const decoded = decodeSnapshot(bytes, null);
+    expect(decoded.vehicles[0]?.destroyed).toBe(1);
+    expect(decoded.vehicles[0]?.driverId).toBe(-1);
   });
 });

@@ -32,6 +32,10 @@ const data = {
     interiors: [],
     shapesForBaseObjectKind: {},
     shapesForTurretBarrel: {},
+    vehicles: {
+      shrike: { source: 'procedural', shape: 'vehicle_shrike.glb' },
+      wildcat: { source: 'procedural', shape: 'vehicle_wildcat.glb' },
+    },
   },
   heights: new Uint16Array(9),
   materials: new Uint8Array(9),

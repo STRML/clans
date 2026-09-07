@@ -2,9 +2,11 @@ import {
   FIXED_DT,
   FlagState,
   GameOverReason,
+  VEHICLE_DATA,
   WeaponId,
   ammoIndex,
   armorFor,
+  type VehicleKind,
   type World,
 } from '@clans/sim';
 import { EventKind, type EventMessage, type FlagSnapshotData } from '@clans/protocol';
@@ -126,6 +128,29 @@ function aimedStructureRow(source: HudSource): HudRow {
   return { id: 'hud-aimed', text: `${name} ${String(healthPercent)}%` };
 }
 
+/** M5, Task 14: vehicle health/speed row, shown only while the local player is mounted.
+ *  Health follows the player health row's own convention (1 - damage/maxDamage); speed is
+ *  the vehicle's own velocity magnitude in m/s, not the player's (a mounted player's own
+ *  velocity is zeroed every tick -- seatDriver in vehicles.ts's stepVehicles -- so reading
+ *  world.players.velocity here would always show 0). */
+function vehicleRow(source: HudSource): HudRow {
+  const vehicleId = source.world.players.mountedVehicleId[source.playerId] ?? -1;
+  if (vehicleId === -1) return { id: 'hud-vehicle', text: '' };
+  const vehicles = source.world.vehicles;
+  const data = VEHICLE_DATA[vehicles.kind[vehicleId] as VehicleKind];
+  const health = data.maxDamage - (vehicles.damage[vehicleId] ?? 0);
+  const base = vehicleId * 3;
+  const speed = Math.hypot(
+    vehicles.velocity[base] ?? 0,
+    vehicles.velocity[base + 1] ?? 0,
+    vehicles.velocity[base + 2] ?? 0,
+  );
+  return {
+    id: 'hud-vehicle',
+    text: `Vehicle ${String(percent(health, data.maxDamage))}% — ${speed.toFixed(1)} m/s`,
+  };
+}
+
 export function describeHud(source: HudSource): HudRow[] {
   return [
     healthRow(source),
@@ -137,6 +162,7 @@ export function describeHud(source: HudSource): HudRow[] {
     clockRow(source),
     gameOverRow(source),
     aimedStructureRow(source),
+    vehicleRow(source),
   ];
 }
 
