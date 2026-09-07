@@ -186,3 +186,79 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   players.godMode[data.id] = data.godMode;
   players.wasJumpHeld[data.id] = data.wasJumpHeld;
 }
+
+/** The wire shape of one vehicle. Unlike base objects/turrets, vehicles have no mission-file
+ *  placement to pre-seed from -- Katabatic's .mis places only the pad, never a vehicle --
+ *  every field here is genuinely dynamic, including `kind`/`team`, which for a base object or
+ *  turret would be static placement data never carried on the wire at all. `energy` is
+ *  included deliberately (unlike BaseObjectSnapshotData/TurretSnapshotData, which omit it,
+ *  issue #14): a vehicle's shield depletion needs to reach the client the same way its
+ *  health does. */
+export interface VehicleSnapshotData {
+  id: number;
+  kind: number;
+  team: number;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  pitch: number;
+  roll: number;
+  energy: number;
+  damage: number;
+  destroyed: 0 | 1;
+  driverId: number;
+}
+
+export function serializeVehicle(world: World, id: number): VehicleSnapshotData {
+  const v = world.vehicles;
+  const base = id * 3;
+  return {
+    id,
+    kind: num(v.kind, id),
+    team: num(v.team, id),
+    x: num(v.position, base),
+    y: num(v.position, base + 1),
+    z: num(v.position, base + 2),
+    yaw: num(v.yaw, id),
+    pitch: num(v.pitch, id),
+    roll: num(v.roll, id),
+    energy: num(v.energy, id),
+    damage: num(v.damage, id),
+    destroyed: bit(v.destroyed, id),
+    driverId: num(v.driverId, id),
+  };
+}
+
+export function serializeActiveVehicles(world: World): VehicleSnapshotData[] {
+  const out: VehicleSnapshotData[] = [];
+  for (let id = 0; id < world.vehicles.count; id += 1) {
+    if (world.vehicles.active[id]) out.push(serializeVehicle(world, id));
+  }
+  return out;
+}
+
+/**
+ * Writes a decoded snapshot's vehicle fields onto `world.vehicles` by id, growing the store
+ * to fit -- the vehicle sibling of `deserializePlayer`'s own `growTo`, but for vehicles this
+ * is not a rare "id we've never locally placed" fallback: because there is no mission-file
+ * placement to pre-seed from (see this interface's own doc comment), `deserializeVehicle` is
+ * the ONLY path a client-side vehicle id is ever created. Every field, including `kind`/
+ * `team`, is written every call rather than assumed already-seeded.
+ */
+export function deserializeVehicle(world: World, data: VehicleSnapshotData): void {
+  const v = world.vehicles;
+  if (data.id >= v.active.length) return;
+  if (data.id >= v.count) v.count = data.id + 1;
+  v.active[data.id] = 1;
+  v.kind[data.id] = data.kind;
+  v.team[data.id] = data.team;
+  v.position.set([data.x, data.y, data.z], data.id * 3);
+  v.yaw[data.id] = data.yaw;
+  v.pitch[data.id] = data.pitch;
+  v.roll[data.id] = data.roll;
+  v.energy[data.id] = data.energy;
+  v.damage[data.id] = data.damage;
+  v.destroyed[data.id] = data.destroyed;
+  v.driverId[data.id] = data.driverId;
+}

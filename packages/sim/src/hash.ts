@@ -183,8 +183,47 @@ function mixTurrets(hash: number, world: World): number {
     h = mix(h, num(store.energy, id));
     h = mix(h, num(store.powered, id));
     h = mix(h, num(store.targetId, id));
+    // M5, Task 8: disambiguates targetId's own referent (player vs. vehicle) -- two worlds
+    // whose turret has the same targetId but a different targetKind (one aimed at a player,
+    // the other at a vehicle sharing that same numeric id) must hash differently, the exact
+    // class of gap issue #13 already found in this function omitting `timer`.
+    h = mix(h, num(store.targetKind, id));
     h = mix(h, num(store.state, id));
   }
+  return h;
+}
+
+/** Mixes in every VehicleStore field that affects future simulation -- deliberately
+ *  exhaustive, not a curated subset (M5 plan, Task 9): mixTurrets shipped in M4 missing
+ *  `timer` (issue #13, still open on main) precisely because an earlier pass excluded a
+ *  field on the assumption it "should" be redundant with something else. `energy` in
+ *  particular is not optional: it is exactly the kind of state applyVehicleDamage's
+ *  shield-then-health rule can diverge on between two otherwise-identical worlds, the same
+ *  role it already plays in mixBaseObjects/mixTurrets. */
+function mixVehicle(hash: number, vehicles: World['vehicles'], id: number): number {
+  const base = id * 3;
+  let h = mix(hash, id);
+  h = mix(h, num(vehicles.kind, id));
+  h = mix(h, num(vehicles.team, id));
+  h = mix(h, num(vehicles.position, base));
+  h = mix(h, num(vehicles.position, base + 1));
+  h = mix(h, num(vehicles.position, base + 2));
+  h = mix(h, num(vehicles.velocity, base));
+  h = mix(h, num(vehicles.velocity, base + 1));
+  h = mix(h, num(vehicles.velocity, base + 2));
+  h = mix(h, num(vehicles.yaw, id));
+  h = mix(h, num(vehicles.pitch, id));
+  h = mix(h, num(vehicles.roll, id));
+  h = mix(h, num(vehicles.angVel, base));
+  h = mix(h, num(vehicles.angVel, base + 1));
+  h = mix(h, num(vehicles.angVel, base + 2));
+  h = mix(h, num(vehicles.energy, id));
+  h = mix(h, num(vehicles.damage, id));
+  h = mix(h, num(vehicles.destroyed, id));
+  h = mix(h, num(vehicles.driverId, id));
+  h = mix(h, num(vehicles.padId, id));
+  h = mix(h, num(vehicles.weaponTimer, id));
+  h = mix(h, num(vehicles.onGround, id));
   return h;
 }
 
@@ -241,7 +280,13 @@ export function hashWorld(world: World): number {
   hash = mixFlags(hash, world);
   hash = mixBaseObjects(hash, world);
   hash = mixTurrets(hash, world);
-  // pendingTurretFireEvents is deliberately not mixed — same one-tick-transient convention
-  // pendingFireEvents already follows per the POLICY comment above.
+  const v = world.vehicles;
+  for (let id = 0; id < v.count; id += 1) {
+    if (!v.active[id]) continue;
+    hash = mixVehicle(hash, v, id);
+  }
+  // pendingTurretFireEvents/pendingVehicleFireEvents are deliberately not mixed — same
+  // one-tick-transient convention pendingFireEvents already follows per the POLICY comment
+  // above.
   return hash >>> 0;
 }

@@ -4,12 +4,16 @@ import {
   addPlayer,
   createWorld,
   deserializePlayer,
+  deserializeVehicle,
+  hashWorld,
   removePlayer,
   respawnPlayer,
   serializeActivePlayers,
   serializePlayer,
+  serializeVehicle,
   type Heightfield,
 } from './index.js';
+import { VehicleKind } from './vehicles.js';
 import { ammoIndex, WeaponId, WeaponState } from './weapons.js';
 
 const terrain: Heightfield = {
@@ -251,5 +255,82 @@ describe('player snapshots', () => {
     const target = createWorld(terrain, 1);
     deserializePlayer(target, data);
     expect(target.players.wasJumpHeld[id]).toBe(1);
+  });
+});
+
+describe('serializeVehicle / deserializeVehicle', () => {
+  it('round-trips every vehicle field exactly', () => {
+    const world = createWorld(terrain, 1);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.team[0] = 1;
+    world.vehicles.position.set([10, 20, 30], 0);
+    world.vehicles.yaw[0] = 0.5;
+    world.vehicles.pitch[0] = 0.1;
+    world.vehicles.roll[0] = -0.2;
+    world.vehicles.damage[0] = 0.2;
+    world.vehicles.energy[0] = 100;
+    world.vehicles.driverId[0] = 3;
+    const data = serializeVehicle(world, 0);
+
+    // Deliberately NOT pre-seeded here (no active/count set on `other` first) -- unlike
+    // baseObjects/turrets, a vehicle id has no mission-file placement to pre-seed from, so
+    // deserializeVehicle is the ONLY path a client-side vehicle id ever comes into existence.
+    const other = createWorld(terrain, 1);
+    deserializeVehicle(other, data);
+    expect(other.vehicles.active[0]).toBe(1);
+    expect(other.vehicles.count).toBe(1);
+    expect(other.vehicles.kind[0]).toBe(VehicleKind.Shrike);
+    expect(other.vehicles.team[0]).toBe(1);
+    expect(other.vehicles.position[1]).toBe(20);
+    expect(other.vehicles.yaw[0]).toBe(0.5);
+    expect(other.vehicles.pitch[0]).toBe(0.1);
+    expect(other.vehicles.roll[0]).toBeCloseTo(-0.2, 10);
+    expect(other.vehicles.damage[0]).toBeCloseTo(0.2, 10);
+    expect(other.vehicles.energy[0]).toBe(100);
+    expect(other.vehicles.driverId[0]).toBe(3);
+  });
+});
+
+describe('hashWorld: vehicle coverage (M5, Task 9)', () => {
+  it('two worlds differing only in a vehicle damage value hash differently', () => {
+    const a = createWorld(terrain, 1);
+    a.vehicles.active[0] = 1;
+    a.vehicles.count = 1;
+    a.vehicles.kind[0] = VehicleKind.Wildcat;
+    const b = createWorld(terrain, 1);
+    b.vehicles.active[0] = 1;
+    b.vehicles.count = 1;
+    b.vehicles.kind[0] = VehicleKind.Wildcat;
+    b.vehicles.damage[0] = 0.1;
+    expect(hashWorld(a)).not.toBe(hashWorld(b));
+  });
+
+  it('two identical worlds (including vehicle state) hash the same', () => {
+    const build = (): ReturnType<typeof createWorld> => {
+      const world = createWorld(terrain, 1);
+      world.vehicles.active[0] = 1;
+      world.vehicles.count = 1;
+      world.vehicles.kind[0] = VehicleKind.Shrike;
+      world.vehicles.energy[0] = 200;
+      world.vehicles.position.set([1, 2, 3], 0);
+      return world;
+    };
+    expect(hashWorld(build())).toBe(hashWorld(build()));
+  });
+});
+
+describe('hashWorld: turret targetKind coverage (M5, Task 8/9)', () => {
+  it('a turret aimed at a player id and one aimed at a vehicle sharing that id hash differently', () => {
+    const a = createWorld(terrain, 1);
+    a.turrets.count = 1;
+    a.turrets.targetId[0] = 0;
+    a.turrets.targetKind[0] = 0; // player
+    const b = createWorld(terrain, 1);
+    b.turrets.count = 1;
+    b.turrets.targetId[0] = 0;
+    b.turrets.targetKind[0] = 1; // vehicle
+    expect(hashWorld(a)).not.toBe(hashWorld(b));
   });
 });

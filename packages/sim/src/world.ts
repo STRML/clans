@@ -7,7 +7,7 @@ import { stepRepairPacks } from './repair.js';
 import type { Heightfield } from './terrain.js';
 import type { PlayerInput, Vec3, World } from './types.js';
 import { createEmptyTurrets, stepTurrets } from './turrets.js';
-import { createVehicleStore } from './vehicles.js';
+import { createVehicleStore, stepVehicles } from './vehicles.js';
 import { resetLoadout, stepWeapons, WEAPON_COUNT } from './weapons.js';
 
 export const FIXED_TICK_MS = 32;
@@ -198,6 +198,12 @@ export function stepWorld(
   if (world.gameOver) return;
   stepPlayers(world, inputs, dt);
   stepWeapons(world, inputs, dt);
+  // Runs before stepTurrets so the AA barrel sees this tick's vehicle positions before it
+  // decides whether to acquire or fire, and before stepProjectiles so a Shrike blaster shot
+  // fired this tick is already in pendingVehicleFireEvents for stepProjectiles to materialize
+  // in the SAME tick -- exactly the relationship stepTurrets -> stepProjectiles already has
+  // for turret shots (M5 plan, Global Constraints).
+  stepVehicles(world, inputs, dt);
   stepTurrets(world, dt);
   stepProjectiles(world, dt);
   // Codex round 1, finding 5: this used to run before stepProjectiles, so a generator
