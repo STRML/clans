@@ -785,7 +785,10 @@ describe('NetClient', () => {
       winnerTeam: 0,
       timeRemainingS: 1200.5,
       gameOverReason: 0,
-      bots: [],
+      bots: [
+        { playerId: 3, state: 0 },
+        { playerId: 7, state: 1 },
+      ],
     };
     transport.pump([encodeSnapshot(1, 0, 0, [], null, extras)]);
     expect(client.projectiles).toEqual(extras.projectiles);
@@ -794,6 +797,7 @@ describe('NetClient', () => {
     expect(client.gameOver).toBe(false);
     expect(client.timeRemainingS).toBeCloseTo(1200.5, 1);
     expect(client.gameOverReason).toBe(0);
+    expect(client.bots).toEqual(extras.bots);
   });
 
   it('a snapshot with base objects populates net.world.baseObjects (Codex round 1, finding 1)', () => {
