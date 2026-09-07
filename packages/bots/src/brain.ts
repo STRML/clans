@@ -17,6 +17,7 @@ import {
 } from './perception.js';
 import { steerToward } from './steering.js';
 import { BotRole, BotState, type BotRuntimeState } from './types.js';
+import { decideVehicleGoal, shouldUseVehicle } from './vehicles.js';
 import type { WaypointGraph } from './waypoints.js';
 
 export const DEFEND_ENGAGE_RADIUS = 120; // Ours.
@@ -91,6 +92,10 @@ function decideDefenderGoal(
   if (carrier !== null) {
     return { position: playerPoint(world, carrier), key: `escort:${String(carrier)}` };
   }
+  // Fallback checked only when every CTF priority above comes up empty (Task 7): mount a
+  // nearby own-team vehicle if one is reachable, otherwise hold at the flag stand as before.
+  const vehicleGoal = decideVehicleGoal(world, runtime);
+  if (vehicleGoal !== null) return vehicleGoal;
   return { position: flagStandPosition(world, ownId), key: `home:${String(ownId)}` };
 }
 
@@ -189,14 +194,12 @@ export function stepBot(world: World, graph: WaypointGraph, runtime: BotRuntimeS
     altFire: false,
     slot: 0,
     packActive: false,
-    // Real PlayerInput.use is a required field (M5, packages/sim/src/types.ts:23) -- every
-    // bot input must set it, not just a vehicle-aware one, or this object literal fails to
-    // typecheck against PlayerInput. Task 6 alone has no vehicle awareness, so this starts
-    // false; Task 7 (vehicles.ts, which already modifies brain.ts for decideGoal) revises
-    // this single line to `use: shouldUseVehicle(world, runtime, runtime.playerId)` once
-    // vehicle piloting exists. Never a queued wire message -- see Global Constraints on why
-    // mounting is a PlayerInput bit, not a direct sim call.
-    use: false,
+    // Real PlayerInput.use is a required field (M5, packages/sim/src/types.ts:23). Never a
+    // queued wire message -- see Global Constraints on why mounting is a PlayerInput bit,
+    // not a direct sim call: shouldUseVehicle re-checks range/occupancy fresh every tick and
+    // stepVehicles itself edge-detects the bit, so holding this true for several consecutive
+    // ticks still mounts exactly once, the same as a human holding E.
+    use: shouldUseVehicle(world, runtime, runtime.playerId),
   };
 }
 

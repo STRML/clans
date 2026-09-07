@@ -168,4 +168,48 @@ describe('stepBot', () => {
     }
     expect(typeof input.use).toBe('boolean');
   });
+
+  it('sets use: true once a bot with no active CTF priority walks within MOUNT_RANGE of a mountable own-team vehicle', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    // A Defender with no dropped own flag and no carrier to escort falls through to the
+    // vehicle-mount fallback goal (Task 7) instead of standing idle at the flag stand.
+    const bot = addPlayer(world, { x: 2, y: 0, z: 0 }, 1);
+    const runtime = createBotRuntimeState(bot, BotRole.Defender, 1);
+    const vehicleStore = world.vehicles;
+    const vehicleId = vehicleStore.count;
+    vehicleStore.count += 1;
+    vehicleStore.active[vehicleId] = 1;
+    vehicleStore.destroyed[vehicleId] = 0;
+    vehicleStore.driverId[vehicleId] = -1;
+    vehicleStore.team[vehicleId] = 1;
+    vehicleStore.position.set([2, 0, 0], vehicleId * 3);
+    const graph = buildWaypointGraph([
+      { position: { x: -100, y: 0, z: 0 }, label: 'homeFlag' },
+      { position: { x: 100, y: 0, z: 0 }, label: 'enemyFlag' },
+    ]);
+    const input = stepBot(world, graph, runtime);
+    expect(input.use).toBe(true);
+  });
+
+  it('sets use: false when an active CTF goal is present even with a vehicle nearby', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 2, y: 0, z: 0 }, 1);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    const vehicleStore = world.vehicles;
+    const vehicleId = vehicleStore.count;
+    vehicleStore.count += 1;
+    vehicleStore.active[vehicleId] = 1;
+    vehicleStore.destroyed[vehicleId] = 0;
+    vehicleStore.driverId[vehicleId] = -1;
+    vehicleStore.team[vehicleId] = 1;
+    vehicleStore.position.set([2, 0, 0], vehicleId * 3);
+    const graph = buildWaypointGraph([
+      { position: { x: -100, y: 0, z: 0 }, label: 'homeFlag' },
+      { position: { x: 100, y: 0, z: 0 }, label: 'enemyFlag' },
+    ]);
+    const input = stepBot(world, graph, runtime);
+    expect(input.use).toBe(false);
+  });
 });
