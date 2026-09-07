@@ -15,7 +15,9 @@ import {
   stepWorld,
   type Heightfield,
   type PlayerInput,
+  type PlayerSnapshotData,
   type RandomState,
+  type VehicleSnapshotData,
   type World,
 } from '@clans/sim';
 import {
@@ -1868,5 +1870,115 @@ describe('NetClient', () => {
     expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
     expect(client.world.projectiles.count).toBe(0);
     expect(Array.from(client.world.projectiles.active).every((flag) => flag === 0)).toBe(true);
+  });
+
+  // Codex review round 1 (this PR), finding 3: deserializeVehicle wrote each vehicle's own
+  // driverId onto world.vehicles, but nothing ever wrote the other side of that relationship
+  // -- world.players.mountedVehicleId, which movement.ts's stepPlayer and weapons.ts's
+  // stepOnePlayer both check before simulating this player at all. Without it, a client that
+  // lost a mount race (or was ejected by a crash the client hadn't itself predicted) stayed
+  // locally "mounted" forever.
+  describe('vehicle mount reconciliation', () => {
+    function defaultServerState(overrides: Partial<PlayerSnapshotData> = {}): PlayerSnapshotData {
+      return {
+        id: 0,
+        team: 1,
+        x: 0,
+        y: 0,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        yaw: 0,
+        energy: 60,
+        health: 60,
+        weaponSlot: 4,
+        onGround: 1 as const,
+        ski: 0 as const,
+        respawnSeq: 0,
+        discAmmo: 15,
+        chaingunAmmo: 100,
+        mortarAmmo: 0,
+        grenades: 5,
+        weaponState: 1,
+        weaponTimer: 0,
+        spunUp: 0 as const,
+        grenadeCooldown: 0,
+        score: 0,
+        godMode: 0 as const,
+        wasJumpHeld: 0 as const,
+        armor: 0,
+        hasRepairPack: 0 as const,
+        ...overrides,
+      };
+    }
+    function vehicleSnapshot(overrides: Partial<VehicleSnapshotData> = {}): VehicleSnapshotData {
+      return {
+        id: 5,
+        kind: 0,
+        team: 1,
+        x: 0,
+        y: 0,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        yaw: 0,
+        pitch: 0,
+        roll: 0,
+        angVelYaw: 0,
+        angVelPitch: 0,
+        angVelRoll: 0,
+        energy: 100,
+        damage: 0,
+        destroyed: 0 as const,
+        driverId: -1,
+        padId: -1,
+        weaponTimer: 0,
+        onGround: 0 as const,
+        wasJumpHeld: 0 as const,
+        ...overrides,
+      };
+    }
+
+    it('sets players.mountedVehicleId[LOCAL_SLOT] when the snapshot reports this player driving a vehicle', () => {
+      const transport = makeTransport(makeLink({ value: 41 }));
+      const client = new NetClient(transport, terrain, { now: () => clock.ms });
+      client.playerId = 0;
+      const extras: WorldExtras = {
+        ...emptyExtras(),
+        // driverId is a real server-assigned playerId (0, matching client.playerId here),
+        // never the client's own remapped LOCAL_SLOT world.players index.
+        vehicles: [vehicleSnapshot({ id: 5, driverId: 0 })],
+      };
+      transport.pump([encodeSnapshot(1, 1, 0, [defaultServerState()], null, extras)]);
+      expect(client.world.players.mountedVehicleId[0]).toBe(5);
+    });
+
+    it('clears a stale local mount once the snapshot no longer reports this player as any vehicle driver', () => {
+      const transport = makeTransport(makeLink({ value: 41 }));
+      const client = new NetClient(transport, terrain, { now: () => clock.ms });
+      client.playerId = 0;
+      transport.pump([
+        encodeSnapshot(1, 1, 0, [defaultServerState()], null, {
+          ...emptyExtras(),
+          vehicles: [vehicleSnapshot({ id: 5, driverId: 0 })],
+        }),
+      ]);
+      expect(client.world.players.mountedVehicleId[0]).toBe(5);
+
+      // The server no longer lists this player as any vehicle's driver -- a lost mount race,
+      // or an ejection (crash, destruction) this client hadn't itself predicted yet. Before
+      // this fix, mountedVehicleId simply never got corrected back down: this player stayed
+      // locally "mounted" on vehicle 5 forever, and movement.ts/weapons.ts kept skipping
+      // their own simulation because of it.
+      transport.pump([
+        encodeSnapshot(2, 2, 0, [defaultServerState()], null, {
+          ...emptyExtras(),
+          vehicles: [vehicleSnapshot({ id: 5, driverId: -1 })],
+        }),
+      ]);
+      expect(client.world.players.mountedVehicleId[0]).toBe(-1);
+    });
   });
 });

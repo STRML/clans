@@ -53,12 +53,23 @@ import { createHud, type HudSource } from './hud.js';
 import { Input } from './input.js';
 import { loadInteriorColliders } from './interior-collision.js';
 import { advance, type Accumulator } from './loop.js';
-import { NetClient, type RemoteSnapshot, type TimestampedEvent } from './netclient.js';
+import {
+  NetClient,
+  type RemoteSnapshot,
+  type RemoteVehicleSnapshot,
+  type TimestampedEvent,
+} from './netclient.js';
 import { RemoteBuffer, syncRemoteMeshes } from './remote.js';
 import { createStationMenu, stationMenuVisible, type StationMenu } from './stationMenu.js';
 import { addEnvironment, createTerrain } from './terrain.js';
 import { WebSocketTransport } from './transport.js';
-import { createVehicleView, vehiclesFromWorld, type VehicleView } from './vehicle-view.js';
+import {
+  createVehicleView,
+  vehicleRenderDataFrom,
+  vehiclesFromWorld,
+  VehicleBuffer,
+  type VehicleView,
+} from './vehicle-view.js';
 import {
   createVehiclePadMenu,
   vehiclePadMenuVisible,
@@ -363,6 +374,7 @@ interface BaseAssetsViewState {
   stationMenu: StationMenu;
   stationMenuState: { open: boolean };
   vehicleView: VehicleView;
+  vehicleBuffers: Map<number, VehicleBuffer>;
   vehiclePadMenu: VehiclePadMenu;
   vehiclePadMenuState: { open: boolean };
   commanderMapCanvas: HTMLCanvasElement;
@@ -429,6 +441,41 @@ function syncMenus(state: BaseAssetsViewState, pressed: boolean): void {
   else state.vehiclePadMenu.hide();
 }
 
+/**
+ * Builds the flat array vehicle-view.ts's `sync` renders from -- single-player reads
+ * `world.vehicles` directly (no snapshot delay to smooth in the first place, exactly
+ * `commanderMapPlayers`' own local/networked split just above). Networked, the local
+ * player's OWN driven vehicle (if any) is drawn live off `world.vehicles` too -- the same
+ * source placeVehicleCamera already chases -- while every other vehicle comes out of
+ * `updateVehicleBuffers`' interpolation history (Codex review round 1, this PR, finding 9)
+ * instead of net.vehicles' single latest, snap-to-new-position-every-snapshot sample.
+ * Exported for a focused unit test.
+ */
+export function vehicleRenderData(state: {
+  world: World;
+  playerId: number;
+  net: Pick<NetClient, 'connected' | 'vehicleSnapshots'> | null;
+  vehicleBuffers: Map<number, VehicleBuffer>;
+}): VehicleSnapshotData[] {
+  const { world, playerId, net } = state;
+  const connected = net ? net.connected : true;
+  if (!net || !connected) {
+    // Mirrors updateRemotes' own disconnect handling: clears any stale interpolation
+    // history so a later reconnect doesn't resume blending from a socket-drop-stale sample.
+    state.vehicleBuffers.clear();
+    return vehiclesFromWorld(world);
+  }
+  const nowMs = performance.now();
+  updateVehicleBuffers(net, state.vehicleBuffers, nowMs);
+  const mountedId = world.players.mountedVehicleId[playerId] ?? -1;
+  const out = vehicleRenderDataFrom(state.vehicleBuffers, nowMs, mountedId);
+  if (mountedId !== -1) {
+    const mounted = vehiclesFromWorld(world).find((v) => v.id === mountedId);
+    if (mounted) out.push(mounted);
+  }
+  return out;
+}
+
 function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): void {
   const { world, playerId, net, input } = state;
   const connected = net ? net.connected : true;
@@ -436,9 +483,7 @@ function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): vo
     net && connected ? net.baseObjects : baseObjectsFromWorld(world);
   const turretData: TurretSnapshotData[] = net && connected ? net.turrets : turretsFromWorld(world);
   state.baseObjectView.sync(baseObjectData, turretData);
-  const vehicleData: VehicleSnapshotData[] =
-    net && connected ? net.vehicles : vehiclesFromWorld(world);
-  state.vehicleView.sync(vehicleData);
+  state.vehicleView.sync(vehicleRenderData(state));
 
   // `usePressed` is computed once by the caller (frame()), the same edge-triggered read
   // that also gates the outgoing `use` wire bit -- see frame()'s own comment for why
@@ -553,6 +598,55 @@ function pruneStaleRemoteBuffers(buffers: Map<number, RemoteBuffer>, latest: Rem
   for (const id of [...buffers.keys()]) {
     if (!latest.players.has(id)) buffers.delete(id);
   }
+}
+
+// --- Vehicle sibling of the remote-player interpolation pair just above (Codex review
+// round 1, this PR, finding 9) -- same shape, applied to RemoteVehicleSnapshot/VehicleBuffer
+// instead of RemoteSnapshot/RemoteBuffer.
+function applyVehicleRemoteSnapshot(
+  buffers: Map<number, VehicleBuffer>,
+  snapshot: RemoteVehicleSnapshot,
+  atMs: number,
+): void {
+  for (const vehicle of snapshot.vehicles) {
+    const buffer = buffers.get(vehicle.id) ?? new VehicleBuffer();
+    buffers.set(vehicle.id, buffer);
+    buffer.push(atMs, vehicle);
+  }
+}
+
+function pruneStaleVehicleBuffers(
+  buffers: Map<number, VehicleBuffer>,
+  latest: RemoteVehicleSnapshot,
+): void {
+  const liveIds = new Set(latest.vehicles.map((v) => v.id));
+  for (const id of [...buffers.keys()]) {
+    if (!liveIds.has(id)) buffers.delete(id);
+  }
+}
+
+/**
+ * Exported for a focused unit test, same convention as updateRemotes just above. Drains
+ * every queued vehicle snapshot (never just the latest -- see updateRemotes' own comment for
+ * why) into per-id VehicleBuffers, stamping each with the same tick-offset-behind-nowMs
+ * timestamp scheme.
+ */
+export function updateVehicleBuffers(
+  activeNet: Pick<NetClient, 'vehicleSnapshots' | 'connected'>,
+  buffers: Map<number, VehicleBuffer>,
+  nowMs: number,
+): void {
+  if (!activeNet.connected) {
+    buffers.clear();
+    return;
+  }
+  const pending = activeNet.vehicleSnapshots.splice(0, activeNet.vehicleSnapshots.length);
+  const latest = pending.at(-1);
+  for (const snapshot of pending) {
+    const atMs = latest ? nowMs - (latest.tick - snapshot.tick) * FIXED_TICK_MS : nowMs;
+    applyVehicleRemoteSnapshot(buffers, snapshot, atMs);
+  }
+  if (latest) pruneStaleVehicleBuffers(buffers, latest);
 }
 
 /**
@@ -846,6 +940,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const acc: Accumulator = { remainder: 0 };
   const remoteMeshes = new Map<number, THREE.Mesh>();
   const remoteBuffers = new Map<number, RemoteBuffer>();
+  const vehicleBuffers = new Map<number, VehicleBuffer>();
   const fps: FpsWindow = { windowStart: performance.now(), frames: 0 };
   const projectileMeshes = new Map<number, THREE.Mesh>();
   const previousProjectiles = new Map<number, ProjectileSnapshotData>();
@@ -984,6 +1079,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
           stationMenu,
           stationMenuState,
           vehicleView,
+          vehicleBuffers,
           vehiclePadMenu,
           vehiclePadMenuState,
           commanderMapCanvas,

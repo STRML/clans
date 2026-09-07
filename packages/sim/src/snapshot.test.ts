@@ -266,12 +266,18 @@ describe('serializeVehicle / deserializeVehicle', () => {
     world.vehicles.kind[0] = VehicleKind.Shrike;
     world.vehicles.team[0] = 1;
     world.vehicles.position.set([10, 20, 30], 0);
+    world.vehicles.velocity.set([1, 2, 3], 0);
     world.vehicles.yaw[0] = 0.5;
     world.vehicles.pitch[0] = 0.1;
     world.vehicles.roll[0] = -0.2;
+    world.vehicles.angVel.set([0.4, 0.5, 0.6], 0);
     world.vehicles.damage[0] = 0.2;
     world.vehicles.energy[0] = 100;
     world.vehicles.driverId[0] = 3;
+    world.vehicles.padId[0] = 7;
+    world.vehicles.weaponTimer[0] = 0.05;
+    world.vehicles.onGround[0] = 1;
+    world.vehicles.wasJumpHeld[0] = 1;
     const data = serializeVehicle(world, 0);
 
     // Deliberately NOT pre-seeded here (no active/count set on `other` first) -- unlike
@@ -284,12 +290,27 @@ describe('serializeVehicle / deserializeVehicle', () => {
     expect(other.vehicles.kind[0]).toBe(VehicleKind.Shrike);
     expect(other.vehicles.team[0]).toBe(1);
     expect(other.vehicles.position[1]).toBe(20);
+    // Codex review round 1 (this PR), finding 4: velocity/angVel/padId/weaponTimer/onGround/
+    // wasJumpHeld were real VehicleStore state hashWorld already covered but the wire never
+    // carried -- a client's decoded vehicle went physically frozen (zero velocity/angVel every
+    // tick) regardless of the real vehicle's motion. Asserted here so this can never silently
+    // regress back to that gap.
+    expect(other.vehicles.velocity[0]).toBe(1);
+    expect(other.vehicles.velocity[1]).toBe(2);
+    expect(other.vehicles.velocity[2]).toBe(3);
     expect(other.vehicles.yaw[0]).toBe(0.5);
     expect(other.vehicles.pitch[0]).toBe(0.1);
     expect(other.vehicles.roll[0]).toBeCloseTo(-0.2, 10);
+    expect(other.vehicles.angVel[0]).toBeCloseTo(0.4, 10);
+    expect(other.vehicles.angVel[1]).toBeCloseTo(0.5, 10);
+    expect(other.vehicles.angVel[2]).toBeCloseTo(0.6, 10);
     expect(other.vehicles.damage[0]).toBeCloseTo(0.2, 10);
     expect(other.vehicles.energy[0]).toBe(100);
     expect(other.vehicles.driverId[0]).toBe(3);
+    expect(other.vehicles.padId[0]).toBe(7);
+    expect(other.vehicles.weaponTimer[0]).toBeCloseTo(0.05, 10);
+    expect(other.vehicles.onGround[0]).toBe(1);
+    expect(other.vehicles.wasJumpHeld[0]).toBe(1);
   });
 });
 

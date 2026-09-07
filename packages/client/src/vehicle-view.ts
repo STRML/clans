@@ -9,6 +9,150 @@ export interface VehicleView {
   sync(vehicles: VehicleSnapshotData[]): void;
 }
 
+// --- Remote-vehicle interpolation (Codex review round 1, this PR, finding 9) --------------
+// Before this, app.ts fed net.vehicles -- the single latest decoded snapshot, replaced
+// wholesale every time one arrived -- straight into sync() above, so every OTHER vehicle
+// on screen (never the one the local player is driving, which app.ts's placeVehicleCamera
+// already reads live off world.vehicles) visibly snapped to a new position/orientation once
+// per snapshot interval instead of smoothing through it the way remote players already do
+// (remote.ts's RemoteBuffer). Same render-time-behind-now, interpolate-or-extrapolate shape
+// as RemoteBuffer, kept as a separate small class rather than generalizing RemoteBuffer
+// itself: vehicles carry pitch/roll and non-positional fields (kind/team/energy/damage/
+// destroyed/driverId/...) RemoteBuffer's player-only shape has no use for, and forcing both
+// through one generic risked exactly the kind of premature abstraction Simplicity
+// Enforcement warns against for a second, structurally different caller.
+export const VEHICLE_INTERP_DELAY_MS = 100; // matches remote.ts's own INTERP_DELAY_MS
+const VEHICLE_MAX_EXTRAPOLATE_MS = 50; // matches remote.ts's own MAX_EXTRAPOLATE_MS
+const VEHICLE_HISTORY_LENGTH = 8;
+
+interface VehicleSample {
+  atMs: number;
+  data: VehicleSnapshotData;
+}
+interface VehiclePose {
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  pitch: number;
+  roll: number;
+}
+
+function findVehicleBracket(
+  samples: VehicleSample[],
+  renderTime: number,
+): { before: VehicleSample | undefined; after: VehicleSample | undefined } {
+  let before = samples[0] ?? samples[samples.length - 1];
+  let after = samples[samples.length - 1];
+  for (let i = 0; i < samples.length - 1; i += 1) {
+    const a = samples[i];
+    const b = samples[i + 1];
+    if (a && b && a.atMs <= renderTime && renderTime <= b.atMs) {
+      before = a;
+      after = b;
+      break;
+    }
+  }
+  return { before, after };
+}
+
+const ZERO_POSE: VehiclePose = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, roll: 0 };
+
+// Split out of a single `sample?.field ?? 0` expression per field (lint: complexity budget --
+// six chained `??`s in one function counted as six branches on their own).
+function vehiclePoseFromSample(sample: VehicleSample | undefined): VehiclePose {
+  if (!sample) return ZERO_POSE;
+  const { x, y, z, yaw, pitch, roll } = sample.data;
+  return { x, y, z, yaw, pitch, roll };
+}
+
+function lerpVehiclePose(
+  before: VehicleSample,
+  after: VehicleSample,
+  renderTime: number,
+): VehiclePose {
+  const t = Math.max(0, Math.min(1, (renderTime - before.atMs) / (after.atMs - before.atMs)));
+  return {
+    x: before.data.x + (after.data.x - before.data.x) * t,
+    y: before.data.y + (after.data.y - before.data.y) * t,
+    z: before.data.z + (after.data.z - before.data.z) * t,
+    yaw: before.data.yaw + (after.data.yaw - before.data.yaw) * t,
+    pitch: before.data.pitch + (after.data.pitch - before.data.pitch) * t,
+    roll: before.data.roll + (after.data.roll - before.data.roll) * t,
+  };
+}
+
+/** One vehicle id's own interpolation history. Only position/orientation are smoothed --
+ *  everything else on a sample (kind/team/energy/damage/destroyed/driverId/...) is discrete
+ *  logical state a client should show as of the LATEST sample, never blended, so callers read
+ *  those straight off the newest pushed sample rather than through positionAt(). */
+export class VehicleBuffer {
+  private samples: VehicleSample[] = [];
+
+  push(atMs: number, data: VehicleSnapshotData): void {
+    this.samples.push({ atMs, data });
+    if (this.samples.length > VEHICLE_HISTORY_LENGTH) this.samples.shift();
+  }
+
+  latest(): VehicleSnapshotData | null {
+    return this.samples.at(-1)?.data ?? null;
+  }
+
+  positionAt(nowMs: number): VehiclePose | null {
+    const latest = this.samples.at(-1);
+    if (!latest) return null;
+    const renderTime = nowMs - VEHICLE_INTERP_DELAY_MS;
+    return renderTime >= latest.atMs
+      ? this.extrapolate(latest, renderTime)
+      : this.interpolate(renderTime);
+  }
+
+  private interpolate(renderTime: number): VehiclePose {
+    const { before, after } = findVehicleBracket(this.samples, renderTime);
+    if (!before || !after || before.atMs === after.atMs) {
+      return vehiclePoseFromSample(before ?? after);
+    }
+    return lerpVehiclePose(before, after, renderTime);
+  }
+
+  private extrapolate(latest: VehicleSample, renderTime: number): VehiclePose {
+    const seconds = Math.min(renderTime - latest.atMs, VEHICLE_MAX_EXTRAPOLATE_MS) / 1000;
+    return {
+      x: latest.data.x + latest.data.vx * seconds,
+      y: latest.data.y + latest.data.vy * seconds,
+      z: latest.data.z + latest.data.vz * seconds,
+      yaw: latest.data.yaw,
+      pitch: latest.data.pitch,
+      roll: latest.data.roll,
+    };
+  }
+}
+
+/**
+ * Merges every vehicle id's interpolation buffer into the flat array vehicle-view.ts's
+ * `sync` expects: position/orientation come from `positionAt` (smoothed), everything else
+ * from that id's own latest raw sample (see VehicleBuffer's own doc comment). `mountedId`
+ * (the local player's own driven vehicle, or -1) is deliberately excluded and must be
+ * supplied by the caller instead reading world.vehicles directly -- the same live,
+ * zero-latency source app.ts's placeVehicleCamera already uses, so the mesh the camera is
+ * chasing never lags one interpolation delay behind where the camera itself already is.
+ */
+export function vehicleRenderDataFrom(
+  buffers: Map<number, VehicleBuffer>,
+  nowMs: number,
+  mountedId: number,
+): VehicleSnapshotData[] {
+  const out: VehicleSnapshotData[] = [];
+  for (const [id, buffer] of buffers) {
+    if (id === mountedId) continue;
+    const data = buffer.latest();
+    const pose = buffer.positionAt(nowMs);
+    if (!data || !pose) continue;
+    out.push({ ...data, ...pose });
+  }
+  return out;
+}
+
 const SHRIKE_COLOR = 0x4488cc;
 const WILDCAT_COLOR = 0xcc8844;
 
@@ -142,13 +286,23 @@ function vehicleSnapshotFromStore(store: World['vehicles'], id: number): Vehicle
     x: num(store.position, base),
     y: num(store.position, base + 1),
     z: num(store.position, base + 2),
+    vx: num(store.velocity, base),
+    vy: num(store.velocity, base + 1),
+    vz: num(store.velocity, base + 2),
     yaw: num(store.yaw, id),
     pitch: num(store.pitch, id),
     roll: num(store.roll, id),
+    angVelYaw: num(store.angVel, base),
+    angVelPitch: num(store.angVel, base + 1),
+    angVelRoll: num(store.angVel, base + 2),
     energy: num(store.energy, id),
     damage: num(store.damage, id),
     destroyed: (store.destroyed[id] ? 1 : 0) as 0 | 1,
     driverId: num(store.driverId, id),
+    padId: num(store.padId, id),
+    weaponTimer: num(store.weaponTimer, id),
+    onGround: (store.onGround[id] ? 1 : 0) as 0 | 1,
+    wasJumpHeld: (store.wasJumpHeld[id] ? 1 : 0) as 0 | 1,
   };
 }
 

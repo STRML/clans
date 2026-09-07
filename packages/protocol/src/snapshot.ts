@@ -413,6 +413,12 @@ function readTurret(cursor: Cursor): TurretSnapshotData {
   return { id, damage, destroyed, powered, targetId, state };
 }
 
+// Codex review round 1 (this PR), finding 4: onGround/wasJumpHeld pack into one status byte
+// bit 0/1, the same "one boolean, no new whole byte" convention player snapshots already use
+// (see PlayerSnapshotData.wasJumpHeld's own doc comment further up this file).
+function vehicleStatusByte(v: VehicleSnapshotData): number {
+  return (v.onGround ? 1 : 0) | (v.wasJumpHeld ? 2 : 0);
+}
 function writeVehicle(cursor: Cursor, v: VehicleSnapshotData): void {
   writeU16(cursor, v.id);
   writeU8(cursor, v.kind);
@@ -420,13 +426,22 @@ function writeVehicle(cursor: Cursor, v: VehicleSnapshotData): void {
   writeF32(cursor, v.x);
   writeF32(cursor, v.y);
   writeF32(cursor, v.z);
+  writeF32(cursor, v.vx);
+  writeF32(cursor, v.vy);
+  writeF32(cursor, v.vz);
   writeF32(cursor, v.yaw);
   writeF32(cursor, v.pitch);
   writeF32(cursor, v.roll);
+  writeF32(cursor, v.angVelYaw);
+  writeF32(cursor, v.angVelPitch);
+  writeF32(cursor, v.angVelRoll);
   writeF32(cursor, v.energy);
   writeF32(cursor, v.damage);
   writeU8(cursor, v.destroyed);
   writeI16(cursor, v.driverId);
+  writeI16(cursor, v.padId);
+  writeF32(cursor, v.weaponTimer);
+  writeU8(cursor, vehicleStatusByte(v));
 }
 function readVehicle(cursor: Cursor): VehicleSnapshotData {
   const id = readU16(cursor);
@@ -435,17 +450,70 @@ function readVehicle(cursor: Cursor): VehicleSnapshotData {
   const x = readF32(cursor);
   const y = readF32(cursor);
   const z = readF32(cursor);
+  const vx = readF32(cursor);
+  const vy = readF32(cursor);
+  const vz = readF32(cursor);
   const yaw = readF32(cursor);
   const pitch = readF32(cursor);
   const roll = readF32(cursor);
+  const angVelYaw = readF32(cursor);
+  const angVelPitch = readF32(cursor);
+  const angVelRoll = readF32(cursor);
   const energy = readF32(cursor);
   const damage = readF32(cursor);
-  assertFinite([x, y, z, yaw, pitch, roll, energy, damage]);
+  assertFinite([
+    x,
+    y,
+    z,
+    vx,
+    vy,
+    vz,
+    yaw,
+    pitch,
+    roll,
+    angVelYaw,
+    angVelPitch,
+    angVelRoll,
+    energy,
+    damage,
+  ]);
   const destroyed = (readU8(cursor) ? 1 : 0) as 0 | 1;
   const driverId = readI16(cursor);
-  return { id, kind, team, x, y, z, yaw, pitch, roll, energy, damage, destroyed, driverId };
+  const padId = readI16(cursor);
+  const weaponTimer = readF32(cursor);
+  assertFinite([weaponTimer]);
+  const status = readU8(cursor);
+  const onGround = (status & 1 ? 1 : 0) as 0 | 1;
+  const wasJumpHeld = (status & 2 ? 1 : 0) as 0 | 1;
+  return {
+    id,
+    kind,
+    team,
+    x,
+    y,
+    z,
+    vx,
+    vy,
+    vz,
+    yaw,
+    pitch,
+    roll,
+    angVelYaw,
+    angVelPitch,
+    angVelRoll,
+    energy,
+    damage,
+    destroyed,
+    driverId,
+    padId,
+    weaponTimer,
+    onGround,
+    wasJumpHeld,
+  };
 }
-const VEHICLE_BYTES = 2 + 1 + 1 + 4 * 8 + 1 + 2; // id, kind, team, 8 f32 fields, destroyed, driverId i16
+// id, kind, team, 14 f32 fields (x/y/z, vx/vy/vz, yaw/pitch/roll, angVelYaw/Pitch/Roll,
+// energy, damage), destroyed, driverId i16, padId i16, weaponTimer f32, status byte.
+const VEHICLE_BYTES = 2 + 1 + 1 + 4 * 14 + 1 + 2 + 2 + 4 + 1;
 
 function writeExtras(cursor: Cursor, extras: WorldExtras): void {
   writeU16(cursor, extras.projectiles.length);

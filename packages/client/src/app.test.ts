@@ -12,9 +12,11 @@ import {
   LIGHT_ARMOR,
   RESPAWN_TICKS,
   stepPower,
+  VehicleKind,
   type Heightfield,
   type PlayerInput,
   type PlayerSnapshotData,
+  type VehicleSnapshotData,
 } from '@clans/sim';
 import {
   EventKind,
@@ -36,11 +38,48 @@ import {
   teleportPlayerToFlag,
   teleportPlayerToVehiclePad,
   updateRemotes,
+  updateVehicleBuffers,
+  vehicleRenderData,
 } from './app.js';
 import { flagsFromWorld } from './flag-view.js';
 import { RemoteBuffer } from './remote.js';
-import type { NetClient, RemoteSnapshot, TimestampedEvent } from './netclient.js';
+import { VehicleBuffer } from './vehicle-view.js';
+import type {
+  NetClient,
+  RemoteSnapshot,
+  RemoteVehicleSnapshot,
+  TimestampedEvent,
+} from './netclient.js';
 import type { Effect } from './weapons-view.js';
+
+function vehicleData(overrides: Partial<VehicleSnapshotData> = {}): VehicleSnapshotData {
+  return {
+    id: 1,
+    kind: VehicleKind.Shrike,
+    team: 1,
+    x: 0,
+    y: 0,
+    z: 0,
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    yaw: 0,
+    pitch: 0,
+    roll: 0,
+    angVelYaw: 0,
+    angVelPitch: 0,
+    angVelRoll: 0,
+    energy: 0,
+    damage: 0,
+    destroyed: 0,
+    driverId: -1,
+    padId: -1,
+    weaponTimer: 0,
+    onGround: 0,
+    wasJumpHeld: 0,
+    ...overrides,
+  };
+}
 
 const IDLE_INPUT: PlayerInput = {
   moveX: 0,
@@ -208,6 +247,99 @@ describe('updateRemotes', () => {
     // treats equal timestamps as a single sample) still jumped straight to the newest
     // instead of ever bracketing between them.
     expect(samples[0]?.atMs).not.toBe(samples[1]?.atMs);
+  });
+});
+
+// Codex review round 1 (this PR), finding 9: the vehicle sibling of updateRemotes just
+// above -- same disconnect-clears and drain-every-queued-snapshot behavior, applied to
+// RemoteVehicleSnapshot/VehicleBuffer instead of RemoteSnapshot/RemoteBuffer.
+describe('updateVehicleBuffers', () => {
+  it('clears every vehicle buffer once the connection is no longer active', () => {
+    const buffers = new Map<number, VehicleBuffer>();
+    const fakeNet: { vehicleSnapshots: RemoteVehicleSnapshot[]; connected: boolean } = {
+      vehicleSnapshots: [{ tick: 1, vehicles: [vehicleData({ id: 1 })] }],
+      connected: true,
+    };
+    updateVehicleBuffers(fakeNet, buffers, 0);
+    expect(buffers.has(1)).toBe(true);
+
+    fakeNet.connected = false;
+    updateVehicleBuffers(fakeNet, buffers, 100);
+    expect(buffers.size).toBe(0);
+  });
+
+  it('drains every queued vehicle snapshot from a single call, not just the latest', () => {
+    const buffers = new Map<number, VehicleBuffer>();
+    const vehicleSnapshots: RemoteVehicleSnapshot[] = [
+      { tick: 10, vehicles: [vehicleData({ id: 1, x: 10 })] },
+      { tick: 20, vehicles: [vehicleData({ id: 1, x: 20 })] },
+    ];
+    const activeNet: Pick<NetClient, 'vehicleSnapshots' | 'connected'> = {
+      vehicleSnapshots,
+      connected: true,
+    };
+
+    updateVehicleBuffers(activeNet, buffers, 0);
+
+    expect(vehicleSnapshots).toHaveLength(0); // the queue is drained, not just peeked
+    const samples = (
+      buffers.get(1) as unknown as { samples: Array<{ atMs: number; data: { x: number } }> }
+    ).samples;
+    expect(samples.map((sample) => sample.data.x)).toEqual([10, 20]);
+    expect(samples[0]?.atMs).not.toBe(samples[1]?.atMs);
+  });
+
+  it('drops a buffer for an id the most recent snapshot no longer reports', () => {
+    const buffers = new Map<number, VehicleBuffer>();
+    const activeNet: Pick<NetClient, 'vehicleSnapshots' | 'connected'> = {
+      vehicleSnapshots: [{ tick: 1, vehicles: [vehicleData({ id: 1 })] }],
+      connected: true,
+    };
+    updateVehicleBuffers(activeNet, buffers, 0);
+    expect(buffers.has(1)).toBe(true);
+
+    activeNet.vehicleSnapshots.push({ tick: 2, vehicles: [] }); // vehicle 1 destroyed/despawned
+    updateVehicleBuffers(activeNet, buffers, 100);
+    expect(buffers.has(1)).toBe(false);
+  });
+});
+
+describe('vehicleRenderData', () => {
+  it('single-player (no net) reads world.vehicles directly, no buffering', () => {
+    const world = createWorld(flat, 1);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    const playerId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const buffers = new Map<number, VehicleBuffer>();
+    const out = vehicleRenderData({ world, playerId, net: null, vehicleBuffers: buffers });
+    expect(out.map((v) => v.id)).toEqual([0]);
+  });
+
+  it('draws the locally-mounted vehicle live off world.vehicles, not the (stale) interpolation buffer', () => {
+    // Codex review round 1 (this PR), finding 9: placeVehicleCamera already chases
+    // world.vehicles' own live, zero-latency prediction. Feeding the SAME vehicle's mesh
+    // through the 100 ms-behind interpolation buffer instead would make the mesh the
+    // camera is chasing visibly lag behind where the camera itself already is.
+    const world = createWorld(flat, 1);
+    world.vehicles.active[7] = 1;
+    world.vehicles.count = 8;
+    world.vehicles.kind[7] = VehicleKind.Wildcat;
+    world.vehicles.position.set([42, 0, 0], 7 * 3); // the LIVE, locally-predicted position
+    const playerId = addPlayer(world, { x: 42, y: 0, z: 0 }, 1);
+    world.players.mountedVehicleId[playerId] = 7;
+
+    const buffers = new Map<number, VehicleBuffer>([[7, new VehicleBuffer()]]);
+    // A stale buffered sample from before the local prediction above ran -- must NOT win.
+    buffers.get(7)?.push(0, vehicleData({ id: 7, x: -999 }));
+
+    const fakeNet: Pick<NetClient, 'connected' | 'vehicleSnapshots'> = {
+      connected: true,
+      vehicleSnapshots: [],
+    };
+    const out = vehicleRenderData({ world, playerId, net: fakeNet, vehicleBuffers: buffers });
+    expect(out).toHaveLength(1);
+    expect(out[0]?.x).toBe(42);
   });
 });
 

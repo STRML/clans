@@ -56,6 +56,14 @@ const MAX_PENDING_INPUTS = MAX_REPLAY_TICKS * 4;
 const LOSS_WINDOW = 50;
 const BYTES_WINDOW_MS = 1000;
 const LOCAL_SLOT = 0;
+
+/** Extracted out of handleSnapshot's own body to stay under the complexity budget -- the
+ *  `.find` plus `?? -1` together counted as two more branches than that function had room
+ *  for. See handleSnapshot's own call site comment for why this comparison uses `playerId`
+ *  (a real server-assigned id), not LOCAL_SLOT. */
+function findMountedVehicleId(vehicles: readonly VehicleSnapshotData[], playerId: number): number {
+  return vehicles.find((v) => v.driverId === playerId)?.id ?? -1;
+}
 // Bounds the interpolation queue below in case a caller ever stops draining it. Under
 // normal operation it holds at most a couple of entries: render frames (~60/s) happen far
 // more often than snapshots (every SNAPSHOT_EVERY_N_TICKS ticks), so the render loop
@@ -69,6 +77,14 @@ interface PendingInput {
 export interface RemoteSnapshot {
   tick: number;
   players: Map<number, PlayerSnapshotData>;
+}
+/** Codex review round 1 (this PR), finding 9: the vehicle sibling of RemoteSnapshot -- same
+ *  "queue every arrival, drain-and-splice on the render side" reason: `this.vehicles` alone
+ *  (replaced wholesale each snapshot) loses any earlier arrival within one render frame, and
+ *  a single-sample feed has no history to interpolate through in the first place. */
+export interface RemoteVehicleSnapshot {
+  tick: number;
+  vehicles: VehicleSnapshotData[];
 }
 /**
  * An Event message tagged with a receipt-order sequence number. recentEvents is a rolling
@@ -107,6 +123,7 @@ export class NetClient {
    * queue empty on every drain, not just read the latest entry.
    */
   remoteSnapshots: RemoteSnapshot[] = [];
+  vehicleSnapshots: RemoteVehicleSnapshot[] = [];
   projectiles: ProjectileSnapshotData[] = [];
   flags: FlagSnapshotData[] = [];
   baseObjects: BaseObjectSnapshotData[] = [];
@@ -383,10 +400,21 @@ export class NetClient {
     // already placed" step. This is exactly the M4 round-1 defect class for base objects,
     // not repeated here.
     for (const data of decoded.vehicles) deserializeVehicle(this.world, data);
+    // Codex review round 1 (this PR), finding 3: deserializeVehicle above writes each
+    // vehicle's own driverId, but nothing wrote the OTHER side of that relationship --
+    // world.players.mountedVehicleId, which movement.ts's stepPlayer and weapons.ts's
+    // stepOnePlayer both check to decide whether to simulate this player at all. Without
+    // this, a client that lost a mount race (or was ejected by a crash/destruction the
+    // client hadn't predicted) stayed locally "mounted" forever: its own next input replay
+    // in reconcile() below would keep skipping movement/weapons for a player the server no
+    // longer considers mounted. driverId is a real server-assigned playerId (never
+    // LOCAL_SLOT), so it is compared against this.playerId, not the local player's
+    // remapped world.players index.
+    const mountedVehicleId = findMountedVehicleId(decoded.vehicles, this.playerId);
 
     const self = decoded.players.find((player) => player.id === this.playerId);
     if (self) {
-      this.reconcile(self, decoded.tick, decoded.lastInputSequence);
+      this.reconcile(self, decoded.tick, decoded.lastInputSequence, mountedVehicleId);
       this.localHealth = self.health;
     }
 
@@ -415,6 +443,8 @@ export class NetClient {
     this.remoteTick = decoded.tick;
     this.remoteSnapshots.push({ tick: decoded.tick, players: this.remotePlayers });
     if (this.remoteSnapshots.length > MAX_REMOTE_SNAPSHOT_QUEUE) this.remoteSnapshots.shift();
+    this.vehicleSnapshots.push({ tick: decoded.tick, vehicles: decoded.vehicles });
+    if (this.vehicleSnapshots.length > MAX_REMOTE_SNAPSHOT_QUEUE) this.vehicleSnapshots.shift();
     this.stats.entityCount = decoded.players.length;
   }
 
@@ -422,6 +452,7 @@ export class NetClient {
     serverState: PlayerSnapshotData,
     serverTick: number,
     lastInputSequence: number,
+    mountedVehicleId: number,
   ): void {
     const beforeX = this.world.players.position[0] ?? 0;
     const beforeZ = this.world.players.position[2] ?? 0;
@@ -455,6 +486,10 @@ export class NetClient {
     deserializePlayer(this.world, { ...serverState, id: LOCAL_SLOT });
     this.world.players.wasGrounded[LOCAL_SLOT] = previousOnGround;
     this.world.players.wasJumpHeld[LOCAL_SLOT] = serverState.wasJumpHeld;
+    // Must be set before the replay loop below: movement.ts/weapons.ts both gate this
+    // player's own simulation on mountedVehicleId, so an unmounted-vs-mounted mismatch here
+    // would replay every pending input against the wrong branch.
+    this.world.players.mountedVehicleId[LOCAL_SLOT] = mountedVehicleId;
     this.world.tick = serverTick;
     this.syncRespawnState(serverState.health, serverState.respawnSeq);
     this.pendingInputs = this.pendingInputs.filter(
