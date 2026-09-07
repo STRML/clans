@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import {
   applyBaseObjectDamage,
   applyLoadoutRequest,
+  armorFor,
   BASE_OBJECT_DATA,
   BaseObjectKind,
   FIXED_DT,
@@ -26,8 +27,10 @@ import {
   type Heightfield,
   type PlayerInput,
   type PlayerSnapshotData,
+  type Vec3,
   type World,
 } from '@clans/sim';
+import { EventKind } from '@clans/protocol';
 import type {
   BaseObjectSnapshotData,
   ProjectileSnapshotData,
@@ -35,6 +38,7 @@ import type {
   VehicleSnapshotData,
 } from '@clans/protocol';
 import { loadKatabatic, type KatabaticAssets } from './assets.js';
+import { createAudioEngine, FOOTSTEP_INTERVAL_S, type AudioEngine } from './audio.js';
 import {
   baseObjectsFromWorld,
   createBaseObjectView,
@@ -520,6 +524,28 @@ function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): vo
  * false, feed the mesh-sync functions an empty list so their own pruning naturally clears
  * everything, rather than mutating NetClient state from here.
  */
+/** Task 7 (audio): every explosion flash createFlash added to `effects` since `fromIndex`
+ *  gets the matching synthesized boom, at the same position the visual flash already landed
+ *  on -- riding the existing expired-projectile diff (spawnExplosionsForExpired) rather than
+ *  re-deriving "a projectile just expired" a second way. */
+function playExplosionAudio(audio: AudioEngine, effects: Effect[], fromIndex: number): void {
+  for (let i = fromIndex; i < effects.length; i += 1) {
+    const mesh = effects[i]?.mesh;
+    if (mesh) audio.explosion({ x: mesh.position.x, y: mesh.position.y, z: mesh.position.z });
+  }
+}
+
+/** Task 7 (audio): flag touch/capture cues, keyed off the same decoded event list the HUD's
+ *  kill feed and weapons-view.ts's laser beams already read -- single-player has no event
+ *  stream (hudSourceFrom's own single-player branch always returns []), so these stay silent
+ *  there, the same limitation spawnLaserBeams already accepts. */
+function playFlagEventAudio(audio: AudioEngine, events: readonly TimestampedEvent[]): void {
+  for (const event of events) {
+    if (event.kind === EventKind.FlagTouched) audio.flagTouch();
+    else if (event.kind === EventKind.FlagCaptured) audio.flagCapture();
+  }
+}
+
 export function syncWorldView(
   world: World,
   playerId: number,
@@ -545,10 +571,13 @@ export function syncWorldView(
   flagMeshes: Map<number, THREE.Group>,
   seenEventSeq: { seq: number },
   dtSeconds: number,
+  audio?: AudioEngine,
 ): void {
   const connected = net ? net.connected : true;
   const projectiles = net ? (connected ? net.projectiles : []) : projectilesFromWorld(world);
+  const explosionsFrom = effects.length;
   spawnExplosionsForExpired(scene, effects, previousProjectiles, projectiles);
+  if (audio) playExplosionAudio(audio, effects, explosionsFrom);
   syncProjectileMeshes(scene, projectileMeshes, projectiles);
   previousProjectiles.clear();
   for (const projectile of projectiles) previousProjectiles.set(projectile.id, projectile);
@@ -557,6 +586,7 @@ export function syncWorldView(
 
   const allEvents: TimestampedEvent[] = net ? net.recentEvents : [];
   const newEvents = drainNewEvents(allEvents, seenEventSeq);
+  if (audio) playFlagEventAudio(audio, newEvents);
   spawnLaserBeams(scene, effects, newEvents, (id) => positionOfPlayer(world, net, id));
   updateEffects(scene, effects, dtSeconds);
 
@@ -845,6 +875,122 @@ export function debugIsStationPowered(world: World, team: number): boolean {
   return false;
 }
 
+// Task 7 (audio): local player's own gunshots only -- `world.lastFireEvents` is set fresh
+// every simulated tick (empty when nothing fired), from world.pendingFireEvents, and
+// NetClient.tick only ever simulates the LOCAL_SLOT input, so a remote player's shot never
+// appears here (positional audio for other players is out of scope this milestone, see the
+// AudioEngine interface's unused `position` params). Callers must gate this on `steps > 0` --
+// otherwise a paused frame would replay the last tick's already-played shot every frame.
+function playWeaponFireAudio(world: World, playerId: number, audio: AudioEngine): void {
+  for (const event of world.lastFireEvents) {
+    if (event.playerId !== playerId) continue;
+    audio.weaponFire(event.weaponId, event.origin);
+  }
+}
+
+interface FootstepState {
+  timer: number;
+}
+
+const FOOTSTEP_SPEED_THRESHOLD_MPS = 0.5; // Ours: ignores idle jitter/wall-press micro-velocity.
+
+function localPlayerPosition(world: World, playerId: number): Vec3 {
+  const base = playerId * 3;
+  return {
+    x: world.players.position[base] ?? 0,
+    y: world.players.position[base + 1] ?? 0,
+    z: world.players.position[base + 2] ?? 0,
+  };
+}
+
+function localPlayerHorizontalSpeed(world: World, playerId: number): number {
+  const base = playerId * 3;
+  const vx = world.players.velocity[base] ?? 0;
+  const vz = world.players.velocity[base + 2] ?? 0;
+  return Math.hypot(vx, vz);
+}
+
+function updateJetAudio(
+  world: World,
+  playerId: number,
+  audio: AudioEngine,
+  jetInputActive: boolean,
+): void {
+  const energy = world.players.energy[playerId] ?? 0;
+  audio.setJetting(
+    playerId,
+    jetInputActive && energy > 0,
+    energy / armorFor(world, playerId).maxEnergy,
+  );
+}
+
+/** Cadence-gated (FOOTSTEP_INTERVAL_S) synthesized footsteps -- only while grounded, not
+ *  skiing or mounted, and moving faster than idle jitter. */
+function updateFootstepAudio(
+  world: World,
+  playerId: number,
+  audio: AudioEngine,
+  skiing: boolean,
+  speed: number,
+  footstep: FootstepState,
+  dtSeconds: number,
+): void {
+  const onGround = (world.players.onGround[playerId] ?? 0) === 1;
+  const mounted = (world.players.mountedVehicleId[playerId] ?? -1) !== -1;
+  const running = onGround && !skiing && !mounted && speed > FOOTSTEP_SPEED_THRESHOLD_MPS;
+  if (!running) {
+    footstep.timer = 0;
+    return;
+  }
+  footstep.timer += dtSeconds;
+  if (footstep.timer < FOOTSTEP_INTERVAL_S) return;
+  footstep.timer -= FOOTSTEP_INTERVAL_S;
+  audio.footstep(localPlayerPosition(world, playerId));
+}
+
+/** Task 7 (audio): jet/ski loops and cadence-gated footsteps for the local player, read
+ *  straight off the just-simulated world state -- `ski`/`onGround`/`energy`/`velocity` are
+ *  real PlayerStore fields (types.ts), not derived here. Split into one small function per
+ *  effect (jet/footstep) to stay under the complexity budget; skiing itself is cheap enough
+ *  to stay inline here. */
+function updateMovementAudio(
+  world: World,
+  playerId: number,
+  audio: AudioEngine,
+  jetInputActive: boolean,
+  footstep: FootstepState,
+  dtSeconds: number,
+): void {
+  updateJetAudio(world, playerId, audio, jetInputActive);
+
+  const speed = localPlayerHorizontalSpeed(world, playerId);
+  const skiing = (world.players.ski[playerId] ?? 0) === 1;
+  audio.setSkiing(playerId, skiing, speed);
+
+  updateFootstepAudio(world, playerId, audio, skiing, speed, footstep, dtSeconds);
+}
+
+/** Task 7 (audio): one persistent hum loop per team generator, transitioning with
+ *  `world.baseObjects.powered` -- setStationHum/setLoop already no-op a redundant start or a
+ *  stop of a key that never started, so calling this every frame for every generator is cheap
+ *  and still only ever actually starts/stops audio on a genuine power transition. */
+function updateStationHumAudio(world: World, audio: AudioEngine): void {
+  const bases = world.baseObjects;
+  for (let id = 0; id < bases.count; id += 1) {
+    if (bases.kind[id] !== BaseObjectKind.Generator) continue;
+    const base = id * 3;
+    audio.setStationHum(
+      id,
+      {
+        x: bases.position[base] ?? 0,
+        y: bases.position[base + 1] ?? 0,
+        z: bases.position[base + 2] ?? 0,
+      },
+      bases.powered[id] === 1,
+    );
+  }
+}
+
 export async function createApp(container: HTMLElement, options: AppOptions = {}): Promise<App> {
   const assets = await loadKatabatic();
   const terrain = toHeightfield(assets);
@@ -971,6 +1117,10 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   commanderMapCanvas.height = 512;
   commanderMapCanvas.hidden = true;
   document.body.appendChild(commanderMapCanvas);
+  // Task 7: pure oscillator/noise synthesis, no shipped or fetched audio file (M7 plan,
+  // Global Constraints) -- a real AudioContext, not the fake used by audio.test.ts.
+  const audio = createAudioEngine({ context: new AudioContext() });
+  const footstepState: FootstepState = { timer: 0 };
   // Backs the `godMode` accessor below. A plain data property here would just record
   // whatever the debug UI last set, the way it used to, leaving frame() to poll it every
   // tick and react after the fact (Codex review round 4, finding 5) -- the accessor's
@@ -1052,6 +1202,15 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       }
       app.stats.simMs = performance.now() - simStart;
 
+      // Task 7 (audio): reacts to the world state this frame's simulation just produced --
+      // see each helper's own comment for why weaponFire needs the `steps > 0` guard and the
+      // others don't.
+      if (steps > 0) playWeaponFireAudio(world, playerId, audio);
+      if (!app.freeCam) {
+        updateMovementAudio(world, playerId, audio, currentInput.jet, footstepState, dtSeconds);
+      }
+      updateStationHumAudio(world, audio);
+
       syncWorldView(
         world,
         playerId,
@@ -1064,6 +1223,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         flagMeshes,
         seenEventSeq,
         dtSeconds,
+        audio,
       );
 
       syncBaseAssetsView(
