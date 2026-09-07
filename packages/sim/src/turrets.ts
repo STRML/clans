@@ -173,6 +173,15 @@ export interface TurretStore {
   energy: Float64Array;
   powered: Uint8Array;
   targetId: Int16Array;
+  /** 0 = targetId refers to world.players, 1 = world.vehicles. Only ever nonzero for a
+   *  vehiclesOnly barrel (AABarrelLarge, M5 Task 8) -- disambiguates targetId's own referent
+   *  for acquireTarget/targetStillValid/fireAt, since TurretFireEvent itself carries no
+   *  target id at all (direction is already resolved by the time fireAt queues it, so a
+   *  player-vs-vehicle discriminator can't live there). New simulation-relevant state that
+   *  decides which store a later tick's fireAt reads from, so hashWorld must mix it in too
+   *  (Task 9) -- the exact class of gap issue #13 already found in mixTurrets omitting
+   *  `timer`, not to be repeated for a field this task itself introduces. */
+  targetKind: Uint8Array;
   state: Uint8Array;
   timer: Float64Array;
 }
@@ -189,6 +198,7 @@ export function createEmptyTurrets(): TurretStore {
     energy: new Float64Array(TURRET_CAPACITY),
     powered: new Uint8Array(TURRET_CAPACITY),
     targetId: new Int16Array(TURRET_CAPACITY).fill(-1),
+    targetKind: new Uint8Array(TURRET_CAPACITY),
     state: new Uint8Array(TURRET_CAPACITY),
     timer: new Float64Array(TURRET_CAPACITY),
   };
@@ -209,6 +219,7 @@ export function createTurrets(
     store.energy[id] = baseFor(barrel).maxEnergy;
     store.powered[id] = 0;
     store.targetId[id] = -1;
+    store.targetKind[id] = 0;
     store.state[id] = TurretState.Ready;
     store.timer[id] = 0;
     store.count = Math.max(store.count, id + 1);
@@ -295,23 +306,30 @@ function playerPoint(world: World, playerId: number): Vec3 {
   };
 }
 
+function vehiclePoint(world: World, vehicleId: number): Vec3 {
+  const base = vehicleId * 3;
+  return {
+    x: world.vehicles.position[base] ?? 0,
+    y: world.vehicles.position[base + 1] ?? 0,
+    z: world.vehicles.position[base + 2] ?? 0,
+  };
+}
+
 function turretEye(pos: Vec3): Vec3 {
   return { x: pos.x, y: pos.y + TURRET_EYE_HEIGHT, z: pos.z };
 }
 
 /** Nearest living enemy player within the barrel's engagement range and with a clear line of
- *  sight from the turret's eye position to the player. `vehiclesOnly` barrels
- *  (AABarrelLarge) always return null — see `TurretBarrelData.vehiclesOnly`. Matches the real
- *  T2 sensor's `detectsUsingLOS = true` (`turret.cs:142`, `turrets/sentryTurret.cs:129`) —
- *  failure matrix row 16. */
-function acquireTarget(world: World, id: number): number {
-  const store = world.turrets;
-  const barrelId = store.barrel[id] as TurretBarrelId;
-  if (TURRET_BARREL_DATA[barrelId].vehiclesOnly) return -1;
-  const range = engagementRange(barrelId);
-  const pos = turretPosition(store, id);
-  const eye = turretEye(pos);
-  const team = store.team[id] ?? 0;
+ *  sight from the turret's eye position to the player. Matches the real T2 sensor's
+ *  `detectsUsingLOS = true` (`turret.cs:142`, `turrets/sentryTurret.cs:129`) — failure matrix
+ *  row 16. */
+function nearestPlayerTarget(
+  world: World,
+  pos: Vec3,
+  eye: Vec3,
+  team: number,
+  range: number,
+): number {
   let nearest = -1;
   let nearestDistance = Infinity;
   for (let playerId = 0; playerId < world.players.count; playerId += 1) {
@@ -327,19 +345,69 @@ function acquireTarget(world: World, id: number): number {
   return nearest;
 }
 
-/** True when the current target is still a valid one to keep engaging — alive, active, an
- *  enemy, still in range, and still visible. Reacquisition (`acquireTarget`) always runs when
- *  this is false, covering "target died" (failure matrix row 12), "target walked out of
- *  range", and "target walked behind terrain" (failure matrix row 16) alike — there is no
- *  separate code path for any of the three causes. */
+/** `vehiclesOnly` barrels' own version of `nearestPlayerTarget` (M5, Task 8) — dormant since
+ *  M4, this is the one deliberate gap the plan closes: an AA barrel with line of sight to an
+ *  enemy vehicle in range now acquires and fires on it, same rules as a ground turret firing
+ *  on a player (failure matrix row 15). */
+function nearestVehicleTarget(
+  world: World,
+  pos: Vec3,
+  eye: Vec3,
+  team: number,
+  range: number,
+): number {
+  const vehicles = world.vehicles;
+  let nearest = -1;
+  let nearestDistance = Infinity;
+  for (let vehicleId = 0; vehicleId < vehicles.count; vehicleId += 1) {
+    if (!vehicles.active[vehicleId] || vehicles.destroyed[vehicleId]) continue;
+    if (vehicles.team[vehicleId] === team) continue;
+    const target = vehiclePoint(world, vehicleId);
+    const d = distance(pos.x, pos.y, pos.z, target.x, target.y, target.z);
+    if (d > range || d >= nearestDistance) continue;
+    if (!hasLineOfSight(world, eye, target)) continue;
+    nearest = vehicleId;
+    nearestDistance = d;
+  }
+  return nearest;
+}
+
+/** Dispatches to `nearestPlayerTarget` or (for a `vehiclesOnly` barrel, M5) `nearestVehicleTarget`
+ *  and records which store the result refers to in `store.targetKind[id]` — see that field's
+ *  own doc comment for why the discriminator has to live here rather than on the fire event. */
+function acquireTarget(world: World, id: number): number {
+  const store = world.turrets;
+  const barrelId = store.barrel[id] as TurretBarrelId;
+  const range = engagementRange(barrelId);
+  const pos = turretPosition(store, id);
+  const eye = turretEye(pos);
+  const team = store.team[id] ?? 0;
+  if (TURRET_BARREL_DATA[barrelId].vehiclesOnly) {
+    store.targetKind[id] = 1;
+    return nearestVehicleTarget(world, pos, eye, team, range);
+  }
+  store.targetKind[id] = 0;
+  return nearestPlayerTarget(world, pos, eye, team, range);
+}
+
+/** True when the current target is still a valid one to keep engaging — alive/active (or, for
+ *  a vehicle target, active and not destroyed), an enemy, still in range, and still visible.
+ *  Reacquisition (`acquireTarget`) always runs when this is false, covering "target died"
+ *  (failure matrix row 12), "target walked out of range", and "target walked behind terrain"
+ *  (failure matrix row 16) alike — there is no separate code path for any of the three
+ *  causes. Branches on `targetKind` to read the right store for a vehicle target (M5). */
 function targetStillValid(world: World, id: number): boolean {
   const store = world.turrets;
   const targetId = store.targetId[id] ?? -1;
-  if (targetId < 0 || !world.players.active[targetId] || !world.players.alive[targetId])
-    return false;
+  if (targetId < 0) return false;
+  const isVehicle = store.targetKind[id] === 1;
+  const stillExists = isVehicle
+    ? world.vehicles.active[targetId] === 1 && !world.vehicles.destroyed[targetId]
+    : world.players.active[targetId] === 1 && world.players.alive[targetId] === 1;
+  if (!stillExists) return false;
   const barrelId = store.barrel[id] as TurretBarrelId;
   const pos = turretPosition(store, id);
-  const target = playerPoint(world, targetId);
+  const target = isVehicle ? vehiclePoint(world, targetId) : playerPoint(world, targetId);
   const d = distance(pos.x, pos.y, pos.z, target.x, target.y, target.z);
   return d <= engagementRange(barrelId) && hasLineOfSight(world, turretEye(pos), target);
 }
@@ -376,10 +444,12 @@ function fireAt(world: World, id: number): void {
   const barrelId = store.barrel[id] as TurretBarrelId;
   const barrel = TURRET_BARREL_DATA[barrelId];
   const pos = turretPosition(store, id);
-  const targetBase = (store.targetId[id] ?? -1) * 3;
-  const dx = (world.players.position[targetBase] ?? 0) - pos.x;
-  const dy = (world.players.position[targetBase + 1] ?? 0) - pos.y;
-  const dz = (world.players.position[targetBase + 2] ?? 0) - pos.z;
+  const targetId = store.targetId[id] ?? -1;
+  const target =
+    store.targetKind[id] === 1 ? vehiclePoint(world, targetId) : playerPoint(world, targetId);
+  const dx = target.x - pos.x;
+  const dy = target.y - pos.y;
+  const dz = target.z - pos.z;
   const len = Math.hypot(dx, dy, dz) || 1;
   world.pendingTurretFireEvents.push({
     turretId: id,
