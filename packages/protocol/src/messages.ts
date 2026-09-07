@@ -112,3 +112,4 @@ export const MAX_SNAPSHOT_TURRETS = 16; // Matches @clans/sim's TURRET_CAPACITY.
 export const MAX_SNAPSHOT_VEHICLES = 255; // Matches @clans/sim's VehicleStore capacity (8) with
 // headroom; capped at 255 (not 256) because the wire count is a single unchecked-write u8 --
 // see snapshot.ts's writeExtras for why 255 is the real ceiling, not just a round number.
+export const MAX_SNAPSHOT_BOTS = 32; // Ours -- TARGET_TEAM_SIZE * 2 (M6's own "ours" numbers table).

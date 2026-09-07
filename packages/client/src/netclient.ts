@@ -35,6 +35,7 @@ import {
   encodeVehicleSpawn,
   peekSnapshotHeader,
   type BaseObjectSnapshotData,
+  type BotDebugSnapshotData,
   type EventMessage,
   type FlagSnapshotData,
   type ProjectileSnapshotData,
@@ -174,6 +175,7 @@ export class NetClient {
   baseObjects: BaseObjectSnapshotData[] = [];
   turrets: TurretSnapshotData[] = [];
   vehicles: VehicleSnapshotData[] = [];
+  bots: BotDebugSnapshotData[] = [];
   teamScores: [number, number] = [0, 0];
   gameOver = false;
   winnerTeam = 0;
@@ -482,6 +484,7 @@ export class NetClient {
     this.flags = decoded.flags;
     this.baseObjects = decoded.baseObjects;
     this.turrets = decoded.turrets;
+    this.bots = decoded.bots;
     // Codex round 1, finding 1: this.baseObjects/this.turrets above are read directly by
     // base-object-view.ts's `sync` for rendering, but nothing ever applied the same decoded
     // dynamic state onto `this.world`'s own baseObjects/turrets stores -- the ones movement

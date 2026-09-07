@@ -1,12 +1,63 @@
 import GUI from 'lil-gui';
+import type { BotDebugSnapshotData } from '@clans/protocol';
+import type { PlayerSnapshotData } from '@clans/sim';
 import type { App } from './app.js';
 import { activeProjectileCount, describeEvent, describePlayer, type DebugExtra } from './stats.js';
 
-function extraFor(app: App): DebugExtra {
+// BotState from @clans/bots -- this package doesn't depend on @clans/bots (the wire value
+// is a plain number, see protocol/snapshot.ts's BotDebugSnapshotData comment), so the
+// mapping is restated here rather than imported.
+const BOT_STATE_IDLE = 0;
+const BOT_STATE_ATTACK = 1;
+const BOT_STATE_DEFEND = 2;
+
+interface TeamBotCounts {
+  total: number;
+  idle: number;
+  attack: number;
+  defend: number;
+}
+
+/** Groups `bots` by team, looking each bot's team up via `remotePlayers` (the same
+ *  defensive "missing id -> just skip it" style `findMountedVehicleId` in netclient.ts
+ *  already uses for an id with no matching remote player) -- a bot id that hasn't shown
+ *  up in remotePlayers yet (mid-join, or between this snapshot and the next) is simply
+ *  not counted this frame rather than crashing or guessing a team. */
+function countBotsByState(
+  bots: BotDebugSnapshotData[],
+  remotePlayers: Map<number, PlayerSnapshotData>,
+  team: number,
+): TeamBotCounts {
+  const counts: TeamBotCounts = { total: 0, idle: 0, attack: 0, defend: 0 };
+  for (const bot of bots) {
+    if (remotePlayers.get(bot.playerId)?.team !== team) continue;
+    counts.total += 1;
+    if (bot.state === BOT_STATE_IDLE) counts.idle += 1;
+    else if (bot.state === BOT_STATE_ATTACK) counts.attack += 1;
+    else if (bot.state === BOT_STATE_DEFEND) counts.defend += 1;
+  }
+  return counts;
+}
+
+function formatTeamBots(team: number, counts: TeamBotCounts): string {
+  return `Team ${String(team)}: ${String(counts.total)} bots (${String(counts.idle)} idle, ${String(counts.attack)} attack, ${String(counts.defend)} defend)`;
+}
+
+function botsByTeamFor(app: App): [string, string] {
+  const bots = app.net?.bots ?? [];
+  const remotePlayers = app.net?.remotePlayers ?? new Map<number, PlayerSnapshotData>();
+  return [
+    formatTeamBots(1, countBotsByState(bots, remotePlayers, 1)),
+    formatTeamBots(2, countBotsByState(bots, remotePlayers, 2)),
+  ];
+}
+
+export function extraFor(app: App): DebugExtra {
   const lastEvent = app.net?.recentEvents.at(-1);
   return {
     projectileCount: app.net ? app.net.projectiles.length : activeProjectileCount(app.world),
     lastEvent: lastEvent ? describeEvent(lastEvent) : 'none',
+    botsByTeam: botsByTeamFor(app),
   };
 }
 

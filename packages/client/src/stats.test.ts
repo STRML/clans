@@ -38,7 +38,15 @@ describe('describePlayer', () => {
       predictionErrorM: 0.1,
       entityCount: 4,
     };
-    const rows = describePlayer(world, id, stats, { projectileCount: 2, lastEvent: 'none' });
+    const botsByTeam: [string, string] = [
+      'Team 1: 12 bots (7 idle, 3 attack, 2 defend)',
+      'Team 2: 10 bots (5 idle, 4 attack, 1 defend)',
+    ];
+    const rows = describePlayer(world, id, stats, {
+      projectileCount: 2,
+      lastEvent: 'none',
+      botsByTeam,
+    });
     expect(findRow(rows, 'debug-speed').value).toBe(5);
     expect(findRow(rows, 'debug-speed').text).toBe('5.0 m/s');
     expect(findRow(rows, 'debug-pos').text).toBe('1.0, 2.0, 3.0');
@@ -51,6 +59,32 @@ describe('describePlayer', () => {
     expect(findRow(rows, 'debug-entities').value).toBe(4);
     expect(findRow(rows, 'debug-projectiles').value).toBe(2);
     expect(findRow(rows, 'debug-last-event').text).toBe('none');
+  });
+
+  it('includes both per-team bot summary lines verbatim', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const stats = {
+      fps: 60,
+      frameMs: 2.5,
+      simMs: 0.4,
+      ping: 42,
+      bytesPerSecond: 900,
+      packetLossEstimate: 0.05,
+      predictionErrorM: 0.1,
+      entityCount: 4,
+    };
+    const botsByTeam: [string, string] = [
+      'Team 1: 12 bots (7 idle, 3 attack, 2 defend)',
+      'Team 2: 10 bots (5 idle, 4 attack, 1 defend)',
+    ];
+    const rows = describePlayer(world, id, stats, {
+      projectileCount: 0,
+      lastEvent: 'none',
+      botsByTeam,
+    });
+    expect(findRow(rows, 'debug-bots-team1').text).toBe(botsByTeam[0]);
+    expect(findRow(rows, 'debug-bots-team2').text).toBe(botsByTeam[1]);
   });
 });
 

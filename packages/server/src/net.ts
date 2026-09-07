@@ -4,7 +4,6 @@ import {
   FIXED_TICK_MS,
   FlagState,
   LIGHT_ARMOR,
-  RETURN_TICKS,
   WEAPON_DATA,
   WeaponId,
   addPlayer,
@@ -16,7 +15,6 @@ import {
   playerHitbox,
   removePlayer,
   respawnPlayer,
-  sampleTerrain,
   serializeActivePlayers,
   serializeActiveVehicles,
   setGodMode,
@@ -63,11 +61,22 @@ import {
 } from './lagcomp.js';
 import { applyInputMessage, createSession, recordAck, type Session } from './session.js';
 import { needsFullSnapshot } from './snapshot-policy.js';
-import { smallerTeam, spawnPointFor, teamCount, type SceneSpawn } from './world.js';
+import { rebalanceTeams, stepBotManager, type BotManager } from './bots.js';
+import {
+  dropFlagsCarriedBy,
+  smallerTeam,
+  spawnPointFor,
+  teamCount,
+  type SceneSpawn,
+} from './world.js';
 
 export interface NetServerOptions {
   world: World;
   spawns: SceneSpawn[];
+  /** Owns bot ids, per-bot runtime memory, and rebalancing toward TARGET_TEAM_SIZE. A
+   *  server always has one, even at `--bots 0` (an empty-budget manager that's a no-op
+   *  everywhere it's called) -- this milestone does not support running with none at all. */
+  botManager: BotManager;
   port: number;
   /** How long an accepted socket may stay unjoined before it is closed. */
   joinTimeoutMs?: number;
@@ -148,6 +157,7 @@ const HITSCAN_WEAPONS = new Set<WeaponId>([WeaponId.Chaingun, WeaponId.LaserRifl
 function handleJoin(
   world: World,
   spawns: SceneSpawn[],
+  botManager: BotManager,
   clients: Map<WebSocket, ClientEntry>,
   now: () => number,
   socket: WebSocket,
@@ -204,6 +214,11 @@ function handleJoin(
       spawnZ: z,
     }),
   );
+  // The joining human's team/id are already committed to world.players above, so
+  // rebalanceTeams sees an accurate count and, if that team is already at
+  // TARGET_TEAM_SIZE, removes exactly one bot on it before this join would push it over
+  // (failure matrix row 12) -- never the other way around.
+  rebalanceTeams(botManager, world, spawns);
 }
 
 function handleInput(
@@ -318,13 +333,14 @@ function handleVehicleSpawn(
 function handleMessage(
   world: World,
   spawns: SceneSpawn[],
+  botManager: BotManager,
   clients: Map<WebSocket, ClientEntry>,
   now: () => number,
   socket: WebSocket,
   bytes: Uint8Array,
 ): void {
   const type = bytes[0];
-  if (type === MessageType.Join) handleJoin(world, spawns, clients, now, socket, bytes);
+  if (type === MessageType.Join) handleJoin(world, spawns, botManager, clients, now, socket, bytes);
   else if (type === MessageType.Input) handleInput(clients, socket, bytes);
   else if (type === MessageType.Ack) handleAck(clients, now, socket, bytes);
   else if (type === MessageType.God) handleGod(world, clients, socket, bytes);
@@ -332,31 +348,10 @@ function handleMessage(
   else if (type === MessageType.VehicleSpawn) handleVehicleSpawn(world, clients, socket, bytes);
 }
 
-/**
- * Drops every flag `playerId` is carrying at their last known position, the same terminal
- * state a real death leaves a flag in (flags.ts's dropFlag, not exported). This deliberately
- * does not reuse `world.pendingDeaths`: movement.ts's stepPlayers clears that array at the
- * very start of every stepWorld call, before stepFlags ever runs, so a disconnect -- which
- * fires from a WebSocket 'close' event between ticks, never inside stepWorld -- would have
- * its pendingDeaths entry wiped out before the next tick's stepFlags could see it. Dropping
- * the flag here, synchronously, needs no sim change and cannot land on the wrong tick.
- */
-function dropFlagsCarriedBy(world: World, playerId: number): void {
-  const base = playerId * 3;
-  const x = world.players.position[base] ?? 0;
-  const z = world.players.position[base + 2] ?? 0;
-  const y = sampleTerrain(world.terrain, x, z).height;
-  for (let flagId = 0; flagId < world.flags.state.length; flagId += 1) {
-    if (world.flags.carrierId[flagId] !== playerId) continue;
-    world.flags.state[flagId] = FlagState.Dropped;
-    world.flags.position.set([x, y, z], flagId * 3);
-    world.flags.carrierId[flagId] = -1;
-    world.flags.returnAt[flagId] = world.tick + RETURN_TICKS;
-  }
-}
-
 function handleClose(
   world: World,
+  spawns: SceneSpawn[],
+  botManager: BotManager,
   clients: Map<WebSocket, ClientEntry>,
   history: PositionHistory,
   socket: WebSocket,
@@ -365,6 +360,10 @@ function handleClose(
   if (!entry) return;
   dropFlagsCarriedBy(world, entry.session.playerId);
   removePlayer(world, entry.session.playerId);
+  // removePlayer has already run above, so rebalanceTeams sees an accurate post-leave
+  // count and backfills at most one bot on this team if budget remains (failure matrix
+  // row 13) -- never double-counting the departing id.
+  rebalanceTeams(botManager, world, spawns);
   // God mode lives on world.players.godMode now (setGodMode), and addPlayer already zeroes
   // that bit for a reused id -- no separate godPlayers Set to clean up here anymore.
   // Codex PR #9 round 2, finding 7: recordHistory only forgets an id once it notices that
@@ -510,7 +509,14 @@ function snapshotTurrets(world: World): TurretSnapshotData[] {
   return out;
 }
 
-export function buildExtras(world: World): WorldExtras {
+/** `botManager` is optional here (unlike `NetServerOptions.botManager`, required) purely
+ *  so every existing direct caller of this exported function -- net.test.ts builds
+ *  `WorldExtras` fixtures against a bare `World` with no bot manager in play at all --
+ *  keeps working unchanged; the real snapshot path (sendAllSnapshots below) always
+ *  passes one. Debug-overlay data only (Task 12): playerId + BotState, one entry per
+ *  currently-active bot, bounds-checked against MAX_SNAPSHOT_BOTS the same as every
+ *  other extras array. */
+export function buildExtras(world: World, botManager?: BotManager): WorldExtras {
   return {
     projectiles: snapshotActiveProjectiles(world),
     flags: snapshotWorldFlags(world),
@@ -526,6 +532,11 @@ export function buildExtras(world: World): WorldExtras {
     winnerTeam: world.winnerTeam,
     timeRemainingS: Math.max(0, (world.timeLimitTicks - world.tick) * FIXED_DT),
     gameOverReason: world.gameOverReason,
+    bots: botManager
+      ? [...botManager.runtimes.values()]
+          .filter((runtime) => world.players.active[runtime.playerId])
+          .map((runtime) => ({ playerId: runtime.playerId, state: runtime.state }))
+      : [],
   };
 }
 
@@ -779,6 +790,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
         handleMessage(
           options.world,
           options.spawns,
+          options.botManager,
           clients,
           now,
           socket,
@@ -793,7 +805,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
     });
     socket.on('close', () => {
       clearTimeout(joinTimeout);
-      handleClose(options.world, clients, history, socket);
+      handleClose(options.world, options.spawns, options.botManager, clients, history, socket);
     });
     // A malformed frame at the WebSocket protocol level itself (an invalid raw frame,
     // e.g. an unmasked client frame) fires 'error' on the socket before 'message' ever
@@ -802,13 +814,13 @@ export function startNetServer(options: NetServerOptions): NetServer {
     // the process; this absorbs it the same way the server-level handler below does.
     socket.on('error', () => {
       clearTimeout(joinTimeout);
-      handleClose(options.world, clients, history, socket);
+      handleClose(options.world, options.spawns, options.botManager, clients, history, socket);
     });
   });
 
   function sendAllSnapshots(): void {
     const players = serializeActivePlayers(options.world);
-    const extras = buildExtras(options.world);
+    const extras = buildExtras(options.world, options.botManager);
     nextSnapshotId += 1;
     for (const entry of clients.values()) {
       // Codex round 14 (PR #4): sending unconditionally let a slow or unresponsive
@@ -864,7 +876,21 @@ export function startNetServer(options: NetServerOptions): NetServer {
   // keep going out on the normal cadence so every client sees the frozen final state.
   function tick(tickNumber: number): void {
     const inputs = collectTickInputs(clients);
-    if (!options.world.gameOver) runOneTick(inputs);
+    // Codex review round 1, finding (P2): stepBotManager used to run every tick
+    // unconditionally, even after gameOver froze the match -- 32 bots kept paying full
+    // perception/pathing cost for a match nobody could act in, and maybeHeal's direct
+    // applyLoadoutRequest call could still mutate a "frozen" player's armor/energy/ammo.
+    // Gated behind the same guard runOneTick already uses, matching how the rest of the
+    // tick loop treats gameOver as a hard stop, not just a stop on the sim step.
+    if (!options.world.gameOver) {
+      // A bot id is never also a socket-bound player id (a human never joins as an id a
+      // bot already occupies -- handleJoin's own addPlayer always allocates a fresh id),
+      // so the two maps' key sets never overlap and this merge order doesn't matter.
+      for (const [botId, input] of stepBotManager(options.botManager, options.world)) {
+        inputs.set(botId, input);
+      }
+      runOneTick(inputs);
+    }
     if (tickNumber % SNAPSHOT_EVERY_N_TICKS !== 0) return;
     sendAllSnapshots();
   }

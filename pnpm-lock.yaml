@@ -64,7 +64,11 @@ importers:
         specifier: ^3.4.4
         version: 3.4.4
 
-  packages/bots: {}
+  packages/bots:
+    dependencies:
+      '@clans/sim':
+        specifier: workspace:*
+        version: link:../sim
 
   packages/client:
     dependencies:

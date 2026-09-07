@@ -11,6 +11,10 @@ export interface DebugRow {
 export interface DebugExtra {
   projectileCount: number;
   lastEvent: string;
+  /** One summary line per team, e.g. "Team 1: 12 bots (7 idle, 3 attack, 2 defend)" --
+   *  built by debug.ts's extraFor, which cross-references net.bots' playerIds against
+   *  net.remotePlayers' team field (M6, Task 12). */
+  botsByTeam: [string, string];
 }
 
 const fixed = (value: number, digits = 1): string => value.toFixed(digits);
@@ -96,5 +100,7 @@ export function describePlayer(
       value: extra.projectileCount,
     },
     { id: 'debug-last-event', label: 'last event', text: extra.lastEvent, value: 0 },
+    { id: 'debug-bots-team1', label: 'bots t1', text: extra.botsByTeam[0], value: 0 },
+    { id: 'debug-bots-team2', label: 'bots t2', text: extra.botsByTeam[1], value: 0 },
   ];
 }

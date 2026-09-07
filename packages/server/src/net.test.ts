@@ -29,8 +29,25 @@ import {
   MessageType,
   type NetInputSample,
 } from '@clans/protocol';
+import { buildWaypointGraph } from '@clans/bots';
+import { createBotManager, TARGET_TEAM_SIZE, type BotManager } from './bots.js';
 import { buildExtras, startNetServer, type NetServer } from './net.js';
-import type { SceneSpawn } from './world.js';
+import { teamCount, type SceneSpawn } from './world.js';
+
+/** A bot manager with zero budget: every net.ts test in this file that doesn't care
+ *  about bots gets one of these, so rebalanceTeams (called from handleJoin/handleClose)
+ *  is a true no-op -- no bot ever added or removed -- without coupling every test's own
+ *  world/spawns fixture to bots.ts. Bot-aware behavior itself is tested in bots.test.ts
+ *  and net.ts's own dedicated bot-wiring tests below. */
+function emptyBotManager(): BotManager {
+  return {
+    botIds: new Set(),
+    runtimes: new Map(),
+    graph: buildWaypointGraph([]),
+    maxBots: 0,
+    nextSeed: 0,
+  };
+}
 
 const idleSample: PlayerInput = {
   moveX: 0,
@@ -82,7 +99,7 @@ describe('startNetServer', () => {
 
   beforeEach(async () => {
     world = createWorld(terrain, 1, 8);
-    server = startNetServer({ world, spawns, port: TEST_PORT });
+    server = startNetServer({ botManager: emptyBotManager(), world, spawns, port: TEST_PORT });
     await server.ready;
   });
   afterEach(() => server.close());
@@ -448,7 +465,12 @@ describe('startNetServer', () => {
   });
 
   it('rejects a bind failure through `ready` instead of hanging or crashing unhandled', async () => {
-    const busy = startNetServer({ world: createWorld(terrain, 1, 4), spawns, port: TEST_PORT });
+    const busy = startNetServer({
+      botManager: emptyBotManager(),
+      world: createWorld(terrain, 1, 4),
+      spawns,
+      port: TEST_PORT,
+    });
     await expect(busy.ready).rejects.toThrow();
     busy.close();
   });
@@ -487,7 +509,12 @@ describe('startNetServer', () => {
     // can hang a caller waiting for a clean shutdown.
     const port = TEST_PORT + 1;
     const shutdownWorld = createWorld(terrain, 1, 8);
-    const shutdownServer = startNetServer({ world: shutdownWorld, spawns, port });
+    const shutdownServer = startNetServer({
+      botManager: emptyBotManager(),
+      world: shutdownWorld,
+      spawns,
+      port,
+    });
     await shutdownServer.ready;
 
     const client = await connect(port);
@@ -508,6 +535,7 @@ describe('startNetServer', () => {
     // just clients.values() left an accepted-but-unjoined socket open indefinitely.
     const port = TEST_PORT + 2;
     const unjoinedServer = startNetServer({
+      botManager: emptyBotManager(),
       world: createWorld(terrain, 1, 8),
       spawns,
       port,
@@ -527,7 +555,12 @@ describe('startNetServer', () => {
     // forever with the client waiting for a Welcome that would never arrive.
     const port = TEST_PORT + 3;
     const fullWorld = createWorld(terrain, 1, 1);
-    const fullServer = startNetServer({ world: fullWorld, spawns, port });
+    const fullServer = startNetServer({
+      botManager: emptyBotManager(),
+      world: fullWorld,
+      spawns,
+      port,
+    });
     await fullServer.ready;
 
     const first = await connect(port);
@@ -551,6 +584,7 @@ describe('startNetServer', () => {
     // exhaust sockets and memory one connection at a time.
     const port = TEST_PORT + 4;
     const timeoutServer = startNetServer({
+      botManager: emptyBotManager(),
       world: createWorld(terrain, 1, 8),
       spawns,
       port,
@@ -567,6 +601,7 @@ describe('startNetServer', () => {
   it('does not close a socket that joined before its join timeout elapses', async () => {
     const port = TEST_PORT + 5;
     const timeoutServer = startNetServer({
+      botManager: emptyBotManager(),
       world: createWorld(terrain, 1, 8),
       spawns,
       port,
@@ -617,6 +652,7 @@ describe('startNetServer', () => {
   it('lag compensation: a 150ms-ping shooter still hits a target that has since moved away', async () => {
     let clock = 0;
     const lagServer = startNetServer({
+      botManager: emptyBotManager(),
       world,
       spawns,
       port: TEST_PORT + 1,
@@ -705,6 +741,7 @@ describe('startNetServer', () => {
     // Ready/NoAmmo gate refuses to produce a second shot at all.
     let clock = 0;
     const lagServer = startNetServer({
+      botManager: emptyBotManager(),
       world,
       spawns,
       port: TEST_PORT + 7,
@@ -792,7 +829,13 @@ describe('startNetServer', () => {
       { team: 2, position: { x: 8, y: 0, z: 8 } },
     ]);
     let clock = 0;
-    const flagServer = startNetServer({ world, spawns, port: TEST_PORT + 6, now: () => clock });
+    const flagServer = startNetServer({
+      botManager: emptyBotManager(),
+      world,
+      spawns,
+      port: TEST_PORT + 6,
+      now: () => clock,
+    });
     await flagServer.ready;
     const carrierId = addPlayer(world, { x: 0, y: 0, z: 8 }, 2);
     world.flags.carrierId[0] = carrierId; // team 1's flag, carried by a team-2 player
@@ -924,7 +967,13 @@ describe('startNetServer', () => {
       { team: 2, position: { x: 8, y: 0, z: 8 } },
     ]);
     let clock = 0;
-    const lagServer = startNetServer({ world, spawns, port: TEST_PORT + 8, now: () => clock });
+    const lagServer = startNetServer({
+      botManager: emptyBotManager(),
+      world,
+      spawns,
+      port: TEST_PORT + 8,
+      now: () => clock,
+    });
     await lagServer.ready;
     const carrierId = addPlayer(world, { x: 0, y: 0, z: 8 }, 2);
     world.flags.carrierId[0] = carrierId; // team 1's flag, carried by a team-2 player
@@ -1002,7 +1051,13 @@ describe('startNetServer', () => {
     // live miss unless applyLagCompensatedHits also checks the new `resolved` flag. Put the
     // target directly in the shot's line so an unconditional recheck WOULD have hit them.
     let clock = 0;
-    const lagServer = startNetServer({ world, spawns, port: TEST_PORT + 9, now: () => clock });
+    const lagServer = startNetServer({
+      botManager: emptyBotManager(),
+      world,
+      spawns,
+      port: TEST_PORT + 9,
+      now: () => clock,
+    });
     await lagServer.ready;
     // allocate() only checks count/freeIds, not which slots are actually marked active --
     // exhaust just those two fields so the store looks full without any phantom projectiles
@@ -1072,7 +1127,13 @@ describe('startNetServer', () => {
     // straight into targetB's true (never-rewound) position, landing a second, independent
     // hit for the one shot that fired.
     let clock = 0;
-    const lagServer = startNetServer({ world, spawns, port: TEST_PORT + 10, now: () => clock });
+    const lagServer = startNetServer({
+      botManager: emptyBotManager(),
+      world,
+      spawns,
+      port: TEST_PORT + 10,
+      now: () => clock,
+    });
     await lagServer.ready;
     // Chaingun speed is 425 m/s at a 32 ms tick, so one tick of travel covers 13.6 m.
     const targetA = addPlayer(world, { x: 0, y: 0, z: 8 }, 2); // inside the first 0-13.6 m segment
@@ -1182,6 +1243,7 @@ describe('startNetServer', () => {
     ];
     const spawnWorld = createWorld(terrain, 1, 8);
     const spawnServer = startNetServer({
+      botManager: emptyBotManager(),
       world: spawnWorld,
       spawns: twoSpawnsPerTeam,
       port: TEST_PORT + 11,
@@ -1222,6 +1284,7 @@ describe('startNetServer', () => {
     let clock = 0;
     const respawnWorld = createWorld(terrain, 1, 8);
     const lagServer = startNetServer({
+      botManager: emptyBotManager(),
       world: respawnWorld,
       spawns: respawnSpawns,
       port: TEST_PORT + 12,
@@ -1318,6 +1381,7 @@ describe('startNetServer', () => {
     let clock = 0;
     const rttWorld = createWorld(terrain, 1, 8);
     const rttServer = startNetServer({
+      botManager: emptyBotManager(),
       world: rttWorld,
       spawns: rttSpawns,
       port: TEST_PORT + 13,
@@ -1402,6 +1466,7 @@ describe('startNetServer', () => {
       collideWorld.players.respawnAt[id] = 0; // both due on the same tick
     }
     const collideServer = startNetServer({
+      botManager: emptyBotManager(),
       world: collideWorld,
       spawns: twoSpawnsPerTeam,
       port: TEST_PORT + 14,
@@ -1432,6 +1497,7 @@ describe('startNetServer', () => {
     stepPower(loadoutWorld);
     const loadoutSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
     const loadoutServer = startNetServer({
+      botManager: emptyBotManager(),
       world: loadoutWorld,
       spawns: loadoutSpawns,
       port: TEST_PORT + 15,
@@ -1484,6 +1550,7 @@ describe('startNetServer', () => {
     stepPower(vehicleWorld);
     const vehicleSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
     const vehicleServer = startNetServer({
+      botManager: emptyBotManager(),
       world: vehicleWorld,
       spawns: vehicleSpawns,
       port: TEST_PORT + 16,
@@ -1513,6 +1580,7 @@ describe('startNetServer', () => {
     stepPower(vehicleWorld);
     const farSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [0, 0, 0], radius: 5 }];
     const vehicleServer = startNetServer({
+      botManager: emptyBotManager(),
       world: vehicleWorld,
       spawns: farSpawns,
       port: TEST_PORT + 17,
@@ -1546,6 +1614,7 @@ describe('startNetServer', () => {
     // The connecting player spawns on team 1, right next to team 2's own pad.
     const vehicleSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
     const vehicleServer = startNetServer({
+      botManager: emptyBotManager(),
       world: vehicleWorld,
       spawns: vehicleSpawns,
       port: TEST_PORT + 18,
@@ -1573,6 +1642,7 @@ describe('startNetServer', () => {
     stepPower(vehicleWorld);
     const vehicleSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
     const vehicleServer = startNetServer({
+      botManager: emptyBotManager(),
       world: vehicleWorld,
       spawns: vehicleSpawns,
       port: TEST_PORT + 19,
@@ -1590,5 +1660,121 @@ describe('startNetServer', () => {
     expect(vehicleWorld.vehicles.count).toBe(0);
     client.close();
     vehicleServer.close();
+  });
+
+  it("a bot's own PlayerInput reaches stepWorld every tick, with no socket at all (Task 9)", async () => {
+    const botWorld = createWorld(terrain, 1, 8);
+    createFlags(botWorld, [
+      { team: 1, position: { x: 0, y: 0, z: 0 } },
+      { team: 2, position: { x: 8, y: 0, z: 8 } },
+    ]);
+    const botSpawns: SceneSpawn[] = [
+      { name: null, team: 1, position: [0, 0, 0], radius: 5 },
+      { name: null, team: 2, position: [8, 0, 8], radius: 5 },
+    ];
+    const manager = createBotManager(
+      botWorld,
+      botSpawns,
+      [
+        { position: { x: 0, y: 0, z: 0 }, label: 'homeFlag' },
+        { position: { x: 8, y: 0, z: 8 }, label: 'enemyFlag' },
+      ],
+      2,
+    );
+    const [botId] = manager.botIds;
+    const before: [number, number, number] = [
+      botWorld.players.position[(botId as number) * 3] ?? 0,
+      botWorld.players.position[(botId as number) * 3 + 1] ?? 0,
+      botWorld.players.position[(botId as number) * 3 + 2] ?? 0,
+    ];
+    const botServer = startNetServer({
+      botManager: manager,
+      world: botWorld,
+      spawns: botSpawns,
+      port: TEST_PORT + 20,
+    });
+    await botServer.ready;
+    for (let tick = 1; tick <= 20; tick += 1) botServer.tick(tick);
+    const after: [number, number, number] = [
+      botWorld.players.position[(botId as number) * 3] ?? 0,
+      botWorld.players.position[(botId as number) * 3 + 1] ?? 0,
+      botWorld.players.position[(botId as number) * 3 + 2] ?? 0,
+    ];
+    expect(after).not.toEqual(before);
+    botServer.close();
+  });
+
+  it('a human joining a team already at TARGET_TEAM_SIZE bots leaves exactly one fewer bot on that team (failure matrix row 12)', async () => {
+    const rebalanceWorld = createWorld(terrain, 1, 64);
+    createFlags(rebalanceWorld, [
+      { team: 1, position: { x: 0, y: 0, z: 0 } },
+      { team: 2, position: { x: 8, y: 0, z: 8 } },
+    ]);
+    const rebalanceSpawns: SceneSpawn[] = [
+      { name: null, team: 1, position: [0, 0, 0], radius: 5 },
+      { name: null, team: 2, position: [8, 0, 8], radius: 5 },
+    ];
+    const manager = createBotManager(rebalanceWorld, rebalanceSpawns, [], TARGET_TEAM_SIZE * 2);
+    expect(teamCount(rebalanceWorld, 1)).toBe(TARGET_TEAM_SIZE);
+    const botCountBefore = manager.botIds.size;
+    const rebalanceServer = startNetServer({
+      botManager: manager,
+      world: rebalanceWorld,
+      spawns: rebalanceSpawns,
+      port: TEST_PORT + 21,
+    });
+    await rebalanceServer.ready;
+    const client = await connect(TEST_PORT + 21);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    expect(welcome.team).toBe(1); // smallerTeam picks team 1 on a tie before this join
+    expect(teamCount(rebalanceWorld, 1)).toBe(TARGET_TEAM_SIZE); // one bot removed, human added
+    expect(manager.botIds.size).toBe(botCountBefore - 1);
+    client.close();
+    rebalanceServer.close();
+  });
+
+  it('stops stepping bots once gameOver freezes the match (Codex review round 1, P2)', async () => {
+    const frozenWorld = createWorld(terrain, 1, 8);
+    createFlags(frozenWorld, [
+      { team: 1, position: { x: 0, y: 0, z: 0 } },
+      { team: 2, position: { x: 8, y: 0, z: 8 } },
+    ]);
+    const frozenSpawns: SceneSpawn[] = [
+      { name: null, team: 1, position: [0, 0, 0], radius: 5 },
+      { name: null, team: 2, position: [8, 0, 8], radius: 5 },
+    ];
+    const manager = createBotManager(
+      frozenWorld,
+      frozenSpawns,
+      [
+        { position: { x: 0, y: 0, z: 0 }, label: 'homeFlag' },
+        { position: { x: 8, y: 0, z: 8 }, label: 'enemyFlag' },
+      ],
+      2,
+    );
+    const [botId] = manager.botIds;
+    frozenWorld.gameOver = true;
+    const before: [number, number, number] = [
+      frozenWorld.players.position[(botId as number) * 3] ?? 0,
+      frozenWorld.players.position[(botId as number) * 3 + 1] ?? 0,
+      frozenWorld.players.position[(botId as number) * 3 + 2] ?? 0,
+    ];
+    const frozenServer = startNetServer({
+      botManager: manager,
+      world: frozenWorld,
+      spawns: frozenSpawns,
+      port: TEST_PORT + 22,
+    });
+    await frozenServer.ready;
+    for (let tick = 1; tick <= 20; tick += 1) frozenServer.tick(tick);
+    const after: [number, number, number] = [
+      frozenWorld.players.position[(botId as number) * 3] ?? 0,
+      frozenWorld.players.position[(botId as number) * 3 + 1] ?? 0,
+      frozenWorld.players.position[(botId as number) * 3 + 2] ?? 0,
+    ];
+    expect(after).toEqual(before);
+    frozenServer.close();
   });
 });

@@ -19,6 +19,7 @@ import {
 } from '@clans/sim';
 import { bytesOf, createWriter, writeU16, writeU32, writeU8 } from './codec.js';
 import {
+  MAX_SNAPSHOT_BOTS,
   MAX_SNAPSHOT_FLAGS,
   MAX_SNAPSHOT_PLAYERS,
   MAX_SNAPSHOT_PROJECTILES,
@@ -28,6 +29,7 @@ import {
   decodeSnapshot,
   emptyExtras,
   encodeSnapshot,
+  type BotDebugSnapshotData,
   type DecodedSnapshot,
   type FlagSnapshotData,
   type ProjectileSnapshotData,
@@ -107,6 +109,7 @@ describe('snapshot codec', () => {
       winnerTeam: 1,
       timeRemainingS: 0,
       gameOverReason: GameOverReason.CaptureLimit,
+      bots: [],
     };
     const bytes = encodeSnapshot(1, source.tick, 0, players, null, extras);
     const decoded = decodeSnapshot(bytes, null);
@@ -176,13 +179,18 @@ describe('snapshot codec', () => {
     expect(() => decodeSnapshot(deltaBytes, null)).toThrow(RangeError);
   });
 
-  it('round-trips projectiles, flags, team scores, and game over', () => {
+  it('round-trips projectiles, flags, team scores, game over, and bots -- bots decoded in order, after every other field', () => {
     const projectiles: ProjectileSnapshotData[] = [
       { id: 3, type: 0, weaponId: 0, x: 1, y: 2, z: 3, vx: 90, vy: 0, vz: 0, ownerId: 0, armed: 1 },
     ];
     const flags: FlagSnapshotData[] = [
       { id: 0, team: 1, state: 0, x: 0, y: 0, z: 0, carrierId: -1, returnInS: -1 },
       { id: 1, team: 2, state: 1, x: 5, y: 0, z: 5, carrierId: 2, returnInS: -1 },
+    ];
+    const bots: BotDebugSnapshotData[] = [
+      { playerId: 4, state: 0 },
+      { playerId: 9, state: 1 },
+      { playerId: 2, state: 2 },
     ];
     const bytes = encodeSnapshot(1, 0, 0, [], null, {
       projectiles,
@@ -195,6 +203,7 @@ describe('snapshot codec', () => {
       winnerTeam: 1,
       timeRemainingS: 723.4,
       gameOverReason: 0,
+      bots,
     });
     const decoded = decodeSnapshot(bytes, null);
     expect(decoded.projectiles).toEqual(projectiles);
@@ -204,6 +213,19 @@ describe('snapshot codec', () => {
     expect(decoded.winnerTeam).toBe(1);
     expect(decoded.timeRemainingS).toBeCloseTo(723.4, 1);
     expect(decoded.gameOverReason).toBe(0);
+    expect(decoded.bots).toEqual(bots);
+  });
+
+  it('throws at encode time when the bots array exceeds MAX_SNAPSHOT_BOTS', () => {
+    const bots: BotDebugSnapshotData[] = Array.from({ length: MAX_SNAPSHOT_BOTS + 1 }, (_, i) => ({
+      playerId: i,
+      state: 0,
+    }));
+    expect(() => encodeSnapshot(1, 0, 0, [], null, { ...emptyExtras(), bots })).toThrow(RangeError);
+  });
+
+  it('emptyExtras includes an empty bots array', () => {
+    expect(emptyExtras().bots).toEqual([]);
   });
 
   it('round-trips respawnSeq through a full snapshot', () => {

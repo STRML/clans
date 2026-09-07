@@ -18,6 +18,7 @@ import {
 } from './codec.js';
 import {
   MAX_SNAPSHOT_BASE_OBJECTS,
+  MAX_SNAPSHOT_BOTS,
   MAX_SNAPSHOT_FLAGS,
   MAX_SNAPSHOT_PLAYERS,
   MAX_SNAPSHOT_PROJECTILES,
@@ -77,6 +78,14 @@ export interface TurretSnapshotData {
   targetId: number; // -1 = none
   state: number; // TurretState from @clans/sim
 }
+/** A bot's debug state, mirroring @clans/bots' BotState (0 Idle, 1 Attack, 2 Defend) --
+ *  this package doesn't depend on @clans/bots, so the value is carried as a plain number,
+ *  the same convention every other *SnapshotData "enum from @clans/sim" field already
+ *  uses (e.g. TurretSnapshotData.state above). */
+export interface BotDebugSnapshotData {
+  playerId: number;
+  state: number;
+}
 export interface WorldExtras {
   projectiles: ProjectileSnapshotData[];
   flags: FlagSnapshotData[];
@@ -88,6 +97,9 @@ export interface WorldExtras {
   winnerTeam: number;
   timeRemainingS: number; // seconds until the match clock expires; derived, not the raw tick threshold
   gameOverReason: number; // GameOverReason from @clans/sim: 0 = capture limit, 1 = time limit
+  /** Purely additive, appended after every other field (Global Constraints: no
+   *  PROTOCOL_VERSION bump) -- must stay the LAST field writeExtras/readExtras handle. */
+  bots: BotDebugSnapshotData[];
 }
 export function emptyExtras(): WorldExtras {
   return {
@@ -101,6 +113,7 @@ export function emptyExtras(): WorldExtras {
     winnerTeam: 0,
     timeRemainingS: 0,
     gameOverReason: 0,
+    bots: [],
   };
 }
 export interface DecodedSnapshot {
@@ -120,6 +133,7 @@ export interface DecodedSnapshot {
   winnerTeam: number;
   timeRemainingS: number;
   gameOverReason: number;
+  bots: BotDebugSnapshotData[];
 }
 
 const HEADER_BYTES = 1 + 4 + 4 + 4 + 4 + 1; // type, snapshotId, baselineId, tick, lastInputSequence, flags
@@ -515,6 +529,18 @@ function readVehicle(cursor: Cursor): VehicleSnapshotData {
 // energy, damage), destroyed, driverId i16, padId i16, weaponTimer f32, status byte.
 const VEHICLE_BYTES = 2 + 1 + 1 + 4 * 14 + 1 + 2 + 2 + 4 + 1;
 
+function writeBot(cursor: Cursor, b: BotDebugSnapshotData): void {
+  writeU16(cursor, b.playerId);
+  writeU8(cursor, b.state);
+}
+function readBot(cursor: Cursor): BotDebugSnapshotData {
+  const playerId = readU16(cursor);
+  const state = readU8(cursor);
+  return { playerId, state };
+}
+// playerId u16, state u8.
+const BOT_BYTES = 2 + 1;
+
 function writeExtras(cursor: Cursor, extras: WorldExtras): void {
   writeU16(cursor, extras.projectiles.length);
   for (const p of extras.projectiles) writeProjectile(cursor, p);
@@ -539,6 +565,16 @@ function writeExtras(cursor: Cursor, extras: WorldExtras): void {
   writeU8(cursor, extras.winnerTeam);
   writeF32(cursor, extras.timeRemainingS);
   writeU8(cursor, extras.gameOverReason);
+  // Bots (M6): the true last block in the payload, after every trailing scalar field
+  // above -- not just after turrets/vehicles -- so a pre-M6 decoder that simply stops
+  // reading here never has to change (Global Constraints: no PROTOCOL_VERSION bump).
+  // Follows vehicles' own explicit-throw bounds convention, not turrets' still-open
+  // silent-wraparound one (issue #16): new code doesn't have to inherit that gap.
+  if (extras.bots.length > MAX_SNAPSHOT_BOTS) {
+    throw new RangeError('Snapshot bot count exceeds ' + String(MAX_SNAPSHOT_BOTS));
+  }
+  writeU8(cursor, extras.bots.length);
+  for (const b of extras.bots) writeBot(cursor, b);
 }
 function assertPlausibleExtrasCount(count: number, max: number, label: string): void {
   if (count > max) {
@@ -573,6 +609,10 @@ function readExtras(cursor: Cursor): WorldExtras {
   const timeRemainingS = readF32(cursor);
   const gameOverReason = readU8(cursor);
   assertFinite([timeRemainingS]);
+  const botCount = readU8(cursor);
+  assertPlausibleExtrasCount(botCount, MAX_SNAPSHOT_BOTS, 'bot');
+  const bots: BotDebugSnapshotData[] = [];
+  for (let i = 0; i < botCount; i += 1) bots.push(readBot(cursor));
   return {
     projectiles,
     flags,
@@ -584,6 +624,7 @@ function readExtras(cursor: Cursor): WorldExtras {
     winnerTeam,
     timeRemainingS,
     gameOverReason,
+    bots,
   };
 }
 function extrasByteLength(extras: WorldExtras): number {
@@ -603,7 +644,9 @@ function extrasByteLength(extras: WorldExtras): number {
     1 +
     1 +
     4 +
-    1
+    1 +
+    1 +
+    extras.bots.length * BOT_BYTES
   );
 }
 
