@@ -184,9 +184,20 @@ export function stepWorld(
   if (world.gameOver) return;
   stepPlayers(world, inputs, dt);
   stepWeapons(world, inputs, dt);
-  stepPower(world);
   stepTurrets(world, dt);
   stepProjectiles(world, dt);
+  // Codex round 1, finding 5: this used to run before stepProjectiles, so a generator
+  // destroyed by this tick's own projectile damage did not clear its team's power until the
+  // NEXT tick's stepPower call -- every dependent (station, force field) stayed powered
+  // through the rest of the tick it was actually destroyed on. teamHasPower (called from
+  // here) already excludes a destroyed generator; the bug was purely about when this ran
+  // relative to stepProjectiles's applyBaseObjectDamage, not the exclusion logic itself.
+  // Moving it here costs nothing downstream: stepPlayers/stepTurrets both already read
+  // `powered` before any damage this tick could apply, exactly as before (they use the
+  // previous tick's stepPower result either way), and by the START of the NEXT tick's
+  // stepProjectiles this value already reflects everything destroyed through the end of
+  // THIS tick -- the same freshness stepProjectiles saw when this call sat earlier.
+  stepPower(world);
   stepRepairPacks(world, inputs, dt);
   stepFlags(world, dt);
   world.tick += 1;

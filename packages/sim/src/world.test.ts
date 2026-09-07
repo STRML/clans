@@ -9,6 +9,8 @@ import {
   stepWorld,
   type Heightfield,
 } from './index.js';
+import { BASE_OBJECT_DATA, BaseObjectKind, createBaseObjects, stationAt } from './baseObjects.js';
+import { ProjectileType, WeaponId } from './weapons.js';
 
 const terrain: Heightfield = {
   gridSize: 2,
@@ -155,5 +157,48 @@ describe('fixed world', () => {
     expect(Array.from(world.players.position)).toEqual(positionBefore);
     expect(Array.from(world.players.velocity)).toEqual(velocityBefore);
     expect(Array.from(world.players.ammo)).toEqual(ammoBefore);
+  });
+
+  it('a generator destroyed this tick leaves its team unpowered by the end of the same tick -- Codex round 1, finding 5', () => {
+    // stepPower used to run BEFORE stepProjectiles in the per-tick order, so a generator
+    // whose damage crossed maxHealth from a hit stepProjectiles resolved THIS tick did not
+    // clear its team's power until the NEXT tick's stepPower call -- every dependent (a
+    // station, say) stayed powered through the rest of the tick it was actually destroyed on.
+    const world = createWorld(terrain, 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 5, z: 20 } },
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 0, y: 5, z: 0 } },
+    ]);
+    const [generatorId, stationId] = [0, 1];
+    // Pre-soften the generator to just under its destruction threshold, so this tick's single
+    // Chaingun hit (directDamage 0.0825) is the one that pushes it over -- isolating the
+    // ordering bug from the shield/health math baseObjects.test.ts already covers directly.
+    world.baseObjects.energy[generatorId] = 0;
+    world.baseObjects.damage[generatorId] =
+      BASE_OBJECT_DATA[BaseObjectKind.Generator].maxHealth - 0.05;
+    const player = addPlayer(world, { x: 0.5, y: 5, z: 0 }, 1);
+    expect(stationAt(world, player)).not.toBeNull(); // sanity: powered before the hit lands
+
+    // Inject an already-in-flight Tracer directly into the projectile store -- bypassing
+    // stepWeapons (which unconditionally clears world.pendingFireEvents at the top of every
+    // tick, so a fire event set before stepWorld never survives to reach stepProjectiles) the
+    // same way a shot fired on an earlier tick would already be flying when this tick starts.
+    const projectiles = world.projectiles;
+    const shotId = 0;
+    projectiles.active[shotId] = 1;
+    projectiles.type[shotId] = ProjectileType.Tracer;
+    projectiles.weaponId[shotId] = WeaponId.Chaingun;
+    projectiles.ownerId[shotId] = -1;
+    projectiles.team[shotId] = 2;
+    projectiles.sourceTurretId[shotId] = -1;
+    projectiles.position.set([0, 5, 15], shotId * 3);
+    projectiles.velocity.set([0, 0, 200], shotId * 3); // reaches z=21.4, past the generator at z=20
+    projectiles.count = Math.max(projectiles.count, shotId + 1);
+
+    stepWorld(world, new Map());
+
+    expect(world.baseObjects.destroyed[generatorId]).toBe(1);
+    expect(world.baseObjects.powered[stationId]).toBe(0);
+    expect(stationAt(world, player)).toBeNull();
   });
 });

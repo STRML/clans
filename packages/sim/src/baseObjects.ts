@@ -278,7 +278,11 @@ export function stationAt(world: World, playerId: number): number | null {
   const team = world.players.team[playerId] ?? 0;
   for (let id = 0; id < store.count; id += 1) {
     if (store.kind[id] !== BaseObjectKind.StationInventory) continue;
-    if (store.team[id] !== team || !store.powered[id]) continue;
+    // Codex round 1, finding 5: `powered` and `destroyed` are independent bits -- stepPower
+    // derives `powered` purely from the TEAM's generator state, never from this object's own
+    // `destroyed` flag, so a destroyed-but-still-"powered" station (its team's generator is
+    // still alive) passed this check and stayed usable after being blown up.
+    if (store.team[id] !== team || !store.powered[id] || store.destroyed[id]) continue;
     const stationPos = positionAt(store.position, id * 3);
     if (distanceVec(playerPos, stationPos) <= STATION_USE_RADIUS) return id;
   }
