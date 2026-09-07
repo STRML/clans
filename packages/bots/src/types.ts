@@ -32,6 +32,12 @@ export interface BotRuntimeState {
    *  so steering.ts/brain.ts can tell "still the same goal" apart from "goal changed,
    *  repath" without diffing the path array itself. */
   goalKey: string | null;
+  /** The world-space x/z of the goal that produced `path`/`goalKey` -- steering.ts's
+   *  ensurePath compares this against each call's fresh `goal` to detect drift (an
+   *  escort target or a flag carrier that moved) even when `goalKey` itself hasn't
+   *  changed, since `goalKey` alone (e.g. `escort:4`) never reflects the target's actual
+   *  current position (closes #33). null until the first path is computed. */
+  goalPosition: { x: number; z: number } | null;
   aimYaw: number;
   /** Rolled once per fresh target acquisition, not every tick — see combat.ts. */
   aimJitterDeg: number;
@@ -66,6 +72,7 @@ export function createBotRuntimeState(
     path: [],
     pathIndex: 0,
     goalKey: null,
+    goalPosition: null,
     aimYaw: 0,
     aimJitterDeg: 0,
     engagedTargetId: -1,

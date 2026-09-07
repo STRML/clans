@@ -94,7 +94,12 @@ export class RemoteBuffer {
     // A jump this large is a teleport (respawn, or a reused id's new player entirely),
     // not movement: discard the stale history instead of letting interpolate() smear a
     // straight line between two unrelated positions.
-    if (previous && distance(previous.data, data) > TELEPORT_DISTANCE_M) this.samples.length = 0;
+    const teleported = previous ? distance(previous.data, data) > TELEPORT_DISTANCE_M : false;
+    // respawnSeq increments on every respawn, including a freed id's first spawn as a new
+    // player -- catches the case the distance heuristic alone misses, where a reused id's
+    // new spawn happens to land close to the departed player's last position (closes #8).
+    const respawned = previous ? previous.data.respawnSeq !== data.respawnSeq : false;
+    if (teleported || respawned) this.samples.length = 0;
     this.samples.push({ atMs, data });
     if (this.samples.length > HISTORY_LENGTH) this.samples.shift();
   }

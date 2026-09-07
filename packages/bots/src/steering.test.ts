@@ -100,3 +100,50 @@ describe('steerToward stuck-skip (Codex review round 3, P1)', () => {
     expect(runtime.pathIndex).toBe(0);
   });
 });
+
+describe('steerToward goal-drift repath (closes #33)', () => {
+  it('repaths when the goal position drifts far past GOAL_DRIFT_REPATH_M even though goalKey is unchanged', () => {
+    // Today's needsNewPath only checks goalKey/pathIndex/path.length, never whether the
+    // goal itself moved -- an escort or flag-chase target that walks away from its first
+    // steerToward call leaves the bot's path heading toward the stale original position
+    // forever, since the goalKey ('escort:<id>' or similar) never changes.
+    const world = createWorld(flat, 1);
+    world.tick = 0;
+    const graph = buildWaypointGraph([
+      { position: { x: 0, y: 0, z: 0 }, label: 'a' },
+      { position: { x: 50, y: 0, z: 0 }, label: 'b' },
+      { position: { x: 100, y: 0, z: 0 }, label: 'c' },
+    ]);
+    const runtime = createBotRuntimeState(1, BotRole.Attacker, 1);
+    const position = { x: 0, y: 0, z: 0 };
+
+    steerToward(
+      graph,
+      world,
+      1,
+      runtime,
+      1,
+      { x: 100, y: 0, z: 0 },
+      'goal:carrier',
+      position,
+      LIGHT_ARMOR,
+      60,
+    );
+    expect(runtime.path.at(-1)).toEqual({ x: 100, z: 0 });
+
+    // Same goalKey, goal moved 100 m -- far past GOAL_DRIFT_REPATH_M (6 m).
+    steerToward(
+      graph,
+      world,
+      1,
+      runtime,
+      1,
+      { x: 0, y: 0, z: 0 },
+      'goal:carrier',
+      position,
+      LIGHT_ARMOR,
+      60,
+    );
+    expect(runtime.path.at(-1)).toEqual({ x: 0, z: 0 });
+  });
+});
