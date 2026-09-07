@@ -268,4 +268,20 @@ describe('applyLoadoutRequest', () => {
     const player = addPlayer(world, { x: 10 + STATION_USE_RADIUS + 5, y: 0, z: 0 }, 1);
     expect(applyLoadoutRequest(world, player, ArmorId.Medium, false)).toBe(false);
   });
+  it('rejects an out-of-range armor byte and leaves the player untouched -- Codex round 1, finding 3', () => {
+    // decodeLoadout (protocol/handshake.ts) reads armor as a raw u8 off the wire, so a
+    // malicious or buggy client can send any value 0-255, not just a real ArmorId (0-2).
+    // Before this fix, ARMORS[armor] was undefined for anything out of range, and
+    // `players.armor[playerId] = armor` had already run by the time `data.maxEnergy` threw --
+    // poisoning the player's armor field with the invalid byte before the exception unwound
+    // into server/net.ts's handleLoadout, which has no catch of its own around applyLoadoutRequest.
+    const world = createWorld(flat, 1);
+    twoGeneratorsOneStation(world);
+    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
+    const invalidArmor = 99 as ArmorId;
+    expect(() => applyLoadoutRequest(world, player, invalidArmor, true)).not.toThrow();
+    expect(applyLoadoutRequest(world, player, invalidArmor, true)).toBe(false);
+    expect(world.players.armor[player]).toBe(ArmorId.Light);
+    expect(world.players.hasRepairPack[player]).toBe(0);
+  });
 });

@@ -323,6 +323,14 @@ export function applyLoadoutRequest(
   armor: ArmorId,
   repairPack: boolean,
 ): boolean {
+  // decodeLoadout (protocol/handshake.ts) reads this straight off an untrusted wire byte, so
+  // it can carry any u8 (0-255), not just a real ArmorId (0-2). ARMORS[armor] below is undefined
+  // for anything out of range, and the caller (server/net.ts's handleLoadout) has no catch of
+  // its own -- an invalid byte used to throw straight past applyLoadoutRequest's ability to
+  // return false, poisoning the player's armor field with the raw invalid value before the
+  // throw (players.armor[playerId] = armor ran first) and getting silently swallowed by the
+  // server's own message-handler try/catch. Reject it here, before any state changes.
+  if (!(armor in ARMORS)) return false;
   if (stationAt(world, playerId) === null) return false;
   const players = world.players;
   const data: ArmorData = ARMORS[armor];
