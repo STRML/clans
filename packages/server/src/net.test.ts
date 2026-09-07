@@ -1734,4 +1734,47 @@ describe('startNetServer', () => {
     client.close();
     rebalanceServer.close();
   });
+
+  it('stops stepping bots once gameOver freezes the match (Codex review round 1, P2)', async () => {
+    const frozenWorld = createWorld(terrain, 1, 8);
+    createFlags(frozenWorld, [
+      { team: 1, position: { x: 0, y: 0, z: 0 } },
+      { team: 2, position: { x: 8, y: 0, z: 8 } },
+    ]);
+    const frozenSpawns: SceneSpawn[] = [
+      { name: null, team: 1, position: [0, 0, 0], radius: 5 },
+      { name: null, team: 2, position: [8, 0, 8], radius: 5 },
+    ];
+    const manager = createBotManager(
+      frozenWorld,
+      frozenSpawns,
+      [
+        { position: { x: 0, y: 0, z: 0 }, label: 'homeFlag' },
+        { position: { x: 8, y: 0, z: 8 }, label: 'enemyFlag' },
+      ],
+      2,
+    );
+    const [botId] = manager.botIds;
+    frozenWorld.gameOver = true;
+    const before: [number, number, number] = [
+      frozenWorld.players.position[(botId as number) * 3] ?? 0,
+      frozenWorld.players.position[(botId as number) * 3 + 1] ?? 0,
+      frozenWorld.players.position[(botId as number) * 3 + 2] ?? 0,
+    ];
+    const frozenServer = startNetServer({
+      botManager: manager,
+      world: frozenWorld,
+      spawns: frozenSpawns,
+      port: TEST_PORT + 22,
+    });
+    await frozenServer.ready;
+    for (let tick = 1; tick <= 20; tick += 1) frozenServer.tick(tick);
+    const after: [number, number, number] = [
+      frozenWorld.players.position[(botId as number) * 3] ?? 0,
+      frozenWorld.players.position[(botId as number) * 3 + 1] ?? 0,
+      frozenWorld.players.position[(botId as number) * 3 + 2] ?? 0,
+    ];
+    expect(after).toEqual(before);
+    frozenServer.close();
+  });
 });

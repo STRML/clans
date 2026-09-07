@@ -72,6 +72,31 @@ describe('decideGoal', () => {
     expect(goal.position).toEqual({ x: 20, y: 0, z: 30 });
     expect(goal.key).toBe(`escort:${String(carrier)}`);
   });
+
+  it('a bot below LOW_HEALTH_FRACTION heads to its nearest friendly station ahead of any CTF goal (Codex review round 1, P1)', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.damage[bot] = 0.9; // Light armor maxDamage 1.0 -- well under LOW_HEALTH_FRACTION.
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 5, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 5, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    const goal = decideGoal(world, runtime);
+    expect(goal.position).toEqual({ x: 5, y: 0, z: 0 });
+    expect(goal.key).toBe('heal:1');
+  });
+
+  it('a healthy bot with no station nearby is unaffected -- decideHealGoal is a no-op', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    const goal = decideGoal(world, runtime);
+    expect(goal.key).toBe('enemyFlag:1');
+  });
 });
 
 describe('decideCombat (failure matrix row 9)', () => {

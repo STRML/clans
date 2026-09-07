@@ -876,13 +876,21 @@ export function startNetServer(options: NetServerOptions): NetServer {
   // keep going out on the normal cadence so every client sees the frozen final state.
   function tick(tickNumber: number): void {
     const inputs = collectTickInputs(clients);
-    // A bot id is never also a socket-bound player id (a human never joins as an id a bot
-    // already occupies -- handleJoin's own addPlayer always allocates a fresh id), so the
-    // two maps' key sets never overlap and this merge order doesn't matter.
-    for (const [botId, input] of stepBotManager(options.botManager, options.world)) {
-      inputs.set(botId, input);
+    // Codex review round 1, finding (P2): stepBotManager used to run every tick
+    // unconditionally, even after gameOver froze the match -- 32 bots kept paying full
+    // perception/pathing cost for a match nobody could act in, and maybeHeal's direct
+    // applyLoadoutRequest call could still mutate a "frozen" player's armor/energy/ammo.
+    // Gated behind the same guard runOneTick already uses, matching how the rest of the
+    // tick loop treats gameOver as a hard stop, not just a stop on the sim step.
+    if (!options.world.gameOver) {
+      // A bot id is never also a socket-bound player id (a human never joins as an id a
+      // bot already occupies -- handleJoin's own addPlayer always allocates a fresh id),
+      // so the two maps' key sets never overlap and this merge order doesn't matter.
+      for (const [botId, input] of stepBotManager(options.botManager, options.world)) {
+        inputs.set(botId, input);
+      }
+      runOneTick(inputs);
     }
-    if (!options.world.gameOver) runOneTick(inputs);
     if (tickNumber % SNAPSHOT_EVERY_N_TICKS !== 0) return;
     sendAllSnapshots();
   }

@@ -15,19 +15,30 @@ function isUsableByTeam(store: VehicleStore, vehicleId: number, team: number): b
   );
 }
 
+/** Codex review round 1, finding: real mounting (sim/vehicles.ts's own
+ *  findUnoccupiedVehicleInRange) checks full 3D distance
+ *  (`Math.hypot(dx, dy, dz)` against `minMountDist`), not a horizontal-only one -- a
+ *  same-team vehicle directly above or below a bot (a cliff edge, a ledge) previously read
+ *  as "in range" here on X/Z alone while the real mount check in stepVehicles kept
+ *  rejecting it, leaving the bot stuck holding `use: true` at a vehicle goal that could
+ *  never actually resolve. */
+function distance3D(world: World, botId: number, vehicleId: number): number {
+  const base = botId * 3;
+  const vBase = vehicleId * 3;
+  const dx = (world.players.position[base] ?? 0) - (world.vehicles.position[vBase] ?? 0);
+  const dy = (world.players.position[base + 1] ?? 0) - (world.vehicles.position[vBase + 1] ?? 0);
+  const dz = (world.players.position[base + 2] ?? 0) - (world.vehicles.position[vBase + 2] ?? 0);
+  return Math.hypot(dx, dy, dz);
+}
+
 export function findMountableVehicle(world: World, botId: number): number | null {
   const store = world.vehicles;
-  const base = botId * 3;
-  const bx = world.players.position[base] ?? 0,
-    bz = world.players.position[base + 2] ?? 0;
   const team = world.players.team[botId] ?? 0;
   let best: number | null = null;
   let bestDistance = Infinity;
   for (let id = 0; id < store.count; id += 1) {
     if (!isUsableByTeam(store, id, team)) continue;
-    const vx = store.position[id * 3] ?? 0,
-      vz = store.position[id * 3 + 2] ?? 0;
-    const d = Math.hypot(bx - vx, bz - vz);
+    const d = distance3D(world, botId, id);
     if (d <= MOUNT_RANGE && d < bestDistance) {
       bestDistance = d;
       best = id;
@@ -79,9 +90,5 @@ export function shouldUseVehicle(world: World, runtime: BotRuntimeState, botId: 
   if (vehicleId === null) return false;
   const team = world.players.team[botId] ?? 0;
   if (!isUsableByTeam(store, vehicleId, team)) return false;
-  const base = botId * 3,
-    vBase = vehicleId * 3;
-  const dx = (world.players.position[base] ?? 0) - (store.position[vBase] ?? 0);
-  const dz = (world.players.position[base + 2] ?? 0) - (store.position[vBase + 2] ?? 0);
-  return Math.hypot(dx, dz) <= MOUNT_RANGE;
+  return distance3D(world, botId, vehicleId) <= MOUNT_RANGE;
 }

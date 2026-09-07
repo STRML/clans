@@ -13,6 +13,7 @@ import {
   findEscortedCarrier,
   findNearestFriendlyStation,
   findNearestVisibleEnemy,
+  LOW_HEALTH_FRACTION,
   needsHealing,
 } from './perception.js';
 import { steerToward } from './steering.js';
@@ -99,10 +100,51 @@ function decideDefenderGoal(
   return { position: flagStandPosition(world, ownId), key: `home:${String(ownId)}` };
 }
 
+/** Codex review round 1, finding (P1): `needsHealing` existed, but nothing ever routed a
+ *  bot TOWARD a station -- `maybeHeal` (below) only ever healed a bot that happened to
+ *  already be standing in range, so a bot at 80% damage 50 m from its own station kept
+ *  chasing the enemy flag forever. The spec's own words ("backs off to a friendly
+ *  inventory station when health or energy runs low") make this the bot's top priority,
+ *  ahead of any CTF task -- checked here, before role branching, not folded into either
+ *  role's own goal function.
+ *
+ *  Health only, not the full `needsHealing` (health OR energy): the milestone's own
+ *  required proof (Task 11's bot-only match) is the check the plan itself names for
+ *  exactly this tuning question ("a real signal to revisit brain.ts's goal priorities...
+ *  before declaring this task done"), and gating this on energy too made every bot's
+ *  routine uphill jetting over Katabatic (LOW_ENERGY_FRACTION's own 30% threshold drains
+ *  fast against LIGHT_ARMOR's rechargeRate) trigger a full cross-map retreat, and the
+ *  match produced zero kills across 5000 ticks -- verified directly, not assumed. Low
+ *  energy alone is already handled gracefully without an explicit goal: slopeAssist stops
+ *  offering `jet` once energy is low, so a low-energy bot just walks/skis instead, and
+ *  `maybeHeal` below still tops off energy for free the moment any goal (CTF, escort, or
+ *  this one) happens to walk it past a friendly station. */
+function decideHealGoal(
+  world: World,
+  runtime: BotRuntimeState,
+): { position: Vec3; key: string } | null {
+  const armor = armorFor(world, runtime.playerId);
+  const health = 1 - (world.players.damage[runtime.playerId] ?? 0) / armor.maxDamage;
+  if (health >= LOW_HEALTH_FRACTION) return null;
+  const stationId = findNearestFriendlyStation(world, runtime.playerId);
+  if (stationId === null) return null;
+  const base = stationId * 3;
+  return {
+    position: {
+      x: world.baseObjects.position[base] ?? 0,
+      y: world.baseObjects.position[base + 1] ?? 0,
+      z: world.baseObjects.position[base + 2] ?? 0,
+    },
+    key: `heal:${String(stationId)}`,
+  };
+}
+
 export function decideGoal(
   world: World,
   runtime: BotRuntimeState,
 ): { position: Vec3; key: string } {
+  const healGoal = decideHealGoal(world, runtime);
+  if (healGoal !== null) return healGoal;
   return runtime.role === BotRole.Attacker
     ? decideAttackerGoal(world, runtime)
     : decideDefenderGoal(world, runtime);

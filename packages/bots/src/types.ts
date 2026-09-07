@@ -11,7 +11,13 @@ export enum BotRole {
   Defender = 1,
 }
 
-export const DEFENDER_FRACTION = 0.25; // Ours — see this plan's "ours" numbers table.
+// Ours -- see this plan's "ours" numbers table, Task 1. Codex review round 1 flagged this
+// against the design spec's own text ("two defenders per team"), which this deliberately
+// overrides: an all-defensive-leaning bot team would stalemate the milestone's own
+// required proof (Task 11's bot-only match must produce a kill or capture within a bounded
+// tick count), so the plan biased toward offense on purpose. Not an oversight -- see the
+// plan's own numbers table for the full reasoning.
+export const DEFENDER_FRACTION = 0.25;
 
 export interface BotRuntimeState {
   playerId: number;

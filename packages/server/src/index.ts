@@ -1,4 +1,4 @@
-import { createBotManager } from './bots.js';
+import { createBotManager, TARGET_TEAM_SIZE } from './bots.js';
 import { parseArgs } from './cli.js';
 import { startTickLoop } from './loop.js';
 import { startNetServer } from './net.js';
@@ -56,8 +56,22 @@ startTickLoop({
   },
 });
 
+// Codex review round 1, finding (P1): this used to log the raw --bots value, not the
+// actual number of bots the manager could place. rebalanceTeams only ever fills up to
+// TARGET_TEAM_SIZE (16) per team, so a budget above 32 never gets fully used regardless
+// of what was requested -- cli.ts's own validation still allows up to WORLD_CAPACITY (64)
+// since this milestone does not change that flag's contract (Global Constraints), so the
+// mismatch is real and worth surfacing to whoever is reading server startup logs.
+const MAX_USABLE_BOTS = TARGET_TEAM_SIZE * 2;
+if (options.bots > MAX_USABLE_BOTS) {
+  console.warn(
+    `[clans-server] --bots ${String(options.bots)} exceeds the usable maximum of ${String(
+      MAX_USABLE_BOTS,
+    )} (${String(TARGET_TEAM_SIZE)} per team); only ${String(botManager.botIds.size)} bots were placed`,
+  );
+}
 console.log(
   `[clans-server] listening on ws://127.0.0.1:${String(options.port)} with ${String(
-    options.bots,
+    botManager.botIds.size,
   )} bots`,
 );

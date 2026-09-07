@@ -101,4 +101,11 @@ describe('rebalanceTeams', () => {
     expect(manager.botIds.size).toBe(2);
     expect(teamCount(world, 1)).toBeLessThan(TARGET_TEAM_SIZE);
   });
+
+  it('splits a small bot budget across both teams instead of saturating team 1 first (Codex review round 1, P2)', () => {
+    const world = createWorld(flat, 1, 64);
+    createBotManager(world, spawns, [], 2);
+    expect(teamCount(world, 1)).toBe(1);
+    expect(teamCount(world, 2)).toBe(1);
+  });
 });

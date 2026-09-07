@@ -75,7 +75,33 @@ function removeBotFromTeam(manager: BotManager, world: World, team: number): boo
 /** Called after every join/leave (Global Constraints), never on a tick timer. Removes a
  *  bot from a team before it would exceed TARGET_TEAM_SIZE, and backfills a team under
  *  TARGET_TEAM_SIZE from `manager.maxBots`'s remaining budget -- never more, never
- *  fewer than that budget allows (failure matrix rows 12-14). */
+ *  fewer than that budget allows (failure matrix rows 12-14).
+ *
+ *  Codex review round 1 (P1): this can only remove a bot to make room, never a human --
+ *  a team can still exceed TARGET_TEAM_SIZE if it fills past the cap with humans alone
+ *  (e.g. `--bots 0`, or the team's own bot budget already exhausted). This is not a
+ *  regression this milestone introduces: no version of this server has ever capped human
+ *  team membership, before or after M6 -- `--bots` was always a bot-count budget, never a
+ *  matchmaking limit. Rejecting a human's join outright would be a real, separate feature
+ *  (a wire status the client has to handle), out of this milestone's given scope; tracked
+ *  as a follow-up rather than built here. See strml/clans#31. */
+/** The team under TARGET_TEAM_SIZE with fewer players, or null once both are full.
+ *  Codex review round 1, finding (P2): the old backfill loop filled team 1 completely
+ *  before ever considering team 2, so a small `--bots` budget (e.g. 2) landed both bots
+ *  on team 1 -- unlike the pre-M6 `addBots`, which alternated via `smallerTeam` every
+ *  call. This mirrors that alternation while also respecting the per-team cap
+ *  `smallerTeam` alone doesn't know about. */
+function smallerEligibleTeam(world: World): 1 | 2 | null {
+  const t1 = teamCount(world, 1);
+  const t2 = teamCount(world, 2);
+  const t1Eligible = t1 < TARGET_TEAM_SIZE;
+  const t2Eligible = t2 < TARGET_TEAM_SIZE;
+  if (!t1Eligible && !t2Eligible) return null;
+  if (!t2Eligible) return 1;
+  if (!t1Eligible) return 2;
+  return t1 <= t2 ? 1 : 2;
+}
+
 export function rebalanceTeams(manager: BotManager, world: World, spawns: SceneSpawn[]): void {
   for (const team of [1, 2]) {
     while (teamCount(world, team) > TARGET_TEAM_SIZE) {
@@ -83,11 +109,11 @@ export function rebalanceTeams(manager: BotManager, world: World, spawns: SceneS
     }
   }
   let remainingBudget = manager.maxBots - manager.botIds.size;
-  for (const team of [1, 2]) {
-    while (teamCount(world, team) < TARGET_TEAM_SIZE && remainingBudget > 0) {
-      addBotToTeam(manager, world, spawns, team);
-      remainingBudget -= 1;
-    }
+  while (remainingBudget > 0) {
+    const team = smallerEligibleTeam(world);
+    if (team === null) break;
+    addBotToTeam(manager, world, spawns, team);
+    remainingBudget -= 1;
   }
 }
 
