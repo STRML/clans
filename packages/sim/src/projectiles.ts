@@ -930,9 +930,20 @@ function hitTestHitscan(world: World, event: FireEvent, data: WeaponData): HitRe
 
 /** `hitTestFireEvent`'s Chaingun case: rebuilds the exact one-tick travel segment
  *  `spawnFromEvent`'s immediate `stepLinearOrTracer` call resolves a live Tracer against
- *  (same `velocityFor` inputs, same `dt`), then redoes just that segment's terrain-vs-player
- *  hit-test -- terrain wins ties, matching `stepLinearOrTracer` -- without ever spawning a
- *  projectile or applying damage. */
+ *  (same `velocityFor` inputs, same `dt`), then redoes that segment's three-way hit-test
+ *  (terrain/interior/force-field, base object/turret, player) the exact same way
+ *  `stepLinearOrTracer`/`resolveLinearHit` does for a live shot -- `nearestOfThree` ties break
+ *  identically (terrain beats a tied player hit; a tied player hit beats a structure hit) --
+ *  without ever spawning a projectile or applying damage.
+ *
+ *  Codex round 3 review of PR #11: this used to check only terrain/interiors/force-fields
+ *  (`worldHitAlongSegment`) and the player, omitting the live path's base-object/turret check
+ *  (`nearestStructureHitFrom`) entirely. server/net.ts's applyLagCompensatedHits calls this to
+ *  substitute a rewound position and redo the hit-test for a shot the live sim missed; with no
+ *  structure check here, a high-ping shooter could score -- and have real damage applied for --
+ *  a "hit" through an intact generator, station, or turret standing directly between them and
+ *  the target, something the live simulation would have stopped dead. -1 for excludeTurretId:
+ *  a player's own FireEvent is never turret-sourced (only a real turret shot has one). */
 function hitTestTracer(world: World, event: FireEvent, data: WeaponData, dt: number): HitResult {
   const velocity = velocityFor(event.direction, data.speed, event.shooterVelocity, data.velInherit);
   const current: Vec3 = {
@@ -947,7 +958,9 @@ function hitTestTracer(world: World, event: FireEvent, data: WeaponData, dt: num
     world.players.team[event.playerId] ?? 0,
   );
   const directHit = findDirectHitFrom(world, event.playerId, event.origin, current);
-  if (!directHit || (terrainHit && terrainHit.distance <= directHit.distance)) return NO_HIT;
+  const structureHit = nearestStructureHitFrom(world, event.origin, current, -1);
+  const nearest = nearestOfThree(terrainHit, directHit, structureHit);
+  if (!directHit || nearest !== directHit) return NO_HIT;
   return {
     hitPlayerId: directHit.playerId,
     hitPoint: pointAlongSegment(event.origin, current, directHit.distance),

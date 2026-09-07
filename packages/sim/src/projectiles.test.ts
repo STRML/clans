@@ -23,7 +23,7 @@ import {
   TurretBaseId,
 } from './turrets.js';
 import { WeaponId, type FireEvent } from './weapons.js';
-import { stepProjectiles } from './projectiles.js';
+import { hitTestFireEvent, stepProjectiles } from './projectiles.js';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -244,6 +244,50 @@ describe('Chaingun: resolves in the same tick it fires (lag-comp compatible)', (
       LIGHT_ARMOR.maxDamage - 0.0825,
       3,
     );
+  });
+});
+
+describe('hitTestFireEvent (lag-comp recheck): base-object/turret occlusion (Codex round 3 review of PR #11)', () => {
+  const baseEvent: FireEvent = {
+    playerId: 0,
+    weaponId: WeaponId.Chaingun,
+    isAltFire: false,
+    origin: { x: 0, y: 1.6, z: 0 },
+    direction: { x: 0, y: 0, z: 1 },
+    shooterVelocity: { x: 0, y: 0, z: 0 },
+    energyScale: 1,
+    hitPlayerId: -1,
+    hitPoint: null,
+    projectileId: -1,
+    resolved: false,
+  };
+
+  it('does not report a hit through an intact structure the live sim would have blocked', () => {
+    // server/net.ts's applyLagCompensatedHits calls hitTestFireEvent to redo a Chaingun
+    // hit-test against rewound positions when the live sim missed. Before this fix, that
+    // recheck only tested terrain/interiors/force-fields and the player -- never base
+    // objects/turrets, the way the live stepLinearOrTracer path already does -- so a
+    // high-ping shooter could score (and have real damage applied for) a "hit" straight
+    // through an intact generator standing between them and the target.
+    const world = createWorld(flat, 1);
+    // y=0: playerHitbox centers a player's hit sphere at position.y + height/2 (LIGHT_ARMOR:
+    // 1.15 m), which the origin's y=1.6 eye height then actually reaches -- matching the
+    // Chaingun-vs-player convention this file's other tests already use.
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    addPlayer(world, { x: 0, y: 0, z: 10 }, 2); // the target, directly behind the generator
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 2, position: { x: 0, y: 1.6, z: 5 } },
+    ]);
+    const result = hitTestFireEvent(world, { ...baseEvent, playerId: shooter }, FIXED_DT);
+    expect(result.hitPlayerId).toBe(-1);
+  });
+
+  it('sanity: the identical shot with no structure in the way does hit the target', () => {
+    const world = createWorld(flat, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const target = addPlayer(world, { x: 0, y: 0, z: 10 }, 2);
+    const result = hitTestFireEvent(world, { ...baseEvent, playerId: shooter }, FIXED_DT);
+    expect(result.hitPlayerId).toBe(target);
   });
 });
 
