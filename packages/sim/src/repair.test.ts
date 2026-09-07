@@ -9,6 +9,7 @@ import {
 } from './index.js';
 import { applyBaseObjectDamage, BaseObjectKind, createBaseObjects } from './baseObjects.js';
 import { stepRepairPacks } from './repair.js';
+import { applyVehicleDamage, VehicleKind } from './vehicles.js';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -114,6 +115,54 @@ describe('stepRepairPacks', () => {
       FIXED_DT,
     );
     expect(world.baseObjects.damage[0]).toBeLessThan(before);
+  });
+
+  it('heals a damaged vehicle within range (Codex review round 1, finding 7)', () => {
+    // The spec ("adds repairRate per tick to any damaged asset, vehicle, or player") already
+    // required this; findRepairTarget had a player/baseObject/turret candidate search but no
+    // vehicle one at all, so a Repair Pack aimed at a damaged vehicle silently did nothing.
+    const world = createWorld(flat, 1);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.team[0] = 1;
+    world.vehicles.energy[0] = 0; // no shield left to absorb the hit -- lands on damage directly
+    world.vehicles.position.set([5, 1.6, 0], 0); // beam origin is eye height (see the comment above)
+    applyVehicleDamage(world, 0, 0.3, -1);
+    expect(world.vehicles.destroyed[0]).toBe(0);
+    const before = world.vehicles.damage[0] ?? 0;
+    const healer = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[healer] = 1;
+    stepRepairPacks(
+      world,
+      new Map([
+        [healer, { ...IDLE, packActive: true, yaw: aimingAt({ x: 0, z: 0 }, { x: 5, z: 0 }) }],
+      ]),
+      FIXED_DT,
+    );
+    expect(world.vehicles.damage[0]).toBeLessThan(before);
+  });
+
+  it('does not revive a destroyed vehicle', () => {
+    const world = createWorld(flat, 1);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.team[0] = 1;
+    world.vehicles.energy[0] = 0;
+    world.vehicles.position.set([5, 1.6, 0], 0);
+    applyVehicleDamage(world, 0, 1000, -1);
+    expect(world.vehicles.destroyed[0]).toBe(1);
+    const healer = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[healer] = 1;
+    stepRepairPacks(
+      world,
+      new Map([
+        [healer, { ...IDLE, packActive: true, yaw: aimingAt({ x: 0, z: 0 }, { x: 5, z: 0 }) }],
+      ]),
+      FIXED_DT,
+    );
+    expect(world.vehicles.destroyed[0]).toBe(1);
   });
 
   it('failure matrix row 15: does not revive a destroyed generator', () => {
