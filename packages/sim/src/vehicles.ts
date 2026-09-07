@@ -1,5 +1,6 @@
 import { BaseObjectKind, teamHasPower, type BaseObjectStore } from './baseObjects.js';
-import type { PendingFreeId, Vec3, World } from './types.js';
+import { GRAVITY } from './movement.js';
+import type { PendingFreeId, PlayerInput, Vec3, World } from './types.js';
 
 export enum VehicleKind {
   Shrike = 0,
@@ -208,4 +209,182 @@ export function spawnVehicleAtPad(world: World, padId: number, kind: VehicleKind
   vehicles.weaponTimer[id] = 0;
   vehicles.onGround[id] = 0;
   return id;
+}
+
+// --- Shrike flight physics (Task 2) -----------------------------------------------------
+// Real T2 numbers cite vehicles/vehicle_shrike.cs; every field not in the spec's Vehicle
+// numbers table is collected in the plan's "ours" numbers table alongside its citation.
+const SHRIKE_MIN_DRAG = 30;
+const SHRIKE_MANEUVERING_FORCE = 3000; // vehicles/vehicle_shrike.cs:140
+const SHRIKE_ROLL_FORCE = 4; // vehicles/vehicle_shrike.cs:143
+const SHRIKE_HORIZONTAL_SURFACE_FORCE = 6; // vehicles/vehicle_shrike.cs:138
+const SHRIKE_VERT_THRUST_MULTIPLE = 3; // vehicles/vehicle_shrike.cs:152
+const SHRIKE_MAX_AUTO_SPEED = 15; // vehicles/vehicle_shrike.cs:131
+const SHRIKE_AUTO_ANGULAR_FORCE = 400; // vehicles/vehicle_shrike.cs:131-133 — ours table
+const SHRIKE_AUTO_LINEAR_FORCE = 300; // vehicles/vehicle_shrike.cs:132 — ours table
+const SHRIKE_ROTATIONAL_DRAG = 900; // vehicles/vehicle_shrike.cs:128 — ours table
+const SHRIKE_STEERING_FORCE = 1200; // vehicles/vehicle_shrike.cs:141 — ours table
+const SHRIKE_JET_FORCE = 2000;
+const SHRIKE_MIN_JET_ENERGY = 28;
+const SHRIKE_JET_ENERGY_DRAIN = 2.8;
+
+function headingOf(yaw: number, pitch: number): Vec3 {
+  const cp = Math.cos(pitch);
+  return { x: Math.sin(yaw) * cp, y: Math.sin(pitch), z: Math.cos(yaw) * cp };
+}
+
+/** `arr[i] ?? 0` as a call instead of an inline operator -- every physics function below
+ *  reads a typed array many times per tick, and each inline `?? 0` counts as its own branch
+ *  toward that function's own ESLint `complexity` budget. Moving the fallback in here keeps
+ *  the reading code flat without inflating every caller. */
+function at(arr: Float64Array, i: number): number {
+  return arr[i] ?? 0;
+}
+
+/** Auto-stabilizer: below maxAutoSpeed, angular velocity relaxes toward zero and linear
+ *  velocity toward zero, at autoAngularForce/autoLinearForce -- Torque's own "when you let
+ *  go of the stick it levels out" behavior. */
+function applyShrikeAutoStabilize(
+  vehicles: VehicleStore,
+  id: number,
+  speed: number,
+  dt: number,
+): void {
+  if (speed >= SHRIKE_MAX_AUTO_SPEED) return;
+  const mass = VEHICLE_DATA[VehicleKind.Shrike].mass;
+  const base = id * 3;
+  for (let axis = 0; axis < 3; axis += 1) {
+    const av = vehicles.angVel[base + axis] ?? 0;
+    vehicles.angVel[base + axis] =
+      av - Math.sign(av) * Math.min(Math.abs(av), (SHRIKE_AUTO_ANGULAR_FORCE / 1000) * dt);
+  }
+  for (let axis = 0; axis < 3; axis += 1) {
+    const v = vehicles.velocity[base + axis] ?? 0;
+    vehicles.velocity[base + axis] =
+      v - Math.sign(v) * Math.min(Math.abs(v), (SHRIKE_AUTO_LINEAR_FORCE / mass) * dt);
+  }
+}
+
+/** The mouse-steering half of applyShrikeSteering (yaw/pitch/roll angular acceleration) --
+ *  split out so the drag-and-integrate half below stays under the complexity budget on its
+ *  own rather than one long function paying for both. */
+function applyShrikeSteeringInput(
+  vehicles: VehicleStore,
+  id: number,
+  input: PlayerInput,
+  dt: number,
+): void {
+  const mass = VEHICLE_DATA[VehicleKind.Shrike].mass;
+  const base = id * 3;
+  const rate = (SHRIKE_STEERING_FORCE / mass) * dt;
+  vehicles.angVel[base + 1] = at(vehicles.angVel, base + 1) + input.yaw * rate;
+  vehicles.angVel[base] = at(vehicles.angVel, base) + input.pitch * rate;
+  vehicles.angVel[base + 2] =
+    at(vehicles.angVel, base + 2) - SHRIKE_ROLL_FORCE * dt * Math.sign(at(vehicles.roll, id));
+}
+
+function applyShrikeSteering(
+  vehicles: VehicleStore,
+  id: number,
+  input: PlayerInput,
+  dt: number,
+): void {
+  const base = id * 3;
+  // Mouse yaw/pitch accelerate angular velocity via steeringForce, not snap the angle --
+  // integrated below like everything else, so a held mouse input ramps, matching the real
+  // steering-jet model rather than a direct-set rotation.
+  applyShrikeSteeringInput(vehicles, id, input, dt);
+  vehicles.yaw[id] = at(vehicles.yaw, id) + at(vehicles.angVel, base + 1) * dt;
+  vehicles.pitch[id] = at(vehicles.pitch, id) + at(vehicles.angVel, base) * dt;
+  vehicles.roll[id] = at(vehicles.roll, id) + at(vehicles.angVel, base + 2) * dt;
+  const dragScale = 1 - Math.min(1, (SHRIKE_ROTATIONAL_DRAG / 1000) * dt);
+  vehicles.angVel[base] = at(vehicles.angVel, base) * dragScale;
+  vehicles.angVel[base + 1] = at(vehicles.angVel, base + 1) * dragScale;
+}
+
+function applyShrikeThrust(
+  vehicles: VehicleStore,
+  id: number,
+  input: PlayerInput,
+  dt: number,
+): void {
+  const data = VEHICLE_DATA[VehicleKind.Shrike];
+  const base = id * 3;
+  const heading = headingOf(vehicles.yaw[id] ?? 0, vehicles.pitch[id] ?? 0);
+  const thrust = SHRIKE_MANEUVERING_FORCE / data.mass;
+  vehicles.velocity[base] = (vehicles.velocity[base] ?? 0) + heading.x * input.moveZ * thrust * dt;
+  vehicles.velocity[base + 1] =
+    (vehicles.velocity[base + 1] ?? 0) +
+    heading.y * input.moveZ * thrust * dt * SHRIKE_VERT_THRUST_MULTIPLE;
+  vehicles.velocity[base + 2] =
+    (vehicles.velocity[base + 2] ?? 0) + heading.z * input.moveZ * thrust * dt;
+}
+
+function applyShrikeJetThrust(vehicles: VehicleStore, id: number, dt: number): void {
+  const data = VEHICLE_DATA[VehicleKind.Shrike];
+  const base = id * 3;
+  const heading = headingOf(at(vehicles.yaw, id), at(vehicles.pitch, id));
+  const jet = SHRIKE_JET_FORCE / data.mass;
+  vehicles.velocity[base] = at(vehicles.velocity, base) + heading.x * jet * dt;
+  vehicles.velocity[base + 1] = at(vehicles.velocity, base + 1) + heading.y * jet * dt;
+  vehicles.velocity[base + 2] = at(vehicles.velocity, base + 2) + heading.z * jet * dt;
+  vehicles.energy[id] = at(vehicles.energy, id) - SHRIKE_JET_ENERGY_DRAIN;
+}
+
+/** A held jet input that can't afford minJetEnergy is a flat refusal -- no thrust, no drain,
+ *  and (unlike letting go of jet) no recharge either, since the player is still holding the
+ *  afterburner down; recharge only resumes once jet is released. */
+function applyShrikeAfterburner(
+  vehicles: VehicleStore,
+  id: number,
+  input: PlayerInput,
+  dt: number,
+): void {
+  const data = VEHICLE_DATA[VehicleKind.Shrike];
+  if (!input.jet) {
+    vehicles.energy[id] = Math.min(data.maxEnergy, at(vehicles.energy, id) + data.rechargeRate);
+    return;
+  }
+  if (at(vehicles.energy, id) < SHRIKE_MIN_JET_ENERGY) return;
+  applyShrikeJetThrust(vehicles, id, dt);
+}
+
+/** Lift ("bite") opposing gravity while moving forward, plus gravity and the Shrike's own
+ *  minDrag -- split out of stepShrike to keep its complexity under budget. */
+function applyShrikeLiftAndGravity(vehicles: VehicleStore, id: number, dt: number): void {
+  const data = VEHICLE_DATA[VehicleKind.Shrike];
+  const base = id * 3;
+  const heading = headingOf(vehicles.yaw[id] ?? 0, vehicles.pitch[id] ?? 0);
+  const forwardSpeed =
+    (vehicles.velocity[base] ?? 0) * heading.x + (vehicles.velocity[base + 2] ?? 0) * heading.z;
+  vehicles.velocity[base + 1] =
+    (vehicles.velocity[base + 1] ?? 0) +
+    Math.max(0, forwardSpeed) * (SHRIKE_HORIZONTAL_SURFACE_FORCE / data.mass) * dt -
+    GRAVITY * dt;
+  const dragScale = 1 - Math.min(1, (SHRIKE_MIN_DRAG / data.mass) * dt);
+  vehicles.velocity[base] = (vehicles.velocity[base] ?? 0) * dragScale;
+  vehicles.velocity[base + 2] = (vehicles.velocity[base + 2] ?? 0) * dragScale;
+}
+
+export function stepShrike(world: World, id: number, input: PlayerInput, dt: number): void {
+  const vehicles = world.vehicles;
+  const base = id * 3;
+
+  applyShrikeSteering(vehicles, id, input, dt);
+  applyShrikeThrust(vehicles, id, input, dt);
+  applyShrikeAfterburner(vehicles, id, input, dt);
+  applyShrikeLiftAndGravity(vehicles, id, dt);
+
+  const speed = Math.hypot(
+    vehicles.velocity[base] ?? 0,
+    vehicles.velocity[base + 1] ?? 0,
+    vehicles.velocity[base + 2] ?? 0,
+  );
+  applyShrikeAutoStabilize(vehicles, id, speed, dt);
+
+  vehicles.position[base] = (vehicles.position[base] ?? 0) + (vehicles.velocity[base] ?? 0) * dt;
+  vehicles.position[base + 1] =
+    (vehicles.position[base + 1] ?? 0) + (vehicles.velocity[base + 1] ?? 0) * dt;
+  vehicles.position[base + 2] =
+    (vehicles.position[base + 2] ?? 0) + (vehicles.velocity[base + 2] ?? 0) * dt;
 }
