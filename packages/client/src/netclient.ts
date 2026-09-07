@@ -28,16 +28,20 @@ import {
   decodeSnapshot,
   decodeWelcome,
   encodeAck,
+  encodeCommandOrder,
   encodeGod,
   encodeInput,
   encodeJoin,
   encodeLoadout,
   encodeVehicleSpawn,
+  encodeVoiceBind,
   peekSnapshotHeader,
   type BaseObjectSnapshotData,
   type BotDebugSnapshotData,
   type EventMessage,
   type FlagSnapshotData,
+  type OrderKind,
+  type OrderSnapshotData,
   type ProjectileSnapshotData,
   type TurretSnapshotData,
 } from '@clans/protocol';
@@ -176,6 +180,7 @@ export class NetClient {
   turrets: TurretSnapshotData[] = [];
   vehicles: VehicleSnapshotData[] = [];
   bots: BotDebugSnapshotData[] = [];
+  orders: OrderSnapshotData[] = [];
   teamScores: [number, number] = [0, 0];
   gameOver = false;
   winnerTeam = 0;
@@ -309,6 +314,20 @@ export class NetClient {
    *  through the next snapshot's vehicles array like every other authoritative state does. */
   sendVehicleSpawn(padId: number, kind: number): void {
     this.transport.send(encodeVehicleSpawn({ padId, kind }));
+  }
+
+  /** Send-only, same shape as sendLoadout/sendVehicleSpawn: a commander's map click is a
+   *  one-shot request, and the resulting OrderBoard state reaches every client back through
+   *  the next snapshot's WorldExtras.orders like every other authoritative state does. */
+  sendCommandOrder(kind: OrderKind, x: number, z: number): void {
+    this.transport.send(encodeCommandOrder({ kind, x, z }));
+  }
+
+  /** Send-only, same shape as sendCommandOrder: the voice bind is a one-shot request whose
+   *  playback is broadcast back to every client as an EventKind.VoiceBindPlayed event, not
+   *  something this client predicts locally. */
+  sendVoiceBind(lineId: number): void {
+    this.transport.send(encodeVoiceBind({ lineId }));
   }
 
   private handleMessage(bytes: Uint8Array): void {
@@ -485,6 +504,7 @@ export class NetClient {
     this.baseObjects = decoded.baseObjects;
     this.turrets = decoded.turrets;
     this.bots = decoded.bots;
+    this.orders = decoded.orders;
     // Codex round 1, finding 1: this.baseObjects/this.turrets above are read directly by
     // base-object-view.ts's `sync` for rendering, but nothing ever applied the same decoded
     // dynamic state onto `this.world`'s own baseObjects/turrets stores -- the ones movement

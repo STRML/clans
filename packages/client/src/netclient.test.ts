@@ -23,10 +23,13 @@ import {
 import {
   EventKind,
   MessageType,
+  OrderKind,
   SNAPSHOT_EVERY_N_TICKS,
   WelcomeStatus,
+  decodeCommandOrder,
   decodeGod,
   decodeInput,
+  decodeVoiceBind,
   emptyExtras,
   encodeEvent,
   encodeSnapshot,
@@ -799,6 +802,19 @@ describe('NetClient', () => {
     expect(client.timeRemainingS).toBeCloseTo(1200.5, 1);
     expect(client.gameOverReason).toBe(0);
     expect(client.bots).toEqual(extras.bots);
+  });
+
+  it('decodes WorldExtras.orders into net.orders', () => {
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 23 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    const extras: WorldExtras = {
+      ...emptyExtras(),
+      orders: [{ team: 1, kind: OrderKind.Attack, x: 10, z: 20, expiresInS: 88 }],
+    };
+    transport.pump([encodeSnapshot(1, 0, 0, [], null, extras)]);
+    expect(client.orders).toEqual(extras.orders);
   });
 
   it('a snapshot with base objects populates net.world.baseObjects (Codex round 1, finding 1)', () => {
@@ -1802,6 +1818,43 @@ describe('NetClient', () => {
     client.setGodMode(true);
     const god = sent.find((bytes) => bytes[0] === MessageType.God);
     expect(god && decodeGod(god)).toEqual({ type: MessageType.God, enabled: true });
+  });
+
+  it('sendCommandOrder writes an encoded CommandOrder to the transport', () => {
+    clock.ms = 0;
+    const link = makeLink({ value: 24 });
+    const sent: Uint8Array[] = [];
+    const rawSend = link.send.bind(link);
+    link.send = (bytes) => {
+      sent.push(bytes);
+      rawSend(bytes);
+    };
+    const transport = makeTransport(link);
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.sendCommandOrder(OrderKind.Defend, 5, -5);
+    const order = sent.find((bytes) => bytes[0] === MessageType.CommandOrder);
+    expect(order && decodeCommandOrder(order)).toEqual({
+      type: MessageType.CommandOrder,
+      kind: OrderKind.Defend,
+      x: 5,
+      z: -5,
+    });
+  });
+
+  it('sendVoiceBind writes an encoded VoiceBind to the transport', () => {
+    clock.ms = 0;
+    const link = makeLink({ value: 25 });
+    const sent: Uint8Array[] = [];
+    const rawSend = link.send.bind(link);
+    link.send = (bytes) => {
+      sent.push(bytes);
+      rawSend(bytes);
+    };
+    const transport = makeTransport(link);
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.sendVoiceBind(3);
+    const bind = sent.find((bytes) => bytes[0] === MessageType.VoiceBind);
+    expect(bind && decodeVoiceBind(bind)).toEqual({ type: MessageType.VoiceBind, lineId: 3 });
   });
 
   it('applies god mode to local prediction immediately, not just over the wire (Codex review round 14, PR #9, finding 2)', () => {
