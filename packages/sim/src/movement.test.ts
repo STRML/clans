@@ -524,6 +524,52 @@ describe('force fields block enemy movement, pass friendly movement (failure mat
   });
 });
 
+describe('swept collision stops a player crossing a thin force field/wall in one tick (Codex round 1, finding 4)', () => {
+  const radius = 0.6; // LIGHT_ARMOR boundingBox [1.2, 1.2, 2.3] -> max(boxX, boxY) / 2
+  const fieldX = 0.5;
+
+  function withFastPlayer(): { world: ReturnType<typeof createWorld>; id: number } {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    // Injected directly rather than accelerated up to over many ticks: plain running caps at
+    // maxForwardSpeed (15 m/s, 0.48 m per 32 ms tick -- less than the player's own collision
+    // radius, so it can never tunnel). horizMaxSpeed (68 m/s) is what a real high-speed
+    // scenario (skiing a slope, a jet-assisted dive) can reach, and this is close enough to
+    // it to cover well over a full collision radius in a single tick, same as those would.
+    world.players.velocity[id * 3] = 60;
+    return { world, id };
+  }
+
+  it('a player moving fast enough to cross a 0.1 m force field in one tick is still blocked', () => {
+    // Reference: an identical run with no field at all. The tick's own travel is how far a
+    // player at this speed covers in one 32 ms tick -- proof this is a genuine tunneling
+    // scenario (comfortably more than one collision radius past the field) that the OLD
+    // final-position-only overlap check would have completely missed.
+    const reference = withFastPlayer();
+    stepWorld(reference.world, new Map([[reference.id, idle]]));
+    const unblockedX = reference.world.players.position[reference.id * 3] ?? 0;
+    expect(unblockedX).toBeGreaterThan(fieldX + radius * 2);
+
+    const { world, id } = withFastPlayer();
+    createBaseObjects(world, [
+      {
+        kind: BaseObjectKind.ForceField,
+        team: 2, // enemy of the player's team 1
+        position: { x: fieldX, y: 2, z: 0 },
+        rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 },
+        scale: { x: 0.1, y: 4, z: 6 },
+      },
+    ]);
+    // createBaseObjects defaults a fresh object to powered=1 (stepPower's own real generator
+    // check is a Task 4 concern this test doesn't need); the field is real and blocking from
+    // the moment it exists.
+    stepWorld(world, new Map([[id, idle]]));
+    const blockedX = world.players.position[id * 3] ?? 0;
+    expect(blockedX).toBeLessThan(fieldX + radius);
+    expect(blockedX).toBeLessThan(unblockedX - radius);
+  });
+});
+
 describe('MIN_PUSH_DEPTH: floating-point-noise-level interior contact (M4 regression)', () => {
   // A wide quad wall perpendicular to X, tall and deep enough that the player's chest sphere
   // hits its face regardless of the exact y/z it arrives at.
