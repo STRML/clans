@@ -34,6 +34,7 @@ import {
   stepSinglePlayer,
   syncWorldView,
   teleportPlayerToFlag,
+  teleportPlayerToVehiclePad,
   updateRemotes,
 } from './app.js';
 import { flagsFromWorld } from './flag-view.js';
@@ -348,6 +349,33 @@ describe('teleportPlayerToFlag', () => {
     const id = addPlayer(world, { x: 5, y: 5, z: 5 });
 
     teleportPlayerToFlag(world, id, 2);
+
+    expect([...world.players.position.slice(id * 3, id * 3 + 3)]).toEqual([5, 5, 5]);
+  });
+});
+
+describe('teleportPlayerToVehiclePad', () => {
+  it("moves the player to the given team's vehicle pad position", () => {
+    const world = createWorld(flat, 1, 8);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: 1, y: 2, z: 3 } },
+      { kind: BaseObjectKind.StationVehiclePad, team: 2, position: { x: 4, y: 5, z: 6 } },
+    ]);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+
+    teleportPlayerToVehiclePad(world, id, 2);
+
+    expect([...world.players.position.slice(id * 3, id * 3 + 3)]).toEqual([4, 5, 6]);
+  });
+
+  it('is a no-op when no vehicle pad belongs to the requested team', () => {
+    const world = createWorld(flat, 1, 8);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: 1, y: 2, z: 3 } },
+    ]);
+    const id = addPlayer(world, { x: 5, y: 5, z: 5 });
+
+    teleportPlayerToVehiclePad(world, id, 2);
 
     expect([...world.players.position.slice(id * 3, id * 3 + 3)]).toEqual([5, 5, 5]);
   });

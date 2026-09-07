@@ -107,7 +107,13 @@ export class Input {
       altFire: this.isDown('KeyG'),
       slot: this.slotFromKeys(),
       packActive: this.isDown('KeyR'),
-      use: false, // placeholder until Task 14 wires E-near-a-vehicle to this bit
+      // Always false here: Input has no world access to know whether E is mount-relevant.
+      // app.ts's frame() overrides this with usePressedThisFrame() gated by
+      // canSendVehicleUse(world, playerId) before this sample ever reaches stepWorld/net.tick
+      // (M5, Task 14) -- the same reason `yaw`/`pitch` here drive the mounted vehicle's own
+      // steering without any change needed in this class: stepVehicles reads them straight
+      // off this same PlayerInput.
+      use: false,
     };
   }
 }

@@ -9,6 +9,7 @@ import {
   VEHICLE_DATA,
   VehicleKind,
   addPlayer,
+  canSendVehicleUse,
   createBaseObjects,
   createFlags,
   createTurrets,
@@ -131,6 +132,7 @@ export interface App {
   debugKillGenerator(team: number): void;
   debugRepairGenerator(team: number): void;
   debugIsStationPowered(team: number): boolean;
+  debugTeleportToVehiclePad(team: number): void;
 }
 
 function toHeightfield(assets: KatabaticAssets): Heightfield {
@@ -404,7 +406,12 @@ function drawCommanderMapForTeam(state: BaseAssetsViewState): void {
  *  that function's own complexity under budget. */
 function syncMenus(state: BaseAssetsViewState, pressed: boolean): void {
   const { world, playerId } = state;
-  if (pressed) {
+  const mounted = (world.players.mountedVehicleId[playerId] ?? -1) !== -1;
+  // A mounted player's own E press is exclusively about dismounting (canSendVehicleUse
+  // already covers that on the wire side) -- it must not also pop the pad menu open, which
+  // would otherwise happen every time simply because the vehicle sits within its own pad's
+  // use radius.
+  if (pressed && !mounted) {
     state.stationMenuState.open = !state.stationMenuState.open;
     state.vehiclePadMenuState.open = !state.vehiclePadMenuState.open;
   }
@@ -422,7 +429,7 @@ function syncMenus(state: BaseAssetsViewState, pressed: boolean): void {
   else state.vehiclePadMenu.hide();
 }
 
-function syncBaseAssetsView(state: BaseAssetsViewState): void {
+function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): void {
   const { world, playerId, net, input } = state;
   const connected = net ? net.connected : true;
   const baseObjectData: BaseObjectSnapshotData[] =
@@ -433,9 +440,10 @@ function syncBaseAssetsView(state: BaseAssetsViewState): void {
     net && connected ? net.vehicles : vehiclesFromWorld(world);
   state.vehicleView.sync(vehicleData);
 
-  // Task 14 layers the wire-level `use` bit (mounting a vehicle) on top of this same press
-  // elsewhere; that send is independent of these two client-local menu toggles.
-  syncMenus(state, input.usePressedThisFrame());
+  // `usePressed` is computed once by the caller (frame()), the same edge-triggered read
+  // that also gates the outgoing `use` wire bit -- see frame()'s own comment for why
+  // usePressedThisFrame() cannot be called a second time here.
+  syncMenus(state, usePressed);
 
   if (input.commandCirclePressedThisFrame()) {
     state.commanderMapCanvas.hidden = !state.commanderMapCanvas.hidden;
@@ -687,6 +695,23 @@ export function teleportPlayerToFlag(world: World, playerId: number, team: numbe
   );
 }
 
+/** Exported for a focused unit test and the Playwright e2e spec's own fast setup (Task 14),
+ *  mirroring teleportPlayerToFlag's own shape: places the player at their team's vehicle
+ *  pad rather than walking there, so the spec can drive spawn/mount/dismount deterministically
+ *  without depending on WASD movement or the real terrain layout. */
+export function teleportPlayerToVehiclePad(world: World, playerId: number, team: number): void {
+  const bases = world.baseObjects;
+  for (let id = 0; id < bases.count; id += 1) {
+    if (bases.kind[id] !== BaseObjectKind.StationVehiclePad || bases.team[id] !== team) continue;
+    const base = id * 3;
+    world.players.position.set(
+      [bases.position[base] ?? 0, bases.position[base + 1] ?? 0, bases.position[base + 2] ?? 0],
+      playerId * 3,
+    );
+    return;
+  }
+}
+
 /** Exported for a focused unit test, mirroring teleportPlayerToFlag's own shape. Overkills
  *  every one of the team's generators directly via applyBaseObjectDamage and re-derives
  *  power -- bypassing real weapon damage timings on purpose, so the e2e test this backs is
@@ -904,6 +929,9 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     debugIsStationPowered(team: number): boolean {
       return debugIsStationPowered(world, team);
     },
+    debugTeleportToVehiclePad(team: number): void {
+      teleportPlayerToVehiclePad(world, playerId, team);
+    },
     frame(dtSeconds: number): void {
       const frameStart = performance.now();
       let steps = advance(acc, dtSeconds, app.paused ? 0 : app.timeScale, FIXED_DT);
@@ -911,9 +939,16 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         steps = 1;
         app.stepOnce = false;
       }
+      // usePressedThisFrame() is edge-triggered and consumed once per call, so it can only
+      // be read once per frame -- computed here and threaded through both the outgoing input
+      // (the wire-level `use` bit, gated by canSendVehicleUse so an E press near neither a
+      // vehicle nor while mounted doesn't spam the server with a meaningless mount attempt)
+      // and syncBaseAssetsView's own station/pad menu toggles below, rather than each calling
+      // it separately.
+      const usePressed = !app.freeCam && input.usePressedThisFrame();
       const currentInput = app.freeCam
         ? { ...IDLE, yaw: input.yaw, pitch: input.pitch }
-        : input.snapshot();
+        : { ...input.snapshot(), use: usePressed && canSendVehicleUse(world, playerId) };
       const simStart = performance.now();
       if (net) {
         stepNetworked(net, app.stats, currentInput, steps, scene, remoteMeshes, remoteBuffers);
@@ -936,22 +971,25 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         dtSeconds,
       );
 
-      syncBaseAssetsView({
-        world,
-        playerId,
-        net,
-        input,
-        assets,
-        camera,
-        hud,
-        baseObjectView,
-        stationMenu,
-        stationMenuState,
-        vehicleView,
-        vehiclePadMenu,
-        vehiclePadMenuState,
-        commanderMapCanvas,
-      });
+      syncBaseAssetsView(
+        {
+          world,
+          playerId,
+          net,
+          input,
+          assets,
+          camera,
+          hud,
+          baseObjectView,
+          stationMenu,
+          stationMenuState,
+          vehicleView,
+          vehiclePadMenu,
+          vehiclePadMenuState,
+          commanderMapCanvas,
+        },
+        usePressed,
+      );
 
       if (app.freeCam) moveFreeCam(app, dtSeconds);
       placeCamera(app, sky, dtSeconds);

@@ -4,7 +4,7 @@ A Tribes 2 tech demo for the browser. Katabatic from the original heightmap, ski
 jetting with the T2 armor numbers, and eventually the full base game with bots on an
 authoritative Node server.
 
-Status: milestone 4 of 7 (base assets and power). See
+Status: milestone 5 of 7 (vehicles). See
 `docs/superpowers/specs/` for the design and `docs/superpowers/plans/` for what each
 milestone ships.
 
@@ -25,7 +25,7 @@ Open http://127.0.0.1:5173, click to capture the mouse, and ski.
 | Left mouse | fire the held weapon |
 | 1 2 3 4 5 | Spinfusor, Chaingun, Mortar, Laser Rifle, Blaster |
 | G | throw a hand grenade |
-| E | open the loadout menu at a powered inventory station |
+| E | open the loadout menu at a powered inventory station, or open the vehicle spawn menu at a powered vehicle pad; mount an unoccupied vehicle within range, or dismount your own |
 | R | hold to fire a Repair Pack beam (heals a damaged player, base asset, or turret) |
 | C | toggle the commander map |
 | F1 | debug overlay (stats, time scale, pause, step, free cam, god mode) |
@@ -72,6 +72,19 @@ map showing your team's base status and any enemy contacts inside your team's se
 See `docs/superpowers/specs/2026-09-05-clans-tribes2-browser-demo-design.md` for exactly how
 power, shields, and sensor coverage work.
 
+## Vehicles
+
+Each team's vehicle pad spawns a Shrike (a fast, armed flyer) or a Wildcat (a hovering ground
+scout) once its team has power. Stand within the pad's use radius and press `E` to open the
+spawn menu; picking a vehicle destroys whatever the pad already hosts. Walk up to an
+unoccupied vehicle and press `E` to mount it — your own weapons go silent, the camera moves
+to a third-person chase view, and WASD/mouse drive the vehicle's real T2 flight or hover
+physics instead of your own movement. The Shrike's twin-barrel blaster fires from your own
+fire button. Both vehicles take collision, ground-impact, and weapon damage against a shielded
+energy pool, and explode past their damage cap, ejecting the pilot. Each team's AA barrel
+turret now finds and fires on enemy vehicles in range with line of sight. Press `E` again to
+dismount.
+
 ## Develop
 
 ```sh
@@ -84,11 +97,11 @@ pnpm assets:build  # regenerate assets/out from the T2 data files (downloads the
 
 ## Layout
 
-- `packages/sim`: the game simulation. Pure TypeScript, no DOM or Node imports, so it runs in the browser today and on the server. Health, fall damage, respawn, four weapons plus grenades, a projectile store, CTF flags and scoring, base objects and per-team power, turrets with terrain line of sight, a uniform-grid interior collider, and the Repair Pack beam all live here.
-- `packages/assets`: build-time pipeline that turns Tribes 2 data files into `assets/out/`, including the interior and base-object/turret `.glb` shapes and their extracted collision triangles.
-- `packages/client`: Three.js renderer, input, projectile/explosion/laser-beam/flag/base-object/turret/interior rendering, the station loadout menu, the commander map, the HUD, debug overlay.
-- `packages/protocol`: binary wire format. Message schemas (including `Event`, `God`, and `Loadout`), full and delta snapshots with projectiles/flags/base-objects/turrets/scores sent in full each tick, a world hash for tests.
-- `packages/server`: Node, `ws`, 32 ms catch-up tick loop, per-client input sessions, snapshots delta-compressed against the client's last acked snapshot, lag-compensated hit detection for the Chaingun and Laser Rifle, respawn, CTF, and base-object/turret/interior loading.
+- `packages/sim`: the game simulation. Pure TypeScript, no DOM or Node imports, so it runs in the browser today and on the server. Health, fall damage, respawn, four weapons plus grenades, a projectile store, CTF flags and scoring, base objects and per-team power, turrets with terrain line of sight, a uniform-grid interior collider, the Repair Pack beam, and the Shrike/Wildcat vehicles (flight/hover physics, mount/dismount, shielded damage, destruction, ejection) all live here.
+- `packages/assets`: build-time pipeline that turns Tribes 2 data files into `assets/out/`, including the interior/base-object/turret/vehicle `.glb` shapes (with an STL-then-procedural fallback chain for the vehicles) and their extracted collision triangles.
+- `packages/client`: Three.js renderer, input, projectile/explosion/laser-beam/flag/base-object/turret/interior/vehicle rendering, the station loadout menu, the vehicle pad spawn menu, the commander map, the HUD, debug overlay.
+- `packages/protocol`: binary wire format. Message schemas (including `Event`, `God`, `Loadout`, and `VehicleSpawn`), full and delta snapshots with projectiles/flags/base-objects/turrets/vehicles/scores sent in full each tick, a world hash for tests.
+- `packages/server`: Node, `ws`, 32 ms catch-up tick loop, per-client input sessions, snapshots delta-compressed against the client's last acked snapshot, lag-compensated hit detection for the Chaingun and Laser Rifle, respawn, CTF, and base-object/turret/interior/vehicle loading.
 - `packages/bots`: placeholder until milestone 6. The server's `--bots` are idle stand-ins.
 
 Every gameplay number (armor mass, jet force, speed caps) is copied from the T2 base scripts

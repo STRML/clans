@@ -29,6 +29,14 @@ Base-object and turret shapes (`shapes.vl2/shapes/`): `sensor_pulse_large.glb`,
 `turret_base_large.glb`, `turret_fusion_large.glb`, `turret_muzzlepoint.glb`,
 `turret_sentry.glb`, `vehicle_pad.glb`.
 
+Milestone 5 adds two more converted `.glb` files from the same mirror, plus the Shrike and
+Wildcat vehicles they render for -- vehicles have no mission-file placement (they're spawned
+at runtime, not placed in `Katabatic.mis`), so there is no corresponding mission-object credit
+the way milestone 4's shapes had.
+
+Vehicle shapes (`shapes.vl2/shapes/`): `vehicle_air_scout.glb` (the Shrike),
+`vehicle_grav_scout.glb` (the Wildcat).
+
 ## Sources
 
 - Data files are downloaded from the mirror at

@@ -4,6 +4,8 @@ import {
   createWorld,
   GameOverReason,
   LIGHT_ARMOR,
+  VEHICLE_DATA,
+  VehicleKind,
   WeaponId,
   type Heightfield,
 } from '@clans/sim';
@@ -146,6 +148,23 @@ describe('describeHud', () => {
     expect(
       rowsOf(baseSource({ aimedStructure: { name: 'Generator', healthPercent: 62 } }))['hud-aimed'],
     ).toBe('Generator 62%');
+  });
+
+  it('hides the vehicle row when the local player is not mounted', () => {
+    expect(rowsOf(baseSource())['hud-vehicle']).toBe('');
+  });
+
+  it('shows vehicle health and speed while mounted', () => {
+    const source = baseSource();
+    const world = source.world;
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Wildcat;
+    world.vehicles.damage[0] = VEHICLE_DATA[VehicleKind.Wildcat].maxDamage / 2; // 50% health
+    world.vehicles.velocity.set([3, 0, 4], 0); // 5 m/s
+    world.players.mountedVehicleId[source.playerId] = 0;
+    const rows = rowsOf(source);
+    expect(rows['hud-vehicle']).toBe('Vehicle 50% — 5.0 m/s');
   });
 });
 

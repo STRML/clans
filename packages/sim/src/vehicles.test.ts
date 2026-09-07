@@ -10,6 +10,7 @@ import {
 import {
   activeVehicleCountForTeam,
   applyVehicleDamage,
+  canSendVehicleUse,
   createVehicleStore,
   resolveVehicleCollision,
   spawnVehicleAtPad,
@@ -532,5 +533,43 @@ describe('vehiclePadAt', () => {
     stepPower(world);
     const playerId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
     expect(vehiclePadAt(world, playerId)).toBeNull();
+  });
+});
+
+describe('canSendVehicleUse', () => {
+  it('true when already mounted, so a press can dismount', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat) as number;
+    const pos = vehiclePos(world, vId);
+    const playerId = addPlayer(world, pos, 1);
+    stepVehicles(world, new Map([[playerId, useInput(true)]]), 1 / 32);
+    expect(canSendVehicleUse(world, playerId)).toBe(true);
+  });
+
+  it('true when an unoccupied vehicle is within mount range', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Shrike) as number;
+    const pos = vehiclePos(world, vId);
+    const playerId = addPlayer(world, pos, 1);
+    expect(canSendVehicleUse(world, playerId)).toBe(true);
+  });
+
+  it('false when neither mounted nor near an unoccupied vehicle', () => {
+    const world = createWorld(flat, 1);
+    const playerId = addPlayer(world, { x: 500, y: 0, z: 500 }, 1);
+    expect(canSendVehicleUse(world, playerId)).toBe(false);
+  });
+
+  it('false near a vehicle already occupied by someone else', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat) as number;
+    const pos = vehiclePos(world, vId);
+    const driver = addPlayer(world, pos, 1);
+    stepVehicles(world, new Map([[driver, useInput(true)]]), 1 / 32);
+    const bystander = addPlayer(world, { x: pos.x + 1, y: pos.y, z: pos.z }, 1);
+    expect(canSendVehicleUse(world, bystander)).toBe(false);
   });
 });

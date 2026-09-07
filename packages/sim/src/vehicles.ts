@@ -263,6 +263,8 @@ const SHRIKE_STEERING_FORCE = 1200; // vehicles/vehicle_shrike.cs:141 — ours t
 const SHRIKE_JET_FORCE = 2000;
 const SHRIKE_MIN_JET_ENERGY = 28;
 const SHRIKE_JET_ENERGY_DRAIN = 2.8;
+const SHRIKE_MAX_FORWARD_SPEED = 100; // vehicles/vehicle_shrike.cs:145 — real thrust cutoff,
+// not the spec's Chaingun-style projectile speed cap (see the plan's numbers table).
 
 function headingOf(yaw: number, pitch: number): Vec3 {
   const cp = Math.cos(pitch);
@@ -417,6 +419,20 @@ function applyShrikeLiftAndGravity(vehicles: VehicleStore, id: number, dt: numbe
   vehicles.velocity[base + 2] = (vehicles.velocity[base + 2] ?? 0) * dragScale;
 }
 
+/** Real thrust cutoff (vehicles/vehicle_shrike.cs:145), not the projectile speed cap the
+ *  spec's Chaingun-style table uses elsewhere -- caps the whole velocity vector, matching
+ *  Torque's own "thrust stops adding once you're already this fast" rule rather than a
+ *  per-axis clamp that would distort the heading. Split out of stepShrike to keep that
+ *  function's own complexity under budget. */
+function clampShrikeSpeed(vehicles: VehicleStore, id: number, speed: number): void {
+  if (speed <= SHRIKE_MAX_FORWARD_SPEED) return;
+  const base = id * 3;
+  const scale = SHRIKE_MAX_FORWARD_SPEED / speed;
+  vehicles.velocity[base] = at(vehicles.velocity, base) * scale;
+  vehicles.velocity[base + 1] = at(vehicles.velocity, base + 1) * scale;
+  vehicles.velocity[base + 2] = at(vehicles.velocity, base + 2) * scale;
+}
+
 export function stepShrike(world: World, id: number, input: PlayerInput, dt: number): void {
   const vehicles = world.vehicles;
   const base = id * 3;
@@ -432,6 +448,7 @@ export function stepShrike(world: World, id: number, input: PlayerInput, dt: num
     vehicles.velocity[base + 2] ?? 0,
   );
   applyShrikeAutoStabilize(vehicles, id, speed, dt);
+  clampShrikeSpeed(vehicles, id, speed);
 
   vehicles.position[base] = (vehicles.position[base] ?? 0) + (vehicles.velocity[base] ?? 0) * dt;
   vehicles.position[base + 1] =
@@ -462,6 +479,18 @@ const WILDCAT_ROLL_FORCE = 15;
 const WILDCAT_GYRO_DRAG = 16; // spec's Vehicle numbers table
 const WILDCAT_MIN_JET_ENERGY = 15;
 const WILDCAT_JET_ENERGY_DRAIN = 1.3;
+// Ours: the spec's own Vehicle numbers table cites a real `dragForce 25/45` this file does
+// not otherwise model (no continuous drag term exists for the Wildcat the way the Shrike's
+// own minDrag/SHRIKE_MAX_FORWARD_SPEED bound its top speed) -- reverse-engineering the exact
+// Torque units behind those two numbers without the engine source produced either a
+// negligible or a crippling drag depending on which convention was assumed, so this is a
+// flat speed cap instead: an unbounded Wildcat under this file's accel-direct thrust
+// convention reaches 50+ m/s within two seconds and destroys itself on the very first terrain
+// bump (collDamageThresholdVel 23 m/s, groundImpactMinSpeed 29 m/s). Sized comfortably under
+// both thresholds unboosted, with boost allowed to approach (not exceed) collDamageThresholdVel
+// -- fast, but a flat-out boosted collision still carries real risk, matching the spec's own
+// "collision damage" row actually mattering during normal play.
+const WILDCAT_MAX_SPEED = 15;
 // Ours: no jump exists in the real script -- see the plan's numbers table and Spec gaps.
 const WILDCAT_JUMP_IMPULSE_PER_MASS = 8.3; // matches the player jumpForce = 8.3 * mass shape
 
@@ -560,6 +589,14 @@ function applyWildcatThrust(
     vehicles.energy[id] = Math.min(data.maxEnergy, at(vehicles.energy, id) + data.rechargeRate);
   }
   applyWildcatBraking(vehicles, id, input, dt);
+
+  const cap = boosting ? WILDCAT_MAX_SPEED * WILDCAT_TURBO_FACTOR : WILDCAT_MAX_SPEED;
+  const horizSpeed = Math.hypot(at(vehicles.velocity, base), at(vehicles.velocity, base + 2));
+  if (horizSpeed > cap) {
+    const scale = cap / horizSpeed;
+    vehicles.velocity[base] = at(vehicles.velocity, base) * scale;
+    vehicles.velocity[base + 2] = at(vehicles.velocity, base + 2) * scale;
+  }
 }
 
 function applyWildcatJump(vehicles: VehicleStore, id: number, input: PlayerInput): void {
@@ -782,30 +819,49 @@ function idleVehicleInput(): PlayerInput {
   };
 }
 
-/** Nearest-in-range-and-unoccupied wins; the caller (stepVehicles) resolves failure-matrix
- *  row 13 (two players racing for the same vehicle the same tick) just by iterating player
- *  ids in ascending order and mounting one at a time -- once this claims a vehicle, a later
- *  id in that same pass already sees `driverId` set and skips it. */
-function mountNearestVehicle(world: World, playerId: number): void {
-  const players = world.players;
+/** The id of the nearest active, non-destroyed, unoccupied vehicle within its own
+ *  minMountDist of the player, or null. Shared by mountNearestVehicle (the actual mount,
+ *  server/sim-side) and the client-facing nearbyUnoccupiedVehicle export below (so app.ts
+ *  can decide whether pressing E is even mount-relevant before sending the `use` wire bit --
+ *  M5 plan, Global Constraints: "a held E near an unoccupied vehicle... additionally sends
+ *  use: true"). */
+function findUnoccupiedVehicleInRange(world: World, playerId: number): number | null {
   const vehicles = world.vehicles;
   const pBase = playerId * 3;
   const playerPos: Vec3 = {
-    x: at(players.position, pBase),
-    y: at(players.position, pBase + 1),
-    z: at(players.position, pBase + 2),
+    x: at(world.players.position, pBase),
+    y: at(world.players.position, pBase + 1),
+    z: at(world.players.position, pBase + 2),
   };
   for (let vId = 0; vId < vehicles.count; vId += 1) {
     if (!vehicles.active[vId] || vehicles.destroyed[vId] || vehicles.driverId[vId] !== -1) continue;
     const data = VEHICLE_DATA[vehicles.kind[vId] as VehicleKind];
     const vPos = seatPosition(vehicles, vId);
     const dist = Math.hypot(playerPos.x - vPos.x, playerPos.y - vPos.y, playerPos.z - vPos.z);
-    if (dist <= data.minMountDist) {
-      vehicles.driverId[vId] = playerId;
-      players.mountedVehicleId[playerId] = vId;
-      return;
-    }
+    if (dist <= data.minMountDist) return vId;
   }
+  return null;
+}
+
+/** Nearest-in-range-and-unoccupied wins; the caller (stepVehicles) resolves failure-matrix
+ *  row 13 (two players racing for the same vehicle the same tick) just by iterating player
+ *  ids in ascending order and mounting one at a time -- once this claims a vehicle, a later
+ *  id in that same pass already sees `driverId` set and skips it. */
+function mountNearestVehicle(world: World, playerId: number): void {
+  const vId = findUnoccupiedVehicleInRange(world, playerId);
+  if (vId === null) return;
+  world.vehicles.driverId[vId] = playerId;
+  world.players.mountedVehicleId[playerId] = vId;
+}
+
+/** Client-facing: is there any reason for a fresh `E` press to be sent as the wire-level
+ *  `use` bit rather than staying a purely local menu toggle? True while already mounted
+ *  (so a press can dismount) or while an unoccupied vehicle sits within mount range. Ours --
+ *  not itself one of Task 1's exports, but app.ts (Task 14) needs exactly this decision and
+ *  it belongs in sim, matching vehiclePadAt's own precedent (Task 13). */
+export function canSendVehicleUse(world: World, playerId: number): boolean {
+  if ((world.players.mountedVehicleId[playerId] ?? -1) !== -1) return true;
+  return findUnoccupiedVehicleInRange(world, playerId) !== null;
 }
 
 function tryMountOrDismount(world: World, playerId: number, input: PlayerInput): void {
@@ -819,6 +875,18 @@ function tryMountOrDismount(world: World, playerId: number, input: PlayerInput):
   if (currentVehicle !== -1) {
     world.vehicles.driverId[currentVehicle] = -1;
     players.mountedVehicleId[playerId] = -1;
+    // While mounted, movement.ts's own guard skips stepPlayer entirely for this id, so
+    // onGround/wasGrounded/ski never got refreshed the whole time it was driving -- they're
+    // still whatever they were the instant before mounting. A dismount can land the player
+    // anywhere, so starting movement's own ground-tracking from a clean slate (rather than
+    // carrying over state from wherever they stood before mounting, possibly seconds and
+    // meters away) is the same defensive reset addPlayer/resetPlayerToSpawn already apply
+    // for a fresh spawn -- cheap, and avoids a stale wasGrounded/ski flag ever influencing
+    // classify/integrate's ground-snap logic (movement.ts) for a frame it shouldn't.
+    players.onGround[playerId] = 0;
+    players.wasGrounded[playerId] = 0;
+    players.ski[playerId] = 0;
+    players.wasJumpHeld[playerId] = 0;
     return;
   }
   mountNearestVehicle(world, playerId);
