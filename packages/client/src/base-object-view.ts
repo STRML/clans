@@ -13,6 +13,11 @@ import { shapeUrl, type KatabaticAssets } from './assets.js';
 export interface BaseObjectView {
   baseObjectMeshes: Map<number, THREE.Object3D>;
   turretMeshes: Map<number, THREE.Object3D>;
+  /** Codex round 1, finding 6: interior-collision.ts already loads the collision binaries for
+   *  these same placements (world.interiors, for movement collision), but nothing ever added a
+   *  visible mesh for them -- every interior (sbunk2, the station buildings, etc.) was
+   *  invisible geometry a player could walk through the collision of but never see. */
+  interiorMeshes: Map<number, THREE.Object3D>;
   sync(baseObjects: BaseObjectSnapshotData[], turrets: TurretSnapshotData[]): void;
 }
 
@@ -114,6 +119,31 @@ function addBaseObjectMesh(
   meshes.set(id, mesh);
 }
 
+/** Positions and orients a placeholder mesh from an interior placement's own `position`/
+ *  `rotation` -- the same fields interior-collision.ts's `loadInteriorColliders` already reads
+ *  to build that same interior's collision geometry, so the visible mesh and the invisible
+ *  collider it stands over always agree on where the interior actually is. */
+function addInteriorMesh(
+  scene: THREE.Scene,
+  meshes: Map<number, THREE.Object3D>,
+  placement: KatabaticAssets['scene']['interiors'][number],
+  id: number,
+): void {
+  const mesh = placeholderMesh();
+  mesh.position.fromArray(placement.position);
+  mesh.setRotationFromAxisAngle(
+    new THREE.Vector3(
+      placement.rotation.axis[0],
+      placement.rotation.axis[1],
+      placement.rotation.axis[2],
+    ),
+    (placement.rotation.degrees * Math.PI) / 180,
+  );
+  loadRealShape(mesh, placement.shape);
+  scene.add(mesh);
+  meshes.set(id, mesh);
+}
+
 function addTurretMesh(
   scene: THREE.Scene,
   meshes: Map<number, THREE.Object3D>,
@@ -177,16 +207,21 @@ export function createBaseObjectView(
 ): BaseObjectView {
   const baseObjectMeshes = new Map<number, THREE.Object3D>();
   const turretMeshes = new Map<number, THREE.Object3D>();
+  const interiorMeshes = new Map<number, THREE.Object3D>();
   assets.scene.baseObjects.forEach((placement, id) => {
     addBaseObjectMesh(scene, baseObjectMeshes, assets, placement, id);
   });
   assets.scene.turrets.forEach((placement, id) => {
     addTurretMesh(scene, turretMeshes, assets, placement, id);
   });
+  assets.scene.interiors.forEach((placement, id) => {
+    addInteriorMesh(scene, interiorMeshes, placement, id);
+  });
 
   return {
     baseObjectMeshes,
     turretMeshes,
+    interiorMeshes,
     sync(baseObjects, turrets) {
       syncBaseObjects(baseObjectMeshes, baseObjects);
       syncTurrets(turretMeshes, turrets);

@@ -1,23 +1,42 @@
 import * as THREE from 'three';
-import { describe, expect, it } from 'vitest';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { describe, expect, it, vi } from 'vitest';
 import { createBaseObjectView } from './base-object-view.js';
+import { shapeUrl } from './assets.js';
 
-const stubAssets = {
+const baseScene = {
+  baseObjects: [
+    { kind: 0, team: 1, position: [0, 0, 0] as [number, number, number] },
+    {
+      kind: 4,
+      team: 1,
+      position: [5, 2, 0] as [number, number, number],
+      rotation: { axis: [0, 1, 0] as [number, number, number], degrees: 0 },
+      scale: [1, 4, 6] as [number, number, number],
+    },
+  ],
+  turrets: [{ barrel: 2, team: 1, position: [10, 0, 0] as [number, number, number] }],
+  interiors: [] as Array<{
+    shape: string;
+    position: [number, number, number];
+    rotation: { axis: [number, number, number]; degrees: number };
+  }>,
+  shapesForBaseObjectKind: { 0: 'station_generator_large' },
+  shapesForTurretBarrel: { 2: 'turret_sentry' },
+};
+
+const stubAssets = { scene: baseScene } as never;
+
+const stubAssetsWithInterior = {
   scene: {
-    baseObjects: [
-      { kind: 0, team: 1, position: [0, 0, 0] as [number, number, number] },
+    ...baseScene,
+    interiors: [
       {
-        kind: 4,
-        team: 1,
-        position: [5, 2, 0] as [number, number, number],
-        rotation: { axis: [0, 1, 0] as [number, number, number], degrees: 0 },
-        scale: [1, 4, 6] as [number, number, number],
+        shape: 'sbunk2',
+        position: [1, 2, 3] as [number, number, number],
+        rotation: { axis: [0, 1, 0] as [number, number, number], degrees: 45 },
       },
     ],
-    turrets: [{ barrel: 2, team: 1, position: [10, 0, 0] as [number, number, number] }],
-    interiors: [],
-    shapesForBaseObjectKind: { 0: 'station_generator_large' },
-    shapesForTurretBarrel: { 2: 'turret_sentry' },
   },
 } as never;
 
@@ -63,5 +82,33 @@ describe('createBaseObjectView', () => {
     const fieldMesh = view.baseObjectMeshes.get(1) as THREE.Mesh;
     const material = fieldMesh.material as THREE.MeshBasicMaterial;
     expect(material.opacity).toBe(0);
+  });
+
+  it('places one mesh per interior at its scene position and requests its real shape (Codex round 1, finding 6)', () => {
+    // interior-collision.ts already loads collision for this same placement data (for
+    // movement collision); before this fix, createBaseObjectView never created a visible mesh
+    // for it at all, so every interior building was invisible geometry a player could walk
+    // into the collision of but never see rendered.
+    const loadSpy = vi.spyOn(GLTFLoader.prototype, 'load');
+    const scene = new THREE.Scene();
+    const view = createBaseObjectView(scene, stubAssetsWithInterior);
+    expect(view.interiorMeshes.size).toBe(1);
+    const mesh = view.interiorMeshes.get(0);
+    expect(mesh).toBeInstanceOf(THREE.Object3D);
+    expect(mesh?.position.toArray()).toEqual([1, 2, 3]);
+    expect(scene.children).toContain(mesh);
+    expect(loadSpy).toHaveBeenCalledWith(
+      shapeUrl('sbunk2'),
+      expect.any(Function),
+      undefined,
+      expect.any(Function),
+    );
+    loadSpy.mockRestore();
+  });
+
+  it('an empty interiors list adds no interior meshes (existing base objects/turrets unaffected)', () => {
+    const scene = new THREE.Scene();
+    const view = createBaseObjectView(scene, stubAssets);
+    expect(view.interiorMeshes.size).toBe(0);
   });
 });
