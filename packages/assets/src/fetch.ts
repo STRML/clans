@@ -30,6 +30,8 @@ const SOURCES = [
   'shapes.vl2/shapes/turret_muzzlepoint.glb',
   'shapes.vl2/shapes/turret_sentry.glb',
   'shapes.vl2/shapes/vehicle_pad.glb',
+  'shapes.vl2/shapes/vehicle_air_scout.glb',
+  'shapes.vl2/shapes/vehicle_grav_scout.glb',
 ] as const;
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
 const cacheRoot = resolve(packageRoot, 'cache');

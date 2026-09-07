@@ -1,10 +1,11 @@
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ASSET_SIZE_BUDGET_BYTES, extractTriangles, writeTriangleBinary } from './interiors.js';
 import { parseMission } from './mis.js';
 import { extractScene } from './scene.js';
 import { decodeTer } from './ter.js';
+import { convertVehicleShape, type VehicleShapeResult } from './vehicleShapes.js';
 
 export interface TerrainManifest {
   gridSize: 256;
@@ -145,6 +146,59 @@ if (totalBytes > ASSET_SIZE_BUDGET_BYTES) {
   );
 }
 
+// Vehicles are spawned at runtime by the sim, not placed in the mission file, so they get
+// no interior collision triangles here — the sim collides them against terrain/interiors
+// with a simple sphere radius (VEHICLE_DATA[kind].checkRadius) instead of a mesh. Prefer the
+// glb `fetch.ts` already cached locally; only fall through to convertVehicleShape's
+// live-fetch STL/procedural chain if that cache entry is missing.
+const T2_MAPPER_SHAPES_BASE =
+  'https://raw.githubusercontent.com/exogen/t2-mapper/HEAD/docs/base/@vl2/shapes.vl2/shapes/';
+const STL_FALLBACK_BASE = 'https://files.nastyhobbit.org/t2-models/stl-files/';
+interface VehicleShapeSpec {
+  kind: 'shrike' | 'wildcat';
+  cacheName: string;
+  stlName: string;
+  outputName: string;
+}
+const VEHICLE_SHAPES: VehicleShapeSpec[] = [
+  {
+    kind: 'shrike',
+    cacheName: 'vehicle_air_scout',
+    stlName: 'Shrike-Fighter',
+    outputName: 'vehicle_shrike.glb',
+  },
+  {
+    kind: 'wildcat',
+    cacheName: 'vehicle_grav_scout',
+    stlName: 'Wildcat-Grav-Cycle',
+    outputName: 'vehicle_wildcat.glb',
+  },
+];
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const vehicles: Record<string, { source: VehicleShapeResult['source']; shape: string }> = {};
+for (const spec of VEHICLE_SHAPES) {
+  const cachedPath = resolve(cache, 'shapes.vl2/shapes', `${spec.cacheName}.glb`);
+  const resolved: VehicleShapeResult = (await exists(cachedPath))
+    ? { source: 'glb', bytes: await readFile(cachedPath) }
+    : await convertVehicleShape(
+        `${T2_MAPPER_SHAPES_BASE}${spec.cacheName}.glb`,
+        `${STL_FALLBACK_BASE}${spec.stlName}.stl`,
+      );
+  if (resolved.bytes) {
+    await writeFile(resolve(shapesDir, spec.outputName), resolved.bytes);
+  }
+  vehicles[spec.kind] = { source: resolved.source, shape: spec.outputName };
+}
+
 await writeFile(
   resolve(output, 'scene.json'),
   `${JSON.stringify(
@@ -152,6 +206,7 @@ await writeFile(
       ...mission,
       shapesForBaseObjectKind: SHAPE_FOR_BASE_OBJECT_KIND,
       shapesForTurretBarrel: SHAPE_FOR_TURRET_BARREL,
+      vehicles,
     },
     null,
     2,
