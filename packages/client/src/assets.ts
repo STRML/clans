@@ -36,6 +36,22 @@ export interface ClientSceneData {
     radius: number;
   }>;
   flagStands: Array<{ team: number; position: [number, number, number] }>;
+  baseObjects: Array<{
+    kind: number;
+    team: number;
+    position: [number, number, number];
+    // ForceField placements only (kind 4) -- every other kind leaves both undefined.
+    rotation?: { axis: [number, number, number]; degrees: number };
+    scale?: [number, number, number];
+  }>;
+  turrets: Array<{ barrel: number; team: number; position: [number, number, number] }>;
+  interiors: Array<{
+    shape: string;
+    position: [number, number, number];
+    rotation: { axis: [number, number, number]; degrees: number };
+  }>;
+  shapesForBaseObjectKind: Record<number, string>;
+  shapesForTurretBarrel: Record<number, string>;
 }
 export interface KatabaticAssets {
   terrain: TerrainManifest;
@@ -50,6 +66,12 @@ async function response(path: string): Promise<Response> {
   const result = await fetch(`${ROOT}${path}`);
   if (!result.ok) throw new Error(`Asset load failed ${result.status}: ${path}`);
   return result;
+}
+export function shapeUrl(name: string): string {
+  return `${ROOT}shapes/${name}.glb`;
+}
+export function collisionUrl(name: string): string {
+  return `${ROOT}collision/${name}.collision.bin`;
 }
 export async function loadKatabatic(): Promise<KatabaticAssets> {
   const terrain = (await (await response('terrain.json')).json()) as TerrainManifest;
