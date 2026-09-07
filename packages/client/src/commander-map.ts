@@ -55,25 +55,53 @@ function insideAnyCircle(x: number, z: number, circles: readonly SensorCircle[])
   return circles.some((c) => Math.hypot(x - c.x, z - c.z) <= c.radius);
 }
 
+/**
+ * Codex round 2 review of PR #11: a NetClient's own prediction world only ever holds the
+ * LOCAL player (netclient.ts's `createWorld(terrain, 1, 1)` -- capacity 1); every remote
+ * player's position lives entirely in `net.remotePlayers`, decoded straight off the wire, and
+ * never gets written into `world.players` (movement prediction has no use for another
+ * player's exact position the way it does its own). sensedEnemyIds/drawPlayers below used to
+ * read `world.players` directly, so a networked client's commander map never showed a single
+ * enemy or teammate other than the local player. Both now take an explicit list built by the
+ * caller (app.ts's `commanderMapPlayers`), which merges `playersFromWorld` (below, for
+ * single-player and the local player) with `net.remotePlayers` when connected.
+ */
+export interface PlayerPosition {
+  id: number;
+  team: number;
+  x: number;
+  z: number;
+  alive: boolean;
+}
+
+/** Single-player has every player (bots included) in `world.players` directly; a NetClient's
+ *  own `world.players` holds only the local player, so callers merge this with the net's own
+ *  remote-player snapshots (see `PlayerPosition`'s own comment) for a full roster. */
+export function playersFromWorld(world: World): PlayerPosition[] {
+  const out: PlayerPosition[] = [];
+  for (let id = 0; id < world.players.count; id += 1) {
+    if (!world.players.active[id]) continue;
+    const base = id * 3;
+    out.push({
+      id,
+      team: world.players.team[id] ?? 0,
+      x: world.players.position[base] ?? 0,
+      z: world.players.position[base + 2] ?? 0,
+      alive: (world.players.alive[id] ?? 0) === 1,
+    });
+  }
+  return out;
+}
+
 export function sensedEnemyIds(
-  world: World,
+  players: readonly PlayerPosition[],
   localTeam: number,
   circles: readonly SensorCircle[],
 ): number[] {
   const ids: number[] = [];
-  for (let id = 0; id < world.players.count; id += 1) {
-    if (!world.players.active[id] || !world.players.alive[id]) continue;
-    if (world.players.team[id] === localTeam) continue;
-    const base = id * 3;
-    if (
-      insideAnyCircle(
-        world.players.position[base] ?? 0,
-        world.players.position[base + 2] ?? 0,
-        circles,
-      )
-    ) {
-      ids.push(id);
-    }
+  for (const player of players) {
+    if (!player.alive || player.team === localTeam) continue;
+    if (insideAnyCircle(player.x, player.z, circles)) ids.push(player.id);
   }
   return ids;
 }
@@ -98,22 +126,17 @@ function drawBaseObjects(
 
 function drawPlayers(
   ctx: CanvasRenderingContext2D,
-  world: World,
+  players: readonly PlayerPosition[],
   localTeam: number,
   sensedIds: readonly number[],
   toCanvas: (x: number, z: number) => [number, number],
 ): void {
-  for (let id = 0; id < world.players.count; id += 1) {
-    if (!world.players.active[id] || !world.players.alive[id]) continue;
-    const team = world.players.team[id] ?? 0;
-    const isEnemy = team !== localTeam;
-    if (isEnemy && !sensedIds.includes(id)) continue;
-    const base = id * 3;
-    const [cx, cz] = toCanvas(
-      world.players.position[base] ?? 0,
-      world.players.position[base + 2] ?? 0,
-    );
-    ctx.fillStyle = TEAM_COLOR[team] ?? '#ffffff';
+  for (const player of players) {
+    if (!player.alive) continue;
+    const isEnemy = player.team !== localTeam;
+    if (isEnemy && !sensedIds.includes(player.id)) continue;
+    const [cx, cz] = toCanvas(player.x, player.z);
+    ctx.fillStyle = TEAM_COLOR[player.team] ?? '#ffffff';
     ctx.beginPath();
     ctx.arc(cx, cz, 3, 0, Math.PI * 2);
     ctx.fill();
@@ -124,6 +147,7 @@ export function drawCommanderMap(
   ctx: CanvasRenderingContext2D,
   assets: Pick<KatabaticAssets, 'scene'>,
   world: World,
+  players: readonly PlayerPosition[],
   localTeam: number,
   sensedIds: readonly number[],
 ): void {
@@ -136,5 +160,5 @@ export function drawCommanderMap(
   ctx.fillStyle = '#0b1420';
   ctx.fillRect(0, 0, width, height);
   drawBaseObjects(ctx, world, localTeam, toCanvas);
-  drawPlayers(ctx, world, localTeam, sensedIds, toCanvas);
+  drawPlayers(ctx, players, localTeam, sensedIds, toCanvas);
 }

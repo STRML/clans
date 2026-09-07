@@ -20,6 +20,7 @@ import {
   type ArmorId,
   type Heightfield,
   type PlayerInput,
+  type PlayerSnapshotData,
   type World,
 } from '@clans/sim';
 import type {
@@ -34,7 +35,13 @@ import {
   raycastAimedStructure,
   turretsFromWorld,
 } from './base-object-view.js';
-import { drawCommanderMap, friendlySensorCircles, sensedEnemyIds } from './commander-map.js';
+import {
+  drawCommanderMap,
+  friendlySensorCircles,
+  playersFromWorld,
+  sensedEnemyIds,
+  type PlayerPosition,
+} from './commander-map.js';
 import { flagsFromWorld, syncFlagMeshes } from './flag-view.js';
 import { createHud, type HudSource } from './hud.js';
 import { Input } from './input.js';
@@ -299,13 +306,32 @@ interface BaseAssetsViewState {
   commanderMapCanvas: HTMLCanvasElement;
 }
 
+function remoteToPlayerPosition(player: PlayerSnapshotData): PlayerPosition {
+  return { id: player.id, team: player.team, x: player.x, z: player.z, alive: player.health > 0 };
+}
+
+/** See commander-map.ts's `PlayerPosition` doc comment: NetClient's own prediction world only
+ *  ever holds the local player, so a networked client's full roster needs net.remotePlayers
+ *  merged in too -- single-player has every player in `world.players` already and no `net`
+ *  to merge. Exported for app.test.ts (Codex round 2 review of PR #11). */
+export function commanderMapPlayers(
+  world: World,
+  net: Pick<NetClient, 'remotePlayers'> | null,
+): PlayerPosition[] {
+  const local = playersFromWorld(world);
+  return net
+    ? [...local, ...Array.from(net.remotePlayers.values()).map(remoteToPlayerPosition)]
+    : local;
+}
+
 function drawCommanderMapForTeam(state: BaseAssetsViewState): void {
   const ctx = state.commanderMapCanvas.getContext('2d');
   if (!ctx) return;
   const localTeam = state.world.players.team[state.playerId] ?? 1;
   const circles = friendlySensorCircles(state.world, localTeam);
-  const sensedIds = sensedEnemyIds(state.world, localTeam, circles);
-  drawCommanderMap(ctx, state.assets, state.world, localTeam, sensedIds);
+  const players = commanderMapPlayers(state.world, state.net);
+  const sensedIds = sensedEnemyIds(players, localTeam, circles);
+  drawCommanderMap(ctx, state.assets, state.world, players, localTeam, sensedIds);
 }
 
 /** Syncs base-object/turret meshes, the station menu, the commander map, and the HUD's

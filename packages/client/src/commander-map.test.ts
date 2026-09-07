@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { addPlayer, createWorld, type Heightfield } from '@clans/sim';
 import { BaseObjectKind, createBaseObjects, stepPower } from '@clans/sim';
 import { createTurrets, stepTurretPower, TurretBarrelId } from '@clans/sim';
-import { friendlySensorCircles, sensedEnemyIds } from './commander-map.js';
+import { friendlySensorCircles, playersFromWorld, sensedEnemyIds } from './commander-map.js';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -64,18 +64,20 @@ describe('sensedEnemyIds', () => {
   it('reports an enemy player inside a friendly sensor circle', () => {
     const world = createWorld(flat, 1);
     const enemy = addPlayer(world, { x: 100, y: 0, z: 0 }, 2);
-    const ids = sensedEnemyIds(world, 1, [{ x: 0, z: 0, radius: 300 }]);
+    const ids = sensedEnemyIds(playersFromWorld(world), 1, [{ x: 0, z: 0, radius: 300 }]);
     expect(ids).toContain(enemy);
   });
   it('never reports a teammate, even inside the circle', () => {
     const world = createWorld(flat, 1);
     const friend = addPlayer(world, { x: 100, y: 0, z: 0 }, 1);
-    const ids = sensedEnemyIds(world, 1, [{ x: 0, z: 0, radius: 300 }]);
+    const ids = sensedEnemyIds(playersFromWorld(world), 1, [{ x: 0, z: 0, radius: 300 }]);
     expect(ids).not.toContain(friend);
   });
   it('does not report an enemy outside every circle', () => {
     const world = createWorld(flat, 1);
     addPlayer(world, { x: 1000, y: 0, z: 0 }, 2);
-    expect(sensedEnemyIds(world, 1, [{ x: 0, z: 0, radius: 300 }])).toHaveLength(0);
+    expect(sensedEnemyIds(playersFromWorld(world), 1, [{ x: 0, z: 0, radius: 300 }])).toHaveLength(
+      0,
+    );
   });
 });

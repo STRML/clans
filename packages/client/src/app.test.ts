@@ -23,6 +23,7 @@ import {
   type ProjectileSnapshotData,
 } from '@clans/protocol';
 import {
+  commanderMapPlayers,
   debugIsStationPowered,
   debugKillGenerator,
   debugRepairGenerator,
@@ -93,6 +94,40 @@ const snapshot: PlayerSnapshotData = {
   armor: 0,
   hasRepairPack: 0 as const,
 };
+
+describe('commanderMapPlayers (Codex round 2 review of PR #11)', () => {
+  it('merges net.remotePlayers into the roster -- world.players alone never has them', () => {
+    // NetClient's own prediction world only ever holds the local player (netclient.ts's
+    // createWorld(terrain, 1, 1) -- capacity 1); every remote player's position lives
+    // entirely in net.remotePlayers, decoded off the wire. Before this fix, the commander
+    // map's player scan read world.players alone, so a networked client's map never showed
+    // a single enemy or teammate other than the local player.
+    const world = createWorld(flat, 1);
+    addPlayer(world, { x: 0, y: 0, z: 0 }, 1); // the local player, id 0
+    const remote: Pick<NetClient, 'remotePlayers'> = {
+      remotePlayers: new Map([[1, { ...snapshot, id: 1, team: 2, x: 42, z: 7 }]]),
+    };
+    const players = commanderMapPlayers(world, remote);
+    expect(players).toHaveLength(2);
+    const remotePlayer = players.find((p) => p.id === 1);
+    expect(remotePlayer).toMatchObject({ team: 2, x: 42, z: 7, alive: true });
+  });
+
+  it('a dead remote (health <= 0) is not reported alive', () => {
+    const world = createWorld(flat, 1);
+    const remote: Pick<NetClient, 'remotePlayers'> = {
+      remotePlayers: new Map([[1, { ...snapshot, id: 1, health: 0 }]]),
+    };
+    const players = commanderMapPlayers(world, remote);
+    expect(players.find((p) => p.id === 1)?.alive).toBe(false);
+  });
+
+  it('single-player (no net) reads only world.players', () => {
+    const world = createWorld(flat, 1);
+    addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    expect(commanderMapPlayers(world, null)).toHaveLength(1);
+  });
+});
 
 describe('updateRemotes', () => {
   it('timestamps a pushed remote sample with the caller clock, not the server tick counter', () => {
