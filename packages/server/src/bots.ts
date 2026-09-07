@@ -7,7 +7,7 @@ import {
   type WaypointGraph,
 } from '@clans/bots';
 import { removePlayer, type PlayerInput, type Vec3, type World } from '@clans/sim';
-import { addOneBot, smallerTeam, teamCount, type SceneSpawn } from './world.js';
+import { addOneBot, dropFlagsCarriedBy, smallerTeam, teamCount, type SceneSpawn } from './world.js';
 
 export const TARGET_TEAM_SIZE = 16; // Spec's own "16 versus 16" -- cited, not ours.
 
@@ -58,9 +58,13 @@ function pickBotToRemove(world: World, manager: BotManager, team: number): numbe
   return best;
 }
 
+/** A bot's own "disconnect" during rebalancing matches how a real player disconnect is
+ *  handled (net.ts's handleClose): drop whatever flag it's carrying before removing it,
+ *  so a carried flag never ends up pointing at a removed, no-longer-active carrierId. */
 function removeBotFromTeam(manager: BotManager, world: World, team: number): boolean {
   const id = pickBotToRemove(world, manager, team);
   if (id === null) return false;
+  dropFlagsCarriedBy(world, id);
   removePlayer(world, id);
   manager.botIds.delete(id);
   manager.runtimes.delete(id);

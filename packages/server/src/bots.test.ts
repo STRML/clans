@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addPlayer, createWorld, type Heightfield } from '@clans/sim';
+import { addPlayer, createFlags, createWorld, FlagState, type Heightfield } from '@clans/sim';
 import { BotRole } from '@clans/bots';
 import { createBotManager, rebalanceTeams, TARGET_TEAM_SIZE } from './bots.js';
 import { teamCount, type SceneSpawn } from './world.js';
@@ -57,6 +57,30 @@ describe('rebalanceTeams', () => {
     rebalanceTeams(manager, world, spawns);
     expect(teamCount(world, 1)).toBe(TARGET_TEAM_SIZE);
     expect(manager.botIds.has(lowestScoreBotId as number)).toBe(false);
+  });
+
+  it('drops a carried flag before removing a bot during rebalancing, the same as a real disconnect', () => {
+    const world = createWorld(flat, 1, 64);
+    createFlags(world, [
+      { team: 1, position: { x: -100, y: 0, z: 0 } },
+      { team: 2, position: { x: 100, y: 0, z: 0 } },
+    ]);
+    const manager = createBotManager(world, spawns, [], TARGET_TEAM_SIZE * 2);
+    const team1BotIds = [...manager.botIds]
+      .filter((id) => world.players.team[id] === 1)
+      .sort((a, b) => a - b);
+    // Every bot starts at score 0 (a tie), so pickBotToRemove's own tie-break -- highest
+    // player id -- decides; team1BotIds is sorted ascending, so its last entry is the one
+    // rebalanceTeams will actually remove here.
+    const carrierId = team1BotIds[team1BotIds.length - 1] as number;
+    // Team-1's own flag (id 0) carried by that bot.
+    world.flags.carrierId[0] = carrierId;
+    world.flags.state[0] = FlagState.Carried;
+    addPlayer(world, { x: -95, y: 0, z: 0 }, 1); // the joining human, team 1 already at 16
+    rebalanceTeams(manager, world, spawns);
+    expect(manager.botIds.has(carrierId)).toBe(false);
+    expect(world.flags.carrierId[0]).toBe(-1);
+    expect(world.flags.state[0]).toBe(FlagState.Dropped);
   });
 
   it('backfills one bot when a human leaves and budget remains (failure matrix row 13)', () => {

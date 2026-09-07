@@ -8,6 +8,8 @@ import {
   createFlags,
   createTurrets,
   createWorld,
+  FlagState,
+  RETURN_TICKS,
   sampleTerrain,
   type Heightfield,
   type InteriorInstance,
@@ -180,6 +182,33 @@ export function spawnPointFor(
   const [x, y, z] = chosen.position;
   const ground = sampleTerrain(terrain, x, z).height;
   return [x, Math.max(y, ground + 0.1), z];
+}
+
+/**
+ * Drops every flag `playerId` is carrying at their last known position, the same terminal
+ * state a real death leaves a flag in (flags.ts's dropFlag, not exported). This deliberately
+ * does not reuse `world.pendingDeaths`: movement.ts's stepPlayers clears that array at the
+ * very start of every stepWorld call, before stepFlags ever runs, so a disconnect -- which
+ * fires from a WebSocket 'close' event between ticks (or a bot's own removal during
+ * rebalancing, same shape), never inside stepWorld -- would have its pendingDeaths entry
+ * wiped out before the next tick's stepFlags could see it. Dropping the flag here,
+ * synchronously, needs no sim change and cannot land on the wrong tick. Shared by net.ts's
+ * handleClose (a human disconnect) and bots.ts's removeBotFromTeam (a bot's own "disconnect"
+ * during rebalancing) -- both must leave a carried flag in the same state a real death would,
+ * not a dangling carrierId pointing at a removed, no-longer-active player id.
+ */
+export function dropFlagsCarriedBy(world: World, playerId: number): void {
+  const base = playerId * 3;
+  const x = world.players.position[base] ?? 0;
+  const z = world.players.position[base + 2] ?? 0;
+  const y = sampleTerrain(world.terrain, x, z).height;
+  for (let flagId = 0; flagId < world.flags.state.length; flagId += 1) {
+    if (world.flags.carrierId[flagId] !== playerId) continue;
+    world.flags.state[flagId] = FlagState.Dropped;
+    world.flags.position.set([x, y, z], flagId * 3);
+    world.flags.carrierId[flagId] = -1;
+    world.flags.returnAt[flagId] = world.tick + RETURN_TICKS;
+  }
 }
 
 export function addOneBot(world: World, spawns: SceneSpawn[], team: number): number {
