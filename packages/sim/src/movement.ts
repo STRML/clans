@@ -26,6 +26,7 @@ const IDLE: PlayerInput = {
   altFire: false,
   slot: 0,
   packActive: false,
+  use: false,
 };
 
 interface Body {
@@ -466,6 +467,13 @@ function stepPlayer(
   dt: number,
 ): void {
   const players = world.players;
+  // A mounted player's position is not simulated here at all -- no gravity, no run/jet/jump,
+  // no interior/force-field collision pass. stepVehicles (vehicles.ts) is the only system
+  // that writes a mounted player's position/velocity, seat-locked to their vehicle, after it
+  // moves the vehicle itself (M5 plan, Global Constraints). Every other per-player system
+  // this file's caller runs for every active id (weapon timers, etc.) is unaffected -- this
+  // guard is scoped to movement.ts alone.
+  if (players.mountedVehicleId[id] !== -1) return;
   const body = readBody(players, id);
   const previous: Vec3 = { x: body.x, y: body.y, z: body.z };
   players.yaw[id] = input.yaw;

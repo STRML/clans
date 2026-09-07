@@ -107,6 +107,7 @@ export class Input {
       altFire: this.isDown('KeyG'),
       slot: this.slotFromKeys(),
       packActive: this.isDown('KeyR'),
+      use: false, // placeholder until Task 14 wires E-near-a-vehicle to this bit
     };
   }
 }

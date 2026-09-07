@@ -86,6 +86,7 @@ function readSample(cursor: Cursor): NetInputSample {
     altFire: (flags & 8) !== 0,
     slot,
     packActive: (flags & 16) !== 0,
+    use: false, // placeholder until Task 10 adds the real wire bit (bit 5, value 32)
   };
 }
 

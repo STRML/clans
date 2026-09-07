@@ -79,6 +79,7 @@ describe('handshake codec', () => {
           altFire: false,
           slot: 2,
           packActive: false,
+          use: false,
         },
         {
           moveX: 0,
@@ -91,6 +92,7 @@ describe('handshake codec', () => {
           altFire: true,
           slot: 0,
           packActive: false,
+          use: false,
         },
         {
           moveX: -1,
@@ -103,6 +105,7 @@ describe('handshake codec', () => {
           altFire: false,
           slot: 0,
           packActive: false,
+          use: false,
         },
       ],
     };
@@ -166,6 +169,7 @@ describe('handshake codec', () => {
           altFire: false,
           slot: 0,
           packActive: false,
+          use: false,
         },
         {
           moveX: 0,
@@ -178,6 +182,7 @@ describe('handshake codec', () => {
           altFire: false,
           slot: 0,
           packActive: false,
+          use: false,
         },
         {
           moveX: 0,
@@ -190,6 +195,7 @@ describe('handshake codec', () => {
           altFire: false,
           slot: 0,
           packActive: false,
+          use: false,
         },
       ],
     };
@@ -211,6 +217,7 @@ describe('handshake codec', () => {
           altFire: false,
           slot: 0,
           packActive: false,
+          use: false,
         },
         {
           moveX: 0,
@@ -223,6 +230,7 @@ describe('handshake codec', () => {
           altFire: false,
           slot: 0,
           packActive: false,
+          use: false,
         },
         {
           moveX: 0,
@@ -235,6 +243,7 @@ describe('handshake codec', () => {
           altFire: false,
           slot: 0,
           packActive: false,
+          use: false,
         },
       ],
     };
@@ -275,6 +284,7 @@ describe('handshake codec', () => {
           altFire: false,
           slot: 0,
           packActive: false,
+          use: false,
         },
         {
           moveX: 0,
@@ -287,6 +297,7 @@ describe('handshake codec', () => {
           altFire: false,
           slot: 0,
           packActive: false,
+          use: false,
         },
         {
           moveX: 0,
@@ -299,6 +310,7 @@ describe('handshake codec', () => {
           altFire: false,
           slot: 0,
           packActive: false,
+          use: false,
         },
       ],
     };
@@ -314,6 +326,7 @@ describe('handshake codec', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     });
   });
 });
@@ -342,6 +355,7 @@ describe('packActive input bit', () => {
       altFire: false,
       slot: 3,
       packActive: true,
+      use: false,
     };
     const bytes = encodeInput({ sequence: 1, samples: [sample, sample, sample] });
     const decoded = decodeInput(bytes);

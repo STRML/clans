@@ -132,6 +132,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // Like the real server: step with the newest input received, idle until the first arrives.
     let serverInput: PlayerInput = {
@@ -145,6 +146,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     const totalTicks = Math.ceil(3 / FIXED_DT);
     // Prediction is judged at equal input sequence: the client's position right after it
@@ -319,6 +321,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     for (let i = 0; i < 5; i += 1) client.tick(forward);
     expect(client.world.players.velocity[2]).not.toBe(0);
@@ -357,6 +360,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // Well past the ceiling (4x MAX_REPLAY_TICKS), and well past the existing "40 ticks,
     // then reconcile hard-snaps" scenario this must not disturb.
@@ -388,6 +392,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     for (let i = 0; i < 20_000; i += 1) client.tick(idleInput);
     expect((client as unknown as { sequence: number }).sequence).toBe(0);
@@ -454,6 +459,7 @@ describe('NetClient', () => {
         altFire: false,
         slot: 0,
         packActive: false,
+        use: false,
       }),
     ).not.toThrow();
   });
@@ -524,6 +530,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     for (let tick = 0; tick < 40; tick += 1) {
       clock.ms += FIXED_TICK_MS;
@@ -592,6 +599,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     for (let i = 0; i < 5; i += 1) client.tick(skiInput);
     const pending = (client as unknown as { pendingInputs: unknown[] }).pendingInputs;
@@ -701,6 +709,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.tick(heldJump); // queues pendingInputs[0] (sequence 1); predicts no new jump
     expect(client.world.players.velocity[1]).toBeCloseTo(0, 5);
@@ -860,6 +869,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     });
     expect(client.world.players.position[0] ?? 0).toBe(beforeX);
   });
@@ -886,6 +896,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // Leave this input unacknowledged: the snapshot below names lastInputSequence 0,
     // so reconcile() will still find it pending and eligible for replay.
@@ -1024,6 +1035,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     });
 
     expect(client.world.tick).toBe(serverTick + 1);
@@ -1377,6 +1389,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.tick(fireInput); // sequence 1: predicts a Spinfusor shot, decrementing local ammo
     expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(14);
@@ -1451,6 +1464,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // sequence 1: predicts a Spinfusor shot locally -- this input never actually reaches
     // the server (lost or evicted), exactly like the ammo self-heal test above.
@@ -1542,6 +1556,7 @@ describe('NetClient', () => {
       altFire: true,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // sequence 1: predicts a grenade throw locally -- this input never actually reaches the
     // server (lost or evicted), exactly like the ammo/weapon-state self-heal tests above.
@@ -1694,6 +1709,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.tick(idleInput);
 
@@ -1795,6 +1811,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.world.players.position[1] = client.world.killY - 1;
     client.tick(noInput);
@@ -1821,6 +1838,7 @@ describe('NetClient', () => {
       altFire: false,
       slot: 1, // Spinfusor
       packActive: false,
+      use: false,
     };
     client.tick(fireSpinfusor); // fire before Welcome ever arrives
 

@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { BaseObjectKind, createBaseObjects, stepPower } from './baseObjects.js';
-import { createWorld, type Heightfield, type PlayerInput } from './index.js';
+import {
+  addPlayer,
+  createWorld,
+  removePlayer,
+  type Heightfield,
+  type PlayerInput,
+} from './index.js';
 import {
   activeVehicleCountForTeam,
   createVehicleStore,
   resolveVehicleCollision,
   spawnVehicleAtPad,
   stepShrike,
+  stepVehicles,
   stepWildcat,
   VEHICLE_DATA,
   VehicleKind,
@@ -117,6 +124,7 @@ const idleInput: PlayerInput = {
   altFire: false,
   slot: 0,
   packActive: false,
+  use: false,
 };
 
 function shrikeWorld(): { world: ReturnType<typeof createWorld>; id: number } {
@@ -266,5 +274,124 @@ describe('resolveVehicleCollision', () => {
     world.vehicles.position.set([0, 5, 0], id * 3); // inside checkRadius (5.5) of the ground
     resolveVehicleCollision(world, id, { x: 0, y: 5.1, z: 0 }, 1 / 32); // ~3.2 m/s
     expect(world.vehicles.damage[id]).toBe(0);
+  });
+});
+
+const useInput = (use: boolean): PlayerInput => ({ ...idleInput, use });
+
+describe('stepVehicles: mount/dismount', () => {
+  it('a player within MOUNT_RANGE pressing use mounts the vehicle', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat) as number;
+    const pos = {
+      x: world.vehicles.position[vId * 3] ?? 0,
+      y: world.vehicles.position[vId * 3 + 1] ?? 0,
+      z: world.vehicles.position[vId * 3 + 2] ?? 0,
+    };
+    const playerId = addPlayer(world, { x: pos.x + 2, y: pos.y, z: pos.z }, 1);
+    stepVehicles(world, new Map([[playerId, useInput(true)]]), 1 / 32);
+    expect(world.players.mountedVehicleId[playerId]).toBe(vId);
+    expect(world.vehicles.driverId[vId]).toBe(playerId);
+  });
+
+  it('a player outside MOUNT_RANGE pressing use does not mount', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat) as number;
+    const playerId = addPlayer(world, { x: 100, y: 0, z: 100 }, 1);
+    stepVehicles(world, new Map([[playerId, useInput(true)]]), 1 / 32);
+    expect(world.players.mountedVehicleId[playerId]).toBe(-1);
+    expect(world.vehicles.driverId[vId]).toBe(-1);
+  });
+
+  it('use is edge-triggered: holding it does not remount immediately after a mount', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat) as number;
+    const pos = {
+      x: world.vehicles.position[vId * 3] ?? 0,
+      y: world.vehicles.position[vId * 3 + 1] ?? 0,
+      z: world.vehicles.position[vId * 3 + 2] ?? 0,
+    };
+    const playerId = addPlayer(world, { x: pos.x, y: pos.y, z: pos.z }, 1);
+    const held = new Map([[playerId, useInput(true)]]);
+    stepVehicles(world, held, 1 / 32); // mounts
+    stepVehicles(world, held, 1 / 32); // still held -- must NOT dismount (no edge)
+    expect(world.players.mountedVehicleId[playerId]).toBe(vId);
+  });
+
+  it('releasing and pressing use again while mounted dismounts', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat) as number;
+    const pos = {
+      x: world.vehicles.position[vId * 3] ?? 0,
+      y: world.vehicles.position[vId * 3 + 1] ?? 0,
+      z: world.vehicles.position[vId * 3 + 2] ?? 0,
+    };
+    const playerId = addPlayer(world, { x: pos.x, y: pos.y, z: pos.z }, 1);
+    stepVehicles(world, new Map([[playerId, useInput(true)]]), 1 / 32);
+    stepVehicles(world, new Map([[playerId, useInput(false)]]), 1 / 32);
+    stepVehicles(world, new Map([[playerId, useInput(true)]]), 1 / 32);
+    expect(world.players.mountedVehicleId[playerId]).toBe(-1);
+    expect(world.vehicles.driverId[vId]).toBe(-1);
+  });
+
+  it('two players pressing use on the same vehicle the same tick mount exactly one', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat) as number;
+    const pos = {
+      x: world.vehicles.position[vId * 3] ?? 0,
+      y: world.vehicles.position[vId * 3 + 1] ?? 0,
+      z: world.vehicles.position[vId * 3 + 2] ?? 0,
+    };
+    const a = addPlayer(world, { x: pos.x, y: pos.y, z: pos.z }, 1);
+    const b = addPlayer(world, { x: pos.x + 1, y: pos.y, z: pos.z }, 1);
+    stepVehicles(
+      world,
+      new Map([
+        [a, useInput(true)],
+        [b, useInput(true)],
+      ]),
+      1 / 32,
+    );
+    const mounted = [a, b].filter((id) => world.players.mountedVehicleId[id] === vId);
+    expect(mounted).toHaveLength(1);
+  });
+
+  it('a pad-respawn destroying a piloted vehicle dismounts the pilot without damage', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const first = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat) as number;
+    const pos = {
+      x: world.vehicles.position[first * 3] ?? 0,
+      y: world.vehicles.position[first * 3 + 1] ?? 0,
+      z: world.vehicles.position[first * 3 + 2] ?? 0,
+    };
+    const playerId = addPlayer(world, { x: pos.x, y: pos.y, z: pos.z }, 1);
+    stepVehicles(world, new Map([[playerId, useInput(true)]]), 1 / 32);
+    spawnVehicleAtPad(world, padId, VehicleKind.Shrike); // destroys `first`, pilot aboard
+    stepVehicles(world, new Map(), 1 / 32);
+    expect(world.players.mountedVehicleId[playerId]).toBe(-1);
+    expect(world.players.damage[playerId]).toBe(0);
+  });
+});
+
+describe('removePlayer clears dangling driverId', () => {
+  it('removing a driving player leaves the vehicle unpiloted, not dangling', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat) as number;
+    const pos = {
+      x: world.vehicles.position[vId * 3] ?? 0,
+      y: world.vehicles.position[vId * 3 + 1] ?? 0,
+      z: world.vehicles.position[vId * 3 + 2] ?? 0,
+    };
+    const playerId = addPlayer(world, { x: pos.x, y: pos.y, z: pos.z }, 1);
+    stepVehicles(world, new Map([[playerId, useInput(true)]]), 1 / 32);
+    removePlayer(world, playerId);
+    expect(world.vehicles.driverId[vId]).toBe(-1);
   });
 });

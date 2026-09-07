@@ -38,6 +38,7 @@ const idle: PlayerInput = {
   altFire: false,
   slot: 0,
   packActive: false,
+  use: false,
 };
 const inputMap = (id: number, input: Partial<PlayerInput>) =>
   new Map([[id, { ...idle, ...input }]]);

@@ -124,6 +124,7 @@ const IDLE_INPUT: PlayerInput = {
   altFire: false,
   slot: 0,
   packActive: false,
+  use: false,
 };
 // Bounds a client's catch-up queue. Each Input message contributes at most 3 samples and
 // a duplicate/reordered sequence is dropped in applyInputMessage, so this only guards the

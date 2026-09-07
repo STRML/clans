@@ -40,6 +40,7 @@ const idleSample: PlayerInput = {
   altFire: false,
   slot: 0,
   packActive: false,
+  use: false,
 };
 
 const terrain: Heightfield = {
@@ -221,6 +222,7 @@ describe('startNetServer', () => {
             altFire: false,
             slot: 0,
             packActive: false,
+            use: false,
           },
           idleSample,
           idleSample,
@@ -269,6 +271,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.send(encodeInput({ sequence: 3, samples: [idleSample, forward, idleSample] }));
     await wait(10);
@@ -312,6 +315,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.send(encodeInput({ sequence: 1, samples: [forward, idleSample, idleSample] }));
     for (let sequence = 2; sequence <= 12; sequence += 1) {
@@ -377,6 +381,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.send(encodeInput({ sequence: 3, samples: [idleSample, forward, idleSample] }));
     await wait(10);
@@ -596,6 +601,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 1,
       packActive: false,
+      use: false,
     };
     shooter.send(encodeInput({ sequence: 1, samples: [fire, fire, fire] }));
     await wait(20);
@@ -640,6 +646,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // Walk the target across the shot line for a few ticks (recorded into lag-comp history),
     // then jump it far away right before the shot — the laggy shooter's screen still shows
@@ -726,6 +733,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     for (let step = 0; step < 5; step += 1) {
       world.players.position.set([0, 0, 8], targetId * 3);
@@ -813,6 +821,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // The carrier holds the shot line for a few ticks, recorded into lag-comp history...
     for (let step = 0; step < 5; step += 1) {
@@ -873,6 +882,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     client.send(
       encodeInput({
@@ -943,6 +953,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // The carrier holds the shot line for a few ticks (recorded into lag-comp history), then
     // jumps far away right before the shot resolves: the laggy shooter's screen still shows
@@ -1022,6 +1033,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     shooter.send(
       encodeInput({
@@ -1088,6 +1100,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     // Walk targetA across the shot line for a few ticks (recorded into lag-comp history),
     // then jump it far away right before the shot -- the laggy shooter's screen still shows
@@ -1243,6 +1256,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     for (let step = 0; step < 5; step += 1) {
       respawnWorld.players.position.set([0, 0, 8], targetId * 3);
@@ -1335,6 +1349,7 @@ describe('startNetServer', () => {
       altFire: false,
       slot: 0,
       packActive: false,
+      use: false,
     };
     rttServer.tick(3); // call 2: history@1 = on the line
     rttServer.tick(4); // call 3: history@2 = on the line

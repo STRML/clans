@@ -18,6 +18,10 @@ export interface PlayerInput {
   slot: number; // 0 = no change, 1..5 = select that weapon slot (see weaponIdForSlot)
   /** Repair Pack beam held down. Level-triggered, like `fire`. */
   packActive: boolean;
+  /** Mount/dismount a nearby vehicle. A real wire bit, not a client-local decision like
+   *  station use: which player controls which vehicle is authoritative state the server
+   *  alone decides (M5 plan, Global Constraints). Edge-triggered inside vehicles.ts. */
+  use: boolean;
 }
 export interface PlayerStore {
   count: number;
@@ -69,6 +73,16 @@ export interface PlayerStore {
   armor: Uint8Array; // ArmorId
   /** 0/1. Set by a Loadout request (Task 6); the only pack modeled this milestone. */
   hasRepairPack: Uint8Array;
+  /** -1 = not mounted, else the VehicleStore id this player is riding. movement.ts's
+   *  stepPlayer and weapons.ts's stepOnePlayer both no-op for a mounted id -- stepVehicles is
+   *  the only system that writes a mounted player's position/velocity (M5 plan, Global
+   *  Constraints). */
+  mountedVehicleId: Int16Array;
+  /** Edge-detect state for PlayerInput.use, private to vehicles.ts's stepVehicles (no other
+   *  system reads this). Lives on PlayerStore rather than a module-level Map so it resets
+   *  cleanly with every fresh World -- a bare module-level map keyed by player id would leak
+   *  state across separate World instances (every test in this file creates several). */
+  wasUseHeld: Uint8Array;
 }
 /** One id freed by `free()`, held out of `freeIds` until it has sat unallocated for at
  *  least PROJECTILE_ID_REUSE_DELAY_TICKS calls to `stepProjectiles` -- see that constant

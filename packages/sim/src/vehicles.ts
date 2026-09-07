@@ -675,3 +675,129 @@ export function resolveVehicleCollision(
   // hit, matching a real crash doing more than one kind of damage at once.
   if (hitGround || hitInterior) applyCollisionDamage(world, id, speed);
 }
+
+// --- Mount/dismount, seat position, weapon takeover (Task 5) ----------------------------
+
+function seatPosition(vehicles: VehicleStore, id: number): Vec3 {
+  const base = id * 3;
+  return {
+    x: at(vehicles.position, base),
+    y: at(vehicles.position, base + 1),
+    z: at(vehicles.position, base + 2),
+  };
+}
+
+function idleVehicleInput(): PlayerInput {
+  return {
+    moveX: 0,
+    moveZ: 0,
+    yaw: 0,
+    pitch: 0,
+    jump: false,
+    jet: false,
+    fire: false,
+    altFire: false,
+    slot: 0,
+    packActive: false,
+    use: false,
+  };
+}
+
+/** Nearest-in-range-and-unoccupied wins; the caller (stepVehicles) resolves failure-matrix
+ *  row 13 (two players racing for the same vehicle the same tick) just by iterating player
+ *  ids in ascending order and mounting one at a time -- once this claims a vehicle, a later
+ *  id in that same pass already sees `driverId` set and skips it. */
+function mountNearestVehicle(world: World, playerId: number): void {
+  const players = world.players;
+  const vehicles = world.vehicles;
+  const pBase = playerId * 3;
+  const playerPos: Vec3 = {
+    x: at(players.position, pBase),
+    y: at(players.position, pBase + 1),
+    z: at(players.position, pBase + 2),
+  };
+  for (let vId = 0; vId < vehicles.count; vId += 1) {
+    if (!vehicles.active[vId] || vehicles.destroyed[vId] || vehicles.driverId[vId] !== -1) continue;
+    const data = VEHICLE_DATA[vehicles.kind[vId] as VehicleKind];
+    const vPos = seatPosition(vehicles, vId);
+    const dist = Math.hypot(playerPos.x - vPos.x, playerPos.y - vPos.y, playerPos.z - vPos.z);
+    if (dist <= data.minMountDist) {
+      vehicles.driverId[vId] = playerId;
+      players.mountedVehicleId[playerId] = vId;
+      return;
+    }
+  }
+}
+
+function tryMountOrDismount(world: World, playerId: number, input: PlayerInput): void {
+  const players = world.players;
+  const wasHeld = players.wasUseHeld[playerId] === 1;
+  const edge = input.use && !wasHeld;
+  players.wasUseHeld[playerId] = input.use ? 1 : 0;
+  if (!edge) return;
+
+  const currentVehicle = players.mountedVehicleId[playerId] ?? -1;
+  if (currentVehicle !== -1) {
+    world.vehicles.driverId[currentVehicle] = -1;
+    players.mountedVehicleId[playerId] = -1;
+    return;
+  }
+  mountNearestVehicle(world, playerId);
+}
+
+/** Failure matrix row 5's dismount half: a pad-respawn (or Task 7's own destruction path)
+ *  marks `destroyed` first and leaves the actual unmount/no-damage handling to this, called
+ *  from stepVehicles's per-vehicle pass every tick a destroyed vehicle still has a driver. */
+function dismountWithoutDamage(world: World, vId: number): void {
+  const driverId = world.vehicles.driverId[vId] ?? -1;
+  if (driverId === -1) return;
+  world.players.mountedVehicleId[driverId] = -1;
+  world.vehicles.driverId[vId] = -1;
+}
+
+function stepOneVehiclePhysics(world: World, vId: number, input: PlayerInput, dt: number): void {
+  const vehicles = world.vehicles;
+  const previous = seatPosition(vehicles, vId);
+  if (vehicles.kind[vId] === VehicleKind.Shrike) stepShrike(world, vId, input, dt);
+  else stepWildcat(world, vId, input, dt);
+  resolveVehicleCollision(world, vId, previous, dt);
+}
+
+function seatDriver(world: World, vId: number, driverId: number): void {
+  if (driverId === -1 || !world.players.active[driverId]) return;
+  const seat = seatPosition(world.vehicles, vId);
+  const base = driverId * 3;
+  world.players.position.set([seat.x, seat.y, seat.z], base);
+  world.players.velocity.set([0, 0, 0], base);
+}
+
+/** The system `stepWorld` calls (Task 9) between stepWeapons and stepTurrets. Resolves this
+ *  tick's mount/dismount requests, then steps every active vehicle's physics -- piloted or
+ *  not, matching a real T2 vehicle idling at its pad -- and seat-locks its driver's position
+ *  to the vehicle's own transform. */
+export function stepVehicles(
+  world: World,
+  inputs: ReadonlyMap<number, PlayerInput>,
+  dt: number,
+): void {
+  const vehicles = world.vehicles;
+
+  const ids = [...inputs.keys()].sort((a, b) => a - b);
+  for (const playerId of ids) {
+    if (!world.players.active[playerId]) continue;
+    tryMountOrDismount(world, playerId, inputs.get(playerId) as PlayerInput);
+  }
+
+  for (let vId = 0; vId < vehicles.count; vId += 1) {
+    if (!vehicles.active[vId]) continue;
+    if (vehicles.destroyed[vId]) {
+      dismountWithoutDamage(world, vId);
+      continue;
+    }
+    const driverId = vehicles.driverId[vId] ?? -1;
+    const input =
+      driverId !== -1 ? (inputs.get(driverId) ?? idleVehicleInput()) : idleVehicleInput();
+    stepOneVehiclePhysics(world, vId, input, dt);
+    seatDriver(world, vId, driverId);
+  }
+}

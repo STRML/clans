@@ -80,6 +80,8 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
       respawnSeq: new Uint16Array(capacity),
       armor: new Uint8Array(capacity),
       hasRepairPack: new Uint8Array(capacity),
+      mountedVehicleId: new Int16Array(capacity).fill(-1),
+      wasUseHeld: new Uint8Array(capacity),
     },
     projectiles: createProjectileStore(),
     pendingDeaths: [],
@@ -121,6 +123,8 @@ export function resetPlayerToSpawn(world: World, id: number, spawn: Vec3): void 
   players.wasGrounded[id] = 0;
   players.wasJumpHeld[id] = 0;
   players.landingSpeed[id] = 0;
+  players.mountedVehicleId[id] = -1;
+  players.wasUseHeld[id] = 0;
 }
 
 export function addPlayer(world: World, spawn: Vec3, team = 0, armor = ArmorId.Light): number {
@@ -159,6 +163,12 @@ export function removePlayer(world: World, id: number): void {
   // not touch the deeper reused-id identity problem (stale projectile ownerId self-exclusion),
   // which is already tracked separately at github.com/STRML/clans/issues/8.
   world.pendingAmmoRefunds = world.pendingAmmoRefunds.filter((refund) => refund.playerId !== id);
+  // Failure matrix row 12 (M5): a vehicle's driver disconnecting must not leave the vehicle
+  // pointing at a removed player id forever. The vehicle itself survives, unpiloted, wherever
+  // it was -- only the dangling driverId is cleared, not the vehicle's position/velocity.
+  for (let vId = 0; vId < world.vehicles.count; vId += 1) {
+    if (world.vehicles.driverId[vId] === id) world.vehicles.driverId[vId] = -1;
+  }
 }
 
 /**

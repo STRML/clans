@@ -32,6 +32,7 @@ const IDLE: PlayerInput = {
   altFire: false,
   slot: 0,
   packActive: false,
+  use: false,
 };
 const aimingAt = (from: { x: number; z: number }, to: { x: number; z: number }): number =>
   Math.atan2(to.x - from.x, to.z - from.z);

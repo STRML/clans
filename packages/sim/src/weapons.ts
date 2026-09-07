@@ -67,6 +67,7 @@ const IDLE_INPUT: PlayerInput = {
   altFire: false,
   slot: 0,
   packActive: false,
+  use: false,
 };
 
 // Spec's Weapon numbers table, used exactly. Chaingun's spinDownTime (1.0 s) is kept for the
@@ -412,6 +413,11 @@ function tryThrowGrenade(world: World, id: number, input: PlayerInput): void {
  */
 function stepOnePlayer(world: World, id: number, input: PlayerInput, dt: number): void {
   const players = world.players;
+  // A mounted player's own weapon system is inert -- the vehicle's own weapon (the Shrike
+  // blaster) reads the driver's fire input directly inside stepVehicles instead (M5 plan,
+  // Global Constraints, Task 6). This is the same "exactly one system owns this id's state
+  // this tick" rule movement.ts's own mounted guard follows.
+  if (players.mountedVehicleId[id] !== -1) return;
   if (!input.fire) players.spunUp[id] = 0;
   if ((players.grenadeCooldown[id] ?? 0) > 0) {
     players.grenadeCooldown[id] = Math.max(0, (players.grenadeCooldown[id] ?? 0) - dt);
