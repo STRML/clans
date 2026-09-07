@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { stepWorld } from '@clans/sim';
 import { createBotManager, rebalanceTeams, stepBotManager, TARGET_TEAM_SIZE } from '../src/bots.js';
+import { createOrderBoard } from '../src/orders.js';
 import { loadKatabaticWorld } from '../src/world.js';
 
 const MATCH_TICKS = 5000; // Ours -- long enough at 32ms/tick (160s of simulated time) for
@@ -16,9 +17,10 @@ describe('bot-only match', () => {
     }));
     const manager = createBotManager(world, spawns, landmarks, TARGET_TEAM_SIZE * 2);
     rebalanceTeams(manager, world, spawns);
+    const board = createOrderBoard();
     let anyDeath = false;
     for (let tick = 0; tick < MATCH_TICKS; tick += 1) {
-      const inputs = stepBotManager(manager, world);
+      const inputs = stepBotManager(manager, world, board);
       stepWorld(world, inputs);
       if (world.pendingDeaths.length > 0) anyDeath = true;
       if (world.gameOver) break;

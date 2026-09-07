@@ -13,6 +13,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@clans/sim": "workspace:*"
+    "@clans/sim": "workspace:*",
+    "@clans/protocol": "workspace:*"
   }
 }

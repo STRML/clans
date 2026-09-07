@@ -7,6 +7,8 @@ import {
   type WaypointGraph,
 } from '@clans/bots';
 import { removePlayer, type PlayerInput, type Vec3, type World } from '@clans/sim';
+import type { TeamOrder } from '@clans/protocol';
+import { currentOrder, type OrderBoard } from './orders.js';
 import { addOneBot, dropFlagsCarriedBy, smallerTeam, teamCount, type SceneSpawn } from './world.js';
 
 export const TARGET_TEAM_SIZE = 16; // Spec's own "16 versus 16" -- cited, not ours.
@@ -134,8 +136,21 @@ export function createBotManager(
   return manager;
 }
 
-export function stepBotManager(manager: BotManager, world: World): Map<number, PlayerInput> {
-  return stepBots(world, manager.graph, manager.runtimes);
+/** Resolves each team's current order (`currentOrder`'s own fresh expiry check, failure
+ *  matrix row 21) before handing off to `@clans/bots`'s `stepBots` -- `OrderBoard` and
+ *  `currentOrder` are server-only (this package's own `orders.ts`), never importable from
+ *  `@clans/bots`, which depends only on `@clans/sim` and `@clans/protocol` (that dependency
+ *  runs the other way: this package already depends on `@clans/bots`). */
+export function stepBotManager(
+  manager: BotManager,
+  world: World,
+  board: OrderBoard,
+): Map<number, PlayerInput> {
+  const orders = new Map<number, TeamOrder | null>([
+    [1, currentOrder(board, 1, world.tick)],
+    [2, currentOrder(board, 2, world.tick)],
+  ]);
+  return stepBots(world, manager.graph, manager.runtimes, orders);
 }
 
 export { smallerTeam };

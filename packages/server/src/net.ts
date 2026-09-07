@@ -966,7 +966,11 @@ export function startNetServer(options: NetServerOptions): NetServer {
       // A bot id is never also a socket-bound player id (a human never joins as an id a
       // bot already occupies -- handleJoin's own addPlayer always allocates a fresh id),
       // so the two maps' key sets never overlap and this merge order doesn't matter.
-      for (const [botId, input] of stepBotManager(options.botManager, options.world)) {
+      for (const [botId, input] of stepBotManager(
+        options.botManager,
+        options.world,
+        options.board,
+      )) {
         inputs.set(botId, input);
       }
       runOneTick(inputs);

@@ -66,6 +66,9 @@ importers:
 
   packages/bots:
     dependencies:
+      '@clans/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       '@clans/sim':
         specifier: workspace:*
         version: link:../sim
