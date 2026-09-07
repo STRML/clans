@@ -67,19 +67,27 @@ function isUsableFriendlyStation(store: BaseObjectStore, team: number, id: numbe
   return true;
 }
 
+// Codex review round 2, finding (P2): this and maybeHeal's own in-range check (brain.ts)
+// both used X/Z-only distance, while the real gate a heal request is checked against --
+// baseObjects.ts's stationAt, which applyLoadoutRequest calls internally -- uses full 3D
+// distance. A bot could walk to the right horizontal spot on a raised or sunken platform,
+// read itself as "in range" here, and have applyLoadoutRequest silently reject every
+// request forever (stationAt's own real check fails), stuck at a heal goal that could
+// never resolve.
+function vec3At(arr: Float64Array, base: number): { x: number; y: number; z: number } {
+  return { x: arr[base] ?? 0, y: arr[base + 1] ?? 0, z: arr[base + 2] ?? 0 };
+}
+
 export function findNearestFriendlyStation(world: World, botId: number): number | null {
   const store = world.baseObjects;
   const team = world.players.team[botId] ?? 0;
-  const base = botId * 3;
-  const bx = world.players.position[base] ?? 0,
-    bz = world.players.position[base + 2] ?? 0;
+  const botPos = vec3At(world.players.position, botId * 3);
   let best: number | null = null;
   let bestDistance = Infinity;
   for (let id = 0; id < store.count; id += 1) {
     if (!isUsableFriendlyStation(store, team, id)) continue;
-    const ox = store.position[id * 3] ?? 0,
-      oz = store.position[id * 3 + 2] ?? 0;
-    const d = Math.hypot(bx - ox, bz - oz);
+    const stationPos = vec3At(store.position, id * 3);
+    const d = Math.hypot(botPos.x - stationPos.x, botPos.y - stationPos.y, botPos.z - stationPos.z);
     if (d < bestDistance) {
       bestDistance = d;
       best = id;

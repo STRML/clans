@@ -79,7 +79,7 @@ export function aimAndFire(
   runtime: BotRuntimeState,
   botId: number,
   targetId: number,
-): { yaw: number; pitch: number; fire: boolean } {
+): { yaw: number; pitch: number; fire: boolean; weaponId: WeaponId } {
   rollJitterIfNewTarget(runtime, targetId);
   const shooterBase = botId * 3;
   const shooter: Vec3 = {
@@ -107,5 +107,10 @@ export function aimAndFire(
   const yawErrorDeg = Math.abs(
     toDeg(Math.atan2(Math.sin(idealYaw - aimYaw), Math.cos(idealYaw - aimYaw))),
   );
-  return { yaw: idealYaw, pitch: idealPitch, fire: yawErrorDeg <= AIM_TOLERANCE_DEG };
+  return {
+    yaw: idealYaw,
+    pitch: idealPitch,
+    fire: yawErrorDeg <= AIM_TOLERANCE_DEG,
+    weaponId,
+  };
 }

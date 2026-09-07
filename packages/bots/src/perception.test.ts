@@ -120,6 +120,20 @@ describe('findNearestFriendlyStation', () => {
     stepPower(world); // no generator for team 1 -> unpowered
     expect(findNearestFriendlyStation(world, bot)).toBeNull();
   });
+
+  it('prefers a true 3D-nearer station over one only horizontally closer (Codex review round 2, P2)', () => {
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      // Horizontally closer (5 m) but 20 m up -- true 3D distance ~20.6 m.
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 5, y: 20, z: 0 } },
+      // Horizontally farther (8 m) but at the bot's own height -- true 3D distance 8 m.
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 8, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    expect(findNearestFriendlyStation(world, bot)).toBe(2);
+  });
 });
 
 describe('findEscortedCarrier', () => {

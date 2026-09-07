@@ -92,4 +92,13 @@ describe('aimAndFire', () => {
     aimAndFire(world, runtime, bot, targetB);
     expect(runtime.engagedTargetId).toBe(targetB);
   });
+
+  it("returns the chosen weaponId, matching chooseWeapon's own decision for the same distance (Codex review round 2, P2)", () => {
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const closeTarget = addPlayer(world, { x: 0, y: 0, z: CLOSE_RANGE - 5 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    const result = aimAndFire(world, runtime, bot, closeTarget);
+    expect(result.weaponId).toBe(chooseWeapon(world, bot, CLOSE_RANGE - 5));
+  });
 });

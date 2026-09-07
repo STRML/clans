@@ -6,6 +6,7 @@ import {
   type ArmorId,
   type PlayerInput,
   type Vec3,
+  type WeaponId,
   type World,
 } from '@clans/sim';
 import { aimAndFire } from './combat.js';
@@ -171,19 +172,29 @@ function isOutsideDefendLeash(world: World, runtime: BotRuntimeState, targetId: 
 export function decideCombat(
   world: World,
   runtime: BotRuntimeState,
-): { yaw: number; pitch: number; fire: boolean; targetId: number | null } {
+): {
+  yaw: number;
+  pitch: number;
+  fire: boolean;
+  targetId: number | null;
+  weaponId: WeaponId | null;
+} {
   const targetId = findNearestVisibleEnemy(world, runtime.playerId);
   if (targetId === null || isOutsideDefendLeash(world, runtime, targetId)) {
     runtime.engagedTargetId = -1;
-    return { yaw: runtime.aimYaw, pitch: 0, fire: false, targetId: null };
+    return { yaw: runtime.aimYaw, pitch: 0, fire: false, targetId: null, weaponId: null };
   }
-  const { yaw, pitch, fire } = aimAndFire(world, runtime, runtime.playerId, targetId);
-  return { yaw, pitch, fire, targetId };
+  const { yaw, pitch, fire, weaponId } = aimAndFire(world, runtime, runtime.playerId, targetId);
+  return { yaw, pitch, fire, targetId, weaponId };
 }
 
 /** Direct sim call, not a queued wire message (Global Constraints) -- a bot server-side
  *  has no socket, and a station-use decision is a one-shot state change exactly like a
- *  human's own Loadout request, just triggered from here instead of a decoded message. */
+ *  human's own Loadout request, just triggered from here instead of a decoded message.
+ *
+ *  Codex review round 2, finding (P2): this range check used X/Z only, while the real
+ *  gate (baseObjects.ts's stationAt, called internally by applyLoadoutRequest) checks
+ *  full 3D distance -- see findNearestFriendlyStation's own comment (perception.ts). */
 function maybeHeal(world: World, botId: number): void {
   if (!needsHealing(world, botId)) return;
   const stationId = findNearestFriendlyStation(world, botId);
@@ -191,9 +202,11 @@ function maybeHeal(world: World, botId: number): void {
   const base = botId * 3;
   const stationBase = stationId * 3;
   const dx = (world.players.position[base] ?? 0) - (world.baseObjects.position[stationBase] ?? 0);
+  const dy =
+    (world.players.position[base + 1] ?? 0) - (world.baseObjects.position[stationBase + 1] ?? 0);
   const dz =
     (world.players.position[base + 2] ?? 0) - (world.baseObjects.position[stationBase + 2] ?? 0);
-  if (Math.hypot(dx, dz) > STATION_USE_RADIUS) return;
+  if (Math.hypot(dx, dy, dz) > STATION_USE_RADIUS) return;
   applyLoadoutRequest(
     world,
     botId,
@@ -234,7 +247,14 @@ export function stepBot(world: World, graph: WaypointGraph, runtime: BotRuntimeS
     jet: move.jet ?? false,
     fire: combat.fire,
     altFire: false,
-    slot: 0,
+    // Codex review round 2, finding (P2): chooseWeapon (combat.ts) picked a real weapon by
+    // range, but stepBot always sent slot: 0 ("no change" -- weapons.ts's own applySlot),
+    // so every bot fired whatever it happened to already have equipped (the Blaster,
+    // never switched away from at spawn) regardless of what combat.ts decided. weaponIdForSlot's
+    // own inverse (slot = weaponId + 1, since slot 0 means "no change" and slots 1-5 map to
+    // WeaponId 0-4) is the same mapping a human's weapon-select key press uses. No target
+    // -> 0 (no change): weapon choice is only meaningful relative to an engagement distance.
+    slot: combat.weaponId !== null ? combat.weaponId + 1 : 0,
     packActive: false,
     // Real PlayerInput.use is a required field (M5, packages/sim/src/types.ts:23). Never a
     // queued wire message -- see Global Constraints on why mounting is a PlayerInput bit,

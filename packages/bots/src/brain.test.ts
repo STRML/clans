@@ -166,6 +166,39 @@ describe('stepBot', () => {
     expect(world.players.damage[bot]).toBe(0);
   });
 
+  it('does not heal a bot that is horizontally in range but vertically outside STATION_USE_RADIUS (Codex review round 2, P2)', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 10, y: 10, z: 0 }, 1);
+    world.players.damage[bot] = 0.9;
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 10, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 10, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    const graph = buildWaypointGraph([
+      { position: { x: -100, y: 0, z: 0 }, label: 'homeFlag' },
+      { position: { x: 100, y: 0, z: 0 }, label: 'enemyFlag' },
+    ]);
+    stepBot(world, graph, runtime);
+    expect(world.players.damage[bot]).toBe(0.9);
+  });
+
+  it("sets 'slot' to the weapon combat.ts actually chose while engaged, not 0 (Codex review round 2, P2)", () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    addPlayer(world, { x: 0, y: 0, z: 5 }, 2); // close enemy -> chooseWeapon picks the Chaingun (WeaponId 1)
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    const graph = buildWaypointGraph([
+      { position: { x: -100, y: 0, z: 0 }, label: 'homeFlag' },
+      { position: { x: 100, y: 0, z: 0 }, label: 'enemyFlag' },
+    ]);
+    const input = stepBot(world, graph, runtime);
+    expect(input.slot).toBe(2); // WeaponId.Chaingun (1) + 1
+  });
+
   it("returns an object satisfying every field of PlayerInput, including 'use'", () => {
     const world = createWorld(flat, 1);
     setupFlags(world);
