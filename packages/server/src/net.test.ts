@@ -9,7 +9,9 @@ import {
   createWorld,
   FlagState,
   LIGHT_ARMOR,
+  spawnVehicleAtPad,
   stepPower,
+  VehicleKind,
   type Heightfield,
   type PlayerInput,
   type World,
@@ -22,6 +24,7 @@ import {
   encodeInput,
   encodeJoin,
   encodeLoadout,
+  encodeVehicleSpawn,
   EventKind,
   MessageType,
   type NetInputSample,
@@ -1457,5 +1460,74 @@ describe('startNetServer', () => {
     const extras = buildExtras(extrasWorld);
     expect(extras.baseObjects).toHaveLength(1);
     expect(extras.baseObjects[0]?.powered).toBe(1);
+  });
+
+  it('buildExtras includes vehicles', () => {
+    const extrasWorld = createWorld(terrain, 1, 8);
+    createBaseObjects(extrasWorld, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: 5, y: 0, z: 0 } },
+    ]);
+    stepPower(extrasWorld);
+    spawnVehicleAtPad(extrasWorld, 1, VehicleKind.Wildcat);
+    const extras = buildExtras(extrasWorld);
+    expect(extras.vehicles).toHaveLength(1);
+    expect(extras.vehicles[0]?.kind).toBe(VehicleKind.Wildcat);
+  });
+
+  it('a VehicleSpawn message from a player near a powered pad spawns a vehicle', async () => {
+    const vehicleWorld = createWorld(terrain, 1, 8);
+    createBaseObjects(vehicleWorld, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: 1, y: 0, z: 0 } },
+    ]);
+    stepPower(vehicleWorld);
+    const vehicleSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
+    const vehicleServer = startNetServer({
+      world: vehicleWorld,
+      spawns: vehicleSpawns,
+      port: TEST_PORT + 16,
+    });
+    await vehicleServer.ready;
+    const client = await connect(TEST_PORT + 16);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    client.send(encodeVehicleSpawn({ padId: 1, kind: VehicleKind.Shrike }));
+    await wait(10);
+    vehicleServer.tick(1);
+    expect(vehicleWorld.vehicles.count).toBe(1);
+    expect(vehicleWorld.vehicles.active[0]).toBe(1);
+    expect(vehicleWorld.vehicles.kind[0]).toBe(VehicleKind.Shrike);
+    client.close();
+    vehicleServer.close();
+  });
+
+  it('a VehicleSpawn message from a player too far from the named pad is silently ignored', async () => {
+    const vehicleWorld = createWorld(terrain, 1, 8);
+    createBaseObjects(vehicleWorld, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: 500, y: 0, z: 0 } },
+    ]);
+    stepPower(vehicleWorld);
+    const farSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [0, 0, 0], radius: 5 }];
+    const vehicleServer = startNetServer({
+      world: vehicleWorld,
+      spawns: farSpawns,
+      port: TEST_PORT + 17,
+    });
+    await vehicleServer.ready;
+    const client = await connect(TEST_PORT + 17);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    client.send(encodeVehicleSpawn({ padId: 1, kind: VehicleKind.Shrike }));
+    await wait(10);
+    vehicleServer.tick(1);
+    expect(vehicleWorld.vehicles.count).toBe(0);
+    client.close();
+    vehicleServer.close();
   });
 });

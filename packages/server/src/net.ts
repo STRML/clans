@@ -20,7 +20,9 @@ import {
   serializeActivePlayers,
   serializeActiveVehicles,
   setGodMode,
+  spawnVehicleAtPad,
   stepWorld,
+  VEHICLE_PAD_USE_RADIUS,
   type FireEvent,
   type HitResult,
   type PlayerInput,
@@ -38,6 +40,7 @@ import {
   decodeInput,
   decodeJoin,
   decodeLoadout,
+  decodeVehicleSpawn,
   encodeEvent,
   encodeSnapshot,
   encodeWelcome,
@@ -273,6 +276,34 @@ function handleLoadout(
   applyLoadoutRequest(world, entry.session.playerId, armor, repairPack);
 }
 
+/** A refused request (unpowered pad, team already at its pad-derived cap, bad pad id, or the
+ *  sender too far from the named pad) is silently a no-op, matching handleLoadout's own
+ *  convention above: the client's pad menu (Task 13) already only offers a choice while
+ *  standing in a powered pad's use radius, so a legitimate client rarely sends a doomed
+ *  request in the first place -- see the M5 plan's Task 12 notes. `spawnVehicleAtPad` itself
+ *  already re-checks power/cap at call time (never trusts an earlier "in range" result), so
+ *  this handler's own job is only the proximity check spawnVehicleAtPad has no player
+ *  position to make on its own. */
+function positionAt(arr: Float64Array, base: number): [number, number, number] {
+  return [arr[base] ?? 0, arr[base + 1] ?? 0, arr[base + 2] ?? 0];
+}
+
+function handleVehicleSpawn(
+  world: World,
+  clients: Map<WebSocket, ClientEntry>,
+  socket: WebSocket,
+  bytes: Uint8Array,
+): void {
+  const entry = clients.get(socket);
+  if (!entry) return;
+  const { padId, kind } = decodeVehicleSpawn(bytes);
+  if (padId < 0 || padId >= world.baseObjects.count) return;
+  const [px, py, pz] = positionAt(world.players.position, entry.session.playerId * 3);
+  const [bx, by, bz] = positionAt(world.baseObjects.position, padId * 3);
+  if (Math.hypot(px - bx, py - by, pz - bz) > VEHICLE_PAD_USE_RADIUS) return;
+  spawnVehicleAtPad(world, padId, kind);
+}
+
 function handleMessage(
   world: World,
   spawns: SceneSpawn[],
@@ -287,6 +318,7 @@ function handleMessage(
   else if (type === MessageType.Ack) handleAck(clients, now, socket, bytes);
   else if (type === MessageType.God) handleGod(world, clients, socket, bytes);
   else if (type === MessageType.Loadout) handleLoadout(world, clients, socket, bytes);
+  else if (type === MessageType.VehicleSpawn) handleVehicleSpawn(world, clients, socket, bytes);
 }
 
 /**
