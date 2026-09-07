@@ -1029,6 +1029,13 @@ export function stepVehicles(
 ): void {
   const vehicles = world.vehicles;
   flushPendingVehicleFreeIds(vehicles);
+  // One-tick transient signal, same convention pendingDeaths (movement.ts's stepPlayers) and
+  // pendingFireEvents/pendingTurretFireEvents already follow (hash.ts's own POLICY comment):
+  // cleared at the start of every call so a consumer only ever sees this tick's destructions,
+  // not an unbounded history. Nothing in this milestone's client/server actually reads this
+  // yet -- see the PR body's Open follow-ups -- but the array must not silently grow forever
+  // in the meantime regardless of whether anything drains it.
+  world.pendingVehicleDestroyed = [];
 
   const ids = [...inputs.keys()].sort((a, b) => a - b);
   for (const playerId of ids) {

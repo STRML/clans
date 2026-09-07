@@ -599,4 +599,19 @@ describe('vehicle id retention and reuse', () => {
       for (let tick = 0; tick < 5; tick += 1) stepVehicles(world, new Map(), 1 / 32);
     }
   });
+
+  it('pendingVehicleDestroyed does not grow unbounded across many combat destructions', () => {
+    // A one-tick transient signal (hash.ts's own POLICY comment: same convention as
+    // pendingDeaths/pendingFireEvents) -- stepVehicles clears it at the start of every call,
+    // so repeated destructions over a long match never accumulate into an unbounded array.
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    for (let spawn = 0; spawn < 10; spawn += 1) {
+      const id = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat) as number;
+      world.vehicles.energy[id] = 0;
+      applyVehicleDamage(world, id, 10, -1); // destroys it via combat, pushes an event
+      stepVehicles(world, new Map(), 1 / 32);
+    }
+    expect(world.pendingVehicleDestroyed.length).toBeLessThanOrEqual(1);
+  });
 });
