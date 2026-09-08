@@ -128,6 +128,14 @@ TLS-terminating proxy in front of your server) or the connection will never open
 can't reach the server you gave it, it shows a "couldn't connect" message rather than staying
 silently blank.
 
+## Rendering limitations
+
+First-person weapons use a small procedural model with basic weapon variants; original held-gun
+art and firing/reload animations are not implemented. Imported structures and vehicles retain
+their GLB materials and geometry. Source power/destruction visibility is supported for structures,
+but animated mechanical parts and turret aiming remain static. Failed shape loads retain a neutral
+fallback and report the asset URL in the browser console.
+
 ## Develop
 
 ```sh

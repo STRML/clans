@@ -1,3 +1,4 @@
+import { createWeaponModel } from './weapon-model.js';
 import * as THREE from 'three';
 import {
   applyBaseObjectDamage,
@@ -1156,6 +1157,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   world.interiors = await loadInteriorColliders(assets);
   const baseObjectView = createBaseObjectView(scene, assets);
   const vehicleView = createVehicleView(scene, assets);
+  const weaponModel = createWeaponModel();
 
   const camera = new THREE.PerspectiveCamera(
     90,
@@ -1287,6 +1289,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     },
     dispose(): void {
       audio.dispose();
+      weaponModel.dispose();
     },
     frame(dtSeconds: number): void {
       const frameStart = performance.now();
@@ -1372,6 +1375,8 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       if (app.freeCam) moveFreeCam(app, dtSeconds);
       placeCamera(app, sky, dtSeconds);
       renderer.render(scene, camera);
+      weaponModel.sync(world, playerId, app.freeCam);
+      weaponModel.render(renderer, camera.aspect);
       app.stats.frameMs = performance.now() - frameStart;
       updateFps(app, frameStart, fps);
     },

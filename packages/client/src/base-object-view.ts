@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { loadShapeInto } from './shape-loader.js';
 import {
   BASE_OBJECT_DATA,
   BaseObjectKind,
@@ -8,7 +8,7 @@ import {
   type World,
 } from '@clans/sim';
 import type { BaseObjectSnapshotData, TurretSnapshotData } from '@clans/protocol';
-import { shapeUrl, type KatabaticAssets } from './assets.js';
+import { type KatabaticAssets } from './assets.js';
 
 export interface BaseObjectView {
   baseObjectMeshes: Map<number, THREE.Object3D>;
@@ -22,8 +22,6 @@ export interface BaseObjectView {
 }
 
 const DESTROYED_COLOR = new THREE.Color(0x1a1a1a);
-const UNPOWERED_EMISSIVE = new THREE.Color(0x000000);
-const POWERED_EMISSIVE = new THREE.Color(0x2266ff);
 const FORCE_FIELD_KIND = 4; // Matches @clans/sim's BaseObjectKind.ForceField ordinal.
 // forceField.cs:12-18 (defaultForceFieldBare): color, powerOffColor, baseTranslucency,
 // powerOffTranslucency -- see the M4 plan's "ours" numbers table.
@@ -31,14 +29,15 @@ const FORCE_FIELD_POWERED_COLOR = new THREE.Color(0.0, 0.55, 0.99);
 const FORCE_FIELD_UNPOWERED_COLOR = new THREE.Color(0x000000);
 const FORCE_FIELD_TRANSLUCENCY = 0.3;
 
-function placeholderMesh(): THREE.Mesh {
-  // A box stands in for the shape until its real .glb resolves -- createBaseObjectView
-  // returns synchronously (app.ts's frame loop must not block on network), and every
-  // caller of `sync` already tolerates a mesh whose geometry swaps out later.
-  return new THREE.Mesh(
-    new THREE.BoxGeometry(1, 1, 1),
-    new THREE.MeshStandardMaterial({ color: 0x888888, emissive: POWERED_EMISSIVE }),
+function placeholderMesh(): THREE.Group {
+  const group = new THREE.Group();
+  group.add(
+    new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshStandardMaterial({ color: 0x888888 }),
+    ),
   );
+  return group;
 }
 
 /** A flat, translucent quad standing in for the field's real `PhysicalZone` volume -- see
@@ -77,35 +76,6 @@ function forceFieldMesh(placement: KatabaticAssets['scene']['baseObjects'][numbe
   return mesh;
 }
 
-/** Swaps `mesh`'s placeholder geometry for the real loaded shape once the fetch resolves.
- *  Failure is swallowed (not rethrown) rather than surfaced: a missing/slow shape leaves the
- *  placeholder box on screen instead of crashing the render loop or leaving an unhandled
- *  promise rejection, and this file's own tests never wait on a real network fetch. The
- *  `.load()` call itself is wrapped too, not just its error callback: three's `FileLoader`
- *  parses the URL as absolute internally and throws SYNCHRONOUSLY, before the error callback
- *  ever runs, in an environment with no document base URL to resolve a root-relative path
- *  against (Node's test environment, in particular) -- a try/catch here is what keeps that
- *  from crashing createBaseObjectView itself rather than just failing to load one shape. */
-function loadRealShape(mesh: THREE.Mesh, shapeName: string | undefined): void {
-  if (!shapeName) return;
-  try {
-    new GLTFLoader().load(
-      shapeUrl(shapeName),
-      (gltf) => {
-        mesh.geometry.dispose();
-        const real = gltf.scene.getObjectByProperty('type', 'Mesh') as THREE.Mesh | undefined;
-        if (real) mesh.geometry = real.geometry;
-      },
-      undefined,
-      () => {
-        // Swallowed -- see this function's own doc comment.
-      },
-    );
-  } catch {
-    // Swallowed -- see this function's own doc comment.
-  }
-}
-
 function addBaseObjectMesh(
   scene: THREE.Scene,
   meshes: Map<number, THREE.Object3D>,
@@ -116,7 +86,7 @@ function addBaseObjectMesh(
   const mesh = placement.kind === FORCE_FIELD_KIND ? forceFieldMesh(placement) : placeholderMesh();
   mesh.position.fromArray(placement.position);
   if (placement.kind !== FORCE_FIELD_KIND) {
-    loadRealShape(mesh, assets.scene.shapesForBaseObjectKind[placement.kind]);
+    loadShapeInto(mesh, assets.scene.shapesForBaseObjectKind[placement.kind]);
   }
   // Stashed for raycastAimedStructure below, which reads a raycast hit's own mesh back out
   // without needing to search baseObjectMeshes/turretMeshes for it.
@@ -146,7 +116,7 @@ function addInteriorMesh(
     ),
     (placement.rotation.degrees * Math.PI) / 180,
   );
-  loadRealShape(mesh, placement.shape);
+  loadShapeInto(mesh, placement.shape);
   scene.add(mesh);
   meshes.set(id, mesh);
 }
@@ -158,9 +128,17 @@ function addTurretMesh(
   placement: KatabaticAssets['scene']['turrets'][number],
   id: number,
 ): void {
-  const mesh = placeholderMesh();
+  const mesh = new THREE.Group();
   mesh.position.fromArray(placement.position);
-  loadRealShape(mesh, assets.scene.shapesForTurretBarrel[placement.barrel]);
+  const barrel = placeholderMesh();
+  // Large turret GLBs contain only the barrel; the mission uses a separate shared pedestal.
+  mesh.add(barrel);
+  loadShapeInto(barrel, assets.scene.shapesForTurretBarrel[placement.barrel]);
+  if (placement.barrel !== 2) {
+    const base = placeholderMesh();
+    mesh.add(base);
+    loadShapeInto(base, 'turret_base_large');
+  }
   mesh.userData.structureKind = 'turret';
   mesh.userData.structureId = id;
   scene.add(mesh);
@@ -173,38 +151,48 @@ function syncForceField(mesh: THREE.Mesh, o: BaseObjectSnapshotData): void {
   material.opacity = o.powered ? FORCE_FIELD_TRANSLUCENCY : 0; // powerOffTranslucency = 0.0.
 }
 
+// Save authored colors per material, so repair restores the model rather than painting it gray.
+const originalColors = new WeakMap<THREE.Material, THREE.Color>();
+function syncVisibility(node: THREE.Object3D, destroyed: boolean, powered: boolean): void {
+  const visibility = node.userData.vis_keyframes_visibility as number[] | undefined;
+  if (visibility?.length) node.visible = (destroyed ? visibility.at(-1)! : visibility[0]!) > 0;
+  if (node.userData.vis_keyframes_power) node.visible = powered && !destroyed;
+}
+
+function syncStructure(root: THREE.Object3D, destroyed: boolean, powered: boolean): void {
+  root.userData.destroyed = destroyed;
+  root.userData.powered = powered;
+  root.traverse((node) => {
+    syncVisibility(node, destroyed, powered);
+    if (!(node instanceof THREE.Mesh)) return;
+    const materials = Array.isArray(node.material) ? node.material : [node.material];
+    for (const material of materials) {
+      if (!(material instanceof THREE.MeshStandardMaterial)) continue;
+      if (!originalColors.has(material)) originalColors.set(material, material.color.clone());
+      material.color.copy(destroyed ? DESTROYED_COLOR : originalColors.get(material)!);
+    }
+  });
+}
+
 function syncBaseObjects(
   meshes: Map<number, THREE.Object3D>,
   data: BaseObjectSnapshotData[],
 ): void {
   for (const o of data) {
     const mesh = meshes.get(o.id);
-    if (!(mesh instanceof THREE.Mesh)) continue;
-    if (mesh.userData.isForceField) {
+    if (!mesh) continue;
+    if (mesh instanceof THREE.Mesh && mesh.userData.isForceField) {
       syncForceField(mesh, o);
-      continue;
+    } else {
+      syncStructure(mesh, o.destroyed === 1, o.powered === 1);
     }
-    const material = mesh.material as THREE.MeshStandardMaterial;
-    material.color = o.destroyed ? DESTROYED_COLOR : new THREE.Color(0x888888);
-    material.emissive = o.powered ? POWERED_EMISSIVE : UNPOWERED_EMISSIVE;
-    mesh.userData.destroyed = o.destroyed === 1;
   }
 }
 
 function syncTurrets(meshes: Map<number, THREE.Object3D>, data: TurretSnapshotData[]): void {
   for (const t of data) {
     const mesh = meshes.get(t.id);
-    if (!(mesh instanceof THREE.Mesh)) continue;
-    const material = mesh.material as THREE.MeshStandardMaterial;
-    material.color = t.destroyed ? DESTROYED_COLOR : new THREE.Color(0x888888);
-    material.emissive = t.powered ? POWERED_EMISSIVE : UNPOWERED_EMISSIVE;
-    mesh.userData.destroyed = t.destroyed === 1;
-    // Aim: the turret's own barrel data isn't on the wire (protocol's Task 7 deliberately
-    // omits it -- see that task's "position is not on the wire" note); targetId alone
-    // combined with the already-known remote/local player position is enough for the client
-    // to face the mesh the same direction turrets.ts's own fireAt computes. Not implemented
-    // this task -- the mesh's static orientation from placement is a reasonable stand-in
-    // until a future pass wires target-facing rotation.
+    if (mesh) syncStructure(mesh, t.destroyed === 1, t.powered === 1);
   }
 }
 
@@ -272,6 +260,11 @@ function aimedTurretInfo(world: World, id: number): { name: string; healthPercen
  *  within `AIM_RANGE`, reading the hit's own stashed `userData` (set at mesh-creation time
  *  above) rather than searching `baseObjectMeshes`/`turretMeshes` for it. Feeds hud.ts's
  *  aimedStructure row. */
+function isVisible(object: THREE.Object3D): boolean {
+  if (!object.visible) return false;
+  return object.parent ? isVisible(object.parent) : true;
+}
+
 export function raycastAimedStructure(
   camera: THREE.Camera,
   view: Pick<BaseObjectView, 'baseObjectMeshes' | 'turretMeshes'>,
@@ -281,9 +274,11 @@ export function raycastAimedStructure(
   raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
   raycaster.far = AIM_RANGE;
   const objects = [...view.baseObjectMeshes.values(), ...view.turretMeshes.values()];
-  const hit = raycaster.intersectObjects(objects, false)[0];
+  const hit = raycaster.intersectObjects(objects, true).find((hit) => isVisible(hit.object));
   if (!hit) return null;
-  const { structureKind, structureId } = hit.object.userData as {
+  let root: THREE.Object3D = hit.object;
+  while (root.parent && root.userData.structureId === undefined) root = root.parent;
+  const { structureKind, structureId } = root.userData as {
     structureKind?: 'baseObject' | 'turret';
     structureId?: number;
   };
