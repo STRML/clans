@@ -30,7 +30,7 @@ import {
   type Vec3,
   type World,
 } from '@clans/sim';
-import { EventKind } from '@clans/protocol';
+import { EventKind, OrderKind } from '@clans/protocol';
 import type {
   BaseObjectSnapshotData,
   ProjectileSnapshotData,
@@ -46,7 +46,9 @@ import {
   turretsFromWorld,
 } from './base-object-view.js';
 import {
+  canvasToWorld,
   drawCommanderMap,
+  drawOrderMarkers,
   friendlySensorCircles,
   playersFromWorld,
   sensedEnemyIds,
@@ -382,6 +384,7 @@ interface BaseAssetsViewState {
   vehiclePadMenu: VehiclePadMenu;
   vehiclePadMenuState: { open: boolean };
   commanderMapCanvas: HTMLCanvasElement;
+  orderState: { pending: { x: number; z: number } | null };
 }
 
 function remoteToPlayerPosition(player: PlayerSnapshotData): PlayerPosition {
@@ -408,8 +411,34 @@ function drawCommanderMapForTeam(state: BaseAssetsViewState): void {
   const localTeam = state.world.players.team[state.playerId] ?? 1;
   const circles = friendlySensorCircles(state.world, localTeam);
   const players = commanderMapPlayers(state.world, state.net);
-  const sensedIds = sensedEnemyIds(players, localTeam, circles);
+  const sensedIds = sensedEnemyIds(players, localTeam, circles, state.world);
   drawCommanderMap(ctx, state.assets, state.world, players, localTeam, sensedIds);
+  const { minX, minZ, width: areaWidth, depth: areaDepth } = state.assets.scene.missionArea;
+  const { width, height } = ctx.canvas;
+  const toCanvas = (x: number, z: number): [number, number] => [
+    ((x - minX) / areaWidth) * width,
+    ((z - minZ) / areaDepth) * height,
+  ];
+  drawOrderMarkers(ctx, state.net?.orders ?? [], localTeam, toCanvas);
+}
+
+/** Order confirm/cancel: a click on the (visible) commander map already stashed a pending
+ *  world position in `state.orderState.pending` (see the click listener set up alongside
+ *  `commanderMapCanvas`'s own creation); this reads the one-shot digit/Escape edge triggers
+ *  once per frame and turns a pending click into a sent CommandOrder, or drops it. An order
+ *  is a message, not client state (Global Constraints) -- this never mutates
+ *  `state.net.orders` itself, only sends the request; the marker `drawCommanderMapForTeam`
+ *  draws only appears once the server echoes the order back on a later snapshot. */
+function syncCommandOrders(state: BaseAssetsViewState): void {
+  const digit = state.input.digitPressedThisFrame();
+  if (state.input.escapePressedThisFrame()) {
+    state.orderState.pending = null;
+  }
+  const pending = state.orderState.pending;
+  if (digit < 1 || digit > 3 || !pending) return;
+  const kind = digit === 1 ? OrderKind.Attack : digit === 2 ? OrderKind.Defend : OrderKind.Repair;
+  state.net?.sendCommandOrder(kind, pending.x, pending.z);
+  state.orderState.pending = null;
 }
 
 /** Syncs base-object/turret meshes, the station menu, the commander map, and the HUD's
@@ -496,8 +525,10 @@ function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): vo
 
   if (input.commandCirclePressedThisFrame()) {
     state.commanderMapCanvas.hidden = !state.commanderMapCanvas.hidden;
+    if (state.commanderMapCanvas.hidden) state.orderState.pending = null;
   }
   if (!state.commanderMapCanvas.hidden) drawCommanderMapForTeam(state);
+  syncCommandOrders(state);
 
   // A second, redundant hud.update immediately after syncWorldView's own -- see
   // hudSourceFrom's own comment for why aimedStructure isn't computed inside that
@@ -1117,6 +1148,19 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   commanderMapCanvas.height = 512;
   commanderMapCanvas.hidden = true;
   document.body.appendChild(commanderMapCanvas);
+  const orderState: { pending: { x: number; z: number } | null } = { pending: null };
+  // A click only stashes a pending world position -- it never sends anything itself. The
+  // order is only sent once the player confirms a kind with a digit key (syncCommandOrders,
+  // above), matching the loadout menu's own click-then-confirm shape.
+  commanderMapCanvas.addEventListener('click', (event: MouseEvent) => {
+    if (commanderMapCanvas.hidden) return;
+    const ctx = commanderMapCanvas.getContext('2d');
+    if (!ctx) return;
+    const rect = commanderMapCanvas.getBoundingClientRect();
+    const canvasX = ((event.clientX - rect.left) / rect.width) * commanderMapCanvas.width;
+    const canvasY = ((event.clientY - rect.top) / rect.height) * commanderMapCanvas.height;
+    orderState.pending = canvasToWorld(ctx, assets.scene.missionArea, canvasX, canvasY);
+  });
   // Task 7: pure oscillator/noise synthesis, no shipped or fetched audio file (M7 plan,
   // Global Constraints) -- a real AudioContext, not the fake used by audio.test.ts.
   const audio = createAudioEngine({ context: new AudioContext() });
@@ -1243,6 +1287,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
           vehiclePadMenu,
           vehiclePadMenuState,
           commanderMapCanvas,
+          orderState,
         },
         usePressed,
       );

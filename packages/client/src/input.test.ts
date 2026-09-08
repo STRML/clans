@@ -68,3 +68,38 @@ describe('Input: station use (E), Repair Pack (R), commander map (C)', () => {
     expect(input.usePressedThisFrame()).toBe(true); // treated as a fresh press after release
   });
 });
+
+describe('Input.digitPressedThisFrame: one-shot order/voice-bind confirm', () => {
+  it('fires once with the pressed digit on the rising edge, not again while held', () => {
+    const input = new Input({} as HTMLElement);
+    const keys = (input as unknown as { keys: Set<string> }).keys;
+    expect(input.digitPressedThisFrame()).toBe(0);
+    keys.add('Digit2');
+    expect(input.digitPressedThisFrame()).toBe(2);
+    expect(input.digitPressedThisFrame()).toBe(0); // still held, no re-fire
+    keys.delete('Digit2');
+    expect(input.digitPressedThisFrame()).toBe(0);
+    keys.add('Digit7');
+    expect(input.digitPressedThisFrame()).toBe(7); // a fresh press fires again
+  });
+
+  it('releaseAll clears the digit edge state so a held key does not fire stale', () => {
+    const input = new Input({} as HTMLElement);
+    const keys = (input as unknown as { keys: Set<string> }).keys;
+    keys.add('Digit1');
+    expect(input.digitPressedThisFrame()).toBe(1);
+    input.releaseAll();
+    keys.add('Digit1');
+    expect(input.digitPressedThisFrame()).toBe(1); // treated as a fresh press after release
+  });
+});
+
+describe('Input.escapePressedThisFrame', () => {
+  it('fires once on the rising edge, not again while held', () => {
+    const input = new Input({} as HTMLElement);
+    const keys = (input as unknown as { keys: Set<string> }).keys;
+    keys.add('Escape');
+    expect(input.escapePressedThisFrame()).toBe(true);
+    expect(input.escapePressedThisFrame()).toBe(false);
+  });
+});
