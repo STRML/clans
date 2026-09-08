@@ -245,20 +245,20 @@ describe('Light movement', () => {
     ).toBe(0);
   });
 
-  it('refuses a jet at minJetEnergy and never drains below zero', () => {
+  it('refuses a jet below minJetEnergy even after recharge', () => {
     const world = createWorld(flat, 1);
     const id = addPlayer(world, { x: 10, y: 10, z: 10 });
-    world.players.energy[id] = 1;
+    world.players.energy[id] = 0;
     stepWorld(world, inputMap(id, { jet: true }));
-    expect(world.players.energy[id]).toBe(1);
+    expect(world.players.energy[id]).toBeCloseTo(0.256);
     expect(world.players.velocity[id * 3 + 1]).toBeCloseTo(-20 * FIXED_DT);
   });
 
-  it('drains only while jetting and recharges 0.256 per released tick', () => {
+  it('recharges each tick, including while jetting', () => {
     const world = createWorld(flat, 1);
     const id = addPlayer(world, { x: 10, y: 10, z: 10 });
     for (let tick = 0; tick < 10; tick += 1) stepWorld(world, inputMap(id, { jet: true }));
-    expect(world.players.energy[id]).toBeCloseTo(52);
+    expect(world.players.energy[id]).toBeCloseTo(60 - 0.8 * 10 + 0.256 * 9);
     for (let tick = 0; tick < 100; tick += 1) stepWorld(world, inputMap(id, {}));
     expect(world.players.energy[id]).toBeCloseTo(60);
   });
@@ -680,7 +680,7 @@ describe('airborne momentum', () => {
       const world = createWorld(flat, 1);
       const id = addPlayer(world, { x: 100, y: 100, z: 100 });
       world.players.velocity.set([9, 0, 12], id * 3);
-      for (let tick = 0; tick < 63; tick++) stepWorld(world, inputMap(id, { moveZ: 1, jet }));
+      for (let tick = 0; tick < 63; tick++) stepWorld(world, inputMap(id, { jet }));
       expect(world.players.onGround[id]).toBe(0);
       expect(world.players.velocity[id * 3]).toBeCloseTo(9, 8);
       expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(12, 8);
@@ -747,3 +747,56 @@ it.each([25.641, 50, 100, -100])(
     expect(world.players.velocity[id * 3 + 1]).toBeCloseTo(expected, 8);
   },
 );
+
+describe('airborne jet steering', () => {
+  it.each([-1, 1])(
+    'allows slight strafing without braking forward momentum (moveX=%s)',
+    (moveX) => {
+      const world = createWorld(flat, 1);
+      const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+      world.players.velocity[id * 3 + 2] = 15;
+      for (let tick = 0; tick < 16; tick++) stepWorld(world, inputMap(id, { moveX, jet: true }));
+      const lateral = -moveX * world.players.velocity[id * 3]!;
+      expect(lateral).toBeGreaterThan(1);
+      expect(lateral).toBeLessThan(8);
+      expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(15, 8);
+      expect(world.players.onGround[id]).toBe(0);
+    },
+  );
+
+  it('does not steer without jet energy or a held jet button', () => {
+    for (const jet of [false, true]) {
+      const world = createWorld(flat, 1);
+      const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+      world.players.energy[id] = 0;
+      world.players.velocity[id * 3 + 2] = 15;
+      stepWorld(world, inputMap(id, { moveX: 1, jet }));
+      expect(world.players.velocity[id * 3]).toBe(0);
+      expect(world.players.velocity[id * 3 + 2]).toBe(15);
+    }
+  });
+
+  it('rotates strafing with the camera heading', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+    world.players.velocity[id * 3] = 15;
+    for (let tick = 0; tick < 16; tick++)
+      stepWorld(world, inputMap(id, { moveX: 1, yaw: Math.PI / 2, jet: true }));
+    expect(world.players.velocity[id * 3 + 2]).toBeGreaterThan(1);
+    expect(world.players.velocity[id * 3]).toBeCloseTo(15, 8);
+  });
+});
+
+it('sustains light jets for about 3.5 seconds from full energy', () => {
+  const world = createWorld(flat, 1);
+  const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+  let thrustTicks = 0;
+  for (let tick = 0; tick < 150; tick++) {
+    const before = world.players.velocity[id * 3 + 1]!;
+    stepWorld(world, inputMap(id, { jet: true }));
+    if (world.players.velocity[id * 3 + 1]! < before) break;
+    thrustTicks++;
+  }
+  expect(thrustTicks * FIXED_DT).toBeGreaterThan(3.4);
+  expect(thrustTicks * FIXED_DT).toBeLessThan(3.6);
+});

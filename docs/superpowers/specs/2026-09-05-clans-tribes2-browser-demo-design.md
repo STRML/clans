@@ -44,9 +44,9 @@ Repo: `github.com/STRML/clans`, public.
 
 ## Source material
 
-Every gameplay number in this document comes from the T2 base scripts, read in this
-session. No number is a guess. Where a value is an engine default that the scripts do not
-state, the text says so.
+Armor, weapon, and vehicle data below come from the T2 base scripts. Engine equations
+require separate verification; copying a script value does not establish matching behavior.
+Demo tuning and engine defaults are identified where used.
 
 | Source | What it gives us | Where |
 |---|---|---|
@@ -208,8 +208,15 @@ The T2 model, applied per tick:
    `jumpForce` impulse fires once on the ground contact edge, not while held, scaled down
    between `minJumpSpeed` and `maxJumpSpeed` and refused above (Torque's jump code).
 3. Jetting: apply `jetForce` upward while energy is above `minJetEnergy`, drain
-   `jetEnergyDrain` per tick. No air run force. Recharge `rechargeRate` per tick when not
-   jetting (Energy Pack doubles the recharge).
+   `jetEnergyDrain` per tick. Recharge `rechargeRate` every tick before jet drain, including
+   while jetting (later Torque ShapeBase behavior). Light armor sustains about 3.5 seconds
+   from full energy. Original `energypack.cs` adds 0.15 recharge per tick; the Energy Pack
+   is not implemented in this demo.
+   Airborne movement input while jetting adds horizontal acceleration at 20% of
+   `jetForce / mass`, capped by the requested direction's run speed component without
+   braking existing momentum. The 20% factor is demo tuning for slight steering, not a
+   recovered T2 engine constant; the T2 script's horizontal-jet fields alone do not specify
+   the original engine equation.
 4. Velocity resistance: above `horizResistSpeed`, cap speed at `horizMaxSpeed`, then
    subtract `horizResistFactor × dt × (cappedSpeed − horizResistSpeed)`, preserving
    horizontal direction. Apply the corresponding `up*` formula only to upward velocity.
