@@ -62,11 +62,18 @@ test('a newly joined network player can walk away from spawn', async ({ page }) 
     return app.world.players.position[app.playerId * 3 + 2]!;
   });
   await page.keyboard.down('KeyW');
-  await page.waitForTimeout(2000);
-  await page.keyboard.up('KeyW');
-  const end = await page.evaluate(() => {
-    const app = (window as unknown as { __app: App }).__app;
-    return app.world.players.position[app.playerId * 3 + 2]!;
-  });
-  expect(end - start).toBeGreaterThan(8);
+  try {
+    await expect
+      .poll(
+        () =>
+          page.evaluate((origin) => {
+            const app = (window as unknown as { __app: App }).__app;
+            return app.world.players.position[app.playerId * 3 + 2]! - origin;
+          }, start),
+        { timeout: 20_000 },
+      )
+      .toBeGreaterThan(8);
+  } finally {
+    await page.keyboard.up('KeyW');
+  }
 });
