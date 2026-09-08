@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { loadShapeInto } from './shape-loader.js';
+import { mountTurretBarrel } from './turret-mount.js';
 import {
   BASE_OBJECT_DATA,
   BaseObjectKind,
@@ -147,6 +148,7 @@ function addTurretMesh(
 
 function syncForceField(mesh: THREE.Mesh, o: BaseObjectSnapshotData): void {
   const material = mesh.material as THREE.MeshBasicMaterial;
+  mesh.visible = o.powered === 1;
   material.color = o.powered ? FORCE_FIELD_POWERED_COLOR : FORCE_FIELD_UNPOWERED_COLOR;
   material.opacity = o.powered ? FORCE_FIELD_TRANSLUCENCY : 0; // powerOffTranslucency = 0.0.
 }
@@ -192,7 +194,10 @@ function syncBaseObjects(
 function syncTurrets(meshes: Map<number, THREE.Object3D>, data: TurretSnapshotData[]): void {
   for (const t of data) {
     const mesh = meshes.get(t.id);
-    if (mesh) syncStructure(mesh, t.destroyed === 1, t.powered === 1);
+    if (mesh) {
+      mountTurretBarrel(mesh);
+      syncStructure(mesh, t.destroyed === 1, t.powered === 1);
+    }
   }
 }
 

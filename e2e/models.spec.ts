@@ -59,5 +59,26 @@ test('committed Draco shapes decode into complete structures and vehicles', asyn
     return meshes;
   });
   expect(generatorMeshes).toBeGreaterThan(1);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const app = (window as unknown as { __app: App }).__app;
+        const largeTurrets = app.scene.children.filter((node) => node.userData.barrelMounted);
+        return (
+          largeTurrets.length === 4 &&
+          largeTurrets.every((root) => {
+            root.updateWorldMatrix(true, true);
+            const socket = root.getObjectByName('Mount0')!;
+            const mount = root.getObjectByName('Mountpoint')!;
+            return (
+              socket
+                .getWorldPosition(socket.position.clone())
+                .distanceTo(mount.getWorldPosition(mount.position.clone())) < 0.00001
+            );
+          })
+        );
+      }),
+    )
+    .toBe(true);
   expect(errors).toEqual([]);
 });

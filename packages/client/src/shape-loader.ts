@@ -12,13 +12,31 @@ const draco = new DRACOLoader()
   .setWorkerLimit(2);
 const loader = new GLTFLoader().setDRACOLoader(draco);
 
-function disposeFallback(root: THREE.Object3D): void {
+function disposeMeshes(root: THREE.Object3D): void {
+  const geometries = new Set<THREE.BufferGeometry>();
+  const materials = new Set<THREE.Material>();
+  const textures = new Set<THREE.Texture>();
   root.traverse((node) => {
     if (!(node instanceof THREE.Mesh)) return;
-    node.geometry.dispose();
-    const materials = Array.isArray(node.material) ? node.material : [node.material];
-    for (const material of materials) material.dispose();
+    geometries.add(node.geometry);
+    const entries = Array.isArray(node.material) ? node.material : [node.material];
+    for (const material of entries) materials.add(material);
   });
+  for (const material of materials) {
+    for (const value of Object.values(material)) {
+      if (value instanceof THREE.Texture) textures.add(value);
+    }
+    material.dispose();
+  }
+  for (const texture of textures) texture.dispose();
+  for (const geometry of geometries) geometry.dispose();
+}
+
+/** Invalidate pending loads as well as freeing the currently displayed model. */
+export function disposeShape(root: THREE.Object3D): void {
+  root.userData.shapeDisposed = true;
+  disposeMeshes(root);
+  root.clear();
 }
 
 /** Retain the fallback on failure, but make the failing asset visible in diagnostics. */
@@ -35,16 +53,21 @@ export function loadShapeInto(root: THREE.Object3D, name: string | undefined): v
     loader.load(
       url,
       (gltf) => {
+        if (root.userData.shapeDisposed) {
+          disposeMeshes(gltf.scene);
+          return;
+        }
         let hasMesh = false;
         gltf.scene.traverse((node) => {
           if (node instanceof THREE.Mesh) hasMesh = true;
           if (typeof node.userData.vis === 'number') node.visible = node.userData.vis > 0;
         });
         if (!hasMesh) {
+          disposeMeshes(gltf.scene);
           fail(new Error('Shape contains no meshes'));
           return;
         }
-        disposeFallback(root);
+        disposeMeshes(root);
         root.clear();
         root.add(gltf.scene);
         root.userData.shapeStatus = 'loaded';

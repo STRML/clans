@@ -201,6 +201,9 @@ describe('createBaseObjectView', () => {
     const fieldMesh = view.baseObjectMeshes.get(1) as THREE.Mesh;
     const material = fieldMesh.material as THREE.MeshBasicMaterial;
     expect(material.opacity).toBe(0);
+    expect(fieldMesh.visible).toBe(false);
+    view.sync([{ id: 1, damage: 0, destroyed: 0, powered: 1 }], []);
+    expect(fieldMesh.visible).toBe(true);
   });
 
   it('places one mesh per interior at its scene position and requests its real shape (Codex round 1, finding 6)', () => {

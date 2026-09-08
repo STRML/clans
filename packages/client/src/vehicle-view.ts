@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { loadShapeInto } from './shape-loader.js';
+import { disposeShape, loadShapeInto } from './shape-loader.js';
 import { VehicleKind, type World } from '@clans/sim';
 import type { VehicleSnapshotData } from '@clans/protocol';
 import { type KatabaticAssets } from './assets.js';
@@ -207,7 +207,10 @@ function pruneVehicleMeshes(
   for (const id of [...meshes.keys()]) {
     if (liveIds.has(id)) continue;
     const mesh = meshes.get(id);
-    if (mesh) scene.remove(mesh);
+    if (mesh) {
+      scene.remove(mesh);
+      disposeShape(mesh);
+    }
     meshes.delete(id);
   }
 }
