@@ -40,6 +40,7 @@ export interface ClientSceneData {
     kind: number;
     team: number;
     position: [number, number, number];
+    usePosition?: [number, number, number];
     // Mission transforms are preserved for every structure.
     rotation?: { axis: [number, number, number]; degrees: number };
     scale?: [number, number, number];

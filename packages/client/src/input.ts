@@ -12,6 +12,8 @@ export class Input {
   jet = false;
   fire = false;
   sensitivity = 0.002;
+  uiOpen = false;
+  private resumeClick = false;
   private readonly keys = new Set<string>();
   private wasUseHeld = false;
   private wasCommandCircleHeld = false;
@@ -24,12 +26,18 @@ export class Input {
   attach(): void {
     const { target } = this;
     target.addEventListener('click', () => {
-      if (document.pointerLockElement !== target) target.requestPointerLock();
+      if (this.uiOpen) return;
+      this.resumeClick = false;
+      if (document.pointerLockElement !== target) {
+        void target.requestPointerLock()?.catch(() => {
+          this.resumeClick = true;
+        });
+      }
     });
     target.addEventListener('contextmenu', (event) => event.preventDefault());
     window.addEventListener('keydown', (event) => {
       if (event.code === 'Space' || event.code.startsWith('F')) event.preventDefault();
-      this.keys.add(event.code);
+      if (!event.repeat) this.keys.add(event.code);
     });
     window.addEventListener('keyup', (event) => this.keys.delete(event.code));
     window.addEventListener('blur', () => this.releaseAll());
@@ -37,6 +45,7 @@ export class Input {
       if (document.pointerLockElement !== target) this.releaseAll();
     });
     target.addEventListener('mousedown', (event) => {
+      if (this.uiOpen || this.resumeClick) return;
       if (event.button === 2) this.jet = true;
       else if (event.button === 0) this.fire = true;
     });
@@ -48,7 +57,7 @@ export class Input {
   }
 
   private look(event: MouseEvent): void {
-    if (document.pointerLockElement !== this.target) return;
+    if (this.uiOpen || document.pointerLockElement !== this.target) return;
     this.yaw -= event.movementX * this.sensitivity;
     this.pitch = Math.max(
       -PITCH_LIMIT,
@@ -66,6 +75,17 @@ export class Input {
     this.wasAnyDigitHeld = false;
     this.wasEscapeHeld = false;
     this.wasVoiceMenuHeld = false;
+  }
+
+  /** Menus own mouse/keyboard actions until closed; the next canvas click resumes look. */
+  setUiOpen(open: boolean): void {
+    if (open === this.uiOpen) return;
+    this.uiOpen = open;
+    this.releaseAll();
+    if (open) {
+      this.resumeClick = true;
+      if (document.pointerLockElement === this.target) document.exitPointerLock();
+    }
   }
 
   isDown(code: string): boolean {
@@ -136,6 +156,20 @@ export class Input {
 
   /** The sim input for this tick. Keys work without pointer lock; only the mouse needs it. */
   snapshot(): PlayerInput {
+    if (this.uiOpen)
+      return {
+        moveX: 0,
+        moveZ: 0,
+        yaw: this.yaw,
+        pitch: this.pitch,
+        jump: false,
+        jet: false,
+        fire: false,
+        altFire: false,
+        slot: 0,
+        packActive: false,
+        use: false,
+      };
     const axis = (positive: string, negative: string): number =>
       (this.isDown(positive) ? 1 : 0) - (this.isDown(negative) ? 1 : 0);
     return {

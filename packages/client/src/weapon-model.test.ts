@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { type World, WeaponId } from '@clans/sim';
 import { createWeaponModel } from './weapon-model.js';
+
+vi.mock('./shape-loader.js', () => ({ loadShapeInto: vi.fn(), disposeShape: vi.fn() }));
 
 describe('first-person weapon', () => {
   it('tracks weapon selection and hides when dead, mounted, or in free camera', () => {
@@ -12,6 +14,9 @@ describe('first-person weapon', () => {
       },
     } as unknown as World;
     const view = createWeaponModel();
+    expect(view.root.parent?.type).toBe('Scene');
+    expect(view.root.children).toHaveLength(5);
+    for (const model of view.root.children) expect(model.children[0]?.type).toBe('Mesh');
     view.sync(world, 0, false);
     expect(view.root.visible).toBe(true);
     expect(view.root.userData.weaponId).toBe(WeaponId.Spinfusor);

@@ -1,9 +1,15 @@
+import { quat, vec3 } from 'gl-matrix';
 import { attachShapeTextures, prepareVehicleAsset } from './textures.js';
 import textureSources from './texture-sources.json' with { type: 'json' };
 import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ASSET_SIZE_BUDGET_BYTES, extractTriangles, writeTriangleBinary } from './interiors.js';
+import {
+  ASSET_SIZE_BUDGET_BYTES,
+  extractAttachment,
+  extractTriangles,
+  writeTriangleBinary,
+} from './interiors.js';
 import { parseMission } from './mis.js';
 import { extractScene } from './scene.js';
 import { decodeTer } from './ter.js';
@@ -123,7 +129,26 @@ const ALL_SHAPE_NAMES = [
   'turret_muzzlepoint',
   'turret_sentry',
   'vehicle_pad',
+  'vehicle_pad_station',
 ];
+
+// T2 station.cs creates StationVehicle dynamically at the pad's Mount0 attachment.
+// Convert the DTS basis half-turn, then the mission placement; do not guess an offset.
+const attachment = await extractAttachment(
+  resolve(cache, 'shapes.vl2/shapes/vehicle_pad.glb'),
+  'Mount0',
+);
+const baseObjects = mission.baseObjects.map((placement) => {
+  if (placement.kind !== 3) return placement;
+  const [x, y, z] = attachment;
+  const rotation = placement.rotation ?? { axis: [0, 1, 0], degrees: 0 };
+  const axis = vec3.normalize(vec3.create(), rotation.axis);
+  const orientation = quat.setAxisAngle(quat.create(), axis, (rotation.degrees * Math.PI) / 180);
+  const local = vec3.multiply(vec3.create(), [-x, y, -z], placement.scale ?? [1, 1, 1]);
+  vec3.transformQuat(local, local, orientation);
+  vec3.add(local, local, placement.position);
+  return { ...placement, usePosition: Array.from(local) };
+});
 
 const shapesDir = resolve(output, 'shapes');
 const collisionDir = resolve(output, 'collision');
@@ -142,6 +167,18 @@ for (const name of ALL_SHAPE_NAMES) {
   await writeFile(resolve(collisionDir, `${name}.collision.bin`), collisionBytes);
   totalBytes += collisionBytes.byteLength;
 }
+for (const name of [
+  'weapon_disc',
+  'weapon_chaingun',
+  'weapon_mortar',
+  'weapon_sniper',
+  'weapon_energy',
+]) {
+  const bytes = await readFile(resolve(cache, 'shapes.vl2/shapes', `${name}.glb`));
+  await writeFile(resolve(shapesDir, `${name}.glb`), attachShapeTextures(bytes));
+  totalBytes += bytes.byteLength;
+}
+
 if (totalBytes > ASSET_SIZE_BUDGET_BYTES) {
   throw new Error(
     `Interior/shape assets total ${String(totalBytes)} bytes, over the ${String(ASSET_SIZE_BUDGET_BYTES)} byte budget`,
@@ -207,6 +244,7 @@ await writeFile(
   `${JSON.stringify(
     {
       ...mission,
+      baseObjects,
       shapesForBaseObjectKind: SHAPE_FOR_BASE_OBJECT_KIND,
       shapesForTurretBarrel: SHAPE_FOR_TURRET_BARREL,
       vehicles,

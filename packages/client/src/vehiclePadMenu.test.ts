@@ -7,7 +7,7 @@ import {
   stepPower,
   type Heightfield,
 } from '@clans/sim';
-import { vehiclePadMenuVisible } from './vehiclePadMenu.js';
+import { vehiclePadMenuVisible, vehicleStationTriggerAt } from './vehiclePadMenu.js';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -54,3 +54,16 @@ describe('vehiclePadMenuVisible', () => {
 // same line and only unit-tests stationMenuVisible for the same reason. The real click-through
 // (choosing Shrike/Wildcat sends VehicleSpawn) is covered by Task 14's Playwright e2e spec,
 // which runs in a real browser.
+
+it('uses the separate vehicle control station, not the vehicle spawning platform', () => {
+  const { world } = poweredPadWorld();
+  world.baseObjects.usePosition.set([14, 1, 0], 3);
+  const player = addPlayer(world, { x: 1, y: 0, z: 0 }, 1);
+  expect(vehiclePadMenuVisible(world, player, true)).toBe(false);
+  expect(vehicleStationTriggerAt(world, player)).toBeNull();
+  world.players.position.set([14, 0, 0], player * 3);
+  expect(vehiclePadMenuVisible(world, player, true)).toBe(true);
+  expect(vehicleStationTriggerAt(world, player)).toBe(1);
+  world.baseObjects.powered[1] = 0;
+  expect(vehicleStationTriggerAt(world, player)).toBeNull();
+});

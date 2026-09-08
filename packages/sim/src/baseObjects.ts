@@ -96,6 +96,8 @@ export interface BaseObjectStore {
   kind: Uint8Array;
   team: Uint8Array;
   position: Float64Array;
+  /** Static interaction origin, distinct from a vehicle spawning platform. */
+  usePosition: Float64Array;
   damage: Float64Array;
   destroyed: Uint8Array;
   energy: Float64Array;
@@ -110,6 +112,7 @@ export function createEmptyBaseObjects(): BaseObjectStore {
     kind: new Uint8Array(BASE_OBJECT_CAPACITY),
     team: new Uint8Array(BASE_OBJECT_CAPACITY),
     position: new Float64Array(BASE_OBJECT_CAPACITY * 3),
+    usePosition: new Float64Array(BASE_OBJECT_CAPACITY * 3),
     damage: new Float64Array(BASE_OBJECT_CAPACITY),
     destroyed: new Uint8Array(BASE_OBJECT_CAPACITY),
     energy: new Float64Array(BASE_OBJECT_CAPACITY),
@@ -163,16 +166,18 @@ export function createBaseObjects(
     kind: BaseObjectKind;
     team: number;
     position: Vec3;
+    usePosition?: Vec3;
     rotation?: { axis: Vec3; degrees: number };
     scale?: Vec3;
   }>,
 ): void {
   const store = world.baseObjects;
-  placements.forEach(({ kind, team, position, rotation, scale }, id) => {
+  placements.forEach(({ kind, team, position, usePosition = position, rotation, scale }, id) => {
     if (id >= BASE_OBJECT_CAPACITY) throw new RangeError('Base object capacity exceeded');
     store.kind[id] = kind;
     store.team[id] = team;
     store.position.set([position.x, position.y, position.z], id * 3);
+    store.usePosition.set([usePosition.x, usePosition.y, usePosition.z], id * 3);
     store.damage[id] = 0;
     store.destroyed[id] = 0;
     store.energy[id] = BASE_OBJECT_DATA[kind].maxEnergy;

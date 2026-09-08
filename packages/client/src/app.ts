@@ -1,3 +1,4 @@
+import { createInteractionPrompt } from './interaction-prompt.js';
 import { createWeaponModel } from './weapon-model.js';
 import * as THREE from 'three';
 import {
@@ -80,6 +81,7 @@ import {
 import {
   createVehiclePadMenu,
   vehiclePadMenuVisible,
+  vehicleStationTriggerAt,
   type VehiclePadMenu,
 } from './vehiclePadMenu.js';
 import { createVoiceMenu, speakVoiceLine, type VoiceMenu } from './voicebinds.js';
@@ -130,6 +132,7 @@ export interface App {
   camera: THREE.PerspectiveCamera;
   scene: THREE.Scene;
   renderer: THREE.WebGLRenderer;
+  weaponModel: ReturnType<typeof createWeaponModel>;
   /**
    * WONTFIX (PR #4, M2 status table): only reachable through the F1 debug panel
    * (debug.ts), never during normal play. Codex round 15 found that running this above
@@ -157,6 +160,15 @@ export interface App {
    *  reload, a test harness constructing several -- leaked a real OS-level audio device
    *  context). Idempotent; safe to call more than once. */
   dispose(): void;
+}
+
+function gameplayInput(app: App, usePressed: boolean): PlayerInput {
+  const { input, world, playerId } = app;
+  if (app.freeCam) return { ...IDLE, yaw: input.yaw, pitch: input.pitch };
+  return {
+    ...input.snapshot(),
+    use: !input.uiOpen && usePressed && canSendVehicleUse(world, playerId),
+  };
 }
 
 function toHeightfield(assets: KatabaticAssets): Heightfield {
@@ -378,7 +390,7 @@ interface BaseAssetsViewState {
   vehicleView: VehicleView;
   vehicleBuffers: Map<number, VehicleBuffer>;
   vehiclePadMenu: VehiclePadMenu;
-  vehiclePadMenuState: { open: boolean };
+  vehiclePadMenuState: { open: boolean; triggerPad: number | null };
   commanderMapCanvas: HTMLCanvasElement;
   orderState: { pending: { x: number; z: number } | null };
   voiceMenu: VoiceMenu;
@@ -459,7 +471,12 @@ function syncCommandOrders(state: BaseAssetsViewState): void {
   const digit = state.input.digitPressedThisFrame();
   if (state.input.escapePressedThisFrame()) {
     state.orderState.pending = null;
-    if (state.voiceMenu.visible) state.voiceMenu.hide();
+    state.voiceMenu.hide();
+    state.stationMenuState.open = false;
+    state.vehiclePadMenuState.open = false;
+    state.stationMenu.hide();
+    state.vehiclePadMenu.hide();
+    state.commanderMapCanvas.hidden = true;
   }
   if (!confirmPendingOrder(state, digit)) confirmVoiceLine(state, digit);
 }
@@ -474,25 +491,44 @@ function syncCommandOrders(state: BaseAssetsViewState): void {
  *  that function's own complexity under budget. */
 function syncMenus(state: BaseAssetsViewState, pressed: boolean): void {
   const { world, playerId } = state;
-  const mounted = (world.players.mountedVehicleId[playerId] ?? -1) !== -1;
-  // A mounted player's own E press is exclusively about dismounting (canSendVehicleUse
-  // already covers that on the wire side) -- it must not also pop the pad menu open, which
-  // would otherwise happen every time simply because the vehicle sits within its own pad's
-  // use radius.
-  if (pressed && !mounted) {
-    state.stationMenuState.open = !state.stationMenuState.open;
-    state.vehiclePadMenuState.open = !state.vehiclePadMenuState.open;
-  }
-  state.stationMenuState.open = stationMenuVisible(world, playerId, state.stationMenuState.open);
+  if (pressed) toggleUseMenu(state);
+  state.stationMenuState.open =
+    stationMenuVisible(world, playerId, state.stationMenuState.open) &&
+    !!world.players.alive[playerId];
   if (state.stationMenuState.open) state.stationMenu.show();
   else state.stationMenu.hide();
+  syncVehicleStationMenu(state);
+}
 
-  state.vehiclePadMenuState.open = vehiclePadMenuVisible(
-    world,
-    playerId,
-    state.vehiclePadMenuState.open,
-  );
-  const padId = state.vehiclePadMenuState.open ? vehiclePadAt(world, playerId) : null;
+function toggleUseMenu(state: BaseAssetsViewState): void {
+  if (state.stationMenuState.open || state.vehiclePadMenuState.open) {
+    state.stationMenuState.open = false;
+    state.vehiclePadMenuState.open = false;
+    return;
+  }
+  if (!state.commanderMapCanvas.hidden || state.voiceMenu.visible) return;
+  if (canSendVehicleUse(state.world, state.playerId)) return;
+  state.stationMenuState.open = stationMenuVisible(state.world, state.playerId, true);
+  state.vehiclePadMenuState.open =
+    !state.stationMenuState.open && vehiclePadMenuVisible(state.world, state.playerId, true);
+}
+
+function syncVehicleStationMenu(state: BaseAssetsViewState): void {
+  const { world, playerId, vehiclePadMenuState: menu } = state;
+  const trigger = vehicleStationTriggerAt(world, playerId);
+  if (
+    trigger !== null &&
+    trigger !== menu.triggerPad &&
+    state.commanderMapCanvas.hidden &&
+    !state.voiceMenu.visible
+  ) {
+    menu.open = true;
+    state.stationMenuState.open = false;
+    state.stationMenu.hide();
+  }
+  menu.triggerPad = trigger;
+  menu.open = vehiclePadMenuVisible(world, playerId, menu.open) && !!world.players.alive[playerId];
+  const padId = menu.open ? vehiclePadAt(world, playerId) : null;
   if (padId !== null) state.vehiclePadMenu.show(padId);
   else state.vehiclePadMenu.hide();
 }
@@ -537,12 +573,18 @@ export function vehicleRenderData(state: {
  *  budget, the same reason `syncMenus` already exists as its own function. */
 function syncMapAndVoiceToggles(state: BaseAssetsViewState): void {
   const { input } = state;
-  if (input.commandCirclePressedThisFrame()) {
+  const mapPressed = input.commandCirclePressedThisFrame();
+  const voicePressed = input.voiceMenuPressedThisFrame();
+  if (state.stationMenuState.open || state.vehiclePadMenuState.open) return;
+  if (mapPressed) {
+    state.voiceMenu.hide();
     state.commanderMapCanvas.hidden = !state.commanderMapCanvas.hidden;
     if (state.commanderMapCanvas.hidden) state.orderState.pending = null;
   }
   if (!state.commanderMapCanvas.hidden) drawCommanderMapForTeam(state);
-  if (input.voiceMenuPressedThisFrame()) {
+  if (voicePressed) {
+    state.commanderMapCanvas.hidden = true;
+    state.orderState.pending = null;
     if (state.voiceMenu.visible) state.voiceMenu.hide();
     else state.voiceMenu.show();
   }
@@ -563,6 +605,12 @@ function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): vo
   syncMenus(state, usePressed);
   syncMapAndVoiceToggles(state);
   syncCommandOrders(state);
+  state.input.setUiOpen(
+    state.stationMenuState.open ||
+      state.vehiclePadMenuState.open ||
+      !state.commanderMapCanvas.hidden ||
+      state.voiceMenu.visible,
+  );
 
   // A second, redundant hud.update immediately after syncWorldView's own -- see
   // hudSourceFrom's own comment for why aimedStructure isn't computed inside that
@@ -904,7 +952,11 @@ export function teleportPlayerToVehiclePad(world: World, playerId: number, team:
     if (bases.kind[id] !== BaseObjectKind.StationVehiclePad || bases.team[id] !== team) continue;
     const base = id * 3;
     world.players.position.set(
-      [bases.position[base] ?? 0, bases.position[base + 1] ?? 0, bases.position[base + 2] ?? 0],
+      [
+        bases.usePosition[base] ?? 0,
+        bases.usePosition[base + 1] ?? 0,
+        bases.usePosition[base + 2] ?? 0,
+      ],
       playerId * 3,
     );
     return;
@@ -1104,18 +1156,23 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   // (damage/destroyed/powered/...) onto this same store by id once a connection exists.
   createBaseObjects(
     world,
-    assets.scene.baseObjects.map(({ kind, team, position: [x, y, z], rotation, scale }) => ({
-      kind,
-      team,
-      position: { x, y, z },
-      ...(rotation && {
-        rotation: {
-          axis: { x: rotation.axis[0], y: rotation.axis[1], z: rotation.axis[2] },
-          degrees: rotation.degrees,
-        },
+    assets.scene.baseObjects.map(
+      ({ kind, team, position: [x, y, z], usePosition, rotation, scale }) => ({
+        kind,
+        team,
+        position: { x, y, z },
+        ...(usePosition && {
+          usePosition: { x: usePosition[0], y: usePosition[1], z: usePosition[2] },
+        }),
+        ...(rotation && {
+          rotation: {
+            axis: { x: rotation.axis[0], y: rotation.axis[1], z: rotation.axis[2] },
+            degrees: rotation.degrees,
+          },
+        }),
+        ...(scale && { scale: { x: scale[0], y: scale[1], z: scale[2] } }),
       }),
-      ...(scale && { scale: { x: scale[0], y: scale[1], z: scale[2] } }),
-    })),
+    ),
   );
   createTurrets(
     world,
@@ -1182,21 +1239,33 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   crosshair.id = 'crosshair';
   document.body.appendChild(crosshair);
   const hud = createHud(document.body, hudSourceFrom(world, playerId, net));
+  const interactionPrompt = createInteractionPrompt(document.body);
   const stationMenuState = { open: false };
   const stationMenu: StationMenu = createStationMenu(
     document.body,
     (armor: ArmorId, repairPack) => {
       if (net) net.sendLoadout(armor, repairPack);
       else applyLoadoutRequest(world, playerId, armor, repairPack);
+      stationMenuState.open = false;
+      input.setUiOpen(false);
+    },
+    () => {
+      stationMenuState.open = false;
+      input.setUiOpen(false);
     },
   );
-  const vehiclePadMenuState = { open: false };
+  const vehiclePadMenuState = { open: false, triggerPad: null as number | null };
   const vehiclePadMenu: VehiclePadMenu = createVehiclePadMenu(
     document.body,
     (padId: number, kind: VehicleKind) => {
       if (net) net.sendVehicleSpawn(padId, kind);
       else spawnVehicleAtPad(world, padId, kind);
       vehiclePadMenuState.open = false;
+      input.setUiOpen(false);
+    },
+    () => {
+      vehiclePadMenuState.open = false;
+      input.setUiOpen(false);
     },
   );
   const commanderMapCanvas = document.createElement('canvas');
@@ -1245,6 +1314,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     camera,
     scene,
     renderer,
+    weaponModel,
     timeScale: 1,
     paused: false,
     stepOnce: false,
@@ -1288,6 +1358,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     dispose(): void {
       audio.dispose();
       weaponModel.dispose();
+      interactionPrompt.dispose();
     },
     frame(dtSeconds: number): void {
       const frameStart = performance.now();
@@ -1303,9 +1374,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       // and syncBaseAssetsView's own station/pad menu toggles below, rather than each calling
       // it separately.
       const usePressed = !app.freeCam && input.usePressedThisFrame();
-      const currentInput = app.freeCam
-        ? { ...IDLE, yaw: input.yaw, pitch: input.pitch }
-        : { ...input.snapshot(), use: usePressed && canSendVehicleUse(world, playerId) };
+      const currentInput = gameplayInput(app, usePressed);
       const simStart = performance.now();
       if (net) {
         stepNetworked(net, app.stats, currentInput, steps, scene, remoteMeshes, remoteBuffers);
@@ -1369,6 +1438,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         usePressed,
       );
 
+      interactionPrompt.update(world, playerId, input.uiOpen || app.freeCam);
       if (app.freeCam) moveFreeCam(app, dtSeconds);
       placeCamera(app, sky, dtSeconds);
       updateStationHumAudio(world, audio);

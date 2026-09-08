@@ -40,6 +40,7 @@ interface SceneBaseObject {
   kind: number;
   team: number;
   position: [number, number, number];
+  usePosition?: [number, number, number];
   // Mission transforms are retained for every base object.
   rotation?: { axis: [number, number, number]; degrees: number };
   scale?: [number, number, number];
@@ -127,10 +128,13 @@ export async function loadKatabaticWorld(
   );
   createBaseObjects(
     world,
-    scene.baseObjects.map(({ kind, team, position: [x, y, z], rotation, scale }) => ({
+    scene.baseObjects.map(({ kind, team, position: [x, y, z], usePosition, rotation, scale }) => ({
       kind,
       team,
       position: { x, y, z },
+      ...(usePosition && {
+        usePosition: { x: usePosition[0], y: usePosition[1], z: usePosition[2] },
+      }),
       ...(rotation && {
         rotation: {
           axis: { x: rotation.axis[0], y: rotation.axis[1], z: rotation.axis[2] },

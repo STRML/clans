@@ -1,25 +1,49 @@
 import * as THREE from 'three';
 import { WeaponId, type World } from '@clans/sim';
+import { disposeShape, loadShapeInto } from './shape-loader.js';
 
-/** Procedural presentation art; dimensions and colors have no gameplay effect. */
+const WEAPON_SHAPES: Record<WeaponId, string> = {
+  [WeaponId.Spinfusor]: 'weapon_disc',
+  [WeaponId.Chaingun]: 'weapon_chaingun',
+  [WeaponId.Mortar]: 'weapon_mortar',
+  [WeaponId.LaserRifle]: 'weapon_sniper',
+  [WeaponId.Blaster]: 'weapon_energy',
+};
+
+/** Original weapon meshes, mounted to their authored grip in a separate first-person scene. */
 export function createWeaponModel() {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(65, 1, 0.01, 10);
   const root = new THREE.Group();
   root.name = 'first-person-weapon';
-  root.position.set(0.28, -0.23, -0.55);
-  const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0x38454d, roughness: 0.6 });
-  const accent = new THREE.MeshStandardMaterial({ color: 0x55ccff, emissive: 0x123344 });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.13, 0.34), bodyMaterial);
-  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.045, 0.28, 12), accent);
-  barrel.rotation.x = Math.PI / 2;
-  barrel.position.set(0, 0.015, -0.25);
-  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.18, 0.09), bodyMaterial);
-  grip.position.set(0, -0.13, 0.08);
-  const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 0.06, 16), accent);
-  disc.position.set(0, 0.065, -0.06);
-  root.add(body, barrel, grip, disc);
-  scene.add(root, new THREE.HemisphereLight(0xdcefff, 0x39424b, 3));
+  root.position.set(0.26, -0.24, -0.4);
+  scene.add(root);
+  const models = new Map<number, THREE.Group>();
+  for (const [id, name] of Object.entries(WEAPON_SHAPES)) {
+    const model = new THREE.Group();
+    const fallback = new THREE.Mesh(
+      new THREE.BoxGeometry(0.12, 0.12, 0.4),
+      new THREE.MeshStandardMaterial({ color: 0x777777 }),
+    );
+    fallback.position.z = -0.2;
+    model.add(fallback);
+    model.name = name;
+    model.userData.weaponId = Number(id);
+    model.visible = false;
+    root.add(model);
+    models.set(Number(id), model);
+    loadShapeInto(model, name, Math.PI, (loaded) => {
+      loaded.updateWorldMatrix(true, true);
+      const mount = loaded.getObjectByName('Mountpoint');
+      if (mount) {
+        const point = model.worldToLocal(mount.getWorldPosition(new THREE.Vector3()));
+        loaded.position.sub(point);
+      }
+      // Presentation scale only; original mesh proportions and mount/muzzle direction stay intact.
+      model.scale.setScalar(0.65);
+    });
+  }
+  scene.add(new THREE.HemisphereLight(0xdcefff, 0x39424b, 3));
   const light = new THREE.DirectionalLight(0xffffff, 2);
   light.position.set(-1, 2, 1);
   scene.add(light);
@@ -31,9 +55,7 @@ export function createWeaponModel() {
       (world.players.mountedVehicleId[playerId] ?? -1) === -1;
     const weapon = world.players.weaponSlot[playerId];
     root.userData.weaponId = weapon;
-    disc.visible = weapon === WeaponId.Spinfusor;
-    barrel.scale.set(1, weapon === WeaponId.LaserRifle ? 1.8 : 1, 1);
-    body.scale.set(weapon === WeaponId.Mortar ? 1.4 : 1, 1, 1);
+    for (const [id, model] of models) model.visible = id === weapon;
   }
 
   return {
@@ -52,9 +74,8 @@ export function createWeaponModel() {
       renderer.autoClear = autoClear;
     },
     dispose(): void {
-      for (const mesh of [body, barrel, grip, disc]) mesh.geometry.dispose();
-      bodyMaterial.dispose();
-      accent.dispose();
+      for (const model of models.values()) disposeShape(model);
+      root.clear();
     },
   };
 }

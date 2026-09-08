@@ -86,3 +86,17 @@ export function writeTriangleBinary(triangles: ExtractedTriangles): Uint8Array {
  *  this task fetches is 1,278,076 bytes; this budget covers that plus the extracted
  *  collision binaries (roughly the same order of magnitude) with real headroom. */
 export const ASSET_SIZE_BUDGET_BYTES = 8 * 1024 * 1024;
+
+/** Converted model-space attachment point, including its complete DTS hierarchy. */
+export async function extractAttachment(
+  glbPath: string,
+  name: string,
+): Promise<[number, number, number]> {
+  const doc = await (await createIO()).read(glbPath);
+  const node = doc
+    .getRoot()
+    .listNodes()
+    .find((item) => item.getName() === name);
+  if (!node) throw new Error(`Missing attachment ${name} in ${glbPath}`);
+  return node.getWorldTranslation();
+}
