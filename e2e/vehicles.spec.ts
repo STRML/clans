@@ -7,18 +7,24 @@ declare global {
   }
 }
 
-/** `page.keyboard.press` fires keydown/keyup back to back, fast enough that the game's own
- *  requestAnimationFrame loop can miss the down state entirely between two rendered frames --
- *  usePressedThisFrame() (input.ts) needs to observe the key held on at least one frame to
- *  register the edge. A real, if brief, hold plus a settle pause after release guarantees
- *  several frames see both the press and its own aftermath, matching how every other e2e
- *  spec in this suite already drives a held key (movement.spec.ts, weapons.spec.ts) rather
- *  than a bare `press`. */
+/** Wait for the game to observe each edge, even with slow software-rendered frames. */
 async function tapE(page: Page): Promise<void> {
   await page.keyboard.down('KeyE');
-  await page.waitForTimeout(300);
-  await page.keyboard.up('KeyE');
-  await page.waitForTimeout(300);
+  try {
+    await waitForSimTick(page);
+  } finally {
+    await page.keyboard.up('KeyE');
+  }
+  await waitForSimTick(page);
+}
+
+async function waitForSimTick(page: Page): Promise<void> {
+  const tick = await page.evaluate(() => (window as unknown as { __app: App }).__app.world.tick);
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __app: App }).__app.world.tick), {
+      timeout: 10_000,
+    })
+    .toBeGreaterThan(tick);
 }
 
 /** Presses E, retrying if needed, until `check` returns true -- covers a heavily loaded CI
@@ -73,7 +79,6 @@ test('spawn a Wildcat, mount, drive, dismount', async ({ page }) => {
     return { x, z };
   });
   await page.keyboard.down('KeyW');
-  await page.keyboard.down('Space');
   try {
     await expect
       .poll(
@@ -90,7 +95,6 @@ test('spawn a Wildcat, mount, drive, dismount', async ({ page }) => {
       .toBeLessThan(3);
   } finally {
     await page.keyboard.up('KeyW');
-    await page.keyboard.up('Space');
   }
 
   // #hud-vehicle is empty while unmounted (hud.ts's vehicleRow) and reads
