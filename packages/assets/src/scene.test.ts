@@ -28,19 +28,20 @@ async function loadFixtureScene() {
 describe('scene extraction', () => {
   it('converts position and rotation axes exactly once', () => {
     expect(torquePositionToYUp('1 2 3')).toEqual([1, 3, -2]);
-    expect(torqueAxisAngleToYUp('1 2 3 90')).toEqual({ axis: [1, 3, -2], degrees: 90 });
+    expect(torqueAxisAngleToYUp('1 2 3 90')).toEqual({ axis: [1, 3, -2], degrees: -90 });
   });
 
   it('extracts typed leaves and inherited team membership', async () => {
     const source = await readFile(new URL('./__fixtures__/scene.mis', import.meta.url), 'utf8');
     const scene = extractScene(parseMission(source));
-    // 223146 = row 103 col 170 once the stray high bits are masked; 747683 = row 104 col 163.
-    expect(scene.terrain.emptySquares).toEqual([103 * 256 + 170, 104 * 256 + 163]);
+    // High 16 bits encode run lengths: three squares followed by eleven squares.
+    const holes = [26538, 26539, 26540, ...Array.from({ length: 11 }, (_, i) => 26787 + i)];
+    expect(scene.terrain.emptySquares).toEqual(holes);
     expect(scene.terrain).toEqual({
       terrainFile: 'Katabatic.ter',
       squareSize: 8,
       position: [-1024, 0, 1024],
-      emptySquares: [103 * 256 + 170, 104 * 256 + 163],
+      emptySquares: holes,
     });
     expect(scene.sun.direction).toEqual([0.57735, -0.57735, -0.57735]);
     expect(scene.sky.visibleDistance).toBe(500);
@@ -52,7 +53,7 @@ describe('scene extraction', () => {
     ]);
     expect(scene.flags).toEqual([{ team: 1, position: [330, 75, 180] }]);
     expect(scene.flagStands).toEqual([
-      { team: 1, position: [330, 75, 180], rotation: { axis: [0, 1, 0], degrees: 45 } },
+      { team: 1, position: [330, 75, 180], rotation: { axis: [0, 1, 0], degrees: -45 } },
     ]);
   });
 
@@ -128,12 +129,22 @@ describe('buildTurrets', () => {
   });
 });
 
+it('retains a sentry mounting rotation instead of placing it upright', async () => {
+  const source = await readFile(new URL('./__fixtures__/scene.mis', import.meta.url), 'utf8');
+  const changed = source.replace(
+    'position = "60 0 0";\n    rotation = "0 0 1 0";',
+    'position = "60 0 0";\n    rotation = "1 0 0 180";',
+  );
+  const sentry = extractScene(parseMission(changed)).turrets.find((t) => t.barrel === 2);
+  expect(sentry?.rotation).toEqual({ axis: [1, 0, 0], degrees: -180 });
+});
+
 describe('buildInteriors', () => {
   it('extracts an interior placement with its shape name (extension stripped), position, and rotation', async () => {
     const scene = await loadFixtureScene();
     const bunker = scene.interiors.find((i) => i.shape === 'sbunk2');
     expect(bunker?.position).toEqual([70, 0, 0]);
-    expect(bunker?.rotation.degrees).toBe(45);
+    expect(bunker?.rotation.degrees).toBe(-45);
   });
 });
 
@@ -144,15 +155,15 @@ describe('buildBaseObjects: force fields', () => {
       (o) => o.kind === BASE_OBJECT_KIND.ForceField && o.team === 1,
     );
     expect(field?.position).toEqual([80, 0, 0]);
-    expect(field?.rotation?.degrees).toBe(90);
+    expect(field?.rotation?.degrees).toBe(-90);
     expect(field?.scale).toEqual([1, 6, 4]); // torqueScaleToYUp swaps Y/Z, no negation.
   });
-  it('every non-ForceField base object leaves rotation and scale undefined', async () => {
+  it('preserves a non-ForceField base object rotation and scale', async () => {
     const scene = await loadFixtureScene();
     const gen = scene.baseObjects.find(
       (o) => o.kind === BASE_OBJECT_KIND.Generator && o.team === 1,
     );
-    expect(gen?.rotation).toBeUndefined();
-    expect(gen?.scale).toBeUndefined();
+    expect(gen?.rotation).toEqual({ axis: [0, 1, 0], degrees: 0 });
+    expect(gen?.scale).toEqual([1, 1, 1]);
   });
 });

@@ -12,6 +12,7 @@ function fakeAudioContext() {
     gain: {
       value: 0,
       setValueAtTime: vi.fn(),
+      setTargetAtTime: vi.fn(),
       linearRampToValueAtTime: vi.fn(),
       exponentialRampToValueAtTime: vi.fn(),
     },
@@ -44,6 +45,25 @@ function fakeAudioContext() {
 }
 
 describe('createAudioEngine', () => {
+  it('keeps distant generator hum silent and updates level as the listener moves', () => {
+    const ctx = fakeAudioContext();
+    const position = { x: 100, y: 0, z: 0 };
+    const engine = createAudioEngine({ context: ctx as unknown as AudioContext, position });
+    engine.setStationHum(0, { x: 0, y: 0, z: 0 }, true);
+    expect(ctx.createOscillator).not.toHaveBeenCalled();
+    position.x = 1;
+    engine.setStationHum(0, { x: 0, y: 0, z: 0 }, true);
+    expect(ctx.createOscillator).toHaveBeenCalledTimes(2);
+    const gain = ctx.createGain.mock.results.at(-1)!.value;
+    const near = gain.gain.setTargetAtTime.mock.calls.at(-1)![0] as number;
+    position.x = 12;
+    engine.setStationHum(0, { x: 0, y: 0, z: 0 }, true);
+    expect(gain.gain.setTargetAtTime.mock.calls.at(-1)![0]).toBeLessThan(near);
+    position.x = 100;
+    engine.setStationHum(0, { x: 0, y: 0, z: 0 }, true);
+    for (const osc of ctx.createOscillator.mock.results) expect(osc.value.stop).toHaveBeenCalled();
+  });
+
   it('weaponFire builds an oscillator graph for the Spinfusor', () => {
     const ctx = fakeAudioContext();
     const engine = createAudioEngine({ context: ctx as unknown as AudioContext });

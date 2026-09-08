@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import type { App } from '../packages/client/src/app.js';
 
 test('loads Katabatic and reaches running speed', async ({ page }) => {
   await page.goto('/');
@@ -6,17 +7,25 @@ test('loads Katabatic and reaches running speed', async ({ page }) => {
   await page
     .locator('#debug-stats[data-ready="1"]')
     .waitFor({ state: 'attached', timeout: 30_000 });
-  // Run first, then hold Space. A held jump fires on every landing, so pressing both from a
-  // standstill would measure hopping, not running.
-  //
-  // W+D, not W alone: M4 added real interior collision, and the default facing direction
-  // (yaw 0, W alone) runs straight into a wall of the sbunk2 interior a short distance from
-  // this team's spawn point within about 1.6 s -- a real, correct wall collision against the
-  // committed Katabatic geometry, not a sim bug. This test has no pointer lock to steer via
-  // mouse look, so W+D's diagonal heading is the way to pick a different world direction with
-  // only keyboard input; it was checked directly against the same collision data (a headless
-  // sim run, not just this e2e test) to confirm it stays clear and sustains a running speed
-  // comfortably over this test's >5 m/s bar.
+  // Test acceleration on the open center valley, independently of the bunker spawn's walls.
+  await page.evaluate(() => {
+    const app = (window as unknown as { __app: App }).__app;
+    const terrain = app.assets.terrain;
+    const col = 128,
+      row = 128;
+    const y =
+      app.assets.heights[row * terrain.gridSize + col]! / terrain.heightScale + terrain.origin.y;
+    app.world.players.position.set(
+      [
+        terrain.origin.x + col * terrain.squareSize,
+        y + 0.1,
+        terrain.origin.z - row * terrain.squareSize,
+      ],
+      app.playerId * 3,
+    );
+    app.world.players.velocity.fill(0, app.playerId * 3, app.playerId * 3 + 3);
+  });
+  // Run first, then hold Space; starting with both measures hopping rather than running.
   await page.keyboard.down('KeyW');
   await page.keyboard.down('KeyD');
   await page.waitForTimeout(2_000);

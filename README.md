@@ -104,7 +104,8 @@ prioritize it over their own default behavior.
 Every sound in the game is synthesized at runtime with the Web Audio API. There are no sampled
 audio files. Weapon fire, explosions, footsteps, jetting, skiing, flag touch and capture, and
 station power hum are all generated from oscillators and filtered noise buffers
-(`packages/client/src/audio.ts`).
+(`packages/client/src/audio.ts`). Generator hum is quiet local ambience: it fades with camera
+distance and is silent beyond 24 m or when the generator is destroyed/unpowered.
 
 ## Voice binds
 

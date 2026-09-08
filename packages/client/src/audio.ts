@@ -6,6 +6,8 @@ export const AUDIO_MASTER_GAIN = 0.6; // Ours -- headroom so overlapping effects
 export const FOOTSTEP_INTERVAL_S = 0.35; // Ours -- reads as a jog, not a machine-gun of clicks.
 
 interface AudioLike {
+  /** Mutable listener position, usually the active camera position. */
+  position?: Vec3;
   context: Pick<
     AudioContext,
     | 'currentTime'
@@ -161,6 +163,7 @@ function synthFootstep(context: AudioLike['context'], master: GainNode): void {
 }
 
 interface Loop {
+  setLevel?(level: number): void;
   stop(): void;
 }
 
@@ -207,15 +210,19 @@ function startStationHumLoop(context: AudioLike['context'], master: GainNode): L
   oscA.frequency.value = 55;
   oscB.frequency.value = 110;
   const gain = context.createGain() as GainNode;
-  gain.gain.value = 0.05;
+  gain.gain.value = 0;
   oscA.connect(gain).connect(master);
   oscB.connect(gain);
   oscA.start();
   oscB.start();
   return {
+    setLevel: (level) => gain.gain.setTargetAtTime(level * 0.025, context.currentTime, 0.1),
     stop: () => {
       oscA.stop();
       oscB.stop();
+      oscA.disconnect();
+      oscB.disconnect();
+      gain.disconnect();
     },
   };
 }
@@ -281,8 +288,14 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
     footstep(_position): void {
       synthFootstep(context, master);
     },
-    setStationHum(id, _position, active): void {
-      setLoop(loops, `hum:${String(id)}`, active, () => startStationHumLoop(context, master));
+    setStationHum(id, position, active): void {
+      const ear = listener.position ?? { x: 0, y: 0, z: 0 };
+      const distance = Math.hypot(position.x - ear.x, position.y - ear.y, position.z - ear.z);
+      // Ours: quiet room ambience, inaudible beyond 24 m; no map-wide oscillator bed.
+      const level = Math.max(0, 1 - distance / 24) ** 2;
+      const key = `hum:${String(id)}`;
+      setLoop(loops, key, active && level > 0, () => startStationHumLoop(context, master));
+      loops.get(key)?.setLevel?.(level);
     },
     resume(): void {
       if (context.state === 'suspended') void context.resume?.();

@@ -39,7 +39,7 @@ interface SceneBaseObject {
   kind: number;
   team: number;
   position: [number, number, number];
-  // ForceField placements only -- every other kind leaves both undefined.
+  // Mission transforms are retained for every base object.
   rotation?: { axis: [number, number, number]; degrees: number };
   scale?: [number, number, number];
 }
@@ -180,8 +180,8 @@ export function spawnPointFor(
   const chosen = teamSpawns[index % teamSpawns.length];
   if (!chosen) throw new Error(`No spawn point for team ${String(team)}`);
   const [x, y, z] = chosen.position;
-  const ground = sampleTerrain(terrain, x, z).height;
-  return [x, Math.max(y, ground + 0.1), z];
+  const ground = sampleTerrain(terrain, x, z);
+  return [x, ground.empty ? y : Math.max(y, ground.height + 0.1), z];
 }
 
 /**

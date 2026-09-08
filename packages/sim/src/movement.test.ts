@@ -56,6 +56,30 @@ describe('Light movement', () => {
     ).toBeCloseTo(15, 1);
   });
 
+  it('runs, stops, and jumps on an interior floor above the terrain', () => {
+    const world = createWorld(flat, 1);
+    world.interiors = [
+      buildInteriorCollider(
+        {
+          positions: new Float32Array([
+            0, 10, 0, 0, 10, 100, 100, 10, 100, 0, 10, 0, 100, 10, 100, 100, 10, 0,
+          ]),
+        },
+        { position: { x: 0, y: 0, z: 0 }, rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 } },
+      ),
+    ];
+    const id = addPlayer(world, { x: 10, y: 10, z: 10 });
+    for (let tick = 0; tick < 60; tick++) stepWorld(world, inputMap(id, { moveZ: 1 }));
+    expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(15, 1);
+    expect(world.players.onGround[id]).toBe(1);
+    expect(world.players.position[id * 3 + 1]).toBeCloseTo(10, 3);
+    for (let tick = 0; tick < 30; tick++) stepWorld(world, inputMap(id, {}));
+    expect(Math.abs(world.players.velocity[id * 3 + 2]!)).toBeLessThan(0.1);
+    stepWorld(world, inputMap(id, { jump: true }));
+    expect(world.players.velocity[id * 3 + 1]).toBeGreaterThan(0);
+    expect(world.players.onGround[id]).toBe(0);
+  });
+
   it('a Heavy player accelerates toward 7 m/s forward, not the Light 15 m/s cap', () => {
     const world = createWorld(flat, 1);
     const id = addPlayer(world, { x: 0, y: 0, z: 0 }, 1, ArmorId.Heavy);
