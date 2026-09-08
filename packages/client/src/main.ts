@@ -1,4 +1,4 @@
-import { createApp } from './app.js';
+import { createApp, type App } from './app.js';
 import { createDebug } from './debug.js';
 
 declare global {
@@ -10,6 +10,7 @@ declare global {
       isStationPowered(team: number): boolean;
       teleportToVehiclePad(team: number): void;
     };
+    __app?: App;
   }
 }
 
@@ -25,6 +26,9 @@ window.__clansDebug = {
   isStationPowered: (team) => app.debugIsStationPowered(team),
   teleportToVehiclePad: (team) => app.debugTeleportToVehiclePad(team),
 };
+// e2e-only handle (Playwright's command-circuit.spec.ts polls net.orders off it) -- never
+// ships in a production Pages build.
+if (import.meta.env.DEV || import.meta.env.MODE === 'test') window.__app = app;
 const debug = createDebug(app, document.body);
 let last = performance.now();
 const tick = (now: number): void => {
