@@ -212,9 +212,9 @@ The T2 model, applied per tick:
    while jetting (later Torque ShapeBase behavior). Light armor sustains about 3.5 seconds
    from full energy. Original `energypack.cs` adds 0.15 recharge per tick; the Energy Pack
    is not implemented in this demo.
-   Airborne movement input while jetting adds horizontal acceleration at 20% of
+   Airborne movement input while jetting adds horizontal acceleration at 40% of
    `jetForce / mass`, capped by the requested direction's run speed component without
-   braking existing momentum. The 20% factor is demo tuning for slight steering, not a
+   braking existing momentum. The 40% factor is demo tuning for slight steering, not a
    recovered T2 engine constant; the T2 script's horizontal-jet fields alone do not specify
    the original engine equation.
 4. Velocity resistance: above `horizResistSpeed`, cap speed at `horizMaxSpeed`, then

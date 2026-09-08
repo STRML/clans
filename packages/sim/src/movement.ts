@@ -177,7 +177,7 @@ function applyJump(body: Body, armor: ArmorData, startVy: number): boolean {
 }
 
 // Demo tuning: slight directional thrust, not a claimed original T2 engine constant.
-const JET_STEERING_FRACTION = 0.2;
+const JET_STEERING_FRACTION = 0.4;
 
 function applyJetSteering(body: Body, input: PlayerInput, armor: ArmorData, dt: number): void {
   const magnitude = Math.hypot(input.moveX, input.moveZ);

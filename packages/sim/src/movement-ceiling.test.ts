@@ -34,26 +34,27 @@ const idle: PlayerInput = {
   use: false,
 };
 
+// Wide enough to keep the full player under the roof throughout the strafe test.
 function lowCeiling(height: number): Float32Array {
   return new Float32Array([
-    -10,
+    -20,
     height,
-    -10,
-    10,
+    -20,
+    20,
     height,
-    10,
-    10,
+    20,
+    20,
     height,
-    -10,
-    -10,
+    -20,
+    -20,
     height,
-    -10,
-    -10,
+    -20,
+    -20,
     height,
-    10,
-    10,
+    20,
+    20,
     height,
-    10,
+    20,
   ]);
 }
 
