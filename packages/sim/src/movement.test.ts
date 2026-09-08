@@ -757,7 +757,7 @@ describe('airborne jet steering', () => {
       world.players.velocity[id * 3 + 2] = 15;
       for (let tick = 0; tick < 16; tick++) stepWorld(world, inputMap(id, { moveX, jet: true }));
       const lateral = -moveX * world.players.velocity[id * 3]!;
-      expect(lateral).toBeGreaterThan(1);
+      expect(lateral).toBeGreaterThan(4);
       expect(lateral).toBeLessThan(8);
       expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(15, 8);
       expect(world.players.onGround[id]).toBe(0);
