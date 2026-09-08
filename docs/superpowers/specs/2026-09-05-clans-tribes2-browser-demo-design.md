@@ -210,9 +210,14 @@ The T2 model, applied per tick:
 3. Jetting: apply `jetForce` upward while energy is above `minJetEnergy`, drain
    `jetEnergyDrain` per tick. No air run force. Recharge `rechargeRate` per tick when not
    jetting (Energy Pack doubles the recharge).
-4. Velocity resistance: above `horizResistSpeed`, scale horizontal velocity by
-   `1 − horizResistFactor × dt`, hard cap at `horizMaxSpeed`. Same for vertical with the
-   `up*` numbers.
+4. Velocity resistance: above `horizResistSpeed`, cap speed at `horizMaxSpeed`, then
+   subtract `horizResistFactor × dt × (cappedSpeed − horizResistSpeed)`, preserving
+   horizontal direction. Apply the corresponding `up*` formula only to upward velocity.
+   Below the thresholds, airborne motion has no additional drag in this demo.
+   This threshold equation follows later Torque3D's `Player::updateMove`; it is not
+   evidence that original T2 had zero air drag. The linked
+   [Unity recreation](https://github.com/amterp/tribes-movement) likewise informs the
+   intended momentum-preserving ski behavior, rather than establishing original-engine fidelity.
 5. Fall damage: landing speed above `minJumpSpeed` scales by `speedDamageScale`.
 6. Surface angle: above `runSurfaceAngle` (70°) the player slides; above
    `jumpSurfaceAngle` (80°) the jump impulse is refused.

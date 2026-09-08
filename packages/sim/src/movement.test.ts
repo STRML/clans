@@ -700,10 +700,50 @@ describe('airborne momentum', () => {
   });
 });
 
-it('still applies horizontal resistance above its threshold while airborne', () => {
+it.each([33.001, 50, 100])(
+  'resists only horizontal speed above the threshold (speed=%s)',
+  (speed) => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+    world.players.velocity[id * 3 + 2] = speed;
+    stepWorld(world, inputMap(id, { jet: true }));
+    const capped = Math.min(speed, 68);
+    expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(
+      capped - 0.35 * FIXED_DT * (capped - 33),
+      8,
+    );
+  },
+);
+
+it('holding Space preserves momentum across repeated landings; releasing it restores ground braking', () => {
   const world = createWorld(flat, 1);
-  const id = addPlayer(world, { x: 100, y: 100, z: 100 });
-  world.players.velocity[id * 3 + 2] = 50;
-  stepWorld(world, inputMap(id, { jet: true }));
-  expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(50 * (1 - 0.35 * FIXED_DT));
+  const id = addPlayer(world, { x: 100, y: 0, z: 100 });
+  world.players.velocity[id * 3 + 2] = 25;
+  let landings = 0;
+  let wasGrounded = true;
+  for (let tick = 0; tick < 320; tick++) {
+    stepWorld(world, inputMap(id, { jump: true }));
+    const grounded = world.players.onGround[id] === 1;
+    if (grounded && !wasGrounded) landings++;
+    wasGrounded = grounded;
+    expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(25, 8);
+  }
+  expect(landings).toBeGreaterThan(5);
+  for (let tick = 0; tick < 100; tick++) stepWorld(world, inputMap(id, {}));
+  expect(world.players.onGround[id]).toBe(1);
+  expect(world.players.velocity[id * 3 + 2]).toBe(0);
 });
+
+it.each([25.641, 50, 100, -100])(
+  'applies upward resistance only to excess upward speed (vy=%s)',
+  (vy) => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+    world.players.velocity[id * 3 + 1] = vy;
+    stepWorld(world, inputMap(id, {}));
+    const accelerated = vy - 20 * FIXED_DT;
+    const capped = Math.min(accelerated, 80);
+    const expected = capped > 25 ? capped - 0.3 * FIXED_DT * (capped - 25) : capped;
+    expect(world.players.velocity[id * 3 + 1]).toBeCloseTo(expected, 8);
+  },
+);

@@ -197,20 +197,17 @@ function applyJet(
 
 function applyResistance(body: Body, armor: ArmorData, dt: number): void {
   const horizontal = Math.hypot(body.vx, body.vz);
-  if (horizontal > armor.horizMaxSpeed) {
-    const scale = armor.horizMaxSpeed / horizontal;
+  // Torque-style resistance acts on the excess above the threshold, after capping.
+  if (horizontal > armor.horizResistSpeed) {
+    const capped = Math.min(horizontal, armor.horizMaxSpeed);
+    const resisted = capped - armor.horizResistFactor * dt * (capped - armor.horizResistSpeed);
+    const scale = resisted / horizontal;
     body.vx *= scale;
     body.vz *= scale;
-  } else if (horizontal > armor.horizResistSpeed) {
-    const decay = 1 - armor.horizResistFactor * dt;
-    body.vx *= decay;
-    body.vz *= decay;
   }
-  const vertical = Math.abs(body.vy);
-  if (vertical > armor.upMaxSpeed) {
-    body.vy = Math.sign(body.vy) * armor.upMaxSpeed;
-  } else if (vertical > armor.upResistSpeed) {
-    body.vy *= 1 - armor.upResistFactor * dt;
+  if (body.vy > armor.upResistSpeed) {
+    const capped = Math.min(body.vy, armor.upMaxSpeed);
+    body.vy = capped - armor.upResistFactor * dt * (capped - armor.upResistSpeed);
   }
 }
 
