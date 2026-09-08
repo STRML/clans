@@ -67,3 +67,7 @@ Draco-compressed meshes via [draco3dgltf](https://github.com/google/draco) (Apac
 does its own vector/matrix math with [gl-matrix](https://github.com/toji/gl-matrix) (MIT). All
 four are build-time-only devDependencies of `packages/assets`: their output is the committed
 data under `assets/out/`, not code any shipped package imports at runtime.
+
+The browser also ships the Apache-2.0 Draco WebAssembly decoder and wrapper distributed with
+Three.js. Vite bundles these files locally; no external decoder CDN is used. The procedural
+first-person weapon model is original presentation geometry created for this project.

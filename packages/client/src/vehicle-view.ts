@@ -1,8 +1,8 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { disposeShape, loadShapeInto } from './shape-loader.js';
 import { VehicleKind, type World } from '@clans/sim';
 import type { VehicleSnapshotData } from '@clans/protocol';
-import { shapeUrl, type KatabaticAssets } from './assets.js';
+import { type KatabaticAssets } from './assets.js';
 
 export interface VehicleView {
   meshes: Map<number, THREE.Object3D>;
@@ -185,29 +185,6 @@ function proceduralMesh(kind: VehicleKind): THREE.Group {
   return group;
 }
 
-/** Swaps every mesh in `group` for the real loaded shape's geometry once the fetch resolves
- *  -- same swallow-on-failure convention base-object-view.ts's loadRealShape already
- *  established (a missing/slow shape leaves the procedural placeholder on screen, never
- *  crashes the render loop). */
-function loadRealShape(group: THREE.Group, shapeFileName: string): void {
-  const url = shapeUrl(shapeFileName.replace(/\.glb$/, ''));
-  try {
-    new GLTFLoader().load(
-      url,
-      (gltf) => {
-        group.clear();
-        group.add(gltf.scene);
-      },
-      undefined,
-      () => {
-        // Swallowed -- the procedural placeholder already on `group` stays visible.
-      },
-    );
-  } catch {
-    // Swallowed -- see this function's own doc comment.
-  }
-}
-
 function vehicleAssetFor(
   assets: Pick<KatabaticAssets, 'scene'>,
   kind: VehicleKind,
@@ -218,7 +195,7 @@ function vehicleAssetFor(
 function createVehicleMesh(assets: Pick<KatabaticAssets, 'scene'>, kind: VehicleKind): THREE.Group {
   const group = proceduralMesh(kind);
   const asset = vehicleAssetFor(assets, kind);
-  if (asset.source !== 'procedural') loadRealShape(group, asset.shape);
+  if (asset.source !== 'procedural') loadShapeInto(group, asset.shape.replace(/\.glb$/, ''));
   return group;
 }
 
@@ -230,7 +207,10 @@ function pruneVehicleMeshes(
   for (const id of [...meshes.keys()]) {
     if (liveIds.has(id)) continue;
     const mesh = meshes.get(id);
-    if (mesh) scene.remove(mesh);
+    if (mesh) {
+      scene.remove(mesh);
+      disposeShape(mesh);
+    }
     meshes.delete(id);
   }
 }
