@@ -10,7 +10,7 @@ import {
   createWorld,
   FlagState,
   RETURN_TICKS,
-  sampleTerrain,
+  findSpawnPosition,
   groundHeightAt,
   type Heightfield,
   type InteriorInstance,
@@ -164,25 +164,19 @@ export function smallerTeam(world: World): number {
   return teamCount(world, 1) <= teamCount(world, 2) ? 1 : 2;
 }
 
-/**
- * Raises a spawn that sits below the terrain to just above it, matching the correction
- * the single-player client applies to the same mission data (app.ts's spawnPoint): the
- * committed scene has at least one team spawn below its sampled terrain height, and
- * without this the network path placed a player underground until the next simulated
- * tick's ground-contact resolution pushed them back up.
- */
 export function spawnPointFor(
   terrain: Heightfield,
   spawns: SceneSpawn[],
   team: number,
   index: number,
+  interiors: readonly InteriorInstance[] = [],
 ): [number, number, number] {
   const teamSpawns = spawns.filter((spawn) => spawn.team === team);
   const chosen = teamSpawns[index % teamSpawns.length];
   if (!chosen) throw new Error(`No spawn point for team ${String(team)}`);
   const [x, y, z] = chosen.position;
-  const ground = sampleTerrain(terrain, x, z);
-  return [x, ground.empty ? y : Math.max(y, ground.height + 0.1), z];
+  const point = findSpawnPosition(terrain, interiors, { x, y, z }, chosen.radius, index);
+  return [point.x, point.y, point.z];
 }
 
 /**
@@ -214,7 +208,13 @@ export function dropFlagsCarriedBy(world: World, playerId: number): void {
 }
 
 export function addOneBot(world: World, spawns: SceneSpawn[], team: number): number {
-  const [x, y, z] = spawnPointFor(world.terrain, spawns, team, teamCount(world, team));
+  const [x, y, z] = spawnPointFor(
+    world.terrain,
+    spawns,
+    team,
+    teamCount(world, team),
+    world.interiors,
+  );
   return addPlayer(world, { x, y, z }, team);
 }
 

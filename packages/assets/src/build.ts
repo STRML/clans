@@ -1,3 +1,5 @@
+import { attachShapeTextures } from './textures.js';
+import textureSources from './texture-sources.json' with { type: 'json' };
 import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -133,9 +135,9 @@ for (const name of ALL_SHAPE_NAMES) {
     ? 'interiors.vl2/interiors'
     : 'shapes.vl2/shapes';
   const glbBytes = await readFile(resolve(cache, sourceDir, `${name}.glb`));
-  await writeFile(resolve(shapesDir, `${name}.glb`), glbBytes);
+  await writeFile(resolve(shapesDir, `${name}.glb`), attachShapeTextures(glbBytes));
   totalBytes += glbBytes.byteLength;
-  const triangles = await extractTriangles(resolve(shapesDir, `${name}.glb`));
+  const triangles = await extractTriangles(resolve(cache, sourceDir, `${name}.glb`));
   const collisionBytes = writeTriangleBinary(triangles);
   await writeFile(resolve(collisionDir, `${name}.collision.bin`), collisionBytes);
   totalBytes += collisionBytes.byteLength;
@@ -194,7 +196,7 @@ for (const spec of VEHICLE_SHAPES) {
         `${STL_FALLBACK_BASE}${spec.stlName}.stl`,
       );
   if (resolved.bytes) {
-    await writeFile(resolve(shapesDir, spec.outputName), resolved.bytes);
+    await writeFile(resolve(shapesDir, spec.outputName), attachShapeTextures(resolved.bytes));
   }
   vehicles[spec.kind] = { source: resolved.source, shape: spec.outputName };
 }
@@ -212,3 +214,10 @@ await writeFile(
     2,
   )}\n`,
 );
+
+// Original diffuse textures are external to the exported GLBs; animated IFLs use frame 1.
+for (const [key, source] of Object.entries(textureSources)) {
+  const directory = resolve(output, 'textures', key.split('/')[0]!);
+  await mkdir(directory, { recursive: true });
+  await copyFile(resolve(cache, source), resolve(output, 'textures', `${key}.png`));
+}

@@ -191,7 +191,13 @@ function handleJoin(
     return;
   }
   const team = smallerTeam(world);
-  const [x, y, z] = spawnPointFor(world.terrain, spawns, team, teamCount(world, team));
+  const [x, y, z] = spawnPointFor(
+    world.terrain,
+    spawns,
+    team,
+    teamCount(world, team),
+    world.interiors,
+  );
   let playerId: number;
   try {
     playerId = addPlayer(world, { x, y, z }, team);
@@ -664,6 +670,7 @@ function respawnDuePlayers(world: World, spawns: SceneSpawn[], history: Position
       spawns,
       team,
       teamCount(world, team) - 1 + alreadyPlaced,
+      world.interiors,
     );
     respawnPlayer(world, id, { x, y, z });
     clearHistory(history, id);

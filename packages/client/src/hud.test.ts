@@ -112,7 +112,7 @@ describe('describeHud', () => {
       winnerTeam: 2,
       gameOverReason: GameOverReason.CaptureLimit,
     });
-    expect(rowsOf(source)['hud-game-over']).toBe('Team 2 wins');
+    expect(rowsOf(source)['hud-game-over']).toBe('Match ended: Team 2 wins. Movement is paused.');
   });
 
   it('names a time-limit win with "on time"', () => {
@@ -121,7 +121,9 @@ describe('describeHud', () => {
       winnerTeam: 1,
       gameOverReason: GameOverReason.TimeLimit,
     });
-    expect(rowsOf(source)['hud-game-over']).toBe('Team 1 wins on time');
+    expect(rowsOf(source)['hud-game-over']).toBe(
+      'Match ended: Team 1 wins on time. Movement is paused.',
+    );
   });
 
   it('names a time-limit tie as a tie, not a team win', () => {
@@ -130,7 +132,7 @@ describe('describeHud', () => {
       winnerTeam: 0,
       gameOverReason: GameOverReason.TimeLimit,
     });
-    expect(rowsOf(source)['hud-game-over']).toBe('Tie game');
+    expect(rowsOf(source)['hud-game-over']).toBe('Match ended: tie game. Movement is paused.');
   });
 
   it('shows nothing before the game ends', () => {

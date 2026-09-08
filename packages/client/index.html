@@ -46,6 +46,18 @@
         pointer-events: none;
         text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
       }
+      #hud-game-over:not(:empty) {
+        position: fixed;
+        top: 35%;
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(560px, 80vw);
+        padding: 24px;
+        background: rgba(12, 20, 28, 0.92);
+        border: 1px solid #90a4ae;
+        font-size: 24px;
+        text-align: center;
+      }
       #hud-kill-feed {
         position: fixed;
         top: 8px;

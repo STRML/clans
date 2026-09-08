@@ -137,6 +137,15 @@ their GLB materials and geometry. Source power/destruction visibility is support
 but animated mechanical parts and turret aiming remain static. Failed shape loads retain a neutral
 fallback and report the asset URL in the browser console.
 
+Spawn areas are sampled for clear outdoor ground, shared by the local game and server
+for joining players, bots, and respawns. The selection checks slopes, terrain cut-outs,
+headroom, and space to walk; mission sphere centers are not used as player transforms.
+
+The asset build resolves original diffuse textures from each GLB's `resource_path`,
+packages 86 texture files locally, and preserves baked interior lightmaps. Animated
+texture lists currently display their first frame. `packages/assets/src/texture-sources.json`
+records the original source paths. These textures add approximately 7 MB to the assets.
+
 ## Develop
 
 ```sh

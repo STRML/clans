@@ -1,3 +1,4 @@
+import type { App } from '../packages/client/src/app.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { expect, test } from '@playwright/test';
 
@@ -47,4 +48,25 @@ test('connects to a bots-only server and shows the right entity count', async ({
       timeout: 10_000,
     })
     .toBe(4);
+});
+
+test('a newly joined network player can walk away from spawn', async ({ page }) => {
+  await page.goto(`/?server=ws://127.0.0.1:${String(PORT)}`);
+  await page.locator('#debug-stats[data-ready="1"]').waitFor({ state: 'attached' });
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __app: App }).__app.net?.connected))
+    .toBe(true);
+  await page.waitForTimeout(200);
+  const start = await page.evaluate(() => {
+    const app = (window as unknown as { __app: App }).__app;
+    return app.world.players.position[app.playerId * 3 + 2]!;
+  });
+  await page.keyboard.down('KeyW');
+  await page.waitForTimeout(2000);
+  await page.keyboard.up('KeyW');
+  const end = await page.evaluate(() => {
+    const app = (window as unknown as { __app: App }).__app;
+    return app.world.players.position[app.playerId * 3 + 2]!;
+  });
+  expect(end - start).toBeGreaterThan(8);
 });
