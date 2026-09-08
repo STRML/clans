@@ -191,18 +191,13 @@ function handleJoin(
     return;
   }
   const team = smallerTeam(world);
-  const [x, y, z] = spawnPointFor(
-    world.terrain,
-    spawns,
-    team,
-    teamCount(world, team),
-    world.interiors,
-  );
+  let x: number, y: number, z: number;
   let playerId: number;
   try {
+    [x, y, z] = spawnPointFor(world.terrain, spawns, team, teamCount(world, team), world.interiors);
     playerId = addPlayer(world, { x, y, z }, team);
   } catch {
-    // A full world's addPlayer throws before this socket is registered or welcomed.
+    // A full world or unusable spawn area can reject a join before registration.
     // handleMessage's outer try/catch would otherwise swallow that silently, leaving the
     // socket open with the client waiting forever for a Welcome that will never come.
     // Closing it tells the client the join was rejected instead of hanging.

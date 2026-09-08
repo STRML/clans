@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import { attachShapeTextures, textureKey } from './textures.js';
+import { attachShapeTextures, textureKey, prepareVehicleAsset } from './textures.js';
 
 describe('external shape textures', () => {
   it('normalizes Torque texture paths', () => {
@@ -25,4 +25,10 @@ describe('external shape textures', () => {
       expect(data.images[texture.source].uri).toMatch(/^\.\.\/textures\/ice\/.*\.png$/);
     }
   });
+});
+
+it('uses the procedural vehicle when the unconverted STL fallback is returned', () => {
+  expect(
+    prepareVehicleAsset({ source: 'stl', bytes: new TextEncoder().encode('solid vehicle') }),
+  ).toEqual({ source: 'procedural', bytes: null });
 });

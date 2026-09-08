@@ -135,7 +135,8 @@ First-person weapons use a small procedural model with basic weapon variants; or
 art and firing/reload animations are not implemented. Imported structures and vehicles retain
 their GLB materials and geometry. Source power/destruction visibility is supported for structures,
 but animated mechanical parts and turret aiming remain static. Failed shape loads retain a neutral
-fallback and report the asset URL in the browser console.
+fallback and report the asset URL in the browser console. If a vehicle GLB is unavailable,
+the procedural vehicle remains usable; the legacy STL fallback has no GLB converter.
 
 Spawn areas are sampled for clear outdoor ground, shared by the local game and server
 for joining players, bots, and respawns. The selection checks slopes, terrain cut-outs,

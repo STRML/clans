@@ -1,4 +1,4 @@
-import { attachShapeTextures } from './textures.js';
+import { attachShapeTextures, prepareVehicleAsset } from './textures.js';
 import textureSources from './texture-sources.json' with { type: 'json' };
 import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -195,10 +195,11 @@ for (const spec of VEHICLE_SHAPES) {
         `${T2_MAPPER_SHAPES_BASE}${spec.cacheName}.glb`,
         `${STL_FALLBACK_BASE}${spec.stlName}.stl`,
       );
-  if (resolved.bytes) {
-    await writeFile(resolve(shapesDir, spec.outputName), attachShapeTextures(resolved.bytes));
+  const prepared = prepareVehicleAsset(resolved);
+  if (prepared.bytes) {
+    await writeFile(resolve(shapesDir, spec.outputName), prepared.bytes);
   }
-  vehicles[spec.kind] = { source: resolved.source, shape: spec.outputName };
+  vehicles[spec.kind] = { source: prepared.source, shape: spec.outputName };
 }
 
 await writeFile(

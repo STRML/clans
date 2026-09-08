@@ -1,3 +1,4 @@
+import type { VehicleShapeResult } from './vehicleShapes.js';
 import textureSources from './texture-sources.json' with { type: 'json' };
 
 interface GltfMaterial {
@@ -67,4 +68,11 @@ function replaceJsonChunk(bytes: Uint8Array, gltf: GltfJson, jsonLength: number)
   result.set(json, 20);
   result.set(remainder, 20 + paddedLength);
   return result;
+}
+
+export function prepareVehicleAsset(shape: VehicleShapeResult): VehicleShapeResult {
+  // The legacy fallback fetches raw STL; no STL-to-GLB converter exists yet.
+  // Use the client's working procedural model instead of publishing invalid GLB bytes.
+  if (shape.source !== 'glb' || !shape.bytes) return { source: 'procedural', bytes: null };
+  return { ...shape, bytes: attachShapeTextures(shape.bytes) };
 }
