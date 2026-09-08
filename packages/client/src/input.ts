@@ -17,6 +17,7 @@ export class Input {
   private wasCommandCircleHeld = false;
   private wasAnyDigitHeld = false;
   private wasEscapeHeld = false;
+  private wasVoiceMenuHeld = false;
 
   constructor(private readonly target: HTMLElement) {}
 
@@ -64,6 +65,7 @@ export class Input {
     this.wasCommandCircleHeld = false;
     this.wasAnyDigitHeld = false;
     this.wasEscapeHeld = false;
+    this.wasVoiceMenuHeld = false;
   }
 
   isDown(code: string): boolean {
@@ -112,6 +114,15 @@ export class Input {
     const held = this.isDown('Escape');
     const pressed = held && !this.wasEscapeHeld;
     this.wasEscapeHeld = held;
+    return pressed;
+  }
+
+  /** Same edge-triggered shape as `commandCirclePressedThisFrame`, for the `V` voice-bind
+   *  quick-chat menu toggle. */
+  voiceMenuPressedThisFrame(): boolean {
+    const held = this.isDown('KeyV');
+    const pressed = held && !this.wasVoiceMenuHeld;
+    this.wasVoiceMenuHeld = held;
     return pressed;
   }
 

@@ -81,6 +81,7 @@ import {
   vehiclePadMenuVisible,
   type VehiclePadMenu,
 } from './vehiclePadMenu.js';
+import { createVoiceMenu, speakVoiceLine, type VoiceMenu } from './voicebinds.js';
 import {
   projectilesFromWorld,
   spawnExplosionsForExpired,
@@ -385,6 +386,7 @@ interface BaseAssetsViewState {
   vehiclePadMenuState: { open: boolean };
   commanderMapCanvas: HTMLCanvasElement;
   orderState: { pending: { x: number; z: number } | null };
+  voiceMenu: VoiceMenu;
 }
 
 function remoteToPlayerPosition(player: PlayerSnapshotData): PlayerPosition {
@@ -422,23 +424,49 @@ function drawCommanderMapForTeam(state: BaseAssetsViewState): void {
   drawOrderMarkers(ctx, state.net?.orders ?? [], localTeam, toCanvas);
 }
 
-/** Order confirm/cancel: a click on the (visible) commander map already stashed a pending
- *  world position in `state.orderState.pending` (see the click listener set up alongside
- *  `commanderMapCanvas`'s own creation); this reads the one-shot digit/Escape edge triggers
- *  once per frame and turns a pending click into a sent CommandOrder, or drops it. An order
- *  is a message, not client state (Global Constraints) -- this never mutates
- *  `state.net.orders` itself, only sends the request; the marker `drawCommanderMapForTeam`
- *  draws only appears once the server echoes the order back on a later snapshot. */
+/** Order confirm/cancel and voice-bind line confirm/cancel share one digit/Escape read per
+ *  frame -- both are edge-triggered and consumed once (see Input's own doc comments), so they
+ *  cannot each call `digitPressedThisFrame`/`escapePressedThisFrame` separately. A click on
+ *  the (visible) commander map already stashed a pending world position in
+ *  `state.orderState.pending` (see the click listener set up alongside `commanderMapCanvas`'s
+ *  own creation); a digit 1-3 while that's set turns it into a sent CommandOrder. An order is
+ *  a message, not client state (Global Constraints) -- this never mutates `state.net.orders`
+ *  itself, only sends the request; the marker `drawCommanderMapForTeam` draws only appears
+ *  once the server echoes the order back on a later snapshot. Otherwise, while the voice menu
+ *  is open, any digit sends that line's VoiceBind and closes the menu. */
+/** Confirms a pending commander-map order-kind click, if `digit` (1-3) and a pending click are
+ *  both present. Returns true when it sent one, so the caller doesn't also try to read the
+ *  same digit as a voice-line pick. */
+function confirmPendingOrder(state: BaseAssetsViewState, digit: number): boolean {
+  const pending = state.orderState.pending;
+  if (!pending || digit < 1 || digit > 3) return false;
+  const kind = digit === 1 ? OrderKind.Attack : digit === 2 ? OrderKind.Defend : OrderKind.Repair;
+  state.net?.sendCommandOrder(kind, pending.x, pending.z);
+  state.orderState.pending = null;
+  return true;
+}
+
+function confirmVoiceLine(state: BaseAssetsViewState, digit: number): void {
+  if (!state.voiceMenu.visible || digit < 1) return;
+  state.net?.sendVoiceBind(digit - 1);
+  state.voiceMenu.hide();
+}
+
+/** Order confirm/cancel and voice-bind line confirm/cancel share one digit/Escape read per
+ *  frame -- both are edge-triggered and consumed once (see Input's own doc comments), so they
+ *  cannot each call `digitPressedThisFrame`/`escapePressedThisFrame` separately. See
+ *  `confirmPendingOrder`'s own comment for why an order takes priority over a voice line on
+ *  the same digit. An order is a message, not client state (Global Constraints) -- this never
+ *  mutates `state.net.orders` itself, only sends the request; the marker
+ *  `drawCommanderMapForTeam` draws only appears once the server echoes the order back on a
+ *  later snapshot. */
 function syncCommandOrders(state: BaseAssetsViewState): void {
   const digit = state.input.digitPressedThisFrame();
   if (state.input.escapePressedThisFrame()) {
     state.orderState.pending = null;
+    if (state.voiceMenu.visible) state.voiceMenu.hide();
   }
-  const pending = state.orderState.pending;
-  if (digit < 1 || digit > 3 || !pending) return;
-  const kind = digit === 1 ? OrderKind.Attack : digit === 2 ? OrderKind.Defend : OrderKind.Repair;
-  state.net?.sendCommandOrder(kind, pending.x, pending.z);
-  state.orderState.pending = null;
+  if (!confirmPendingOrder(state, digit)) confirmVoiceLine(state, digit);
 }
 
 /** Syncs base-object/turret meshes, the station menu, the commander map, and the HUD's
@@ -509,8 +537,24 @@ export function vehicleRenderData(state: {
   return out;
 }
 
+/** The commander-map (`C`) and voice-menu (`V`) toggles, plus drawing the map while it's
+ *  open -- pulled out of `syncBaseAssetsView` to keep that function's own complexity under
+ *  budget, the same reason `syncMenus` already exists as its own function. */
+function syncMapAndVoiceToggles(state: BaseAssetsViewState): void {
+  const { input } = state;
+  if (input.commandCirclePressedThisFrame()) {
+    state.commanderMapCanvas.hidden = !state.commanderMapCanvas.hidden;
+    if (state.commanderMapCanvas.hidden) state.orderState.pending = null;
+  }
+  if (!state.commanderMapCanvas.hidden) drawCommanderMapForTeam(state);
+  if (input.voiceMenuPressedThisFrame()) {
+    if (state.voiceMenu.visible) state.voiceMenu.hide();
+    else state.voiceMenu.show();
+  }
+}
+
 function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): void {
-  const { world, playerId, net, input } = state;
+  const { world, playerId, net } = state;
   const connected = net ? net.connected : true;
   const baseObjectData: BaseObjectSnapshotData[] =
     net && connected ? net.baseObjects : baseObjectsFromWorld(world);
@@ -522,12 +566,7 @@ function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): vo
   // that also gates the outgoing `use` wire bit -- see frame()'s own comment for why
   // usePressedThisFrame() cannot be called a second time here.
   syncMenus(state, usePressed);
-
-  if (input.commandCirclePressedThisFrame()) {
-    state.commanderMapCanvas.hidden = !state.commanderMapCanvas.hidden;
-    if (state.commanderMapCanvas.hidden) state.orderState.pending = null;
-  }
-  if (!state.commanderMapCanvas.hidden) drawCommanderMapForTeam(state);
+  syncMapAndVoiceToggles(state);
   syncCommandOrders(state);
 
   // A second, redundant hud.update immediately after syncWorldView's own -- see
@@ -577,6 +616,15 @@ function playFlagEventAudio(audio: AudioEngine, events: readonly TimestampedEven
   }
 }
 
+/** A VoiceBindPlayed event (`a` = speaker playerId, `b` = lineId) is broadcast back to every
+ *  client, sender included -- that broadcast, not a local-only echo, is what makes "played for
+ *  the local player's own action" true, matching Task 6's own contract. */
+function playVoiceBindAudio(events: readonly TimestampedEvent[]): void {
+  for (const event of events) {
+    if (event.kind === EventKind.VoiceBindPlayed) speakVoiceLine(event.b);
+  }
+}
+
 export function syncWorldView(
   world: World,
   playerId: number,
@@ -618,6 +666,7 @@ export function syncWorldView(
   const allEvents: TimestampedEvent[] = net ? net.recentEvents : [];
   const newEvents = drainNewEvents(allEvents, seenEventSeq);
   if (audio) playFlagEventAudio(audio, newEvents);
+  playVoiceBindAudio(newEvents);
   spawnLaserBeams(scene, effects, newEvents, (id) => positionOfPlayer(world, net, id));
   updateEffects(scene, effects, dtSeconds);
 
@@ -1161,6 +1210,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     const canvasY = ((event.clientY - rect.top) / rect.height) * commanderMapCanvas.height;
     orderState.pending = canvasToWorld(ctx, assets.scene.missionArea, canvasX, canvasY);
   });
+  const voiceMenu = createVoiceMenu(document.body);
   // Task 7: pure oscillator/noise synthesis, no shipped or fetched audio file (M7 plan,
   // Global Constraints) -- a real AudioContext, not the fake used by audio.test.ts.
   const audio = createAudioEngine({ context: new AudioContext() });
@@ -1288,6 +1338,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
           vehiclePadMenuState,
           commanderMapCanvas,
           orderState,
+          voiceMenu,
         },
         usePressed,
       );

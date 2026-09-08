@@ -103,3 +103,18 @@ describe('Input.escapePressedThisFrame', () => {
     expect(input.escapePressedThisFrame()).toBe(false);
   });
 });
+
+describe('Input.voiceMenuPressedThisFrame', () => {
+  it('fires once on the rising edge of KeyV, not again while held', () => {
+    const input = new Input({} as HTMLElement);
+    const keys = (input as unknown as { keys: Set<string> }).keys;
+    expect(input.voiceMenuPressedThisFrame()).toBe(false);
+    keys.add('KeyV');
+    expect(input.voiceMenuPressedThisFrame()).toBe(true);
+    expect(input.voiceMenuPressedThisFrame()).toBe(false); // still held, no re-fire
+    keys.delete('KeyV');
+    expect(input.voiceMenuPressedThisFrame()).toBe(false);
+    keys.add('KeyV');
+    expect(input.voiceMenuPressedThisFrame()).toBe(true); // a fresh press fires again
+  });
+});
