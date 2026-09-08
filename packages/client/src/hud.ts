@@ -110,9 +110,13 @@ function respawnRow(source: HudSource): HudRow {
  * end in a tie, since a capture-limit win requires one specific team to reach `WIN_SCORE`). */
 function gameOverRow(source: HudSource): HudRow {
   if (!source.gameOver) return { id: 'hud-game-over', text: '' };
-  if (source.winnerTeam === 0) return { id: 'hud-game-over', text: 'Tie game' };
+  if (source.winnerTeam === 0)
+    return { id: 'hud-game-over', text: 'Match ended: tie game. Movement is paused.' };
   const suffix = source.gameOverReason === GameOverReason.TimeLimit ? ' on time' : '';
-  return { id: 'hud-game-over', text: `Team ${String(source.winnerTeam)} wins${suffix}` };
+  return {
+    id: 'hud-game-over',
+    text: `Match ended: Team ${String(source.winnerTeam)} wins${suffix}. Movement is paused.`,
+  };
 }
 
 function clockRow(source: HudSource): HudRow {

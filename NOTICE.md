@@ -12,6 +12,7 @@ removed, open an issue and it will be removed.
 Files used in milestone 1:
 
 - `Katabatic.mis` and `Katabatic.ter`: the Katabatic mission and terrain.
+- `textures/`: original diffuse maps for interiors, rocks, structures, and vehicles. Exact source paths are recorded in `packages/assets/src/texture-sources.json`; animated IFL materials use their first frame.
 - `IceWorld.Snow.png`, `IceWorld.RockBlue.png`, `IceWorld.SnowRock.png`, `IceWorld.Ice.png`: the terrain textures.
 
 Milestone 3 adds no new source files: its `Flag` and `ExteriorFlagStand` objects come from the

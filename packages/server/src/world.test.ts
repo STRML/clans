@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { addPlayer, createWorld, stepWorld, raycastInteriors, type Heightfield } from '@clans/sim';
+import {
+  addPlayer,
+  createWorld,
+  stepWorld,
+  raycastInteriors,
+  type Heightfield,
+  type PlayerInput,
+} from '@clans/sim';
 import {
   addBots,
   loadKatabaticWorld,
@@ -67,29 +74,29 @@ describe('server world bootstrap', () => {
     expect(spawnPointFor(terrain, spawns, 1, 2)).toEqual([1, 0.1, 1]);
   });
 
-  it('raises a spawn point sitting below the terrain, matching the single-player client', () => {
+  it('rejects a spawn sphere entirely buried below solid terrain', () => {
     // Codex round 8 (PR #4): the server returned a mission spawn's raw y unmodified,
     // while the single-player path (app.ts's spawnPoint) raises it to just above the
     // sampled terrain height. The committed Katabatic scene has a spawn below terrain,
     // so a network client spawned there started underground for a tick.
     const sunken: Heightfield = { ...terrain, heights: new Uint16Array([50, 50, 50, 50]) };
     const spawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, -5, 1], radius: 5 }];
-    expect(spawnPointFor(sunken, spawns, 1, 0)).toEqual([1, 50.1, 1]);
+    expect(() => spawnPointFor(sunken, spawns, 1, 0)).toThrow(/no clear/);
   });
 
-  it('keeps interior spawns below terrain where the mission cuts a hole', () => {
+  it('rejects a spawn area with no walkable ground', () => {
     const cutOut = {
       ...terrain,
       heights: new Uint16Array([50, 50, 50, 50]),
       emptySquares: new Set([0]),
     };
     const spawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, -5, 1], radius: 5 }];
-    expect(spawnPointFor(cutOut, spawns, 1, 0)).toEqual([1, -5, 1]);
+    expect(() => spawnPointFor(cutOut, spawns, 1, 0)).toThrow(/no clear/);
   });
 
-  it('leaves a spawn point already above the terrain untouched', () => {
+  it('rejects a sphere suspended above all ground', () => {
     const spawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 40, 1], radius: 5 }];
-    expect(spawnPointFor(terrain, spawns, 1, 0)).toEqual([1, 40, 1]);
+    expect(() => spawnPointFor(terrain, spawns, 1, 0)).toThrow(/no clear/);
   });
 
   it('aligns authoritative interior collision with every mission turret anchor', async () => {
@@ -106,7 +113,7 @@ describe('server world bootstrap', () => {
 
   it('keeps an idle player grounded inside the real bunker instead of drifting into terrain', async () => {
     const { world, spawns } = await loadKatabaticWorld();
-    const [x, y, z] = spawnPointFor(world.terrain, spawns, 1, 0);
+    const [x, y, z] = spawns.find((spawn) => spawn.team === 1)!.position;
     const id = addPlayer(world, { x, y, z }, 1);
     for (let tick = 0; tick < 100; tick++) stepWorld(world, new Map());
     expect(world.players.onGround[id]).toBe(1);
@@ -123,4 +130,33 @@ describe('server world bootstrap', () => {
     expect(teamCount(world, 1)).toBe(2);
     expect(teamCount(world, 2)).toBe(2);
   });
+});
+
+it('every real spawn lets a player walk forward out of the starting area', async () => {
+  for (const team of [1, 2])
+    for (const index of Array.from({ length: 32 }, (_, i) => i)) {
+      const { world, spawns } = await loadKatabaticWorld();
+      const [x, y, z] = spawnPointFor(world.terrain, spawns, team, index, world.interiors);
+      const id = addPlayer(world, { x, y, z }, team);
+      const input = {
+        moveX: 0,
+        moveZ: 1,
+        yaw: 0,
+        pitch: 0,
+        jump: false,
+        jet: false,
+        ski: false,
+        fire: false,
+        altFire: false,
+        slot: 0,
+        packActive: false,
+        use: false,
+        grenade: false,
+      } as PlayerInput;
+      for (let tick = 0; tick < 100; tick++) stepWorld(world, new Map([[id, input]]));
+      expect(
+        world.players.position[id * 3 + 2]! - z,
+        `team ${team}, spawn ${index}`,
+      ).toBeGreaterThan(8);
+    }
 });

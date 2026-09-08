@@ -1,3 +1,4 @@
+import type { App } from '../packages/client/src/app.js';
 import { expect, test } from '@playwright/test';
 
 declare global {
@@ -22,6 +23,11 @@ test('fires a Spinfusor at terrain and the projectile it creates cleans up', asy
     .toBe('Spinfusor');
   const startAmmo = Number(await page.locator('#hud-ammo').textContent());
 
+  // Outdoor spawns have no wall immediately ahead. Aim down so this tests terrain
+  // contact, rather than waiting for five simulated seconds of unobstructed flight.
+  await page.evaluate(() => {
+    (window as unknown as { __app: App }).__app.input.pitch = -Math.PI / 4;
+  });
   await page.mouse.move(640, 360);
   await page.mouse.down();
   // Release the instant ammo drops, rather than holding for a fixed window or waiting to see

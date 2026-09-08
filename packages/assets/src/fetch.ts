@@ -2,6 +2,8 @@ import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import textureSources from './texture-sources.json' with { type: 'json' };
+
 const BASE = 'https://raw.githubusercontent.com/exogen/t2-mapper/HEAD/docs/base/@vl2/';
 const SOURCES = [
   'missions.vl2/missions/Katabatic.mis',
@@ -45,7 +47,7 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-for (const source of SOURCES) {
+for (const source of [...SOURCES, ...Object.values(textureSources)]) {
   const destination = resolve(cacheRoot, source);
   if (await exists(destination)) continue;
   const response = await fetch(new URL(source, BASE));

@@ -117,6 +117,15 @@ describe('startNetServer', () => {
   });
   afterEach(() => server.close());
 
+  it('closes a rejected join immediately when the spawn area has no ground', async () => {
+    world.terrain = { ...world.terrain, emptySquares: new Set([0]) };
+    const client = await connect(TEST_PORT);
+    const closed = new Promise<boolean>((resolve) => client.once('close', () => resolve(true)));
+    client.send(encodeJoin());
+    expect(await Promise.race([closed, wait(250).then(() => false)])).toBe(true);
+    expect(world.players.count).toBe(0);
+  });
+
   it('welcomes a joining client with a player id and a team', async () => {
     const client = await connect(TEST_PORT);
     const welcomePromise = receive(client);

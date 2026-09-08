@@ -135,7 +135,17 @@ First-person weapons use a small procedural model with basic weapon variants; or
 art and firing/reload animations are not implemented. Imported structures and vehicles retain
 their GLB materials and geometry. Source power/destruction visibility is supported for structures,
 but animated mechanical parts and turret aiming remain static. Failed shape loads retain a neutral
-fallback and report the asset URL in the browser console.
+fallback and report the asset URL in the browser console. If a vehicle GLB is unavailable,
+the procedural vehicle remains usable; the legacy STL fallback has no GLB converter.
+
+Spawn areas are sampled for clear outdoor ground, shared by the local game and server
+for joining players, bots, and respawns. The selection checks slopes, terrain cut-outs,
+headroom, and space to walk; mission sphere centers are not used as player transforms.
+
+The asset build resolves original diffuse textures from each GLB's `resource_path`,
+packages 86 texture files locally, and preserves baked interior lightmaps. Animated
+texture lists currently display their first frame. `packages/assets/src/texture-sources.json`
+records the original source paths. These textures add approximately 7 MB to the assets.
 
 ## Develop
 

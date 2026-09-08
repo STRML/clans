@@ -18,7 +18,7 @@ import {
   createWorld,
   dueForRespawn,
   respawnPlayer,
-  sampleTerrain,
+  findSpawnPosition,
   setGodMode,
   spawnVehicleAtPad,
   stepPower,
@@ -171,17 +171,6 @@ function toHeightfield(assets: KatabaticAssets): Heightfield {
     heights: assets.heights,
     emptySquares: new Set(assets.terrain.emptySquares),
   };
-}
-
-function spawnPoint(
-  assets: KatabaticAssets,
-  terrain: Heightfield,
-): { x: number; y: number; z: number } {
-  const spawn = assets.scene.spawns.find((candidate) => candidate.team === 1);
-  if (!spawn) throw new Error('Katabatic scene has no team 1 spawn');
-  const [x, y, z] = spawn.position;
-  const ground = sampleTerrain(terrain, x, z);
-  return { x, y: ground.empty ? y : Math.max(y, ground.height + 0.1), z };
 }
 
 function createRenderer(container: HTMLElement): THREE.WebGLRenderer {
@@ -1085,7 +1074,17 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   // Single-player's only spawn point, computed once and reused both for the initial
   // addPlayer below and for every later respawn (Codex review round 4, finding 1) -- the
   // same source spawnPoint always drew from, not a new choice.
-  const localSpawn = spawnPoint(assets, terrain);
+  world.interiors = await loadInteriorColliders(assets);
+  const spawnArea = assets.scene.spawns.find((spawn) => spawn.team === 1);
+  if (!spawnArea) throw new Error('Katabatic has no team 1 spawn area');
+  const [spawnX, spawnY, spawnZ] = spawnArea.position;
+  const localSpawn = findSpawnPosition(
+    terrain,
+    world.interiors,
+    { x: spawnX, y: spawnY, z: spawnZ },
+    spawnArea.radius,
+    0,
+  );
   // Bug found by Task 14's e2e capture test: addPlayer defaults to team 0 when no team is
   // given, which never equals a flag's team (1 or 2) in flags.ts's isOwnFlag/tryCapture checks.
   // That let single-player pick up either flag (both looked "enemy") but never capture one
@@ -1154,7 +1153,6 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   // Local prediction resolves interior/force-field collision identically to the server
   // (Task 11) -- without this, a client walking into a wall or a powered force field would
   // predict straight through it until the next snapshot corrected the mispredict.
-  world.interiors = await loadInteriorColliders(assets);
   const baseObjectView = createBaseObjectView(scene, assets);
   const vehicleView = createVehicleView(scene, assets);
   const weaponModel = createWeaponModel();

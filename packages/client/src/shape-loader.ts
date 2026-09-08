@@ -63,7 +63,19 @@ export function loadShapeInto(
         }
         let hasMesh = false;
         gltf.scene.traverse((node) => {
-          if (node instanceof THREE.Mesh) hasMesh = true;
+          if (node instanceof THREE.Mesh) {
+            hasMesh = true;
+            for (const material of Array.isArray(node.material) ? node.material : [node.material]) {
+              if (!(material instanceof THREE.MeshStandardMaterial)) continue;
+              // DIF exports carry baked lighting in glTF's emissive texture / UV1.
+              if (material.emissiveMap?.channel === 1) {
+                material.lightMap = material.emissiveMap;
+                material.lightMap.colorSpace = THREE.SRGBColorSpace;
+                material.emissiveMap = null;
+                material.needsUpdate = true;
+              }
+            }
+          }
           if (typeof node.userData.vis === 'number') node.visible = node.userData.vis > 0;
         });
         if (!hasMesh) {
