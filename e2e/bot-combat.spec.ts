@@ -1,7 +1,11 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { expect, test } from '@playwright/test';
 
-const PORT = 17789; // distinct from server.spec.ts's own 17788 and the 7777 dev default.
+// Distinct from server.spec.ts's own 17788, demo.spec.ts's own 17789 (Codex review round 1
+// of the M7 PR: this file originally reused 17789 too, colliding with demo.spec.ts under a
+// parallel/multi-worker run), command-circuit.spec.ts's own 17790, voice-binds.spec.ts's own
+// 17791, and the 7777 dev default.
+const PORT = 17792;
 
 let serverProcess: ChildProcess;
 

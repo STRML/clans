@@ -71,11 +71,25 @@ export interface KatabaticAssets {
   alphaMaps: Uint8Array[];
 }
 
-const ROOT = '/katabatic/';
+// Root-relative (`/katabatic/...`) breaks once the page itself isn't served from the domain
+// root -- apps/demo's own vite.config.ts sets `base: './'` for exactly this reason (GitHub
+// Pages serves it under /clans/), but a hardcoded absolute string here ignored that: Vite's
+// `base` only rewrites build-time `import()`/asset references, never a runtime string literal
+// passed to `fetch`. `import.meta.env.BASE_URL` is Vite's own runtime reflection of `base` --
+// '/' for @clans/client's default config (unchanged behavior there), './' for the demo build.
+const ROOT = `${import.meta.env.BASE_URL}katabatic/`;
 async function response(path: string): Promise<Response> {
   const result = await fetch(`${ROOT}${path}`);
   if (!result.ok) throw new Error(`Asset load failed ${result.status}: ${path}`);
   return result;
+}
+/** The one exported way to build a `katabatic/`-relative asset URL -- terrain.ts's own
+ *  texture loader used to hardcode `/katabatic/${texture}` directly (the exact same
+ *  root-relative bug `ROOT` above exists to fix), a second site of the same class Codex
+ *  review round 1 of the M7 PR caught. Routing every caller through this one function is
+ *  what keeps a future one from reintroducing it. */
+export function assetUrl(path: string): string {
+  return `${ROOT}${path}`;
 }
 export function shapeUrl(name: string): string {
   return `${ROOT}shapes/${name}.glb`;

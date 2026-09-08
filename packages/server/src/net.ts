@@ -29,6 +29,7 @@ import {
 import {
   EventKind,
   MessageType,
+  OrderKind,
   PROTOCOL_VERSION,
   SNAPSHOT_EVERY_N_TICKS,
   SNAPSHOT_HISTORY_DEPTH,
@@ -337,10 +338,20 @@ function handleVehicleSpawn(
   spawnVehicleAtPad(world, padId, kind);
 }
 
+const ORDER_KINDS = new Set<number>([OrderKind.Attack, OrderKind.Defend, OrderKind.Repair]);
+
 /** Reads the sender's own team from world.players.team, never a wire-supplied one -- the
  *  CommandOrderMessage shape carries no team field at all, so a client can only ever issue
  *  an order for its own team (failure matrix row 19). Matches handleLoadout's own convention:
- *  a stale click after the world changed is silently a no-op, not an error. */
+ *  a stale click after the world changed is silently a no-op, not an error.
+ *
+ *  Codex review round 1 of the M7 PR: `decodeCommandOrder` reads a raw wire byte into `kind`
+ *  and two raw f32s into `x`/`z` with no bounds or finiteness check -- a modified or buggy
+ *  client could send an out-of-range kind or NaN/Infinity coordinates, which `issueOrder`
+ *  would store and `stepBots`' goal selection would steer bots toward, propagating NaN into
+ *  movement/position and then into every other client's snapshot (the same "never trust the
+ *  client alone" rule `handleVoiceBind`'s own bounds check already applies to `lineId`). Both
+ *  violations are silently dropped, matching `handleVoiceBind`'s own convention. */
 function handleCommandOrder(
   world: World,
   board: OrderBoard,
@@ -351,6 +362,7 @@ function handleCommandOrder(
   const entry = clients.get(socket);
   if (!entry) return;
   const { kind, x, z } = decodeCommandOrder(bytes);
+  if (!ORDER_KINDS.has(kind) || !Number.isFinite(x) || !Number.isFinite(z)) return;
   const team = world.players.team[entry.session.playerId] ?? 0;
   issueOrder(board, team, kind, x, z, world.tick);
 }
@@ -431,6 +443,12 @@ function handleClose(
   // the new occupant onto it for one tick. Clearing it here, synchronously on disconnect,
   // closes that window instead of waiting on a future tick to overwrite it naturally.
   clearHistory(history, entry.session.playerId);
+  // Codex review round 1 of the M7 PR: lastVoiceBindAtTick is keyed by numeric player id and
+  // was never cleared here, unlike every other per-player table this function already clears
+  // -- a reused id (the same disconnect/rejoin churn clearHistory's own comment describes)
+  // inherited a stale cooldown deadline from whoever held that id before, silently dropping
+  // the new occupant's first otherwise-valid voice bind.
+  lastVoiceBindAtTick.delete(entry.session.playerId);
   clients.delete(socket);
 }
 

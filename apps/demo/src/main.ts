@@ -13,6 +13,8 @@ declare global {
 }
 
 const instructions = document.getElementById('demo-instructions');
+const errorPanel = document.getElementById('demo-error');
+const errorDetail = document.getElementById('demo-error-detail');
 const container = document.getElementById('app');
 if (!container) throw new Error('#app missing');
 
@@ -23,6 +25,20 @@ if (!server) {
   if (instructions) instructions.hidden = false;
 } else {
   const app = await createApp(container, { serverUrl: server });
+  // Codex review round 1 of the M7 PR: an unreachable ?server value used to render a fully
+  // unconnected app with no explanation at all -- container.hidden never flips back on, and
+  // Transport has no error surface of its own, so this reads app.net's own `connected`
+  // getter (== the transport's own isOpen(), true while CONNECTING) after a real-world
+  // refused-connection window. A genuinely working connection reaches the server's Welcome
+  // well inside this; an unreachable one has already closed by then (this repo's own e2e
+  // servers report "listening" inside 20s, an order of magnitude looser).
+  setTimeout(() => {
+    if (app.net && !app.net.connected && errorPanel && errorDetail) {
+      errorDetail.textContent = `Could not reach ${server}.`;
+      errorPanel.hidden = false;
+      container.hidden = true;
+    }
+  }, 8_000);
   window.__clansDebug = {
     teleportToFlag: (team) => app.debugTeleportToFlag(team),
     killGenerator: (team) => app.debugKillGenerator(team),

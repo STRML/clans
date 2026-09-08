@@ -25,7 +25,19 @@ export enum OrderKind {
 // a new WorldExtras field (vehicles) are all wire-format changes an M4 client cannot safely
 // ignore -- WelcomeStatus.VersionMismatch exists specifically to reject a stale client rather
 // than let it desync.
-export const PROTOCOL_VERSION = 3;
+//
+// M7 bumps 3 -> 4 (Codex review round 1 of the M7 PR): two new MessageTypes (CommandOrder,
+// VoiceBind) and a new trailing WorldExtras field (orders, snapshot.ts) are wire-format
+// changes too. Appending `orders` after every other field (not a PROTOCOL_VERSION bump) was
+// this milestone's own original plan, reasoned only about a stale M6 CLIENT reading a fresh
+// M7 SERVER's snapshot (it just stops decoding early, which is safe) -- it missed the
+// opposite direction: a fresh M7 client connecting to a stale M6 server sends the same
+// PROTOCOL_VERSION either way, so the handshake never catches it, and the client's own
+// `readOrders` call then reads past the end of a snapshot that was never written with an
+// orders block, throwing on every single snapshot. Bumping the version instead makes
+// WelcomeStatus.VersionMismatch catch this exactly like it already catches every other
+// wire-format change, in both directions.
+export const PROTOCOL_VERSION = 4;
 
 export enum WelcomeStatus {
   Ok = 0,

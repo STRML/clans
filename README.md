@@ -121,6 +121,13 @@ static files, so the hosted page has no server behind it — it shows a "bring y
 prompt until you append `?server=ws://your-host:7777` pointing at a Clans server you're running
 yourself (`pnpm dev:server`, or `pnpm dev` for both halves) and that your browser can reach.
 
+The Pages site is served over HTTPS. A browser blocks a plain `ws://` connection from an
+HTTPS page as mixed content unless the target is a secure context on its own — in practice,
+`ws://127.0.0.1:7777` or `ws://localhost:7777` works, but a remote host needs `wss://` (put a
+TLS-terminating proxy in front of your server) or the connection will never open. If the demo
+can't reach the server you gave it, it shows a "couldn't connect" message rather than staying
+silently blank.
+
 ## Develop
 
 ```sh

@@ -30,7 +30,9 @@ import {
   EventKind,
   MessageType,
   OrderKind,
+  PROTOCOL_VERSION,
   VOICE_LINE_COUNT,
+  WelcomeStatus,
   type NetInputSample,
 } from '@clans/protocol';
 import { buildWaypointGraph } from '@clans/bots';
@@ -1914,6 +1916,100 @@ describe('startNetServer', () => {
       .filter((e) => e.kind === EventKind.VoiceBindPlayed);
     expect(voiceBindEvents).toHaveLength(0);
     client.close();
+    voiceServer.close();
+  });
+
+  it('a stale-version Join gets rejected with VersionMismatch, not silently accepted (Codex review round 1 of the M7 PR)', async () => {
+    // M7 adds a trailing WorldExtras.orders block a stale (pre-M7) client's own decoder has
+    // no idea to read -- PROTOCOL_VERSION bumped 3 -> 4 specifically so this handshake check
+    // catches that instead of a stale client desyncing or crashing on its first snapshot.
+    const versionWorld = createWorld(terrain, 1, 8);
+    const versionSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [0, 0, 0], radius: 5 }];
+    const versionServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world: versionWorld,
+      spawns: versionSpawns,
+      port: TEST_PORT + 28,
+    });
+    await versionServer.ready;
+    const client = await connect(TEST_PORT + 28);
+    const welcomePromise = receive(client);
+    client.send(new Uint8Array([MessageType.Join, PROTOCOL_VERSION - 1]));
+    const welcome = decodeWelcome(await welcomePromise);
+    expect(welcome.status).toBe(WelcomeStatus.VersionMismatch);
+    client.close();
+    versionServer.close();
+  });
+
+  it('a CommandOrder naming an out-of-range kind, or a non-finite x/z, issues no order (Codex review round 1 of the M7 PR)', async () => {
+    const orderWorld = createWorld(terrain, 1, 8);
+    const orderSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [0, 0, 0], radius: 5 }];
+    const board = createOrderBoard();
+    const orderServer = startNetServer({
+      botManager: emptyBotManager(),
+      board,
+      world: orderWorld,
+      spawns: orderSpawns,
+      port: TEST_PORT + 26,
+    });
+    await orderServer.ready;
+    const client = await connect(TEST_PORT + 26);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    client.send(encodeCommandOrder({ kind: 99 as OrderKind, x: 0, z: 0 }));
+    client.send(encodeCommandOrder({ kind: OrderKind.Attack, x: Number.NaN, z: 0 }));
+    client.send(encodeCommandOrder({ kind: OrderKind.Attack, x: 0, z: Number.POSITIVE_INFINITY }));
+    await wait(10);
+    orderServer.tick(1);
+    expect(currentOrder(board, 1, orderWorld.tick)).toBeNull();
+    client.close();
+    orderServer.close();
+  });
+
+  it("a reused player id does not inherit a previous occupant's VoiceBind cooldown after disconnect (Codex review round 1 of the M7 PR)", async () => {
+    const voiceWorld = createWorld(terrain, 1, 8);
+    const voiceSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [0, 0, 0], radius: 5 }];
+    const voiceServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world: voiceWorld,
+      spawns: voiceSpawns,
+      port: TEST_PORT + 27,
+    });
+    await voiceServer.ready;
+
+    const first = await connect(TEST_PORT + 27);
+    const firstWelcome = receive(first);
+    first.send(encodeJoin());
+    await firstWelcome;
+    first.send(encodeVoiceBind({ lineId: 0 }));
+    await wait(10);
+    voiceServer.tick(1);
+    first.close();
+    await wait(10);
+    voiceServer.tick(2); // handleClose runs synchronously on the close event, before this tick.
+
+    // Single-player-slot world (capacity 1): the second connection's Join is guaranteed to
+    // reuse playerId 0, the same id the first connection just held and used its own voice
+    // bind cooldown on.
+    const second = await connect(TEST_PORT + 27);
+    const secondWelcome = receive(second);
+    second.send(encodeJoin());
+    await secondWelcome;
+    const events: Uint8Array[] = [];
+    second.on('message', (data) => events.push(new Uint8Array(data as Uint8Array)));
+    second.send(encodeVoiceBind({ lineId: 1 }));
+    await wait(10);
+    voiceServer.tick(3);
+    const voiceBindEvents = events
+      .filter((bytes) => bytes[0] === MessageType.Event)
+      .map((bytes) => decodeEvent(bytes))
+      .filter((e) => e.kind === EventKind.VoiceBindPlayed);
+    expect(voiceBindEvents).toHaveLength(1);
+    second.close();
     voiceServer.close();
   });
 });

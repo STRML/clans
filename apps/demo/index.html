@@ -32,6 +32,17 @@
       #demo-instructions a {
         color: #6fb7ff;
       }
+      #demo-error {
+        max-width: 40em;
+        margin: 10vh auto 0;
+        padding: 0 1.5em;
+        line-height: 1.5;
+      }
+      #demo-error code {
+        background: rgba(255, 255, 255, 0.08);
+        padding: 0.1em 0.35em;
+        border-radius: 3px;
+      }
     </style>
   </head>
   <body>
@@ -42,6 +53,20 @@
         Run one yourself: <code>pnpm dev:server</code> from a clone of
         <a href="https://github.com/STRML/clans">github.com/STRML/clans</a>, then reload this page
         with <code>?server=ws://your-host:7777</code> appended to the URL.
+      </p>
+      <p>
+        This page is served over HTTPS, so a plain <code>ws://</code> connection only works for a
+        secure-context host like <code>localhost</code> or <code>127.0.0.1</code> -- a remote server
+        needs <code>wss://</code> (a TLS-terminating proxy in front of it).
+      </p>
+    </div>
+    <div id="demo-error" hidden>
+      <h1>Couldn't connect</h1>
+      <p id="demo-error-detail"></p>
+      <p>
+        This page is served over HTTPS, so a plain <code>ws://</code> server is only reachable if
+        your browser treats it as a secure context (typically <code>localhost</code>) -- a remote
+        server needs <code>wss://</code> (a TLS-terminating proxy in front of it).
       </p>
     </div>
     <div id="app"></div>

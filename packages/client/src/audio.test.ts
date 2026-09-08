@@ -21,6 +21,9 @@ function fakeAudioContext() {
   return {
     currentTime: 0,
     destination: {},
+    state: 'running' as AudioContextState,
+    resume: vi.fn(),
+    close: vi.fn(),
     createOscillator: vi.fn(() => {
       created.osc += 1;
       return node();
@@ -123,5 +126,38 @@ describe('createAudioEngine', () => {
     engine.setSkiing(1, true, 10);
     engine.setStationHum(0, { x: 0, y: 0, z: 0 }, true);
     expect(() => engine.dispose()).not.toThrow();
+  });
+
+  // Codex review round 1 of the M7 PR: the context itself was never resumed or closed at all.
+  describe('resume/dispose close the underlying AudioContext', () => {
+    it('resume() calls context.resume() when suspended (an autoplay-restricted browser)', () => {
+      const ctx = fakeAudioContext();
+      ctx.state = 'suspended';
+      const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
+      engine.resume();
+      expect(ctx.resume).toHaveBeenCalledTimes(1);
+    });
+
+    it('resume() is a no-op when the context is already running', () => {
+      const ctx = fakeAudioContext();
+      const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
+      engine.resume();
+      expect(ctx.resume).not.toHaveBeenCalled();
+    });
+
+    it('dispose() closes the context, not just the loops and master gain', () => {
+      const ctx = fakeAudioContext();
+      const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
+      engine.dispose();
+      expect(ctx.close).toHaveBeenCalledTimes(1);
+    });
+
+    it('dispose() does not re-close an already-closed context', () => {
+      const ctx = fakeAudioContext();
+      ctx.state = 'closed';
+      const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
+      engine.dispose();
+      expect(ctx.close).not.toHaveBeenCalled();
+    });
   });
 });

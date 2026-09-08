@@ -73,3 +73,13 @@ test('loading the demo with a server query param boots the real client against i
   await expect(page.locator('#demo-instructions')).toBeHidden();
   await page.locator('#hud[data-ready="1"]').waitFor({ state: 'attached', timeout: 30_000 });
 });
+
+test('an unreachable server shows a connection-failed message instead of a silently blank app (Codex review round 1 of the M7 PR)', async ({
+  page,
+}) => {
+  // Port 9 ("discard") refuses a TCP connection near-instantly, so the socket closes well
+  // inside main.ts's own 8s check -- no real server needed for this repro.
+  await page.goto(`${DEMO_URL}/?server=ws://127.0.0.1:9`);
+  await expect(page.locator('#demo-error')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('#demo-error-detail')).toContainText('127.0.0.1:9');
+});

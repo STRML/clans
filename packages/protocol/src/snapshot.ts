@@ -112,8 +112,11 @@ export interface WorldExtras {
   /** Bots (M6), appended after every other trailing scalar field above. */
   bots: BotDebugSnapshotData[];
   /** Orders (M7): the new LAST field writeExtras/readExtras handle -- appended after `bots`,
-   *  the real last field at the time this was added, not after `vehicles` (Global Constraints:
-   *  no PROTOCOL_VERSION bump; a pre-M7 decoder that stops reading after `bots` never breaks). */
+   *  the real last field at the time this was added, not after `vehicles`. This DOES need
+   *  PROTOCOL_VERSION bumped (messages.ts: 3 -> 4, Codex review round 1 of the M7 PR) --
+   *  appending it safely covers a stale client reading a fresh server's snapshot (it just
+   *  stops decoding early), but not the reverse: a fresh client connecting to a stale server
+   *  would read past a snapshot that was never written with this block at all. */
   orders: OrderSnapshotData[];
 }
 export function emptyExtras(): WorldExtras {

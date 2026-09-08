@@ -151,6 +151,11 @@ export interface App {
   debugRepairGenerator(team: number): void;
   debugIsStationPowered(team: number): boolean;
   debugTeleportToVehiclePad(team: number): void;
+  /** Closes the underlying AudioContext (Codex review round 1 of the M7 PR: nothing
+   *  previously called AudioEngine's own `dispose`, so every `createApp()` call -- a hot
+   *  reload, a test harness constructing several -- leaked a real OS-level audio device
+   *  context). Idempotent; safe to call more than once. */
+  dispose(): void;
 }
 
 function toHeightfield(assets: KatabaticAssets): Heightfield {
@@ -1217,6 +1222,12 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   // Task 7: pure oscillator/noise synthesis, no shipped or fetched audio file (M7 plan,
   // Global Constraints) -- a real AudioContext, not the fake used by audio.test.ts.
   const audio = createAudioEngine({ context: new AudioContext() });
+  // Browsers start a fresh AudioContext `suspended` under autoplay restriction and require a
+  // real user-gesture handler to resume it -- the same click that already requests pointer
+  // lock (Input's own listener on this element) is that gesture. Codex review round 1 of the
+  // M7 PR: without this, every synthesized sound silently never plays in a browser that
+  // enforces the restriction.
+  renderer.domElement.addEventListener('click', () => audio.resume());
   const footstepState: FootstepState = { timer: 0 };
   // Backs the `godMode` accessor below. A plain data property here would just record
   // whatever the debug UI last set, the way it used to, leaving frame() to poll it every
@@ -1274,6 +1285,9 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     debugTeleportToVehiclePad(team: number): void {
       teleportPlayerToVehiclePad(world, playerId, team);
     },
+    dispose(): void {
+      audio.dispose();
+    },
     frame(dtSeconds: number): void {
       const frameStart = performance.now();
       let steps = advance(acc, dtSeconds, app.paused ? 0 : app.timeScale, FIXED_DT);
@@ -1303,8 +1317,17 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       // see each helper's own comment for why weaponFire needs the `steps > 0` guard and the
       // others don't.
       if (steps > 0) playWeaponFireAudio(world, playerId, audio);
+      // Codex review round 1 of the M7 PR: skipping updateMovementAudio entirely while free
+      // cam is active meant a jet/ski loop already running at the moment free cam was toggled
+      // on never got its own stop call -- setJetting/setSkiing are exactly what makes that
+      // stop happen, and neither ran again until free cam was toggled back off. Explicitly
+      // forcing both off here (setLoop already no-ops a stop of a key that never started, so
+      // this is cheap every frame) closes that gap instead of just not looking at it.
       if (!app.freeCam) {
         updateMovementAudio(world, playerId, audio, currentInput.jet, footstepState, dtSeconds);
+      } else {
+        audio.setJetting(playerId, false, 0);
+        audio.setSkiing(playerId, false, 0);
       }
       updateStationHumAudio(world, audio);
 

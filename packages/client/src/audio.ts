@@ -16,6 +16,9 @@ interface AudioLike {
     | 'createBuffer'
     | 'createBiquadFilter'
     | 'createPanner'
+    | 'resume'
+    | 'close'
+    | 'state'
   >;
 }
 
@@ -226,6 +229,12 @@ export interface AudioEngine {
   setSkiing(playerId: number, active: boolean, speed: number): void;
   footstep(position: Vec3): void;
   setStationHum(id: number, position: Vec3, active: boolean): void;
+  /** Best-effort resume of a context a browser's autoplay policy started (or later put back
+   *  into) the `suspended` state -- must be called from inside a real user-gesture handler
+   *  (a click, a keydown), the same restriction every browser places on `AudioContext.resume`
+   *  itself. A no-op, not a throw, when the context is already running or resume isn't
+   *  available (Codex review round 1 of the M7 PR). */
+  resume(): void;
   dispose(): void;
 }
 
@@ -275,10 +284,18 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
     setStationHum(id, _position, active): void {
       setLoop(loops, `hum:${String(id)}`, active, () => startStationHumLoop(context, master));
     },
+    resume(): void {
+      if (context.state === 'suspended') void context.resume?.();
+    },
     dispose(): void {
       for (const loop of loops.values()) loop.stop();
       loops.clear();
       master.disconnect();
+      // Codex review round 1 of the M7 PR: dispose stopped every loop and disconnected the
+      // master gain, but never closed the underlying AudioContext -- app.ts had no teardown
+      // path calling this at all before this same round, so every App instance (a hot reload,
+      // a test harness creating several) leaked a real OS-level audio device context.
+      if (context.state !== 'closed') void context.close?.();
     },
   };
 }
