@@ -181,4 +181,23 @@ describe('movement under interior ceilings', () => {
     stepWorld(world, inputMap(id, { jet: true }));
     expect(world.players.position[id * 3 + 1]).toBeLessThanOrEqual(3 - 1.7 - 0.6 + 1e-3);
   });
+
+  it('keeps a downward-moving player inside when the chest starts on the roof plane', () => {
+    const world = createWorld(flat, 1);
+    world.interiors = [
+      buildInteriorCollider(
+        { positions: lowCeiling(3) },
+        {
+          position: { x: 0, y: 0, z: 0 },
+          rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 },
+        },
+      ),
+    ];
+    const id = addPlayer(world, { x: 0, y: 1.3, z: 0 });
+    world.players.velocity[id * 3 + 1] = -1;
+    world.players.wasGrounded[id] = 0;
+    stepWorld(world, inputMap(id, {}));
+    expect(world.players.position[id * 3 + 1]).toBeLessThanOrEqual(3 - 1.7 - 0.6 + 1e-3);
+    expect(world.players.velocity[id * 3 + 1]).toBeLessThan(0);
+  });
 });

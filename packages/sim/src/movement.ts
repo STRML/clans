@@ -406,6 +406,7 @@ function sweepChest(
   colliders: readonly InteriorInstance[],
   prevChest: Vec3,
   chest: Vec3,
+  previousBody: Vec3,
 ): { point: Vec3; normal: Vec3 } | null {
   const dx = chest.x - prevChest.x,
     dy = chest.y - prevChest.y,
@@ -428,7 +429,20 @@ function sweepChest(
   // contact normal against this movement so all callers get the same inward-facing normal.
   const facing =
     hit.normal.x * direction.x + hit.normal.y * direction.y + hit.normal.z * direction.z;
-  const sign = facing > 0 ? -1 : 1;
+  let sign = facing > 0 ? -1 : 1;
+  // At a surface tie, movement direction alone cannot tell which side of the solid contains
+  // the player. Use the previous body origin (below the chest for a player) when it has a
+  // meaningful component along the hit normal. This keeps a downward tick inside an upward
+  // wound ceiling; wall contacts with no such component retain motion-based orientation.
+  if (hit.distance <= SWEEP_EPSILON * 2) {
+    const side = {
+      x: previousBody.x - hit.point.x,
+      y: previousBody.y - hit.point.y,
+      z: previousBody.z - hit.point.z,
+    };
+    const sideFacing = hit.normal.x * side.x + hit.normal.y * side.y + hit.normal.z * side.z;
+    if (Math.abs(sideFacing) > SWEEP_EPSILON) sign = sideFacing < 0 ? -1 : 1;
+  }
   return {
     point: hit.point,
     normal: { x: hit.normal.x * sign, y: hit.normal.y * sign, z: hit.normal.z * sign },
@@ -475,7 +489,7 @@ function resolveInteriors(world: World, body: Body, armor: ArmorData, previous: 
   const chestBeforePush = { x: body.x, y: body.y + chestOffsetY, z: body.z };
   stopAtSweepHit(
     body,
-    sweepChest(world.interiors, prevChest, chestBeforePush),
+    sweepChest(world.interiors, prevChest, chestBeforePush, previous),
     chestOffsetY,
     radius,
   );
@@ -518,7 +532,12 @@ function resolveForceFields(
   const chestOffsetY = height - radius;
   const prevChest = { x: previous.x, y: previous.y + chestOffsetY, z: previous.z };
   const chestBeforePush = { x: body.x, y: body.y + chestOffsetY, z: body.z };
-  stopAtSweepHit(body, sweepChest(blockers, prevChest, chestBeforePush), chestOffsetY, radius);
+  stopAtSweepHit(
+    body,
+    sweepChest(blockers, prevChest, chestBeforePush, previous),
+    chestOffsetY,
+    radius,
+  );
   const chest = { x: body.x, y: body.y + chestOffsetY, z: body.z };
   const push = resolveSphereAgainstInteriors(blockers, chest, radius);
   // Same floating-point-noise floor resolveInteriors applies above -- see MIN_PUSH_DEPTH's
