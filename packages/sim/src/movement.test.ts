@@ -757,12 +757,21 @@ describe('airborne jet steering', () => {
       world.players.velocity[id * 3 + 2] = 15;
       for (let tick = 0; tick < 16; tick++) stepWorld(world, inputMap(id, { moveX, jet: true }));
       const lateral = -moveX * world.players.velocity[id * 3]!;
-      expect(lateral).toBeGreaterThan(1);
-      expect(lateral).toBeLessThan(8);
+      expect(lateral).toBeGreaterThan(9);
+      expect(lateral).toBeLessThan(12);
       expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(15, 8);
       expect(world.players.onGround[id]).toBe(0);
     },
   );
+
+  it('builds sideways speed beyond the ground strafe cap while preserving forward momentum', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+    world.players.velocity[id * 3 + 2] = 15;
+    for (let tick = 0; tick < 32; tick++) stepWorld(world, inputMap(id, { moveX: 1, jet: true }));
+    expect(world.players.velocity[id * 3]).toBeLessThan(-20);
+    expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(15, 8);
+  });
 
   it('does not steer without jet energy or a held jet button', () => {
     for (const jet of [false, true]) {

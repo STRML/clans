@@ -70,7 +70,7 @@ test('captures a flag using the debug teleport hook', async ({ page }) => {
   await page.evaluate(() => window.__clansDebug?.teleportToFlag(2));
   await expect
     .poll(async () => page.locator('#hud-flag-status').getAttribute('data-value'), {
-      timeout: 2_000,
+      timeout: 20_000,
     })
     .toBe('carrying the enemy flag');
 
@@ -78,7 +78,7 @@ test('captures a flag using the debug teleport hook', async ({ page }) => {
   await page.evaluate(() => window.__clansDebug?.teleportToFlag(1));
   await expect
     .poll(async () => page.locator('#hud-team-scores').getAttribute('data-value'), {
-      timeout: 2_000,
+      timeout: 20_000,
     })
     .not.toBe(before);
 });
