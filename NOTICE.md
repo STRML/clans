@@ -37,6 +37,12 @@ the way milestone 4's shapes had.
 Vehicle shapes (`shapes.vl2/shapes/`): `vehicle_air_scout.glb` (the Shrike),
 `vehicle_grav_scout.glb` (the Wildcat).
 
+Milestone 6 adds no new source files: bot waypoint navigation reads the same base-object,
+spawn, and flag-stand placements already credited above.
+
+Milestone 7 adds no new source data files -- command circuit, audio, and voice binds are
+synthesized or computed at runtime, not fetched or shipped as media.
+
 ## Sources
 
 - Data files are downloaded from the mirror at

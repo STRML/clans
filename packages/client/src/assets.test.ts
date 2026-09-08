@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { loadKatabatic, type TerrainManifest } from './assets.js';
+import { collisionUrl, loadKatabatic, shapeUrl, type TerrainManifest } from './assets.js';
 
 const manifest: TerrainManifest = {
   gridSize: 2,
@@ -46,5 +46,21 @@ describe('loadKatabatic', () => {
     // a load failure.
     stubFetch(new ArrayBuffer(2)); // one height instead of the four a 2x2 grid needs
     await expect(loadKatabatic()).rejects.toThrow(/heightmap/i);
+  });
+});
+
+describe('shapeUrl / collisionUrl (base-path aware, Codex review round 1 of the M7 PR)', () => {
+  // Root-relative ("/katabatic/...") only works when the page itself is served from the
+  // domain root -- apps/demo's own vite.config.ts sets `base: './'` because GitHub Pages
+  // serves it under /clans/. import.meta.env.BASE_URL is Vite's own runtime reflection of
+  // that setting; every asset URL this module builds must be prefixed with it, not a
+  // hardcoded absolute root, or the demo build 404s on every asset fetch.
+  it("shapeUrl is prefixed with import.meta.env.BASE_URL, not a hardcoded '/'", () => {
+    expect(shapeUrl('shrike')).toBe(`${import.meta.env.BASE_URL}katabatic/shapes/shrike.glb`);
+  });
+  it("collisionUrl is prefixed with import.meta.env.BASE_URL, not a hardcoded '/'", () => {
+    expect(collisionUrl('svpad')).toBe(
+      `${import.meta.env.BASE_URL}katabatic/collision/svpad.collision.bin`,
+    );
   });
 });

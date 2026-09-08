@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import {
   applyBaseObjectDamage,
   applyLoadoutRequest,
+  armorFor,
   BASE_OBJECT_DATA,
   BaseObjectKind,
   FIXED_DT,
@@ -26,8 +27,10 @@ import {
   type Heightfield,
   type PlayerInput,
   type PlayerSnapshotData,
+  type Vec3,
   type World,
 } from '@clans/sim';
+import { EventKind, OrderKind } from '@clans/protocol';
 import type {
   BaseObjectSnapshotData,
   ProjectileSnapshotData,
@@ -35,6 +38,7 @@ import type {
   VehicleSnapshotData,
 } from '@clans/protocol';
 import { loadKatabatic, type KatabaticAssets } from './assets.js';
+import { createAudioEngine, FOOTSTEP_INTERVAL_S, type AudioEngine } from './audio.js';
 import {
   baseObjectsFromWorld,
   createBaseObjectView,
@@ -42,7 +46,9 @@ import {
   turretsFromWorld,
 } from './base-object-view.js';
 import {
+  canvasToWorld,
   drawCommanderMap,
+  drawOrderMarkers,
   friendlySensorCircles,
   playersFromWorld,
   sensedEnemyIds,
@@ -75,6 +81,7 @@ import {
   vehiclePadMenuVisible,
   type VehiclePadMenu,
 } from './vehiclePadMenu.js';
+import { createVoiceMenu, speakVoiceLine, type VoiceMenu } from './voicebinds.js';
 import {
   projectilesFromWorld,
   spawnExplosionsForExpired,
@@ -144,6 +151,11 @@ export interface App {
   debugRepairGenerator(team: number): void;
   debugIsStationPowered(team: number): boolean;
   debugTeleportToVehiclePad(team: number): void;
+  /** Closes the underlying AudioContext (Codex review round 1 of the M7 PR: nothing
+   *  previously called AudioEngine's own `dispose`, so every `createApp()` call -- a hot
+   *  reload, a test harness constructing several -- leaked a real OS-level audio device
+   *  context). Idempotent; safe to call more than once. */
+  dispose(): void;
 }
 
 function toHeightfield(assets: KatabaticAssets): Heightfield {
@@ -378,6 +390,8 @@ interface BaseAssetsViewState {
   vehiclePadMenu: VehiclePadMenu;
   vehiclePadMenuState: { open: boolean };
   commanderMapCanvas: HTMLCanvasElement;
+  orderState: { pending: { x: number; z: number } | null };
+  voiceMenu: VoiceMenu;
 }
 
 function remoteToPlayerPosition(player: PlayerSnapshotData): PlayerPosition {
@@ -404,8 +418,60 @@ function drawCommanderMapForTeam(state: BaseAssetsViewState): void {
   const localTeam = state.world.players.team[state.playerId] ?? 1;
   const circles = friendlySensorCircles(state.world, localTeam);
   const players = commanderMapPlayers(state.world, state.net);
-  const sensedIds = sensedEnemyIds(players, localTeam, circles);
+  const sensedIds = sensedEnemyIds(players, localTeam, circles, state.world);
   drawCommanderMap(ctx, state.assets, state.world, players, localTeam, sensedIds);
+  const { minX, minZ, width: areaWidth, depth: areaDepth } = state.assets.scene.missionArea;
+  const { width, height } = ctx.canvas;
+  const toCanvas = (x: number, z: number): [number, number] => [
+    ((x - minX) / areaWidth) * width,
+    ((z - minZ) / areaDepth) * height,
+  ];
+  drawOrderMarkers(ctx, state.net?.orders ?? [], localTeam, toCanvas);
+}
+
+/** Order confirm/cancel and voice-bind line confirm/cancel share one digit/Escape read per
+ *  frame -- both are edge-triggered and consumed once (see Input's own doc comments), so they
+ *  cannot each call `digitPressedThisFrame`/`escapePressedThisFrame` separately. A click on
+ *  the (visible) commander map already stashed a pending world position in
+ *  `state.orderState.pending` (see the click listener set up alongside `commanderMapCanvas`'s
+ *  own creation); a digit 1-3 while that's set turns it into a sent CommandOrder. An order is
+ *  a message, not client state (Global Constraints) -- this never mutates `state.net.orders`
+ *  itself, only sends the request; the marker `drawCommanderMapForTeam` draws only appears
+ *  once the server echoes the order back on a later snapshot. Otherwise, while the voice menu
+ *  is open, any digit sends that line's VoiceBind and closes the menu. */
+/** Confirms a pending commander-map order-kind click, if `digit` (1-3) and a pending click are
+ *  both present. Returns true when it sent one, so the caller doesn't also try to read the
+ *  same digit as a voice-line pick. */
+function confirmPendingOrder(state: BaseAssetsViewState, digit: number): boolean {
+  const pending = state.orderState.pending;
+  if (!pending || digit < 1 || digit > 3) return false;
+  const kind = digit === 1 ? OrderKind.Attack : digit === 2 ? OrderKind.Defend : OrderKind.Repair;
+  state.net?.sendCommandOrder(kind, pending.x, pending.z);
+  state.orderState.pending = null;
+  return true;
+}
+
+function confirmVoiceLine(state: BaseAssetsViewState, digit: number): void {
+  if (!state.voiceMenu.visible || digit < 1) return;
+  state.net?.sendVoiceBind(digit - 1);
+  state.voiceMenu.hide();
+}
+
+/** Order confirm/cancel and voice-bind line confirm/cancel share one digit/Escape read per
+ *  frame -- both are edge-triggered and consumed once (see Input's own doc comments), so they
+ *  cannot each call `digitPressedThisFrame`/`escapePressedThisFrame` separately. See
+ *  `confirmPendingOrder`'s own comment for why an order takes priority over a voice line on
+ *  the same digit. An order is a message, not client state (Global Constraints) -- this never
+ *  mutates `state.net.orders` itself, only sends the request; the marker
+ *  `drawCommanderMapForTeam` draws only appears once the server echoes the order back on a
+ *  later snapshot. */
+function syncCommandOrders(state: BaseAssetsViewState): void {
+  const digit = state.input.digitPressedThisFrame();
+  if (state.input.escapePressedThisFrame()) {
+    state.orderState.pending = null;
+    if (state.voiceMenu.visible) state.voiceMenu.hide();
+  }
+  if (!confirmPendingOrder(state, digit)) confirmVoiceLine(state, digit);
 }
 
 /** Syncs base-object/turret meshes, the station menu, the commander map, and the HUD's
@@ -476,8 +542,24 @@ export function vehicleRenderData(state: {
   return out;
 }
 
+/** The commander-map (`C`) and voice-menu (`V`) toggles, plus drawing the map while it's
+ *  open -- pulled out of `syncBaseAssetsView` to keep that function's own complexity under
+ *  budget, the same reason `syncMenus` already exists as its own function. */
+function syncMapAndVoiceToggles(state: BaseAssetsViewState): void {
+  const { input } = state;
+  if (input.commandCirclePressedThisFrame()) {
+    state.commanderMapCanvas.hidden = !state.commanderMapCanvas.hidden;
+    if (state.commanderMapCanvas.hidden) state.orderState.pending = null;
+  }
+  if (!state.commanderMapCanvas.hidden) drawCommanderMapForTeam(state);
+  if (input.voiceMenuPressedThisFrame()) {
+    if (state.voiceMenu.visible) state.voiceMenu.hide();
+    else state.voiceMenu.show();
+  }
+}
+
 function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): void {
-  const { world, playerId, net, input } = state;
+  const { world, playerId, net } = state;
   const connected = net ? net.connected : true;
   const baseObjectData: BaseObjectSnapshotData[] =
     net && connected ? net.baseObjects : baseObjectsFromWorld(world);
@@ -489,11 +571,8 @@ function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): vo
   // that also gates the outgoing `use` wire bit -- see frame()'s own comment for why
   // usePressedThisFrame() cannot be called a second time here.
   syncMenus(state, usePressed);
-
-  if (input.commandCirclePressedThisFrame()) {
-    state.commanderMapCanvas.hidden = !state.commanderMapCanvas.hidden;
-  }
-  if (!state.commanderMapCanvas.hidden) drawCommanderMapForTeam(state);
+  syncMapAndVoiceToggles(state);
+  syncCommandOrders(state);
 
   // A second, redundant hud.update immediately after syncWorldView's own -- see
   // hudSourceFrom's own comment for why aimedStructure isn't computed inside that
@@ -520,6 +599,37 @@ function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): vo
  * false, feed the mesh-sync functions an empty list so their own pruning naturally clears
  * everything, rather than mutating NetClient state from here.
  */
+/** Task 7 (audio): every explosion flash createFlash added to `effects` since `fromIndex`
+ *  gets the matching synthesized boom, at the same position the visual flash already landed
+ *  on -- riding the existing expired-projectile diff (spawnExplosionsForExpired) rather than
+ *  re-deriving "a projectile just expired" a second way. */
+function playExplosionAudio(audio: AudioEngine, effects: Effect[], fromIndex: number): void {
+  for (let i = fromIndex; i < effects.length; i += 1) {
+    const mesh = effects[i]?.mesh;
+    if (mesh) audio.explosion({ x: mesh.position.x, y: mesh.position.y, z: mesh.position.z });
+  }
+}
+
+/** Task 7 (audio): flag touch/capture cues, keyed off the same decoded event list the HUD's
+ *  kill feed and weapons-view.ts's laser beams already read -- single-player has no event
+ *  stream (hudSourceFrom's own single-player branch always returns []), so these stay silent
+ *  there, the same limitation spawnLaserBeams already accepts. */
+function playFlagEventAudio(audio: AudioEngine, events: readonly TimestampedEvent[]): void {
+  for (const event of events) {
+    if (event.kind === EventKind.FlagTouched) audio.flagTouch();
+    else if (event.kind === EventKind.FlagCaptured) audio.flagCapture();
+  }
+}
+
+/** A VoiceBindPlayed event (`a` = speaker playerId, `b` = lineId) is broadcast back to every
+ *  client, sender included -- that broadcast, not a local-only echo, is what makes "played for
+ *  the local player's own action" true, matching Task 6's own contract. */
+function playVoiceBindAudio(events: readonly TimestampedEvent[]): void {
+  for (const event of events) {
+    if (event.kind === EventKind.VoiceBindPlayed) speakVoiceLine(event.b);
+  }
+}
+
 export function syncWorldView(
   world: World,
   playerId: number,
@@ -545,10 +655,13 @@ export function syncWorldView(
   flagMeshes: Map<number, THREE.Group>,
   seenEventSeq: { seq: number },
   dtSeconds: number,
+  audio?: AudioEngine,
 ): void {
   const connected = net ? net.connected : true;
   const projectiles = net ? (connected ? net.projectiles : []) : projectilesFromWorld(world);
+  const explosionsFrom = effects.length;
   spawnExplosionsForExpired(scene, effects, previousProjectiles, projectiles);
+  if (audio) playExplosionAudio(audio, effects, explosionsFrom);
   syncProjectileMeshes(scene, projectileMeshes, projectiles);
   previousProjectiles.clear();
   for (const projectile of projectiles) previousProjectiles.set(projectile.id, projectile);
@@ -557,6 +670,8 @@ export function syncWorldView(
 
   const allEvents: TimestampedEvent[] = net ? net.recentEvents : [];
   const newEvents = drainNewEvents(allEvents, seenEventSeq);
+  if (audio) playFlagEventAudio(audio, newEvents);
+  playVoiceBindAudio(newEvents);
   spawnLaserBeams(scene, effects, newEvents, (id) => positionOfPlayer(world, net, id));
   updateEffects(scene, effects, dtSeconds);
 
@@ -845,6 +960,122 @@ export function debugIsStationPowered(world: World, team: number): boolean {
   return false;
 }
 
+// Task 7 (audio): local player's own gunshots only -- `world.lastFireEvents` is set fresh
+// every simulated tick (empty when nothing fired), from world.pendingFireEvents, and
+// NetClient.tick only ever simulates the LOCAL_SLOT input, so a remote player's shot never
+// appears here (positional audio for other players is out of scope this milestone, see the
+// AudioEngine interface's unused `position` params). Callers must gate this on `steps > 0` --
+// otherwise a paused frame would replay the last tick's already-played shot every frame.
+function playWeaponFireAudio(world: World, playerId: number, audio: AudioEngine): void {
+  for (const event of world.lastFireEvents) {
+    if (event.playerId !== playerId) continue;
+    audio.weaponFire(event.weaponId, event.origin);
+  }
+}
+
+interface FootstepState {
+  timer: number;
+}
+
+const FOOTSTEP_SPEED_THRESHOLD_MPS = 0.5; // Ours: ignores idle jitter/wall-press micro-velocity.
+
+function localPlayerPosition(world: World, playerId: number): Vec3 {
+  const base = playerId * 3;
+  return {
+    x: world.players.position[base] ?? 0,
+    y: world.players.position[base + 1] ?? 0,
+    z: world.players.position[base + 2] ?? 0,
+  };
+}
+
+function localPlayerHorizontalSpeed(world: World, playerId: number): number {
+  const base = playerId * 3;
+  const vx = world.players.velocity[base] ?? 0;
+  const vz = world.players.velocity[base + 2] ?? 0;
+  return Math.hypot(vx, vz);
+}
+
+function updateJetAudio(
+  world: World,
+  playerId: number,
+  audio: AudioEngine,
+  jetInputActive: boolean,
+): void {
+  const energy = world.players.energy[playerId] ?? 0;
+  audio.setJetting(
+    playerId,
+    jetInputActive && energy > 0,
+    energy / armorFor(world, playerId).maxEnergy,
+  );
+}
+
+/** Cadence-gated (FOOTSTEP_INTERVAL_S) synthesized footsteps -- only while grounded, not
+ *  skiing or mounted, and moving faster than idle jitter. */
+function updateFootstepAudio(
+  world: World,
+  playerId: number,
+  audio: AudioEngine,
+  skiing: boolean,
+  speed: number,
+  footstep: FootstepState,
+  dtSeconds: number,
+): void {
+  const onGround = (world.players.onGround[playerId] ?? 0) === 1;
+  const mounted = (world.players.mountedVehicleId[playerId] ?? -1) !== -1;
+  const running = onGround && !skiing && !mounted && speed > FOOTSTEP_SPEED_THRESHOLD_MPS;
+  if (!running) {
+    footstep.timer = 0;
+    return;
+  }
+  footstep.timer += dtSeconds;
+  if (footstep.timer < FOOTSTEP_INTERVAL_S) return;
+  footstep.timer -= FOOTSTEP_INTERVAL_S;
+  audio.footstep(localPlayerPosition(world, playerId));
+}
+
+/** Task 7 (audio): jet/ski loops and cadence-gated footsteps for the local player, read
+ *  straight off the just-simulated world state -- `ski`/`onGround`/`energy`/`velocity` are
+ *  real PlayerStore fields (types.ts), not derived here. Split into one small function per
+ *  effect (jet/footstep) to stay under the complexity budget; skiing itself is cheap enough
+ *  to stay inline here. */
+function updateMovementAudio(
+  world: World,
+  playerId: number,
+  audio: AudioEngine,
+  jetInputActive: boolean,
+  footstep: FootstepState,
+  dtSeconds: number,
+): void {
+  updateJetAudio(world, playerId, audio, jetInputActive);
+
+  const speed = localPlayerHorizontalSpeed(world, playerId);
+  const skiing = (world.players.ski[playerId] ?? 0) === 1;
+  audio.setSkiing(playerId, skiing, speed);
+
+  updateFootstepAudio(world, playerId, audio, skiing, speed, footstep, dtSeconds);
+}
+
+/** Task 7 (audio): one persistent hum loop per team generator, transitioning with
+ *  `world.baseObjects.powered` -- setStationHum/setLoop already no-op a redundant start or a
+ *  stop of a key that never started, so calling this every frame for every generator is cheap
+ *  and still only ever actually starts/stops audio on a genuine power transition. */
+function updateStationHumAudio(world: World, audio: AudioEngine): void {
+  const bases = world.baseObjects;
+  for (let id = 0; id < bases.count; id += 1) {
+    if (bases.kind[id] !== BaseObjectKind.Generator) continue;
+    const base = id * 3;
+    audio.setStationHum(
+      id,
+      {
+        x: bases.position[base] ?? 0,
+        y: bases.position[base + 1] ?? 0,
+        z: bases.position[base + 2] ?? 0,
+      },
+      bases.powered[id] === 1,
+    );
+  }
+}
+
 export async function createApp(container: HTMLElement, options: AppOptions = {}): Promise<App> {
   const assets = await loadKatabatic();
   const terrain = toHeightfield(assets);
@@ -947,6 +1178,9 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const flagMeshes = new Map<number, THREE.Group>();
   const effects: Effect[] = [];
   const seenEventSeq = { seq: 0 };
+  const crosshair = document.createElement('div');
+  crosshair.id = 'crosshair';
+  document.body.appendChild(crosshair);
   const hud = createHud(document.body, hudSourceFrom(world, playerId, net));
   const stationMenuState = { open: false };
   const stationMenu: StationMenu = createStationMenu(
@@ -971,6 +1205,30 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   commanderMapCanvas.height = 512;
   commanderMapCanvas.hidden = true;
   document.body.appendChild(commanderMapCanvas);
+  const orderState: { pending: { x: number; z: number } | null } = { pending: null };
+  // A click only stashes a pending world position -- it never sends anything itself. The
+  // order is only sent once the player confirms a kind with a digit key (syncCommandOrders,
+  // above), matching the loadout menu's own click-then-confirm shape.
+  commanderMapCanvas.addEventListener('click', (event: MouseEvent) => {
+    if (commanderMapCanvas.hidden) return;
+    const ctx = commanderMapCanvas.getContext('2d');
+    if (!ctx) return;
+    const rect = commanderMapCanvas.getBoundingClientRect();
+    const canvasX = ((event.clientX - rect.left) / rect.width) * commanderMapCanvas.width;
+    const canvasY = ((event.clientY - rect.top) / rect.height) * commanderMapCanvas.height;
+    orderState.pending = canvasToWorld(ctx, assets.scene.missionArea, canvasX, canvasY);
+  });
+  const voiceMenu = createVoiceMenu(document.body);
+  // Task 7: pure oscillator/noise synthesis, no shipped or fetched audio file (M7 plan,
+  // Global Constraints) -- a real AudioContext, not the fake used by audio.test.ts.
+  const audio = createAudioEngine({ context: new AudioContext() });
+  // Browsers start a fresh AudioContext `suspended` under autoplay restriction and require a
+  // real user-gesture handler to resume it -- the same click that already requests pointer
+  // lock (Input's own listener on this element) is that gesture. Codex review round 1 of the
+  // M7 PR: without this, every synthesized sound silently never plays in a browser that
+  // enforces the restriction.
+  renderer.domElement.addEventListener('click', () => audio.resume());
+  const footstepState: FootstepState = { timer: 0 };
   // Backs the `godMode` accessor below. A plain data property here would just record
   // whatever the debug UI last set, the way it used to, leaving frame() to poll it every
   // tick and react after the fact (Codex review round 4, finding 5) -- the accessor's
@@ -1027,6 +1285,9 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     debugTeleportToVehiclePad(team: number): void {
       teleportPlayerToVehiclePad(world, playerId, team);
     },
+    dispose(): void {
+      audio.dispose();
+    },
     frame(dtSeconds: number): void {
       const frameStart = performance.now();
       let steps = advance(acc, dtSeconds, app.paused ? 0 : app.timeScale, FIXED_DT);
@@ -1052,6 +1313,24 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       }
       app.stats.simMs = performance.now() - simStart;
 
+      // Task 7 (audio): reacts to the world state this frame's simulation just produced --
+      // see each helper's own comment for why weaponFire needs the `steps > 0` guard and the
+      // others don't.
+      if (steps > 0) playWeaponFireAudio(world, playerId, audio);
+      // Codex review round 1 of the M7 PR: skipping updateMovementAudio entirely while free
+      // cam is active meant a jet/ski loop already running at the moment free cam was toggled
+      // on never got its own stop call -- setJetting/setSkiing are exactly what makes that
+      // stop happen, and neither ran again until free cam was toggled back off. Explicitly
+      // forcing both off here (setLoop already no-ops a stop of a key that never started, so
+      // this is cheap every frame) closes that gap instead of just not looking at it.
+      if (!app.freeCam) {
+        updateMovementAudio(world, playerId, audio, currentInput.jet, footstepState, dtSeconds);
+      } else {
+        audio.setJetting(playerId, false, 0);
+        audio.setSkiing(playerId, false, 0);
+      }
+      updateStationHumAudio(world, audio);
+
       syncWorldView(
         world,
         playerId,
@@ -1064,6 +1343,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         flagMeshes,
         seenEventSeq,
         dtSeconds,
+        audio,
       );
 
       syncBaseAssetsView(
@@ -1083,6 +1363,8 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
           vehiclePadMenu,
           vehiclePadMenuState,
           commanderMapCanvas,
+          orderState,
+          voiceMenu,
         },
         usePressed,
       );

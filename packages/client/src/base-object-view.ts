@@ -47,8 +47,15 @@ function placeholderMesh(): THREE.Mesh {
  *  `scale.y` give half-width/half-height once doubled), oriented from its `rotation`. */
 function forceFieldMesh(placement: KatabaticAssets['scene']['baseObjects'][number]): THREE.Mesh {
   const scale = placement.scale ?? [1, 4, 6];
+  // PlaneGeometry's untransformed default lies in the local XY plane (normal along local
+  // +Z). The real collider, sim/baseObjects.ts's forceFieldQuad, has every vertex at
+  // local x = 0 -- it lies in the local YZ plane, normal along local +X. Rotate the
+  // geometry itself (not the mesh) to match, BEFORE placement.rotation is applied below,
+  // the same order the collider's own position+rotation pipeline composes them.
+  const geometry = new THREE.PlaneGeometry(scale[2], scale[1]);
+  geometry.rotateY(Math.PI / 2);
   const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(scale[2], scale[1]),
+    geometry,
     new THREE.MeshBasicMaterial({
       color: FORCE_FIELD_POWERED_COLOR,
       transparent: true,

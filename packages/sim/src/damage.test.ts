@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { LIGHT_ARMOR } from './armor.js';
+import { HEAVY_ARMOR, LIGHT_ARMOR } from './armor.js';
 import {
   addPlayer,
+  ArmorId,
   createWorld,
   FIXED_DT,
   GRAVITY,
+  respawnPlayer as respawnPlayerWithArmor, // the barrel export -- weapons.ts's respawnPlayer, not damage.ts's own
   setGodMode,
   stepWorld,
   type Heightfield,
@@ -268,6 +270,14 @@ describe('respawnPlayer and dueForRespawn', () => {
     );
     expect(world.players.position[id * 3 + 2]).toBe(7);
     expect(world.players.velocity[id * 3 + 1]).toBeCloseTo(-GRAVITY * FIXED_DT, 9);
+  });
+
+  it("respawn restores the player's own armor's energy, not always Light's (closes #12)", () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    respawnPlayerWithArmor(world, id, { x: 0, y: 0, z: 0 }, ArmorId.Heavy); // sets armor, then respawns
+    expect(world.players.armor[id]).toBe(ArmorId.Heavy);
+    expect(world.players.energy[id]).toBe(HEAVY_ARMOR.maxEnergy); // fails today: reads LIGHT_ARMOR.maxEnergy
   });
 
   it('increments respawnSeq on every respawn, starting from 0 (Codex review round 8, PR #9)', () => {

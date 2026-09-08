@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Clans</title>
+    <title>Clans — demo</title>
     <style>
       html,
       body {
@@ -18,6 +18,12 @@
         width: 100%;
         height: 100%;
       }
+      /* Codex review round 2 of the M7 PR: @clans/client's own index.html has this same
+         overlay CSS (packages/client/index.html); this demo shell is a separate Vite app
+         with its own HTML entry and never got it, so the HUD, crosshair, commander map, and
+         every menu rendered as plain document-flow elements after the full-screen canvas on
+         the deployed Pages demo -- a functioning-but-invisible UI, the exact bug class the
+         earlier client-side fix (this PR, round 1) was supposed to close everywhere. */
       #debug-stats {
         position: fixed;
         top: 8px;
@@ -29,10 +35,6 @@
         pointer-events: none;
         white-space: pre;
       }
-      /* The HUD overlays the canvas at all times (createHud never sets `hidden`). Every other
-         panel here toggles `hidden` itself (station/vehicle-pad menus, the voice menu, the
-         commander map); their only job here is to render as a centered overlay instead of a
-         canvas-height block once shown, and to lay their button rows out sanely. */
       #hud {
         position: fixed;
         left: 0;
@@ -112,9 +114,57 @@
         box-shadow: 0 0 2px rgba(0, 0, 0, 0.9);
         pointer-events: none;
       }
+      #demo-instructions {
+        max-width: 40em;
+        margin: 10vh auto 0;
+        padding: 0 1.5em;
+        line-height: 1.5;
+      }
+      #demo-instructions code {
+        background: rgba(255, 255, 255, 0.08);
+        padding: 0.1em 0.35em;
+        border-radius: 3px;
+      }
+      #demo-instructions a {
+        color: #6fb7ff;
+      }
+      #demo-error {
+        max-width: 40em;
+        margin: 10vh auto 0;
+        padding: 0 1.5em;
+        line-height: 1.5;
+      }
+      #demo-error code {
+        background: rgba(255, 255, 255, 0.08);
+        padding: 0.1em 0.35em;
+        border-radius: 3px;
+      }
     </style>
   </head>
   <body>
+    <div id="demo-instructions" hidden>
+      <h1>Clans</h1>
+      <p>This is a client-only demo. It needs a Clans server to connect to.</p>
+      <p>
+        Run one yourself: <code>pnpm dev:server</code> from a clone of
+        <a href="https://github.com/STRML/clans">github.com/STRML/clans</a>, then reload this page
+        with <code>?server=ws://your-host:7777</code> appended to the URL.
+      </p>
+      <p>
+        This page is served over HTTPS, so a plain <code>ws://</code> connection only works for a
+        secure-context host like <code>localhost</code> or <code>127.0.0.1</code> -- a remote server
+        needs <code>wss://</code> (a TLS-terminating proxy in front of it).
+      </p>
+    </div>
+    <div id="demo-error" hidden>
+      <h1>Couldn't connect</h1>
+      <p id="demo-error-detail"></p>
+      <p>
+        This page is served over HTTPS, so a plain <code>ws://</code> server is only reachable if
+        your browser treats it as a secure context (typically <code>localhost</code>) -- a remote
+        server needs <code>wss://</code> (a TLS-terminating proxy in front of it).
+      </p>
+    </div>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

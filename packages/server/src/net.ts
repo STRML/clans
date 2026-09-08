@@ -29,16 +29,20 @@ import {
 import {
   EventKind,
   MessageType,
+  OrderKind,
   PROTOCOL_VERSION,
   SNAPSHOT_EVERY_N_TICKS,
   SNAPSHOT_HISTORY_DEPTH,
+  VOICE_LINE_COUNT,
   WelcomeStatus,
   decodeAck,
+  decodeCommandOrder,
   decodeGod,
   decodeInput,
   decodeJoin,
   decodeLoadout,
   decodeVehicleSpawn,
+  decodeVoiceBind,
   encodeEvent,
   encodeSnapshot,
   encodeWelcome,
@@ -59,6 +63,7 @@ import {
   rewindOthers,
   type PositionHistory,
 } from './lagcomp.js';
+import { currentOrder, issueOrder, type OrderBoard } from './orders.js';
 import { applyInputMessage, createSession, recordAck, type Session } from './session.js';
 import { needsFullSnapshot } from './snapshot-policy.js';
 import { rebalanceTeams, stepBotManager, type BotManager } from './bots.js';
@@ -77,6 +82,9 @@ export interface NetServerOptions {
    *  server always has one, even at `--bots 0` (an empty-budget manager that's a no-op
    *  everywhere it's called) -- this milestone does not support running with none at all. */
   botManager: BotManager;
+  /** One active order per team, TTL-expired -- runtime memory, never part of World/hashWorld
+   *  (mirrors BotManager's own runtime-memory convention, M6 Global Constraints). */
+  board: OrderBoard;
   port: number;
   /** How long an accepted socket may stay unjoined before it is closed. */
   joinTimeoutMs?: number;
@@ -330,10 +338,69 @@ function handleVehicleSpawn(
   spawnVehicleAtPad(world, padId, kind);
 }
 
+const ORDER_KINDS = new Set<number>([OrderKind.Attack, OrderKind.Defend, OrderKind.Repair]);
+
+/** Reads the sender's own team from world.players.team, never a wire-supplied one -- the
+ *  CommandOrderMessage shape carries no team field at all, so a client can only ever issue
+ *  an order for its own team (failure matrix row 19). Matches handleLoadout's own convention:
+ *  a stale click after the world changed is silently a no-op, not an error.
+ *
+ *  Codex review round 1 of the M7 PR: `decodeCommandOrder` reads a raw wire byte into `kind`
+ *  and two raw f32s into `x`/`z` with no bounds or finiteness check -- a modified or buggy
+ *  client could send an out-of-range kind or NaN/Infinity coordinates, which `issueOrder`
+ *  would store and `stepBots`' goal selection would steer bots toward, propagating NaN into
+ *  movement/position and then into every other client's snapshot (the same "never trust the
+ *  client alone" rule `handleVoiceBind`'s own bounds check already applies to `lineId`). Both
+ *  violations are silently dropped, matching `handleVoiceBind`'s own convention. */
+function handleCommandOrder(
+  world: World,
+  board: OrderBoard,
+  clients: Map<WebSocket, ClientEntry>,
+  socket: WebSocket,
+  bytes: Uint8Array,
+): void {
+  const entry = clients.get(socket);
+  if (!entry) return;
+  const { kind, x, z } = decodeCommandOrder(bytes);
+  if (!ORDER_KINDS.has(kind) || !Number.isFinite(x) || !Number.isFinite(z)) return;
+  const team = world.players.team[entry.session.playerId] ?? 0;
+  issueOrder(board, team, kind, x, z, world.tick);
+}
+
+export const VOICE_BIND_COOLDOWN_TICKS = 32; // Ours -- see M7 plan's "ours" numbers table.
+const lastVoiceBindAtTick = new Map<number, number>();
+
+/** Bounds-checks lineId against VOICE_LINE_COUNT (row 23) and enforces a per-player cooldown
+ *  server-side (row 22) -- a modified client could otherwise bypass either check, so neither
+ *  is trusted from the client alone. Both violations are silently dropped, matching
+ *  handleLoadout's "no such thing as a client bug here" convention: never a disconnect. */
+function handleVoiceBind(
+  world: World,
+  clients: Map<WebSocket, ClientEntry>,
+  socket: WebSocket,
+  bytes: Uint8Array,
+): void {
+  const entry = clients.get(socket);
+  if (!entry) return;
+  const { lineId } = decodeVoiceBind(bytes);
+  if (lineId < 0 || lineId >= VOICE_LINE_COUNT) return;
+  const playerId = entry.session.playerId;
+  const last = lastVoiceBindAtTick.get(playerId) ?? -Infinity;
+  if (world.tick - last < VOICE_BIND_COOLDOWN_TICKS) return;
+  lastVoiceBindAtTick.set(playerId, world.tick);
+  broadcastEvent(clients, {
+    type: MessageType.Event,
+    kind: EventKind.VoiceBindPlayed,
+    a: playerId,
+    b: lineId,
+  });
+}
+
 function handleMessage(
   world: World,
   spawns: SceneSpawn[],
   botManager: BotManager,
+  board: OrderBoard,
   clients: Map<WebSocket, ClientEntry>,
   now: () => number,
   socket: WebSocket,
@@ -346,6 +413,9 @@ function handleMessage(
   else if (type === MessageType.God) handleGod(world, clients, socket, bytes);
   else if (type === MessageType.Loadout) handleLoadout(world, clients, socket, bytes);
   else if (type === MessageType.VehicleSpawn) handleVehicleSpawn(world, clients, socket, bytes);
+  else if (type === MessageType.CommandOrder)
+    handleCommandOrder(world, board, clients, socket, bytes);
+  else if (type === MessageType.VoiceBind) handleVoiceBind(world, clients, socket, bytes);
 }
 
 function handleClose(
@@ -373,6 +443,12 @@ function handleClose(
   // the new occupant onto it for one tick. Clearing it here, synchronously on disconnect,
   // closes that window instead of waiting on a future tick to overwrite it naturally.
   clearHistory(history, entry.session.playerId);
+  // Codex review round 1 of the M7 PR: lastVoiceBindAtTick is keyed by numeric player id and
+  // was never cleared here, unlike every other per-player table this function already clears
+  // -- a reused id (the same disconnect/rejoin churn clearHistory's own comment describes)
+  // inherited a stale cooldown deadline from whoever held that id before, silently dropping
+  // the new occupant's first otherwise-valid voice bind.
+  lastVoiceBindAtTick.delete(entry.session.playerId);
   clients.delete(socket);
 }
 
@@ -516,7 +592,11 @@ function snapshotTurrets(world: World): TurretSnapshotData[] {
  *  passes one. Debug-overlay data only (Task 12): playerId + BotState, one entry per
  *  currently-active bot, bounds-checked against MAX_SNAPSHOT_BOTS the same as every
  *  other extras array. */
-export function buildExtras(world: World, botManager?: BotManager): WorldExtras {
+export function buildExtras(
+  world: World,
+  botManager?: BotManager,
+  board?: OrderBoard,
+): WorldExtras {
   return {
     projectiles: snapshotActiveProjectiles(world),
     flags: snapshotWorldFlags(world),
@@ -537,7 +617,24 @@ export function buildExtras(world: World, botManager?: BotManager): WorldExtras 
           .filter((runtime) => world.players.active[runtime.playerId])
           .map((runtime) => ({ playerId: runtime.playerId, state: runtime.state }))
       : [],
+    orders: board ? ordersForSnapshot(board, world) : [],
   };
+}
+
+function ordersForSnapshot(board: OrderBoard, world: World): WorldExtras['orders'] {
+  const orders: WorldExtras['orders'] = [];
+  for (const team of [1, 2] as const) {
+    const order = currentOrder(board, team, world.tick);
+    if (!order) continue;
+    orders.push({
+      team: order.team,
+      kind: order.kind,
+      x: order.x,
+      z: order.z,
+      expiresInS: (order.expiresAtTick - world.tick) * FIXED_DT,
+    });
+  }
+  return orders;
 }
 
 /** Clears a respawned id's position history the same way disconnect already does (see
@@ -791,6 +888,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
           options.world,
           options.spawns,
           options.botManager,
+          options.board,
           clients,
           now,
           socket,
@@ -820,7 +918,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
 
   function sendAllSnapshots(): void {
     const players = serializeActivePlayers(options.world);
-    const extras = buildExtras(options.world, options.botManager);
+    const extras = buildExtras(options.world, options.botManager, options.board);
     nextSnapshotId += 1;
     for (const entry of clients.values()) {
       // Codex round 14 (PR #4): sending unconditionally let a slow or unresponsive
@@ -886,7 +984,11 @@ export function startNetServer(options: NetServerOptions): NetServer {
       // A bot id is never also a socket-bound player id (a human never joins as an id a
       // bot already occupies -- handleJoin's own addPlayer always allocates a fresh id),
       // so the two maps' key sets never overlap and this merge order doesn't matter.
-      for (const [botId, input] of stepBotManager(options.botManager, options.world)) {
+      for (const [botId, input] of stepBotManager(
+        options.botManager,
+        options.world,
+        options.board,
+      )) {
         inputs.set(botId, input);
       }
       runOneTick(inputs);

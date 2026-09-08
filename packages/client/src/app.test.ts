@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   addPlayer,
   applyDamage,
@@ -51,6 +51,14 @@ import type {
   TimestampedEvent,
 } from './netclient.js';
 import type { Effect } from './weapons-view.js';
+import { speakVoiceLine } from './voicebinds.js';
+
+// speakVoiceLine ultimately reaches window.speechSynthesis (a real browser-only global) --
+// mocked here so syncWorldView's own event-drain wiring is observable without a DOM.
+vi.mock('./voicebinds.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./voicebinds.js')>();
+  return { ...actual, speakVoiceLine: vi.fn() };
+});
 
 function vehicleData(overrides: Partial<VehicleSnapshotData> = {}): VehicleSnapshotData {
   return {
@@ -447,6 +455,61 @@ describe('syncWorldView (Codex review round 6, finding P2)', () => {
 
     expect(projectileMeshes.size).toBe(0);
     expect(flagMeshes.size).toBe(0);
+  });
+
+  it('speaks a VoiceBindPlayed event for every client, including the one whose own action it was', () => {
+    const world = createWorld(flat, 1);
+    const localId = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const scene = new THREE.Scene();
+    const hud = { update: () => {} };
+    const voiceEvent: TimestampedEvent = {
+      type: MessageType.Event,
+      seq: 1,
+      kind: EventKind.VoiceBindPlayed,
+      a: localId, // the speaker is the local player itself -- still gets spoken back.
+      b: 4,
+    };
+    const fakeNet: Pick<
+      NetClient,
+      | 'playerId'
+      | 'remotePlayers'
+      | 'projectiles'
+      | 'flags'
+      | 'teamScores'
+      | 'gameOver'
+      | 'winnerTeam'
+      | 'timeRemainingS'
+      | 'gameOverReason'
+      | 'recentEvents'
+    > & { connected: boolean } = {
+      playerId: localId,
+      remotePlayers: new Map(),
+      projectiles: [],
+      flags: [],
+      teamScores: [0, 0],
+      gameOver: false,
+      winnerTeam: 0,
+      timeRemainingS: 0,
+      gameOverReason: 0,
+      recentEvents: [voiceEvent],
+      connected: true,
+    };
+
+    syncWorldView(
+      world,
+      localId,
+      fakeNet,
+      scene,
+      hud,
+      [],
+      new Map(),
+      new Map(),
+      new Map(),
+      { seq: 0 },
+      1 / 60,
+    );
+
+    expect(speakVoiceLine).toHaveBeenCalledWith(4);
   });
 });
 

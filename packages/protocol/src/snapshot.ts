@@ -20,11 +20,13 @@ import {
   MAX_SNAPSHOT_BASE_OBJECTS,
   MAX_SNAPSHOT_BOTS,
   MAX_SNAPSHOT_FLAGS,
+  MAX_SNAPSHOT_ORDERS,
   MAX_SNAPSHOT_PLAYERS,
   MAX_SNAPSHOT_PROJECTILES,
   MAX_SNAPSHOT_TURRETS,
   MAX_SNAPSHOT_VEHICLES,
   MessageType,
+  type OrderKind,
 } from './messages.js';
 
 export interface SnapshotBaseline {
@@ -86,6 +88,16 @@ export interface BotDebugSnapshotData {
   playerId: number;
   state: number;
 }
+/** A team's active commander order, as sent to clients (M7). expiresInS is derived server-side
+ *  (expiresAtTick - world.tick) * FIXED_DT -- ticks don't mean anything across the wire boundary,
+ *  the same reasoning ProjectileSnapshotData's own comment gives for omitting expiresAtTick. */
+export interface OrderSnapshotData {
+  team: number;
+  kind: OrderKind;
+  x: number;
+  z: number;
+  expiresInS: number;
+}
 export interface WorldExtras {
   projectiles: ProjectileSnapshotData[];
   flags: FlagSnapshotData[];
@@ -97,9 +109,15 @@ export interface WorldExtras {
   winnerTeam: number;
   timeRemainingS: number; // seconds until the match clock expires; derived, not the raw tick threshold
   gameOverReason: number; // GameOverReason from @clans/sim: 0 = capture limit, 1 = time limit
-  /** Purely additive, appended after every other field (Global Constraints: no
-   *  PROTOCOL_VERSION bump) -- must stay the LAST field writeExtras/readExtras handle. */
+  /** Bots (M6), appended after every other trailing scalar field above. */
   bots: BotDebugSnapshotData[];
+  /** Orders (M7): the new LAST field writeExtras/readExtras handle -- appended after `bots`,
+   *  the real last field at the time this was added, not after `vehicles`. This DOES need
+   *  PROTOCOL_VERSION bumped (messages.ts: 3 -> 4, Codex review round 1 of the M7 PR) --
+   *  appending it safely covers a stale client reading a fresh server's snapshot (it just
+   *  stops decoding early), but not the reverse: a fresh client connecting to a stale server
+   *  would read past a snapshot that was never written with this block at all. */
+  orders: OrderSnapshotData[];
 }
 export function emptyExtras(): WorldExtras {
   return {
@@ -114,6 +132,7 @@ export function emptyExtras(): WorldExtras {
     timeRemainingS: 0,
     gameOverReason: 0,
     bots: [],
+    orders: [],
   };
 }
 export interface DecodedSnapshot {
@@ -134,6 +153,7 @@ export interface DecodedSnapshot {
   timeRemainingS: number;
   gameOverReason: number;
   bots: BotDebugSnapshotData[];
+  orders: OrderSnapshotData[];
 }
 
 const HEADER_BYTES = 1 + 4 + 4 + 4 + 4 + 1; // type, snapshotId, baselineId, tick, lastInputSequence, flags
@@ -541,6 +561,34 @@ function readBot(cursor: Cursor): BotDebugSnapshotData {
 // playerId u16, state u8.
 const BOT_BYTES = 2 + 1;
 
+function writeOrder(cursor: Cursor, o: OrderSnapshotData): void {
+  writeU8(cursor, o.team);
+  writeU8(cursor, o.kind);
+  writeF32(cursor, o.x);
+  writeF32(cursor, o.z);
+  writeF32(cursor, o.expiresInS);
+}
+function readOrder(cursor: Cursor): OrderSnapshotData {
+  const team = readU8(cursor);
+  const kind = readU8(cursor) as OrderKind;
+  const x = readF32(cursor);
+  const z = readF32(cursor);
+  const expiresInS = readF32(cursor);
+  return { team, kind, x, z, expiresInS };
+}
+// team u8, kind u8, x f32, z f32, expiresInS f32.
+const ORDER_BYTES = 1 + 1 + 4 + 4 + 4;
+
+// Orders (M7): the new true last block, after `bots` -- see WorldExtras.orders' own comment.
+// Split out of writeExtras to keep it under the complexity budget, not for reuse elsewhere.
+function writeOrders(cursor: Cursor, orders: OrderSnapshotData[]): void {
+  if (orders.length > MAX_SNAPSHOT_ORDERS) {
+    throw new RangeError('Snapshot order count exceeds ' + String(MAX_SNAPSHOT_ORDERS));
+  }
+  writeU8(cursor, orders.length);
+  for (const o of orders) writeOrder(cursor, o);
+}
+
 function writeExtras(cursor: Cursor, extras: WorldExtras): void {
   writeU16(cursor, extras.projectiles.length);
   for (const p of extras.projectiles) writeProjectile(cursor, p);
@@ -575,11 +623,21 @@ function writeExtras(cursor: Cursor, extras: WorldExtras): void {
   }
   writeU8(cursor, extras.bots.length);
   for (const b of extras.bots) writeBot(cursor, b);
+  writeOrders(cursor, extras.orders);
 }
 function assertPlausibleExtrasCount(count: number, max: number, label: string): void {
   if (count > max) {
     throw new RangeError(`Snapshot ${label} count ${String(count)} exceeds ${String(max)}`);
   }
+}
+
+// Split out of readExtras to keep it under the complexity budget, mirroring writeOrders' split.
+function readOrders(cursor: Cursor): OrderSnapshotData[] {
+  const orderCount = readU8(cursor);
+  assertPlausibleExtrasCount(orderCount, MAX_SNAPSHOT_ORDERS, 'order');
+  const orders: OrderSnapshotData[] = [];
+  for (let i = 0; i < orderCount; i += 1) orders.push(readOrder(cursor));
+  return orders;
 }
 
 function readExtras(cursor: Cursor): WorldExtras {
@@ -613,6 +671,7 @@ function readExtras(cursor: Cursor): WorldExtras {
   assertPlausibleExtrasCount(botCount, MAX_SNAPSHOT_BOTS, 'bot');
   const bots: BotDebugSnapshotData[] = [];
   for (let i = 0; i < botCount; i += 1) bots.push(readBot(cursor));
+  const orders = readOrders(cursor);
   return {
     projectiles,
     flags,
@@ -625,6 +684,7 @@ function readExtras(cursor: Cursor): WorldExtras {
     timeRemainingS,
     gameOverReason,
     bots,
+    orders,
   };
 }
 function extrasByteLength(extras: WorldExtras): number {
@@ -646,7 +706,9 @@ function extrasByteLength(extras: WorldExtras): number {
     4 +
     1 +
     1 +
-    extras.bots.length * BOT_BYTES
+    extras.bots.length * BOT_BYTES +
+    1 +
+    extras.orders.length * ORDER_BYTES
   );
 }
 

@@ -75,6 +75,30 @@ describe('createBaseObjectView', () => {
     expect(fieldMesh?.position.toArray()).toEqual([5, 2, 0]);
   });
 
+  it('a force-field mesh geometry lies in the local YZ plane, matching the sim collider forceFieldQuad (closes #18)', () => {
+    // sim/baseObjects.ts's forceFieldQuad has every vertex at local x = 0 (the collider
+    // lies in the local YZ plane, normal along local +X). The stub placement's own
+    // rotation is 0 degrees, so this reads the mesh's geometry directly, before any
+    // placement.rotation transform, and would previously fail because PlaneGeometry's
+    // untransformed default lies in the local XY plane (normal along +Z) instead.
+    const scene = new THREE.Scene();
+    const view = createBaseObjectView(scene, stubAssets);
+    const fieldMesh = view.baseObjectMeshes.get(1) as THREE.Mesh;
+    const positionAttribute = fieldMesh.geometry.attributes.position;
+    if (!positionAttribute) throw new Error('expected a position attribute');
+    const positions = positionAttribute.array;
+    const ys = new Set<number>();
+    const zs = new Set<number>();
+    for (let i = 0; i < positions.length; i += 3) {
+      expect(positions[i]).toBeCloseTo(0);
+      ys.add(Math.round((positions[i + 1] as number) * 100));
+      zs.add(Math.round((positions[i + 2] as number) * 100));
+    }
+    // Not a degenerate single point -- the plane still spans real extent in y and z.
+    expect(ys.size).toBeGreaterThan(1);
+    expect(zs.size).toBeGreaterThan(1);
+  });
+
   it('sync fades a force field to zero opacity when it goes unpowered', () => {
     const scene = new THREE.Scene();
     const view = createBaseObjectView(scene, stubAssets);

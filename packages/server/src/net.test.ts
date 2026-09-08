@@ -21,17 +21,24 @@ import {
   decodeSnapshot,
   decodeWelcome,
   encodeAck,
+  encodeCommandOrder,
   encodeInput,
   encodeJoin,
   encodeLoadout,
   encodeVehicleSpawn,
+  encodeVoiceBind,
   EventKind,
   MessageType,
+  OrderKind,
+  PROTOCOL_VERSION,
+  VOICE_LINE_COUNT,
+  WelcomeStatus,
   type NetInputSample,
 } from '@clans/protocol';
 import { buildWaypointGraph } from '@clans/bots';
 import { createBotManager, TARGET_TEAM_SIZE, type BotManager } from './bots.js';
 import { buildExtras, startNetServer, type NetServer } from './net.js';
+import { createOrderBoard, currentOrder } from './orders.js';
 import { teamCount, type SceneSpawn } from './world.js';
 
 /** A bot manager with zero budget: every net.ts test in this file that doesn't care
@@ -99,7 +106,13 @@ describe('startNetServer', () => {
 
   beforeEach(async () => {
     world = createWorld(terrain, 1, 8);
-    server = startNetServer({ botManager: emptyBotManager(), world, spawns, port: TEST_PORT });
+    server = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world,
+      spawns,
+      port: TEST_PORT,
+    });
     await server.ready;
   });
   afterEach(() => server.close());
@@ -467,6 +480,7 @@ describe('startNetServer', () => {
   it('rejects a bind failure through `ready` instead of hanging or crashing unhandled', async () => {
     const busy = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: createWorld(terrain, 1, 4),
       spawns,
       port: TEST_PORT,
@@ -511,6 +525,7 @@ describe('startNetServer', () => {
     const shutdownWorld = createWorld(terrain, 1, 8);
     const shutdownServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: shutdownWorld,
       spawns,
       port,
@@ -536,6 +551,7 @@ describe('startNetServer', () => {
     const port = TEST_PORT + 2;
     const unjoinedServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: createWorld(terrain, 1, 8),
       spawns,
       port,
@@ -557,6 +573,7 @@ describe('startNetServer', () => {
     const fullWorld = createWorld(terrain, 1, 1);
     const fullServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: fullWorld,
       spawns,
       port,
@@ -585,6 +602,7 @@ describe('startNetServer', () => {
     const port = TEST_PORT + 4;
     const timeoutServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: createWorld(terrain, 1, 8),
       spawns,
       port,
@@ -602,6 +620,7 @@ describe('startNetServer', () => {
     const port = TEST_PORT + 5;
     const timeoutServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: createWorld(terrain, 1, 8),
       spawns,
       port,
@@ -653,6 +672,7 @@ describe('startNetServer', () => {
     let clock = 0;
     const lagServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world,
       spawns,
       port: TEST_PORT + 1,
@@ -742,6 +762,7 @@ describe('startNetServer', () => {
     let clock = 0;
     const lagServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world,
       spawns,
       port: TEST_PORT + 7,
@@ -831,6 +852,7 @@ describe('startNetServer', () => {
     let clock = 0;
     const flagServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world,
       spawns,
       port: TEST_PORT + 6,
@@ -969,6 +991,7 @@ describe('startNetServer', () => {
     let clock = 0;
     const lagServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world,
       spawns,
       port: TEST_PORT + 8,
@@ -1053,6 +1076,7 @@ describe('startNetServer', () => {
     let clock = 0;
     const lagServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world,
       spawns,
       port: TEST_PORT + 9,
@@ -1129,6 +1153,7 @@ describe('startNetServer', () => {
     let clock = 0;
     const lagServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world,
       spawns,
       port: TEST_PORT + 10,
@@ -1244,6 +1269,7 @@ describe('startNetServer', () => {
     const spawnWorld = createWorld(terrain, 1, 8);
     const spawnServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: spawnWorld,
       spawns: twoSpawnsPerTeam,
       port: TEST_PORT + 11,
@@ -1285,6 +1311,7 @@ describe('startNetServer', () => {
     const respawnWorld = createWorld(terrain, 1, 8);
     const lagServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: respawnWorld,
       spawns: respawnSpawns,
       port: TEST_PORT + 12,
@@ -1382,6 +1409,7 @@ describe('startNetServer', () => {
     const rttWorld = createWorld(terrain, 1, 8);
     const rttServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: rttWorld,
       spawns: rttSpawns,
       port: TEST_PORT + 13,
@@ -1467,6 +1495,7 @@ describe('startNetServer', () => {
     }
     const collideServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: collideWorld,
       spawns: twoSpawnsPerTeam,
       port: TEST_PORT + 14,
@@ -1498,6 +1527,7 @@ describe('startNetServer', () => {
     const loadoutSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
     const loadoutServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: loadoutWorld,
       spawns: loadoutSpawns,
       port: TEST_PORT + 15,
@@ -1551,6 +1581,7 @@ describe('startNetServer', () => {
     const vehicleSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
     const vehicleServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: vehicleWorld,
       spawns: vehicleSpawns,
       port: TEST_PORT + 16,
@@ -1581,6 +1612,7 @@ describe('startNetServer', () => {
     const farSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [0, 0, 0], radius: 5 }];
     const vehicleServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: vehicleWorld,
       spawns: farSpawns,
       port: TEST_PORT + 17,
@@ -1615,6 +1647,7 @@ describe('startNetServer', () => {
     const vehicleSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
     const vehicleServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: vehicleWorld,
       spawns: vehicleSpawns,
       port: TEST_PORT + 18,
@@ -1643,6 +1676,7 @@ describe('startNetServer', () => {
     const vehicleSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
     const vehicleServer = startNetServer({
       botManager: emptyBotManager(),
+      board: createOrderBoard(),
       world: vehicleWorld,
       spawns: vehicleSpawns,
       port: TEST_PORT + 19,
@@ -1689,6 +1723,7 @@ describe('startNetServer', () => {
     ];
     const botServer = startNetServer({
       botManager: manager,
+      board: createOrderBoard(),
       world: botWorld,
       spawns: botSpawns,
       port: TEST_PORT + 20,
@@ -1719,6 +1754,7 @@ describe('startNetServer', () => {
     const botCountBefore = manager.botIds.size;
     const rebalanceServer = startNetServer({
       botManager: manager,
+      board: createOrderBoard(),
       world: rebalanceWorld,
       spawns: rebalanceSpawns,
       port: TEST_PORT + 21,
@@ -1763,6 +1799,7 @@ describe('startNetServer', () => {
     ];
     const frozenServer = startNetServer({
       botManager: manager,
+      board: createOrderBoard(),
       world: frozenWorld,
       spawns: frozenSpawns,
       port: TEST_PORT + 22,
@@ -1776,5 +1813,203 @@ describe('startNetServer', () => {
     ];
     expect(after).toEqual(before);
     frozenServer.close();
+  });
+
+  it("a CommandOrder message issues an order for the sender's own team, and never affects the other team (row 19)", async () => {
+    const orderWorld = createWorld(terrain, 1, 8);
+    const orderSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [0, 0, 0], radius: 5 }];
+    const board = createOrderBoard();
+    const orderServer = startNetServer({
+      botManager: emptyBotManager(),
+      board,
+      world: orderWorld,
+      spawns: orderSpawns,
+      port: TEST_PORT + 23,
+    });
+    await orderServer.ready;
+    const client = await connect(TEST_PORT + 23);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    client.send(encodeCommandOrder({ kind: OrderKind.Attack, x: 12, z: -3 }));
+    await wait(10);
+    orderServer.tick(1);
+    const order = currentOrder(board, 1, orderWorld.tick);
+    expect(order?.kind).toBe(OrderKind.Attack);
+    expect(order?.x).toBeCloseTo(12);
+    expect(order?.z).toBeCloseTo(-3);
+    expect(currentOrder(board, 2, orderWorld.tick)).toBeNull();
+    client.close();
+    orderServer.close();
+  });
+
+  it('a second VoiceBind within the cooldown window produces no broadcast Event; a third sent after the cooldown does (row 22)', async () => {
+    const voiceWorld = createWorld(terrain, 1, 8);
+    const voiceSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [0, 0, 0], radius: 5 }];
+    const voiceServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world: voiceWorld,
+      spawns: voiceSpawns,
+      port: TEST_PORT + 24,
+    });
+    await voiceServer.ready;
+    const client = await connect(TEST_PORT + 24);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    const events: Uint8Array[] = [];
+    client.on('message', (data) => events.push(new Uint8Array(data as Uint8Array)));
+
+    client.send(encodeVoiceBind({ lineId: 1 }));
+    await wait(10);
+    voiceServer.tick(1);
+    client.send(encodeVoiceBind({ lineId: 2 }));
+    await wait(10);
+    voiceServer.tick(2);
+    const voiceBindEvents = events
+      .filter((bytes) => bytes[0] === MessageType.Event)
+      .map((bytes) => decodeEvent(bytes))
+      .filter((e) => e.kind === EventKind.VoiceBindPlayed);
+    expect(voiceBindEvents).toHaveLength(1);
+
+    for (let tick = 3; tick <= 35; tick += 1) voiceServer.tick(tick);
+    client.send(encodeVoiceBind({ lineId: 3 }));
+    await wait(10);
+    voiceServer.tick(36);
+    const afterCooldown = events
+      .filter((bytes) => bytes[0] === MessageType.Event)
+      .map((bytes) => decodeEvent(bytes))
+      .filter((e) => e.kind === EventKind.VoiceBindPlayed);
+    expect(afterCooldown).toHaveLength(2);
+    client.close();
+    voiceServer.close();
+  });
+
+  it('a VoiceBind naming an out-of-range lineId produces no broadcast Event (row 23)', async () => {
+    const voiceWorld = createWorld(terrain, 1, 8);
+    const voiceSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [0, 0, 0], radius: 5 }];
+    const voiceServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world: voiceWorld,
+      spawns: voiceSpawns,
+      port: TEST_PORT + 25,
+    });
+    await voiceServer.ready;
+    const client = await connect(TEST_PORT + 25);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    const events: Uint8Array[] = [];
+    client.on('message', (data) => events.push(new Uint8Array(data as Uint8Array)));
+
+    client.send(encodeVoiceBind({ lineId: VOICE_LINE_COUNT }));
+    await wait(10);
+    voiceServer.tick(1);
+    const voiceBindEvents = events
+      .filter((bytes) => bytes[0] === MessageType.Event)
+      .map((bytes) => decodeEvent(bytes))
+      .filter((e) => e.kind === EventKind.VoiceBindPlayed);
+    expect(voiceBindEvents).toHaveLength(0);
+    client.close();
+    voiceServer.close();
+  });
+
+  it('a stale-version Join gets rejected with VersionMismatch, not silently accepted (Codex review round 1 of the M7 PR)', async () => {
+    // M7 adds a trailing WorldExtras.orders block a stale (pre-M7) client's own decoder has
+    // no idea to read -- PROTOCOL_VERSION bumped 3 -> 4 specifically so this handshake check
+    // catches that instead of a stale client desyncing or crashing on its first snapshot.
+    const versionWorld = createWorld(terrain, 1, 8);
+    const versionSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [0, 0, 0], radius: 5 }];
+    const versionServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world: versionWorld,
+      spawns: versionSpawns,
+      port: TEST_PORT + 28,
+    });
+    await versionServer.ready;
+    const client = await connect(TEST_PORT + 28);
+    const welcomePromise = receive(client);
+    client.send(new Uint8Array([MessageType.Join, PROTOCOL_VERSION - 1]));
+    const welcome = decodeWelcome(await welcomePromise);
+    expect(welcome.status).toBe(WelcomeStatus.VersionMismatch);
+    client.close();
+    versionServer.close();
+  });
+
+  it('a CommandOrder naming an out-of-range kind, or a non-finite x/z, issues no order (Codex review round 1 of the M7 PR)', async () => {
+    const orderWorld = createWorld(terrain, 1, 8);
+    const orderSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [0, 0, 0], radius: 5 }];
+    const board = createOrderBoard();
+    const orderServer = startNetServer({
+      botManager: emptyBotManager(),
+      board,
+      world: orderWorld,
+      spawns: orderSpawns,
+      port: TEST_PORT + 26,
+    });
+    await orderServer.ready;
+    const client = await connect(TEST_PORT + 26);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    client.send(encodeCommandOrder({ kind: 99 as OrderKind, x: 0, z: 0 }));
+    client.send(encodeCommandOrder({ kind: OrderKind.Attack, x: Number.NaN, z: 0 }));
+    client.send(encodeCommandOrder({ kind: OrderKind.Attack, x: 0, z: Number.POSITIVE_INFINITY }));
+    await wait(10);
+    orderServer.tick(1);
+    expect(currentOrder(board, 1, orderWorld.tick)).toBeNull();
+    client.close();
+    orderServer.close();
+  });
+
+  it("a reused player id does not inherit a previous occupant's VoiceBind cooldown after disconnect (Codex review round 1 of the M7 PR)", async () => {
+    const voiceWorld = createWorld(terrain, 1, 8);
+    const voiceSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [0, 0, 0], radius: 5 }];
+    const voiceServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world: voiceWorld,
+      spawns: voiceSpawns,
+      port: TEST_PORT + 27,
+    });
+    await voiceServer.ready;
+
+    const first = await connect(TEST_PORT + 27);
+    const firstWelcome = receive(first);
+    first.send(encodeJoin());
+    await firstWelcome;
+    first.send(encodeVoiceBind({ lineId: 0 }));
+    await wait(10);
+    voiceServer.tick(1);
+    first.close();
+    await wait(10);
+    voiceServer.tick(2); // handleClose runs synchronously on the close event, before this tick.
+
+    // Single-player-slot world (capacity 1): the second connection's Join is guaranteed to
+    // reuse playerId 0, the same id the first connection just held and used its own voice
+    // bind cooldown on.
+    const second = await connect(TEST_PORT + 27);
+    const secondWelcome = receive(second);
+    second.send(encodeJoin());
+    await secondWelcome;
+    const events: Uint8Array[] = [];
+    second.on('message', (data) => events.push(new Uint8Array(data as Uint8Array)));
+    second.send(encodeVoiceBind({ lineId: 1 }));
+    await wait(10);
+    voiceServer.tick(3);
+    const voiceBindEvents = events
+      .filter((bytes) => bytes[0] === MessageType.Event)
+      .map((bytes) => decodeEvent(bytes))
+      .filter((e) => e.kind === EventKind.VoiceBindPlayed);
+    expect(voiceBindEvents).toHaveLength(1);
+    second.close();
+    voiceServer.close();
   });
 });

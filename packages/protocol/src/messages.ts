@@ -10,13 +10,34 @@ export enum MessageType {
   God = 7,
   Loadout = 8,
   VehicleSpawn = 9,
+  CommandOrder = 10,
+  VoiceBind = 11,
+}
+
+/** Attack/Defend/Repair -- a commander's order to their own team's bots. */
+export enum OrderKind {
+  Attack = 0,
+  Defend = 1,
+  Repair = 2,
 }
 
 // M5 bumps 2 -> 3: a new MessageType (VehicleSpawn), a new PlayerInput flag bit (`use`), and
 // a new WorldExtras field (vehicles) are all wire-format changes an M4 client cannot safely
 // ignore -- WelcomeStatus.VersionMismatch exists specifically to reject a stale client rather
 // than let it desync.
-export const PROTOCOL_VERSION = 3;
+//
+// M7 bumps 3 -> 4 (Codex review round 1 of the M7 PR): two new MessageTypes (CommandOrder,
+// VoiceBind) and a new trailing WorldExtras field (orders, snapshot.ts) are wire-format
+// changes too. Appending `orders` after every other field (not a PROTOCOL_VERSION bump) was
+// this milestone's own original plan, reasoned only about a stale M6 CLIENT reading a fresh
+// M7 SERVER's snapshot (it just stops decoding early, which is safe) -- it missed the
+// opposite direction: a fresh M7 client connecting to a stale M6 server sends the same
+// PROTOCOL_VERSION either way, so the handshake never catches it, and the client's own
+// `readOrders` call then reads past the end of a snapshot that was never written with an
+// orders block, throwing on every single snapshot. Bumping the version instead makes
+// WelcomeStatus.VersionMismatch catch this exactly like it already catches every other
+// wire-format change, in both directions.
+export const PROTOCOL_VERSION = 4;
 
 export enum WelcomeStatus {
   Ok = 0,
@@ -61,6 +82,7 @@ export enum EventKind {
   FlagTouched = 1, // a = playerId, b = flagId
   FlagCaptured = 2, // a = team, b = playerId
   LaserFired = 3, // a = shooterId, b = hitPlayerId (-1 = miss)
+  VoiceBindPlayed = 4, // a = playerId, b = lineId
 }
 export interface EventMessage {
   type: MessageType.Event;
@@ -81,6 +103,32 @@ export interface VehicleSpawnMessage {
   type: MessageType.VehicleSpawn;
   padId: number;
   kind: number; // VehicleKind from @clans/sim, kept as a raw number the same way other wire enums are
+}
+export interface CommandOrderMessage {
+  type: MessageType.CommandOrder;
+  kind: OrderKind;
+  x: number;
+  z: number;
+}
+export interface VoiceBindMessage {
+  type: MessageType.VoiceBind;
+  lineId: number;
+}
+
+/**
+ * A team's currently active commander order, TTL-expired. Lives in `@clans/server`'s
+ * `OrderBoard` (never in `World`/`hashWorld`, matching M6's `BotManager` runtime-memory
+ * convention) but the *shape* is declared here, in protocol, so `@clans/bots` -- which
+ * depends only on `@clans/sim` today, never on `@clans/server` (that dependency runs the
+ * other way) -- can consume it without a circular package dependency. `@clans/server`'s
+ * `orders.ts` imports this type rather than redeclaring it.
+ */
+export interface TeamOrder {
+  team: number;
+  kind: OrderKind;
+  x: number;
+  z: number;
+  expiresAtTick: number;
 }
 
 export const SNAPSHOT_EVERY_N_TICKS = 2;
@@ -113,3 +161,5 @@ export const MAX_SNAPSHOT_VEHICLES = 255; // Matches @clans/sim's VehicleStore c
 // headroom; capped at 255 (not 256) because the wire count is a single unchecked-write u8 --
 // see snapshot.ts's writeExtras for why 255 is the real ceiling, not just a round number.
 export const MAX_SNAPSHOT_BOTS = 32; // Ours -- TARGET_TEAM_SIZE * 2 (M6's own "ours" numbers table).
+export const MAX_SNAPSHOT_ORDERS = 2; // Ours -- one active order per team, no queue.
+export const VOICE_LINE_COUNT = 9; // Ours -- see M7 plan's "ours" numbers table.

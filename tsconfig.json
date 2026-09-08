@@ -6,6 +6,7 @@
     { "path": "packages/bots" },
     { "path": "packages/assets" },
     { "path": "packages/server" },
-    { "path": "packages/client" }
+    { "path": "packages/client" },
+    { "path": "apps/demo" }
   ]
 }

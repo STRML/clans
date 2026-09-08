@@ -16,6 +16,12 @@ export const STUCK_MIN_PROGRESS = 1; // Ours, meters.
 // the already-computed path instead of retrying the identical route -- bounded resilience,
 // not a navmesh.
 export const STUCK_SKIP_THRESHOLD = 3; // Ours.
+// Ours -- bigger than WAYPOINT_REACHED_RADIUS (4 m), small enough that a carrier or
+// chased flag moving even a few strides forces a fresh path, not just a full waypoint's
+// worth of drift. Closes #33: an escort/flag-chase goalKey (e.g. `escort:4`) never
+// changes just because the target moved, so without this the path keeps heading toward
+// wherever the target was on the FIRST steerToward call for that goalKey.
+export const GOAL_DRIFT_REPATH_M = 6; // Ours.
 
 /** Projects a world-space unit direction onto the yaw-relative forward/right frame
  *  movement.ts's own desiredVelocity uses (forward = (sin yaw, 0, cos yaw), right =
@@ -100,15 +106,21 @@ function ensurePath(
   goal: Vec3,
   goalKey: string,
 ): void {
+  const drifted =
+    runtime.goalPosition !== null &&
+    Math.hypot(runtime.goalPosition.x - goal.x, runtime.goalPosition.z - goal.z) >
+      GOAL_DRIFT_REPATH_M;
   const needsNewPath =
     runtime.goalKey !== goalKey ||
     runtime.pathIndex >= runtime.path.length ||
-    runtime.path.length === 0;
+    runtime.path.length === 0 ||
+    drifted;
   if (!needsNewPath) return;
   const path = findPath(graph, world, team, from, goal);
   runtime.path = (path ?? [goal]).map((p) => ({ x: p.x, z: p.z }));
   runtime.pathIndex = 0;
   runtime.goalKey = goalKey;
+  runtime.goalPosition = { x: goal.x, z: goal.z };
 }
 
 function advancePastReachedWaypoints(

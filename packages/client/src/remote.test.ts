@@ -70,6 +70,18 @@ describe('RemoteBuffer', () => {
     buffer.push(100, sample(1, 0)); // 1 m in 100 ms: ordinary run speed, not a teleport
     expect(buffer.positionAt(150)?.x).toBeCloseTo(0.5);
   });
+
+  it('resets its history when respawnSeq changes, even for a small position jump under the teleport threshold (reused id smear, closes #8)', () => {
+    // Codex round 17 / strml/clans#8: a reused id's new spawn can coincidentally land
+    // close to the departed player's last position -- close enough that the distance
+    // heuristic alone never fires. respawnSeq increments on every respawn, including a
+    // freed id's first spawn as a new player, so it catches this case the distance check
+    // misses.
+    const buffer = new RemoteBuffer();
+    buffer.push(0, sample(0, 0));
+    buffer.push(50, { ...sample(2, 0), respawnSeq: 1 }); // 2 m jump: well under TELEPORT_DISTANCE_M
+    expect(buffer.positionAt(140)?.x).toBeCloseTo(2);
+  });
 });
 
 describe('syncRemoteMeshes', () => {

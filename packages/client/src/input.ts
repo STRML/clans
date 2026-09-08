@@ -15,6 +15,9 @@ export class Input {
   private readonly keys = new Set<string>();
   private wasUseHeld = false;
   private wasCommandCircleHeld = false;
+  private wasAnyDigitHeld = false;
+  private wasEscapeHeld = false;
+  private wasVoiceMenuHeld = false;
 
   constructor(private readonly target: HTMLElement) {}
 
@@ -60,6 +63,9 @@ export class Input {
     this.fire = false;
     this.wasUseHeld = false;
     this.wasCommandCircleHeld = false;
+    this.wasAnyDigitHeld = false;
+    this.wasEscapeHeld = false;
+    this.wasVoiceMenuHeld = false;
   }
 
   isDown(code: string): boolean {
@@ -81,6 +87,42 @@ export class Input {
     const held = this.isDown('KeyC');
     const pressed = held && !this.wasCommandCircleHeld;
     this.wasCommandCircleHeld = held;
+    return pressed;
+  }
+
+  /** Edge-triggered read of digit keys 1-9, for one-shot UI confirms (a commander-map order
+   *  kind, a voice-bind line) -- distinct from `slotFromKeys` below, which is read every
+   *  frame for weapon switching, where re-selecting an already-equipped weapon on a held key
+   *  is harmless. Consumed once per read like `usePressedThisFrame`, so a held digit doesn't
+   *  resend the same order/voice-bind on every frame it stays down. Returns 0 when no digit
+   *  is newly pressed this frame. */
+  digitPressedThisFrame(): number {
+    for (let n = 1; n <= 9; n += 1) {
+      if (this.isDown(`Digit${String(n)}`)) {
+        const pressed = !this.wasAnyDigitHeld;
+        this.wasAnyDigitHeld = true;
+        return pressed ? n : 0;
+      }
+    }
+    this.wasAnyDigitHeld = false;
+    return 0;
+  }
+
+  /** Same edge-triggered shape as `commandCirclePressedThisFrame`, for dismissing a pending
+   *  commander-map order or closing the voice-bind menu without sending anything. */
+  escapePressedThisFrame(): boolean {
+    const held = this.isDown('Escape');
+    const pressed = held && !this.wasEscapeHeld;
+    this.wasEscapeHeld = held;
+    return pressed;
+  }
+
+  /** Same edge-triggered shape as `commandCirclePressedThisFrame`, for the `V` voice-bind
+   *  quick-chat menu toggle. */
+  voiceMenuPressedThisFrame(): boolean {
+    const held = this.isDown('KeyV');
+    const pressed = held && !this.wasVoiceMenuHeld;
+    this.wasVoiceMenuHeld = held;
     return pressed;
   }
 

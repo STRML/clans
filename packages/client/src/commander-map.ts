@@ -2,9 +2,12 @@ import {
   BASE_OBJECT_DATA,
   BaseObjectKind,
   engagementRange,
+  hasLineOfSight,
+  sampleTerrain,
   type TurretBarrelId,
   type World,
 } from '@clans/sim';
+import { OrderKind, type OrderSnapshotData } from '@clans/protocol';
 import type { KatabaticAssets } from './assets.js';
 
 export interface SensorCircle {
@@ -93,17 +96,76 @@ export function playersFromWorld(world: World): PlayerPosition[] {
   return out;
 }
 
+// Ours -- matches turrets.ts's own TURRET_EYE_HEIGHT. Ground level (y=0 relative to the
+// terrain sample right there) has to be given some eye-height offset above the terrain at the
+// observer's own position: without it, the from/to interpolated path height sits exactly at
+// "ground" for its whole length and hasLineOfSight's own march (`sample.height >= interpolated
+// y`) degenerates to "is there any terrain at or above ground between us", which is true
+// almost everywhere on non-flat terrain -- it would make the sensor system fail closed on
+// anything but dead-flat ground, not just when a real ridge sits in the way.
+const SENSOR_EYE_HEIGHT = 2;
+
+function groundY(world: World, x: number, z: number): number {
+  const sample = sampleTerrain(world.terrain, x, z);
+  return sample.empty ? 0 : sample.height;
+}
+
 export function sensedEnemyIds(
   players: readonly PlayerPosition[],
   localTeam: number,
   circles: readonly SensorCircle[],
+  world: World,
 ): number[] {
   const ids: number[] = [];
   for (const player of players) {
     if (!player.alive || player.team === localTeam) continue;
-    if (insideAnyCircle(player.x, player.z, circles)) ids.push(player.id);
+    if (!insideAnyCircle(player.x, player.z, circles)) continue;
+    // Reuse each covering sensor circle's own center as the observing point -- a sensor
+    // detects along its own line of sight, not the local player's. Every circle covering this
+    // enemy is checked; one clear line from any of them is enough (closes #19).
+    const clear = circles.some((c) => {
+      if (Math.hypot(player.x - c.x, player.z - c.z) > c.radius) return false;
+      const eye = { x: c.x, y: groundY(world, c.x, c.z) + SENSOR_EYE_HEIGHT, z: c.z };
+      const target = { x: player.x, y: groundY(world, player.x, player.z), z: player.z };
+      return hasLineOfSight(world, eye, target);
+    });
+    if (clear) ids.push(player.id);
   }
   return ids;
+}
+
+export function canvasToWorld(
+  ctx: CanvasRenderingContext2D,
+  missionArea: { minX: number; minZ: number; width: number; depth: number },
+  canvasX: number,
+  canvasY: number,
+): { x: number; z: number } {
+  const { width, height } = ctx.canvas;
+  return {
+    x: missionArea.minX + (canvasX / width) * missionArea.width,
+    z: missionArea.minZ + (canvasY / height) * missionArea.depth,
+  };
+}
+
+export function drawOrderMarkers(
+  ctx: CanvasRenderingContext2D,
+  orders: readonly OrderSnapshotData[],
+  localTeam: number,
+  toCanvas: (x: number, z: number) => [number, number],
+): void {
+  const own = orders.find((o) => o.team === localTeam);
+  if (!own) return;
+  const [cx, cy] = toCanvas(own.x, own.z);
+  ctx.strokeStyle =
+    own.kind === OrderKind.Attack
+      ? '#ff4444'
+      : own.kind === OrderKind.Defend
+        ? '#44aaff'
+        : '#44ff88';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+  ctx.stroke();
 }
 
 const TEAM_COLOR: Record<number, string> = { 1: '#dd3333', 2: '#3366dd' };

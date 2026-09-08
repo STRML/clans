@@ -9,6 +9,7 @@ import {
   stepWorld,
   type Heightfield,
 } from '@clans/sim';
+import { OrderKind, type TeamOrder } from '@clans/protocol';
 import { decideCombat, decideGoal, decideState, stepBot, stepBots } from './brain.js';
 import { buildWaypointGraph } from './waypoints.js';
 import { BotRole, BotState, createBotRuntimeState } from './types.js';
@@ -36,7 +37,7 @@ describe('decideGoal', () => {
     setupFlags(world);
     const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
     const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
-    const goal = decideGoal(world, runtime);
+    const goal = decideGoal(world, runtime, null);
     expect(goal.position).toEqual({ x: 100, y: 0, z: 0 });
     expect(goal.key).toBe('enemyFlag:1');
   });
@@ -47,7 +48,7 @@ describe('decideGoal', () => {
     const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
     world.flags.carrierId[1] = bot;
     const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
-    const goal = decideGoal(world, runtime);
+    const goal = decideGoal(world, runtime, null);
     expect(goal.position).toEqual({ x: -100, y: 0, z: 0 });
     expect(goal.key).toBe('home:0');
   });
@@ -57,7 +58,7 @@ describe('decideGoal', () => {
     setupFlags(world);
     const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
     const runtime = createBotRuntimeState(bot, BotRole.Defender, 1);
-    const goal = decideGoal(world, runtime);
+    const goal = decideGoal(world, runtime, null);
     expect(goal.position).toEqual({ x: -100, y: 0, z: 0 });
     expect(goal.key).toBe('home:0');
   });
@@ -69,7 +70,7 @@ describe('decideGoal', () => {
     const carrier = addPlayer(world, { x: 20, y: 0, z: 30 }, 1);
     world.flags.carrierId[1] = carrier;
     const runtime = createBotRuntimeState(bot, BotRole.Defender, 1);
-    const goal = decideGoal(world, runtime);
+    const goal = decideGoal(world, runtime, null);
     expect(goal.position).toEqual({ x: 20, y: 0, z: 30 });
     expect(goal.key).toBe(`escort:${String(carrier)}`);
   });
@@ -85,7 +86,7 @@ describe('decideGoal', () => {
     ]);
     stepPower(world);
     const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
-    const goal = decideGoal(world, runtime);
+    const goal = decideGoal(world, runtime, null);
     expect(goal.position).toEqual({ x: 5, y: 0, z: 0 });
     expect(goal.key).toBe('heal:1');
   });
@@ -95,8 +96,126 @@ describe('decideGoal', () => {
     setupFlags(world);
     const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
     const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
-    const goal = decideGoal(world, runtime);
+    const goal = decideGoal(world, runtime, null);
     expect(goal.key).toBe('enemyFlag:1');
+  });
+});
+
+describe('decideGoal with an order', () => {
+  it('an Attack order overrides the normal CTF goal for an Attacker', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    const order: TeamOrder = {
+      team: 1,
+      kind: OrderKind.Attack,
+      x: 200,
+      z: 300,
+      expiresAtTick: 1000,
+    };
+    const goal = decideGoal(world, runtime, order);
+    expect(goal).toEqual({ position: { x: 200, y: 0, z: 300 }, key: 'order:attack' });
+  });
+
+  it("an order for the OTHER team never affects this bot's goal", () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    const order: TeamOrder = {
+      team: 2,
+      kind: OrderKind.Attack,
+      x: 200,
+      z: 300,
+      expiresAtTick: 1000,
+    };
+    const goal = decideGoal(world, runtime, order);
+    expect(goal.key).not.toBe('order:attack');
+    expect(goal.key).toBe('enemyFlag:1');
+  });
+
+  it('row 21: an expired order (null from currentOrder) falls back to the normal CTF goal', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    const goal = decideGoal(world, runtime, null);
+    expect(goal.key).not.toMatch(/^order:/);
+  });
+
+  it('row 24: a Repair order with no reachable powered station keeps the bot heading toward the nearest one, never gives up', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 5, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 5, y: 0, z: 0 } },
+    ]);
+    world.baseObjects.destroyed[0] = 1; // generator destroyed -- the station has no power.
+    stepPower(world);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    const order: TeamOrder = { team: 1, kind: OrderKind.Repair, x: 50, z: 50, expiresAtTick: 1000 };
+    const goal = decideGoal(world, runtime, order);
+    expect(goal.key).toBe('order:repair-equip');
+    expect(goal.position).toEqual({ x: 50, y: 0, z: 50 });
+    // Repower the station and call again -- still tries, never latches a give-up flag.
+    world.baseObjects.destroyed[0] = 0;
+    stepPower(world);
+    const goalAfterRepower = decideGoal(world, runtime, order);
+    expect(goalAfterRepower.key).toBe('order:repair-equip');
+    expect(goalAfterRepower.position).toEqual({ x: 5, y: 0, z: 0 });
+  });
+
+  it('a Repair order, once the bot already has a Repair Pack, targets the order location directly', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[bot] = 1;
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    const order: TeamOrder = { team: 1, kind: OrderKind.Repair, x: 50, z: 50, expiresAtTick: 1000 };
+    expect(decideGoal(world, runtime, order)).toEqual({
+      position: { x: 50, y: 0, z: 50 },
+      key: 'order:repair',
+    });
+  });
+
+  it('a Defend order overrides the normal CTF goal for a Defender', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const runtime = createBotRuntimeState(bot, BotRole.Defender, 1);
+    const order: TeamOrder = {
+      team: 1,
+      kind: OrderKind.Defend,
+      x: 150,
+      z: -20,
+      expiresAtTick: 1000,
+    };
+    const goal = decideGoal(world, runtime, order);
+    expect(goal).toEqual({ position: { x: 150, y: 0, z: -20 }, key: 'order:defend' });
+  });
+
+  it('a critically damaged bot still routes to a station ahead of any active order', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.damage[bot] = 0.9;
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 5, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 5, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    const order: TeamOrder = {
+      team: 1,
+      kind: OrderKind.Attack,
+      x: 200,
+      z: 300,
+      expiresAtTick: 1000,
+    };
+    const goal = decideGoal(world, runtime, order);
+    expect(goal.key).toBe('heal:1');
   });
 });
 
@@ -123,9 +242,9 @@ describe('decideCombat (failure matrix row 9)', () => {
     const carrier = addPlayer(world, { x: 20, y: 0, z: 30 }, 1);
     world.flags.carrierId[1] = carrier;
     const runtime = createBotRuntimeState(bot, BotRole.Defender, 1);
-    expect(decideGoal(world, runtime).key).toBe(`escort:${String(carrier)}`);
+    expect(decideGoal(world, runtime, null).key).toBe(`escort:${String(carrier)}`);
     world.players.alive[carrier] = 0;
-    const goal = decideGoal(world, runtime);
+    const goal = decideGoal(world, runtime, null);
     expect(goal.key).toBe('home:0');
   });
 });
@@ -163,7 +282,7 @@ describe('stepBot', () => {
       { position: { x: -100, y: 0, z: 0 }, label: 'homeFlag' },
       { position: { x: 100, y: 0, z: 0 }, label: 'enemyFlag' },
     ]);
-    stepBot(world, graph, runtime);
+    stepBot(world, graph, runtime, null);
     expect(world.players.damage[bot]).toBe(0);
   });
 
@@ -182,7 +301,7 @@ describe('stepBot', () => {
       { position: { x: -100, y: 0, z: 0 }, label: 'homeFlag' },
       { position: { x: 100, y: 0, z: 0 }, label: 'enemyFlag' },
     ]);
-    stepBot(world, graph, runtime);
+    stepBot(world, graph, runtime, null);
     expect(world.players.damage[bot]).toBe(0.9);
   });
 
@@ -196,7 +315,7 @@ describe('stepBot', () => {
       { position: { x: -100, y: 0, z: 0 }, label: 'homeFlag' },
       { position: { x: 100, y: 0, z: 0 }, label: 'enemyFlag' },
     ]);
-    const input = stepBot(world, graph, runtime);
+    const input = stepBot(world, graph, runtime, null);
     expect(input.slot).toBe(2); // WeaponId.Chaingun (1) + 1
   });
 
@@ -209,7 +328,7 @@ describe('stepBot', () => {
       { position: { x: -100, y: 0, z: 0 }, label: 'homeFlag' },
       { position: { x: 100, y: 0, z: 0 }, label: 'enemyFlag' },
     ]);
-    const input = stepBot(world, graph, runtime);
+    const input = stepBot(world, graph, runtime, null);
     for (const field of [
       'moveX',
       'moveZ',
@@ -247,7 +366,7 @@ describe('stepBot', () => {
       { position: { x: -100, y: 0, z: 0 }, label: 'homeFlag' },
       { position: { x: 100, y: 0, z: 0 }, label: 'enemyFlag' },
     ]);
-    const input = stepBot(world, graph, runtime);
+    const input = stepBot(world, graph, runtime, null);
     expect(input.use).toBe(true);
   });
 
@@ -268,7 +387,7 @@ describe('stepBot', () => {
       { position: { x: -100, y: 0, z: 0 }, label: 'homeFlag' },
       { position: { x: 100, y: 0, z: 0 }, label: 'enemyFlag' },
     ]);
-    const input = stepBot(world, graph, runtime);
+    const input = stepBot(world, graph, runtime, null);
     expect(input.use).toBe(false);
   });
 });
@@ -289,7 +408,7 @@ describe('combat actually lands hits end to end (Codex review round 3, P1)', () 
       { position: { x: 100, y: 0, z: 0 }, label: 'enemyFlag' },
     ]);
     for (let tick = 0; tick < 40; tick += 1) {
-      const inputs = stepBots(world, graph, new Map([[bot, runtime]]));
+      const inputs = stepBots(world, graph, new Map([[bot, runtime]]), new Map());
       stepWorld(world, inputs);
     }
     expect(world.players.damage[enemy]).toBeGreaterThan(0);

@@ -9,6 +9,7 @@ import {
   type WeaponId,
   type World,
 } from '@clans/sim';
+import { OrderKind, type TeamOrder } from '@clans/protocol';
 import { aimAndFire } from './combat.js';
 import {
   findEscortedCarrier,
@@ -140,15 +141,68 @@ function decideHealGoal(
   };
 }
 
+/** A commander's Attack/Defend/Repair order for the bot's own team, checked after
+ *  decideHealGoal (self-preservation stays the bot's top priority, unchanged by an
+ *  order -- see this task's own "judgment call" note) and before the normal role/CTF
+ *  branch. Repair re-derives "have I got a Repair Pack yet" from
+ *  `world.players.hasRepairPack` fresh every call, so a bot with no reachable powered
+ *  station simply keeps trying to reach one -- no give-up state (failure matrix row 24). */
+function orderGoal(
+  world: World,
+  runtime: BotRuntimeState,
+  order: TeamOrder,
+): { position: Vec3; key: string } {
+  if (order.kind === OrderKind.Repair) {
+    if (world.players.hasRepairPack[runtime.playerId] !== 1) {
+      const stationId = findNearestFriendlyStation(world, runtime.playerId);
+      if (stationId === null) {
+        return { position: { x: order.x, y: 0, z: order.z }, key: 'order:repair-equip' };
+      }
+      const base = stationId * 3;
+      return {
+        position: {
+          x: world.baseObjects.position[base] ?? 0,
+          y: world.baseObjects.position[base + 1] ?? 0,
+          z: world.baseObjects.position[base + 2] ?? 0,
+        },
+        key: 'order:repair-equip',
+      };
+    }
+    return { position: { x: order.x, y: 0, z: order.z }, key: 'order:repair' };
+  }
+  const key = order.kind === OrderKind.Attack ? 'order:attack' : 'order:defend';
+  return { position: { x: order.x, y: 0, z: order.z }, key };
+}
+
 export function decideGoal(
   world: World,
   runtime: BotRuntimeState,
+  order: TeamOrder | null,
 ): { position: Vec3; key: string } {
   const healGoal = decideHealGoal(world, runtime);
   if (healGoal !== null) return healGoal;
+  const team = world.players.team[runtime.playerId] ?? 0;
+  if (order && order.team === team) return orderGoal(world, runtime, order);
   return runtime.role === BotRole.Attacker
     ? decideAttackerGoal(world, runtime)
     : decideDefenderGoal(world, runtime);
+}
+
+/** Direct sim call, mirroring maybeHeal below -- a Repair order's "equip a Repair Pack"
+ *  step is the same one-shot Loadout-request pattern maybeHeal already uses, just
+ *  triggered by an order instead of low health/energy. */
+export function maybeEquipRepairPack(world: World, botId: number): void {
+  const stationId = findNearestFriendlyStation(world, botId);
+  if (stationId === null) return;
+  const base = botId * 3;
+  const stationBase = stationId * 3;
+  const dx = (world.players.position[base] ?? 0) - (world.baseObjects.position[stationBase] ?? 0);
+  const dy =
+    (world.players.position[base + 1] ?? 0) - (world.baseObjects.position[stationBase + 1] ?? 0);
+  const dz =
+    (world.players.position[base + 2] ?? 0) - (world.baseObjects.position[stationBase + 2] ?? 0);
+  if (Math.hypot(dx, dy, dz) > STATION_USE_RADIUS) return;
+  applyLoadoutRequest(world, botId, world.players.armor[botId] as ArmorId, true);
 }
 
 export function decideState(runtime: BotRuntimeState, engagedTargetId: number | null): BotState {
@@ -215,9 +269,34 @@ function maybeHeal(world: World, botId: number): void {
   );
 }
 
-export function stepBot(world: World, graph: WaypointGraph, runtime: BotRuntimeState): PlayerInput {
+/** Split out of stepBot to keep its own cyclomatic complexity under the lint cap -- both
+ *  branch on the same "is this a Repair order" question stepBot's Repair-Pack handling
+ *  needs twice (once to trigger the equip attempt, once to report packActive). */
+function isRepairOrder(order: TeamOrder | null): order is TeamOrder {
+  return order?.kind === OrderKind.Repair;
+}
+
+function applyRepairOrder(world: World, runtime: BotRuntimeState, order: TeamOrder | null): void {
+  if (isRepairOrder(order)) maybeEquipRepairPack(world, runtime.playerId);
+}
+
+function repairPackActive(
+  world: World,
+  runtime: BotRuntimeState,
+  order: TeamOrder | null,
+): boolean {
+  return isRepairOrder(order) && world.players.hasRepairPack[runtime.playerId] === 1;
+}
+
+export function stepBot(
+  world: World,
+  graph: WaypointGraph,
+  runtime: BotRuntimeState,
+  order: TeamOrder | null,
+): PlayerInput {
   maybeHeal(world, runtime.playerId);
-  const goal = decideGoal(world, runtime);
+  applyRepairOrder(world, runtime, order);
+  const goal = decideGoal(world, runtime, order);
   const armor = armorFor(world, runtime.playerId);
   const energy = world.players.energy[runtime.playerId] ?? 0;
   const team = world.players.team[runtime.playerId] ?? 0;
@@ -255,7 +334,7 @@ export function stepBot(world: World, graph: WaypointGraph, runtime: BotRuntimeS
     // WeaponId 0-4) is the same mapping a human's weapon-select key press uses. No target
     // -> 0 (no change): weapon choice is only meaningful relative to an engagement distance.
     slot: combat.weaponId !== null ? combat.weaponId + 1 : 0,
-    packActive: false,
+    packActive: repairPackActive(world, runtime, order),
     // Real PlayerInput.use is a required field (M5, packages/sim/src/types.ts:23). Never a
     // queued wire message -- see Global Constraints on why mounting is a PlayerInput bit,
     // not a direct sim call: shouldUseVehicle re-checks range/occupancy fresh every tick and
@@ -265,15 +344,22 @@ export function stepBot(world: World, graph: WaypointGraph, runtime: BotRuntimeS
   };
 }
 
+/** `orders` is keyed by team, each value the team's already-expiry-resolved current order
+ *  (or null) -- resolving `OrderBoard`/`currentOrder` is server's job (`@clans/server`'s
+ *  `orders.ts`), not bots'. `@clans/bots` depends only on `@clans/sim` and `@clans/protocol`
+ *  today, never on `@clans/server` (that dependency runs the other way), so it consumes the
+ *  `TeamOrder` shape but never the server-side `OrderBoard`/`currentOrder` that produce it. */
 export function stepBots(
   world: World,
   graph: WaypointGraph,
   runtimes: Map<number, BotRuntimeState>,
+  orders: Map<number, TeamOrder | null>,
 ): Map<number, PlayerInput> {
   const inputs = new Map<number, PlayerInput>();
   for (const [botId, runtime] of runtimes) {
     if (!world.players.active[botId] || !world.players.alive[botId]) continue;
-    inputs.set(botId, stepBot(world, graph, runtime));
+    const team = world.players.team[botId] ?? 0;
+    inputs.set(botId, stepBot(world, graph, runtime, orders.get(team) ?? null));
   }
   return inputs;
 }

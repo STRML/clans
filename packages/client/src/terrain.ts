@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { KatabaticAssets } from './assets.js';
+import { assetUrl, type KatabaticAssets } from './assets.js';
 
 export function fogColor(data: KatabaticAssets): THREE.Color {
   const [r, g, b] = data.scene.sky.fogColor;
@@ -48,7 +48,7 @@ export function buildTerrainGeometry(data: KatabaticAssets): THREE.BufferGeometr
 export async function createTerrain(data: KatabaticAssets): Promise<THREE.Mesh> {
   const loader = new THREE.TextureLoader();
   const textures = await Promise.all(
-    data.terrain.layers.map(async (layer) => loader.loadAsync(`/katabatic/${layer.texture}`)),
+    data.terrain.layers.map(async (layer) => loader.loadAsync(assetUrl(layer.texture))),
   );
   textures.forEach((texture) => {
     texture.wrapS = texture.wrapT = THREE.RepeatWrapping;

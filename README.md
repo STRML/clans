@@ -1,12 +1,12 @@
 # Clans
 
 A Tribes 2 tech demo for the browser. Katabatic from the original heightmap, skiing and
-jetting with the T2 armor numbers, and eventually the full base game with bots on an
-authoritative Node server.
+jetting with the T2 armor numbers, base assets and vehicles, and bots on an authoritative
+Node server.
 
-Status: milestone 5 of 7 (vehicles). See
+Status: v1 complete, all seven milestones shipped. See
 `docs/superpowers/specs/` for the design and `docs/superpowers/plans/` for what each
-milestone ships.
+milestone shipped.
 
 ## Run it
 
@@ -14,6 +14,10 @@ milestone ships.
 pnpm install
 pnpm dev
 ```
+
+`assets/out/` (the converted Tribes 2 data) is committed to the repo, so a clean checkout
+does not need `pnpm assets:fetch` or `pnpm assets:build` first. `pnpm dev` runs
+`scripts/dev.ts`, which starts `dev:server` and `dev:client` together.
 
 Open http://127.0.0.1:5173, click to capture the mouse, and ski.
 
@@ -27,7 +31,8 @@ Open http://127.0.0.1:5173, click to capture the mouse, and ski.
 | G | throw a hand grenade |
 | E | open the loadout menu at a powered inventory station, or open the vehicle spawn menu at a powered vehicle pad; mount an unoccupied vehicle within range, or dismount your own |
 | R | hold to fire a Repair Pack beam (heals a damaged player, base asset, or turret) |
-| C | toggle the commander map |
+| C | open the commander map (see Command circuit below) |
+| V | open the voice-bind quick-chat menu (see Voice binds below) |
 | F1 | debug overlay (stats, time scale, pause, step, free cam, god mode) |
 
 ## Run it with a server
@@ -68,8 +73,9 @@ acquire and fire on enemy players within range and line of sight — a hill or w
 turret and its target blocks it exactly like it blocks a player's own shot. Katabatic's eleven
 interior buildings render and block movement and projectiles through a per-instance collision
 grid built once at load, not brute-force triangle checks. Press `C` for a top-down commander
-map showing your team's base status and any enemy contacts inside your team's sensor coverage.
-See `docs/superpowers/specs/2026-09-05-clans-tribes2-browser-demo-design.md` for exactly how
+map showing your team's base status and any enemy contacts inside your team's sensor coverage
+(see Command circuit below for issuing orders from that map). See
+`docs/superpowers/specs/2026-09-05-clans-tribes2-browser-demo-design.md` for exactly how
 power, shields, and sensor coverage work.
 
 ## Vehicles
@@ -85,6 +91,43 @@ energy pool, and explode past their damage cap, ejecting the pilot. Each team's 
 turret now finds and fires on enemy vehicles in range with line of sight. Press `E` again to
 dismount.
 
+## Command circuit
+
+Press `C` to open the commander map. Click a location, then press `1` (Attack), `2` (Defend),
+or `3` (Repair) to issue an order to your team's bots at that location. A new order replaces
+whatever order your team already has; there is no order queue, and an order expires on its own
+after 90 seconds if it isn't replaced first. Bots read the active order off the server and
+prioritize it over their own default behavior.
+
+## Audio
+
+Every sound in the game is synthesized at runtime with the Web Audio API. There are no sampled
+audio files. Weapon fire, explosions, footsteps, jetting, skiing, flag touch and capture, and
+station power hum are all generated from oscillators and filtered noise buffers
+(`packages/client/src/audio.ts`).
+
+## Voice binds
+
+Press `V` to open a voice-bind quick-chat menu. Digit keys 1-9 send one of nine preset lines
+(kill confirm, flag status, need repair, incoming, affirmative/negative, taunt). Each line is
+played through the browser's own SpeechSynthesis API (Web Speech API) and broadcast to every
+other client in the match.
+
+## GitHub Pages demo
+
+A client-only build deploys to GitHub Pages at https://strml.github.io/clans/ on every push to
+`main` (`.github/workflows/deploy-pages.yml`, building `apps/demo`). GitHub Pages only serves
+static files, so the hosted page has no server behind it — it shows a "bring your own server"
+prompt until you append `?server=ws://your-host:7777` pointing at a Clans server you're running
+yourself (`pnpm dev:server`, or `pnpm dev` for both halves) and that your browser can reach.
+
+The Pages site is served over HTTPS. A browser blocks a plain `ws://` connection from an
+HTTPS page as mixed content unless the target is a secure context on its own — in practice,
+`ws://127.0.0.1:7777` or `ws://localhost:7777` works, but a remote host needs `wss://` (put a
+TLS-terminating proxy in front of your server) or the connection will never open. If the demo
+can't reach the server you gave it, it shows a "couldn't connect" message rather than staying
+silently blank.
+
 ## Develop
 
 ```sh
@@ -99,10 +142,10 @@ pnpm assets:build  # regenerate assets/out from the T2 data files (downloads the
 
 - `packages/sim`: the game simulation. Pure TypeScript, no DOM or Node imports, so it runs in the browser today and on the server. Health, fall damage, respawn, four weapons plus grenades, a projectile store, CTF flags and scoring, base objects and per-team power, turrets with terrain line of sight, a uniform-grid interior collider, the Repair Pack beam, and the Shrike/Wildcat vehicles (flight/hover physics, mount/dismount, shielded damage, destruction, ejection) all live here.
 - `packages/assets`: build-time pipeline that turns Tribes 2 data files into `assets/out/`, including the interior/base-object/turret/vehicle `.glb` shapes (with an STL-then-procedural fallback chain for the vehicles) and their extracted collision triangles.
-- `packages/client`: Three.js renderer, input, projectile/explosion/laser-beam/flag/base-object/turret/interior/vehicle rendering, the station loadout menu, the vehicle pad spawn menu, the commander map, the HUD, debug overlay.
-- `packages/protocol`: binary wire format. Message schemas (including `Event`, `God`, `Loadout`, and `VehicleSpawn`), full and delta snapshots with projectiles/flags/base-objects/turrets/vehicles/scores sent in full each tick, a world hash for tests.
-- `packages/server`: Node, `ws`, 32 ms catch-up tick loop, per-client input sessions, snapshots delta-compressed against the client's last acked snapshot, lag-compensated hit detection for the Chaingun and Laser Rifle, respawn, CTF, and base-object/turret/interior/vehicle loading.
-- `packages/bots`: server-side bot AI, read-only over the sim's exported API. A coarse waypoint graph (Dijkstra, seeded from spawn points, flag stands, and base objects) for navigation; perception that spots a living, unmounted enemy in line of sight and skips a low-health/low-energy retreat to a friendly station; combat that leads targets by projectile speed and prefers the Chaingun close, the Spinfusor/Mortar at range; CTF role assignment (Attacker/Defender) and a per-tick brain that chases or returns the flag, escorts a carrying teammate, heals at a station, and mounts a nearby vehicle when nothing else is more urgent. The server keeps both teams filled toward 16 a side by adding or removing bots on join/leave, never touching a human's seat; a debug-overlay row shows each team's bot count and idle/attack/defend split.
+- `packages/client`: Three.js renderer, input, projectile/explosion/laser-beam/flag/base-object/turret/interior/vehicle rendering, the station loadout menu, the vehicle pad spawn menu, the commander map, a synthesized Web Audio engine, the HUD, debug overlay.
+- `packages/protocol`: binary wire format. Message schemas (including `Event`, `God`, `Loadout`, `VehicleSpawn`, `CommandOrder`, and `VoiceBind`), full and delta snapshots with projectiles/flags/base-objects/turrets/vehicles/scores/active team orders sent in full each tick, a world hash for tests.
+- `packages/server`: Node, `ws`, 32 ms catch-up tick loop, per-client input sessions, snapshots delta-compressed against the client's last acked snapshot, lag-compensated hit detection for the Chaingun and Laser Rifle, respawn, CTF, base-object/turret/interior/vehicle loading, and a per-team command-order board (Attack/Defend/Repair, one active order per team, no queue).
+- `packages/bots`: server-side bot AI, read-only over the sim's exported API. A coarse waypoint graph (Dijkstra, seeded from spawn points, flag stands, and base objects) for navigation; perception that spots a living, unmounted enemy in line of sight and skips a low-health/low-energy retreat to a friendly station; combat that leads targets by projectile speed and prefers the Chaingun close, the Spinfusor/Mortar at range; CTF role assignment (Attacker/Defender) and a per-tick brain that chases or returns the flag, escorts a carrying teammate, heals at a station, mounts a nearby vehicle when nothing else is more urgent, and prioritizes a commander's active Attack/Defend/Repair order over its own default behavior. The server keeps both teams filled toward 16 a side by adding or removing bots on join/leave, never touching a human's seat; a debug-overlay row shows each team's bot count and idle/attack/defend split.
 
 Every gameplay number (armor mass, jet force, speed caps) is copied from the T2 base scripts
 and cited in the spec, except a handful of documented "ours" values where a script constant
