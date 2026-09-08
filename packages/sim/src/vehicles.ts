@@ -812,6 +812,19 @@ function resolveVehicleInteriors(world: World, id: number, previous: Vec3, curre
       [resolvedCurrent.x + push.x, resolvedCurrent.y + push.y, resolvedCurrent.z + push.z],
       base,
     );
+    // Depenetration holds the hull outside the floor/wall. Remove velocity into that
+    // contact too, or gravity keeps accumulating while the hull appears stationary.
+    const lengthSq = push.x * push.x + push.y * push.y + push.z * push.z;
+    const inward =
+      (at(vehicles.velocity, base) * push.x +
+        at(vehicles.velocity, base + 1) * push.y +
+        at(vehicles.velocity, base + 2) * push.z) /
+      lengthSq;
+    if (inward < 0) {
+      vehicles.velocity[base] = at(vehicles.velocity, base) - inward * push.x;
+      vehicles.velocity[base + 1] = at(vehicles.velocity, base + 1) - inward * push.y;
+      vehicles.velocity[base + 2] = at(vehicles.velocity, base + 2) - inward * push.z;
+    }
     hit = true;
   }
   return hit;

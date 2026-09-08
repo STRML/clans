@@ -162,6 +162,10 @@ export interface App {
   dispose(): void;
 }
 
+function weaponAnimationDelta(app: App, dt: number): number {
+  return app.paused || app.world.gameOver ? 0 : dt * app.timeScale;
+}
+
 function gameplayInput(app: App, usePressed: boolean): PlayerInput {
   const { input, world, playerId } = app;
   if (app.freeCam) return { ...IDLE, yaw: input.yaw, pitch: input.pitch };
@@ -1443,7 +1447,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       placeCamera(app, sky, dtSeconds);
       updateStationHumAudio(world, audio);
       renderer.render(scene, camera);
-      weaponModel.sync(world, playerId, app.freeCam);
+      weaponModel.sync(world, playerId, app.freeCam, weaponAnimationDelta(app, dtSeconds));
       weaponModel.render(renderer, camera.aspect);
       app.stats.frameMs = performance.now() - frameStart;
       updateFps(app, frameStart, fps);

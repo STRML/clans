@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { BaseObjectKind, createBaseObjects, stepPower } from './baseObjects.js';
 import {
   addPlayer,
+  buildInteriorCollider,
   createWorld,
   removePlayer,
   type Heightfield,
@@ -715,5 +716,39 @@ describe('vehicle id retention and reuse', () => {
       stepVehicles(world, new Map(), 1 / 32);
     }
     expect(world.pendingVehicleDestroyed.length).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('vehicle interior support', () => {
+  it('keeps an idle Shrike on a raised platform without accumulating impact velocity', () => {
+    const world = createWorld(flat, 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: 0, y: 10, z: 0 } },
+    ]);
+    stepPower(world);
+    world.interiors = [
+      buildInteriorCollider(
+        {
+          positions: new Float32Array([
+            -50, 10, -50, 50, 10, 50, 50, 10, -50, -50, 10, -50, -50, 10, 50, 50, 10, 50,
+          ]),
+        },
+        { position: { x: 0, y: 0, z: 0 }, rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 } },
+      ),
+    ];
+    const id = spawnVehicleAtPad(world, 1, VehicleKind.Shrike)!;
+    world.vehicles.position.set([0, 15.5, 0], id * 3);
+    for (let tick = 0; tick < 320; tick++) stepVehicles(world, new Map(), 1 / 32);
+    expect(world.vehicles.active[id]).toBe(1);
+    expect(world.vehicles.destroyed[id]).toBe(0);
+    expect(world.vehicles.damage[id]).toBe(0);
+    expect(world.vehicles.energy[id]).toBe(VEHICLE_DATA[VehicleKind.Shrike].maxEnergy);
+    expect(world.vehicles.velocity[id * 3 + 1]).toBeCloseTo(0);
+    // Contact cancels the inward component, preserving travel along the platform.
+    world.vehicles.position.set([0, 15.4, 0], id * 3);
+    world.vehicles.velocity.set([3, -4, 5], id * 3);
+    resolveVehicleCollision(world, id, { x: 0, y: 15.5, z: 0 }, 1 / 32);
+    expect(Array.from(world.vehicles.velocity.slice(id * 3, id * 3 + 3))).toEqual([3, 0, 5]);
   });
 });
