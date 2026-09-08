@@ -18,6 +18,102 @@
         width: 100%;
         height: 100%;
       }
+      /* Codex review round 2 of the M7 PR: @clans/client's own index.html has this same
+         overlay CSS (packages/client/index.html); this demo shell is a separate Vite app
+         with its own HTML entry and never got it, so the HUD, crosshair, commander map, and
+         every menu rendered as plain document-flow elements after the full-screen canvas on
+         the deployed Pages demo -- a functioning-but-invisible UI, the exact bug class the
+         earlier client-side fix (this PR, round 1) was supposed to close everywhere. */
+      #debug-stats {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        padding: 6px 8px;
+        background: rgba(0, 0, 0, 0.55);
+        font-size: 12px;
+        line-height: 1.4;
+        pointer-events: none;
+        white-space: pre;
+      }
+      #hud {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 12px;
+        display: flex;
+        justify-content: center;
+        gap: 16px;
+        padding: 0 16px;
+        font-size: 14px;
+        pointer-events: none;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+      }
+      #hud-kill-feed {
+        position: fixed;
+        top: 8px;
+        right: 8px;
+        left: auto;
+        bottom: auto;
+        text-align: right;
+        font-size: 12px;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+      }
+      #station-menu,
+      #vehicle-pad-menu,
+      #voice-menu {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 16px 20px;
+        background: rgba(10, 15, 24, 0.85);
+        border: 1px solid rgba(216, 224, 234, 0.3);
+        border-radius: 4px;
+      }
+      #station-menu[hidden],
+      #vehicle-pad-menu[hidden],
+      #voice-menu[hidden] {
+        display: none;
+      }
+      #station-menu button,
+      #vehicle-pad-menu button {
+        font-family: inherit;
+        font-size: 14px;
+        padding: 6px 12px;
+        background: rgba(216, 224, 234, 0.1);
+        color: inherit;
+        border: 1px solid rgba(216, 224, 234, 0.3);
+        border-radius: 3px;
+        cursor: pointer;
+      }
+      #commander-map {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 512px;
+        height: 512px;
+        background: rgba(10, 15, 24, 0.85);
+        border: 1px solid rgba(216, 224, 234, 0.3);
+      }
+      #commander-map[hidden] {
+        display: none;
+      }
+      #crosshair {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        width: 6px;
+        height: 6px;
+        margin: -3px 0 0 -3px;
+        border-radius: 50%;
+        background: rgba(216, 224, 234, 0.85);
+        box-shadow: 0 0 2px rgba(0, 0, 0, 0.9);
+        pointer-events: none;
+      }
       #demo-instructions {
         max-width: 40em;
         margin: 10vh auto 0;
