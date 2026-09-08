@@ -145,7 +145,10 @@ is explicit demo tuning. Energy Packs are not implemented.
 ## Rendering limitations
 
 All five first-person weapons use their original textured models and authored grip points.
-Firing/reload animations are not implemented. Imported structures and vehicles retain
+Authored activation, disc spin/reload, Chaingun spin/flash, Mortar recoil and Blaster flash
+sequences now follow the simulated weapon states. DTS visibility tracks are restored from
+the exported metadata. Animated texture sequences still display their first frame, including
+the Laser Rifle’s indicator lights; its exported model has no mechanical firing clip. Imported structures and vehicles retain
 their GLB materials and geometry. Source power/destruction visibility is supported for structures,
 but animated mechanical parts and turret aiming remain static. Failed shape loads retain a neutral
 fallback and report the asset URL in the browser console. If a vehicle GLB is unavailable,

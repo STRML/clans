@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { WeaponId, type World } from '@clans/sim';
+import { WeaponId, WeaponState, type World } from '@clans/sim';
+import { createWeaponAnimation } from './weapon-animation.js';
 import { disposeShape, loadShapeInto } from './shape-loader.js';
 
 const WEAPON_SHAPES: Record<WeaponId, string> = {
@@ -19,6 +20,9 @@ export function createWeaponModel() {
   root.position.set(0.26, -0.24, -0.4);
   scene.add(root);
   const models = new Map<number, THREE.Group>();
+  const animations = new Map<number, ReturnType<typeof createWeaponAnimation>>();
+  let previousWeapon: number | undefined;
+  let wasVisible = false;
   for (const [id, name] of Object.entries(WEAPON_SHAPES)) {
     const model = new THREE.Group();
     const fallback = new THREE.Mesh(
@@ -32,7 +36,7 @@ export function createWeaponModel() {
     model.visible = false;
     root.add(model);
     models.set(Number(id), model);
-    loadShapeInto(model, name, Math.PI, (loaded) => {
+    loadShapeInto(model, name, Math.PI, (loaded, clips) => {
       loaded.updateWorldMatrix(true, true);
       const mount = loaded.getObjectByName('Mountpoint');
       if (mount) {
@@ -41,6 +45,9 @@ export function createWeaponModel() {
       }
       // Presentation scale only; original mesh proportions and mount/muzzle direction stay intact.
       model.scale.setScalar(0.65);
+      const animation = createWeaponAnimation(loaded, clips);
+      animation.reset();
+      animations.set(Number(id), animation);
     });
   }
   scene.add(new THREE.HemisphereLight(0xdcefff, 0x39424b, 3));
@@ -48,7 +55,7 @@ export function createWeaponModel() {
   light.position.set(-1, 2, 1);
   scene.add(light);
 
-  function sync(world: World, playerId: number, freeCam: boolean): void {
+  function sync(world: World, playerId: number, freeCam: boolean, dt = 0): void {
     root.visible =
       !freeCam &&
       !!world.players.alive[playerId] &&
@@ -56,6 +63,26 @@ export function createWeaponModel() {
     const weapon = world.players.weaponSlot[playerId];
     root.userData.weaponId = weapon;
     for (const [id, model] of models) model.visible = id === weapon;
+    syncAnimation(world, playerId, weapon, dt);
+  }
+
+  function syncAnimation(
+    world: World,
+    playerId: number,
+    weapon: number | undefined,
+    dt: number,
+  ): void {
+    const animation = animations.get(weapon!);
+    if (weapon !== previousWeapon || (root.visible && !wasVisible)) animation?.reset();
+    if (root.visible)
+      animation?.update(
+        (world.players.weaponState[playerId] ?? WeaponState.Ready) as WeaponState,
+        world.players.weaponTimer[playerId] ?? 0,
+        dt,
+        !!world.players.spunUp[playerId],
+      );
+    previousWeapon = weapon;
+    wasVisible = root.visible;
   }
 
   return {
@@ -74,6 +101,7 @@ export function createWeaponModel() {
       renderer.autoClear = autoClear;
     },
     dispose(): void {
+      for (const animation of animations.values()) animation.dispose();
       for (const model of models.values()) disposeShape(model);
       root.clear();
     },
