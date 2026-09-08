@@ -97,6 +97,17 @@ describe('failure matrix row 3: capture with own flag away is refused', () => {
 });
 
 describe('failure matrix row 1: carrier dies, flag drops at the nearest walkable point', () => {
+  it('does not raise a dropped flag onto removed terrain', () => {
+    const world = createWorld({ ...flat, emptySquares: new Set([0]) }, 1);
+    createFlags(world, stands);
+    const attacker = addPlayer(world, { x: 100, y: 0, z: 0 }, 1);
+    stepFlags(world, FIXED_DT);
+    world.players.position.set([50, -20, 50], attacker * 3);
+    applyDamage(world, attacker, LIGHT_ARMOR.maxDamage, -1, LIGHT_ARMOR);
+    stepFlags(world, FIXED_DT);
+    expect(world.flags.position[4]).toBe(-20);
+  });
+
   it('clamps the drop Y to terrain height even if the death position was below the surface', () => {
     const world = createWorld(flat, 1);
     createFlags(world, stands);
@@ -285,7 +296,7 @@ describe('Codex review round 9, PR #9, P1: a flag carrier falling out of the wor
     expect(world.flags.state[1]).toBe(FlagState.Dropped);
     expect(world.flags.carrierId[1]).toBe(-1);
     expect(world.flags.position[1 * 3]).toBe(100); // dropped near the fall-out point
-    expect(world.flags.position[1 * 3 + 1]).toBe(0); // clamped to the flat terrain height there
+    expect(world.flags.position[1 * 3 + 1]).toBeLessThan(world.killY); // no phantom floor in the hole
     expect(world.flags.position[1 * 3 + 2]).toBe(0);
     // A real death, not an instant reset: the standard 5 s respawn timer is running, and
     // the player does not come back alive on their own without going through it.

@@ -45,6 +45,12 @@ const identity: InteriorPlacement = {
 };
 
 describe('buildInteriorCollider + raycastInteriors', () => {
+  it('hits a floor when a vertical ray starts exactly on a parallel AABB boundary', () => {
+    const instance = buildInteriorCollider(unitBox(), identity);
+    const hit = raycastInteriors([instance], { x: -1, y: 3, z: 0 }, { x: 0, y: -1, z: 0 }, 10);
+    expect(hit?.distance).toBeCloseTo(2);
+  });
+
   it('hits the near face of an untransformed box from outside', () => {
     const instance = buildInteriorCollider(unitBox(), identity);
     const hit = raycastInteriors([instance], { x: -5, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }, 20);

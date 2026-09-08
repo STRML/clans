@@ -227,6 +227,17 @@ function wildcatWorld(): { world: ReturnType<typeof createWorld>; id: number } {
 }
 
 describe('stepWildcat', () => {
+  it('falls through an empty terrain square instead of hovering on phantom terrain', () => {
+    const { world, id } = wildcatWorld();
+    world.terrain = { ...world.terrain, emptySquares: new Set([0]) };
+    world.vehicles.position.set([5, -5, 5], id * 3);
+    stepWildcat(world, id, idleInput, 1 / 32);
+    expect(world.vehicles.velocity[id * 3 + 1]).toBeLessThan(0);
+    expect(world.vehicles.onGround[id]).toBe(0);
+    resolveVehicleCollision(world, id, { x: 5, y: -5, z: 5 }, 1 / 32);
+    expect(world.vehicles.position[id * 3 + 1]).toBeLessThan(-5);
+  });
+
   it('holds hover height on the spring: settles between stabLenMin and stabLenMax above terrain', () => {
     const { world, id } = wildcatWorld();
     for (let tick = 0; tick < 200; tick += 1) stepWildcat(world, id, idleInput, 1 / 32);

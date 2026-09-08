@@ -11,6 +11,7 @@ import {
   FlagState,
   RETURN_TICKS,
   sampleTerrain,
+  groundHeightAt,
   type Heightfield,
   type InteriorInstance,
   type InteriorTriangles,
@@ -201,7 +202,8 @@ export function dropFlagsCarriedBy(world: World, playerId: number): void {
   const base = playerId * 3;
   const x = world.players.position[base] ?? 0;
   const z = world.players.position[base + 2] ?? 0;
-  const y = sampleTerrain(world.terrain, x, z).height;
+  const playerY = world.players.position[base + 1] ?? 0;
+  const y = groundHeightAt(world, { x, y: playerY, z }) ?? playerY;
   for (let flagId = 0; flagId < world.flags.state.length; flagId += 1) {
     if (world.flags.carrierId[flagId] !== playerId) continue;
     world.flags.state[flagId] = FlagState.Dropped;
