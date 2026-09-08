@@ -9,13 +9,22 @@ test('a fresh player can walk out of spawn without teleporting', async ({ page }
     return Array.from(app.world.players.position.slice(app.playerId * 3, app.playerId * 3 + 3));
   });
   await page.keyboard.down('KeyW');
-  await page.waitForTimeout(2000);
-  await page.keyboard.up('KeyW');
-  const end = await page.evaluate(() => {
-    const app = (window as unknown as { __app: App }).__app;
-    return Array.from(app.world.players.position.slice(app.playerId * 3, app.playerId * 3 + 3));
-  });
-  expect(end[2]! - start[2]!).toBeGreaterThan(8);
+  try {
+    // Software WebGL can spend seconds compiling textured materials. Assert actual
+    // travel, not how many simulation frames happened in a two-second wall-clock window.
+    await expect
+      .poll(
+        () =>
+          page.evaluate((startZ) => {
+            const app = (window as unknown as { __app: App }).__app;
+            return app.world.players.position[app.playerId * 3 + 2]! - startZ;
+          }, start[2]!),
+        { timeout: 20000 },
+      )
+      .toBeGreaterThan(8);
+  } finally {
+    await page.keyboard.up('KeyW');
+  }
 });
 
 test('base walls, floors, and equipment have loaded original diffuse textures', async ({
