@@ -229,10 +229,11 @@ function integrate(
   dt: number,
 ): Contact {
   const impactSpeed = Math.max(0, -body.vy);
+  const previousY = body.y;
   body.x += body.vx * dt;
   body.y += body.vy * dt;
   body.z += body.vz * dt;
-  const landing = sampleTerrain(world.terrain, body.x, body.z);
+  const landing = sampleGround(world, body, Math.max(previousY, body.y));
   if (landing.empty) return { grounded: false, landingSpeed: -1 };
   const gap = body.y - landing.height;
   if (gap <= 0) {
@@ -256,8 +257,31 @@ interface TickContext {
   mayRun: boolean;
 }
 
+/** Use an interior floor as ground too, so running, friction, and jumping work indoors.
+ * Probe from the previous feet height during integration to catch crossed floors. */
+function sampleGround(world: World, body: Body, probeY = body.y): TerrainSample {
+  const terrain = sampleTerrain(world.terrain, body.x, body.z);
+  if (world.interiors.length === 0) return terrain;
+  const hit = raycastInteriors(
+    world.interiors,
+    { x: body.x, y: probeY + GROUND_EPSILON, z: body.z },
+    { x: 0, y: -1, z: 0 },
+    Math.max(0, probeY - body.y) + GROUND_SNAP + GROUND_EPSILON,
+  );
+  if (!hit || Math.abs(hit.normal.y) < GROUND_EPSILON) return terrain;
+  if (!terrain.empty && terrain.height <= probeY + GROUND_EPSILON && terrain.height > hit.point.y)
+    return terrain;
+  const sign = hit.normal.y < 0 ? -1 : 1;
+  return {
+    ...terrain,
+    height: hit.point.y,
+    empty: false,
+    normal: { x: hit.normal.x * sign, y: hit.normal.y * sign, z: hit.normal.z * sign },
+  };
+}
+
 function classify(world: World, body: Body, input: PlayerInput, armor: ArmorData): TickContext {
-  const sample = sampleTerrain(world.terrain, body.x, body.z);
+  const sample = sampleGround(world, body);
   const grounded = !sample.empty && body.y <= sample.height + GROUND_EPSILON;
   const slope = degrees(Math.acos(Math.max(-1, Math.min(1, sample.normal.y))));
   const forcedSki = slope > armor.runSurfaceAngle;

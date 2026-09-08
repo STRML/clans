@@ -21,7 +21,13 @@ export interface SceneData {
     rotation?: AxisAngle;
     scale?: Vec3;
   }>;
-  turrets: Array<{ barrel: number; team: number; position: Vec3 }>;
+  turrets: Array<{
+    barrel: number;
+    team: number;
+    position: Vec3;
+    rotation?: AxisAngle;
+    scale?: Vec3;
+  }>;
   interiors: Array<{ shape: string; position: Vec3; rotation: AxisAngle }>;
 }
 
@@ -60,7 +66,9 @@ export function torquePositionToYUp(value: string): Vec3 {
 
 export function torqueAxisAngleToYUp(value: string): AxisAngle {
   const [x = 0, y = 0, z = 0, degrees = 0] = numbers(value, 4);
-  return { axis: [x, z, negate(y)], degrees };
+  // Torque mission angles have the opposite sign from standard Rodrigues/Three rotations.
+  // See exogen/t2-mapper src/scene/coordinates.ts, torqueAxisAngleToQuaternion.
+  return { axis: [x, z, negate(y)], degrees: negate(degrees) };
 }
 
 /** Scale swaps the Y/Z axes exactly like position and rotation do (Torque Z-up to Y-up), but
@@ -128,16 +136,14 @@ function buildTerrain(terrain: MissionObject): SceneData['terrain'] {
   };
 }
 
-/**
- * Torque stores each empty square as row * 256 + col with stray high bits above bit 15
- * (Katabatic has values up to 748451). Mask both to 8 bits and re-pack as row * 256 + col.
- */
+/** Torque packs each run as (count << 16) | startIndex, not a single square ID.
+ * See exogen/t2-mapper src/components/TerrainBlock.tsx, createVisibilityMask. */
 function emptySquares(value: string | undefined): number[] {
   if (value === undefined || value.trim() === '') return [];
-  return numbers(value, value.trim().split(/\s+/).length).map((raw) => {
-    const col = raw & 0xff;
-    const row = (raw >>> 8) & 0xff;
-    return row * 256 + col;
+  return numbers(value, value.trim().split(/\s+/).length).flatMap((raw) => {
+    const start = raw & 0xffff;
+    const count = raw >>> 16;
+    return Array.from({ length: Math.min(count, 65536 - start) }, (_, i) => start + i);
   });
 }
 
@@ -220,6 +226,8 @@ function buildBaseObjects(all: LocatedObject[]): SceneData['baseObjects'] {
       kind: BASE_OBJECT_KIND_BY_DATA_BLOCK[object.props.dataBlock as string] as number,
       team: teamFor(ancestors),
       position: torquePositionToYUp(object.props.position ?? ''),
+      rotation: torqueAxisAngleToYUp(object.props.rotation ?? '0 0 1 0'),
+      scale: torqueScaleToYUp(object.props.scale ?? '1 1 1'),
     }));
 }
 
@@ -262,6 +270,8 @@ function buildTurrets(all: LocatedObject[]): SceneData['turrets'] {
         barrel,
         team: teamFor(ancestors),
         position: torquePositionToYUp(object.props.position ?? ''),
+        rotation: torqueAxisAngleToYUp(object.props.rotation ?? '0 0 1 0'),
+        scale: torqueScaleToYUp(object.props.scale ?? '1 1 1'),
       };
     });
 }

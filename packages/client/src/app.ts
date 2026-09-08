@@ -180,8 +180,8 @@ function spawnPoint(
   const spawn = assets.scene.spawns.find((candidate) => candidate.team === 1);
   if (!spawn) throw new Error('Katabatic scene has no team 1 spawn');
   const [x, y, z] = spawn.position;
-  const ground = sampleTerrain(terrain, x, z).height;
-  return { x, y: Math.max(y, ground + 0.1), z };
+  const ground = sampleTerrain(terrain, x, z);
+  return { x, y: ground.empty ? y : Math.max(y, ground.height + 0.1), z };
 }
 
 function createRenderer(container: HTMLElement): THREE.WebGLRenderer {
@@ -1072,7 +1072,7 @@ function updateStationHumAudio(world: World, audio: AudioEngine): void {
         y: bases.position[base + 1] ?? 0,
         z: bases.position[base + 2] ?? 0,
       },
-      bases.powered[id] === 1,
+      bases.powered[id] === 1 && bases.destroyed[id] === 0,
     );
   }
 }
@@ -1223,7 +1223,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const voiceMenu = createVoiceMenu(document.body);
   // Task 7: pure oscillator/noise synthesis, no shipped or fetched audio file (M7 plan,
   // Global Constraints) -- a real AudioContext, not the fake used by audio.test.ts.
-  const audio = createAudioEngine({ context: new AudioContext() });
+  const audio = createAudioEngine({ context: new AudioContext(), position: camera.position });
   // Browsers start a fresh AudioContext `suspended` under autoplay restriction and require a
   // real user-gesture handler to resume it -- the same click that already requests pointer
   // lock (Input's own listener on this element) is that gesture. Codex review round 1 of the
@@ -1332,7 +1332,6 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         audio.setJetting(playerId, false, 0);
         audio.setSkiing(playerId, false, 0);
       }
-      updateStationHumAudio(world, audio);
 
       syncWorldView(
         world,
@@ -1374,6 +1373,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
 
       if (app.freeCam) moveFreeCam(app, dtSeconds);
       placeCamera(app, sky, dtSeconds);
+      updateStationHumAudio(world, audio);
       renderer.render(scene, camera);
       weaponModel.sync(world, playerId, app.freeCam);
       weaponModel.render(renderer, camera.aspect);

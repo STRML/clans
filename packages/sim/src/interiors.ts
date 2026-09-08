@@ -246,6 +246,10 @@ function rayAabbInterval(
     [origin.z, inv.z, bounds.minZ, bounds.maxZ],
   ];
   for (const [o, invD, lo, hi] of axes) {
+    if (!Number.isFinite(invD)) {
+      if (o < lo || o > hi) return null;
+      continue;
+    }
     let t1 = (lo - o) * invD;
     let t2 = (hi - o) * invD;
     if (t1 > t2) [t1, t2] = [t2, t1];

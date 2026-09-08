@@ -4,7 +4,7 @@ import { applyDamage } from './damage.js';
 import { raycastInteriors, resolveSphereAgainstInteriors } from './interiors.js';
 import { GRAVITY } from './movement.js';
 import { nextRandom } from './random.js';
-import { sampleTerrain } from './terrain.js';
+import { groundHeightAt } from './ground.js';
 import type { PendingFreeId, PlayerInput, Vec3, World } from './types.js';
 
 export enum VehicleKind {
@@ -551,7 +551,12 @@ function applyHoverSpring(world: World, vehicles: VehicleStore, id: number, dt: 
   const base = id * 3;
   const x = at(vehicles.position, base);
   const z = at(vehicles.position, base + 2);
-  const ground = sampleTerrain(world.terrain, x, z).height;
+  const ground = groundHeightAt(world, { x, y: at(vehicles.position, base + 1), z });
+  if (ground === null) {
+    vehicles.velocity[base + 1] = at(vehicles.velocity, base + 1) - GRAVITY * dt;
+    vehicles.onGround[id] = 0;
+    return;
+  }
   const height = at(vehicles.position, base + 1) - ground;
   const restHeight = (WILDCAT_STAB_LEN_MIN + WILDCAT_STAB_LEN_MAX) / 2;
   const compression = restHeight - height;
@@ -752,7 +757,8 @@ function resolveVehicleGround(world: World, id: number, current: Vec3, speed: nu
   const vehicles = world.vehicles;
   const data = VEHICLE_DATA[vehicles.kind[id] as VehicleKind];
   const base = id * 3;
-  const ground = sampleTerrain(world.terrain, current.x, current.z).height;
+  const ground = groundHeightAt(world, current);
+  if (ground === null) return false;
   if (current.y - data.checkRadius >= ground) return false;
   vehicles.position[base + 1] = ground + data.checkRadius;
   if (at(vehicles.velocity, base + 1) < 0) vehicles.velocity[base + 1] = 0;

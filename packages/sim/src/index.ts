@@ -33,3 +33,5 @@ export * from './types.js';
 export * from './vehicles.js';
 export * from './weapons.js';
 export * from './world.js';
+
+export * from './ground.js';

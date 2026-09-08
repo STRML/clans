@@ -40,7 +40,11 @@ export function disposeShape(root: THREE.Object3D): void {
 }
 
 /** Retain the fallback on failure, but make the failing asset visible in diagnostics. */
-export function loadShapeInto(root: THREE.Object3D, name: string | undefined): void {
+export function loadShapeInto(
+  root: THREE.Object3D,
+  name: string | undefined,
+  modelRotationY = 0,
+): void {
   if (!name) return;
   const url = shapeUrl(name);
   root.userData.shapeUrl = url;
@@ -69,6 +73,9 @@ export function loadShapeInto(root: THREE.Object3D, name: string | undefined): v
         }
         disposeMeshes(root);
         root.clear();
+        // DIF interiors already match our basis. Unmounted DTS shapes need a half-turn:
+        // upstream uses +PI/2 for shapes in its (y,z,x) world; our (x,z,-y) adds +PI/2.
+        gltf.scene.applyMatrix4(new THREE.Matrix4().makeRotationY(modelRotationY));
         root.add(gltf.scene);
         root.userData.shapeStatus = 'loaded';
       },

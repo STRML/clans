@@ -77,6 +77,22 @@ function forceFieldMesh(placement: KatabaticAssets['scene']['baseObjects'][numbe
   return mesh;
 }
 
+function applyShapeTransform(
+  mesh: THREE.Object3D,
+  placement: {
+    rotation?: { axis: [number, number, number]; degrees: number };
+    scale?: [number, number, number];
+  },
+): void {
+  if (placement.rotation) {
+    mesh.setRotationFromAxisAngle(
+      new THREE.Vector3(...placement.rotation.axis).normalize(),
+      (placement.rotation.degrees * Math.PI) / 180,
+    );
+  }
+  if (placement.scale) mesh.scale.fromArray(placement.scale);
+}
+
 function addBaseObjectMesh(
   scene: THREE.Scene,
   meshes: Map<number, THREE.Object3D>,
@@ -87,7 +103,8 @@ function addBaseObjectMesh(
   const mesh = placement.kind === FORCE_FIELD_KIND ? forceFieldMesh(placement) : placeholderMesh();
   mesh.position.fromArray(placement.position);
   if (placement.kind !== FORCE_FIELD_KIND) {
-    loadShapeInto(mesh, assets.scene.shapesForBaseObjectKind[placement.kind]);
+    applyShapeTransform(mesh, placement);
+    loadShapeInto(mesh, assets.scene.shapesForBaseObjectKind[placement.kind], Math.PI);
   }
   // Stashed for raycastAimedStructure below, which reads a raycast hit's own mesh back out
   // without needing to search baseObjectMeshes/turretMeshes for it.
@@ -131,14 +148,19 @@ function addTurretMesh(
 ): void {
   const mesh = new THREE.Group();
   mesh.position.fromArray(placement.position);
+  applyShapeTransform(mesh, placement);
   const barrel = placeholderMesh();
   // Large turret GLBs contain only the barrel; the mission uses a separate shared pedestal.
   mesh.add(barrel);
-  loadShapeInto(barrel, assets.scene.shapesForTurretBarrel[placement.barrel]);
+  loadShapeInto(
+    barrel,
+    assets.scene.shapesForTurretBarrel[placement.barrel],
+    placement.barrel === 2 ? Math.PI : 0,
+  );
   if (placement.barrel !== 2) {
     const base = placeholderMesh();
     mesh.add(base);
-    loadShapeInto(base, 'turret_base_large');
+    loadShapeInto(base, 'turret_base_large', Math.PI);
   }
   mesh.userData.structureKind = 'turret';
   mesh.userData.structureId = id;

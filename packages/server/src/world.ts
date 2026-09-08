@@ -11,6 +11,7 @@ import {
   FlagState,
   RETURN_TICKS,
   sampleTerrain,
+  groundHeightAt,
   type Heightfield,
   type InteriorInstance,
   type InteriorTriangles,
@@ -39,7 +40,7 @@ interface SceneBaseObject {
   kind: number;
   team: number;
   position: [number, number, number];
-  // ForceField placements only -- every other kind leaves both undefined.
+  // Mission transforms are retained for every base object.
   rotation?: { axis: [number, number, number]; degrees: number };
   scale?: [number, number, number];
 }
@@ -180,8 +181,8 @@ export function spawnPointFor(
   const chosen = teamSpawns[index % teamSpawns.length];
   if (!chosen) throw new Error(`No spawn point for team ${String(team)}`);
   const [x, y, z] = chosen.position;
-  const ground = sampleTerrain(terrain, x, z).height;
-  return [x, Math.max(y, ground + 0.1), z];
+  const ground = sampleTerrain(terrain, x, z);
+  return [x, ground.empty ? y : Math.max(y, ground.height + 0.1), z];
 }
 
 /**
@@ -201,7 +202,8 @@ export function dropFlagsCarriedBy(world: World, playerId: number): void {
   const base = playerId * 3;
   const x = world.players.position[base] ?? 0;
   const z = world.players.position[base + 2] ?? 0;
-  const y = sampleTerrain(world.terrain, x, z).height;
+  const playerY = world.players.position[base + 1] ?? 0;
+  const y = groundHeightAt(world, { x, y: playerY, z }) ?? playerY;
   for (let flagId = 0; flagId < world.flags.state.length; flagId += 1) {
     if (world.flags.carrierId[flagId] !== playerId) continue;
     world.flags.state[flagId] = FlagState.Dropped;

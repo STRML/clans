@@ -1,4 +1,4 @@
-import { sampleTerrain } from './terrain.js';
+import { groundHeightAt } from './ground.js';
 import type { FlagStore, Vec3, World } from './types.js';
 
 export enum FlagState {
@@ -61,13 +61,9 @@ function distance(world: World, playerId: number, flagId: number): number {
   );
 }
 
-function clampToWalkable(world: World, x: number, z: number): Vec3 {
-  return { x, y: sampleTerrain(world.terrain, x, z).height, z };
-}
-
 function dropFlag(world: World, flagId: number, at: Vec3): void {
   const flags = world.flags;
-  const walkable = clampToWalkable(world, at.x, at.z);
+  const walkable = { ...at, y: groundHeightAt(world, at) ?? at.y };
   flags.state[flagId] = FlagState.Dropped;
   flags.position.set([walkable.x, walkable.y, walkable.z], flagId * 3);
   flags.carrierId[flagId] = -1;

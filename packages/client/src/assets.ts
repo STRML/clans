@@ -40,11 +40,17 @@ export interface ClientSceneData {
     kind: number;
     team: number;
     position: [number, number, number];
-    // ForceField placements only (kind 4) -- every other kind leaves both undefined.
+    // Mission transforms are preserved for every structure.
     rotation?: { axis: [number, number, number]; degrees: number };
     scale?: [number, number, number];
   }>;
-  turrets: Array<{ barrel: number; team: number; position: [number, number, number] }>;
+  turrets: Array<{
+    barrel: number;
+    team: number;
+    position: [number, number, number];
+    rotation?: { axis: [number, number, number]; degrees: number };
+    scale?: [number, number, number];
+  }>;
   interiors: Array<{
     shape: string;
     position: [number, number, number];
