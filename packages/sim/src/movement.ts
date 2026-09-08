@@ -176,8 +176,8 @@ function applyJump(body: Body, armor: ArmorData, startVy: number): boolean {
   return true;
 }
 
-// Demo tuning: slight directional thrust, not a claimed original T2 engine constant.
-const JET_STEERING_FRACTION = 0.4;
+// Demo tuning: responsive directional thrust, not a claimed original T2 engine constant.
+const JET_STEERING_FRACTION = 0.8;
 
 function applyJetSteering(body: Body, input: PlayerInput, armor: ArmorData, dt: number): void {
   const magnitude = Math.hypot(input.moveX, input.moveZ);
@@ -188,7 +188,9 @@ function applyJetSteering(body: Body, input: PlayerInput, armor: ArmorData, dt: 
   const z = (input.moveZ * cos + input.moveX * sin) / magnitude;
   // Add only the requested component. Never steer the entire velocity toward a run
   // target, which would erase skiing momentum perpendicular to the input.
-  const room = Math.max(0, desiredSpeed(input, armor) - (body.vx * x + body.vz * z));
+  // Give sustained strafing more authority than the grounded side-speed cap.
+  const steeringSpeed = desiredSpeed(input, armor) * (input.moveX !== 0 ? 2 : 1);
+  const room = Math.max(0, steeringSpeed - (body.vx * x + body.vz * z));
   const acceleration = Math.min(
     room,
     (armor.jetForce / armor.mass) * JET_STEERING_FRACTION * dt * Math.min(1, magnitude),
