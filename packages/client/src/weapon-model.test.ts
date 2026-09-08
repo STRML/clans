@@ -16,6 +16,7 @@ describe('first-person weapon', () => {
     const view = createWeaponModel();
     expect(view.root.parent?.type).toBe('Scene');
     expect(view.root.children).toHaveLength(5);
+    for (const model of view.root.children) expect(model.children[0]?.type).toBe('Mesh');
     view.sync(world, 0, false);
     expect(view.root.visible).toBe(true);
     expect(view.root.userData.weaponId).toBe(WeaponId.Spinfusor);

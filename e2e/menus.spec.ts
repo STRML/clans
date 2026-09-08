@@ -41,6 +41,12 @@ test('inventory menu releases captured mouse and accepts a real loadout click', 
   await expect(page.locator('#station-menu')).toBeVisible();
   await page.keyboard.up('KeyE');
   await expect.poll(() => page.evaluate(() => document.pointerLockElement === null)).toBe(true);
+  await page.keyboard.press('KeyC');
+  await page.keyboard.press('KeyV');
+  await expect(page.locator('#commander-map')).toBeHidden();
+  await expect(page.locator('#voice-menu')).toBeHidden();
+  await page.keyboard.down('KeyG');
+  await page.keyboard.down('Space');
   await page.getByRole('button', { name: 'Heavy', exact: true }).click();
   await page.getByRole('button', { name: 'Confirm', exact: true }).click();
   await expect
@@ -52,6 +58,11 @@ test('inventory menu releases captured mouse and accepts a real loadout click', 
     )
     .toBe(2);
   await expect(page.locator('#station-menu')).toBeHidden();
+  expect(
+    await page.evaluate(() => (window as unknown as { __app: App }).__app.input.snapshot()),
+  ).toMatchObject({ jump: false, altFire: false });
+  await page.keyboard.up('KeyG');
+  await page.keyboard.up('Space');
 });
 
 test('walking onto the separate vehicle station opens its menu and permits a spawn', async ({

@@ -21,6 +21,12 @@ export function createWeaponModel() {
   const models = new Map<number, THREE.Group>();
   for (const [id, name] of Object.entries(WEAPON_SHAPES)) {
     const model = new THREE.Group();
+    const fallback = new THREE.Mesh(
+      new THREE.BoxGeometry(0.12, 0.12, 0.4),
+      new THREE.MeshStandardMaterial({ color: 0x777777 }),
+    );
+    fallback.position.z = -0.2;
+    model.add(fallback);
     model.name = name;
     model.userData.weaponId = Number(id);
     model.visible = false;

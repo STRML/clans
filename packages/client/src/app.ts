@@ -506,6 +506,7 @@ function toggleUseMenu(state: BaseAssetsViewState): void {
     state.vehiclePadMenuState.open = false;
     return;
   }
+  if (!state.commanderMapCanvas.hidden || state.voiceMenu.visible) return;
   if (canSendVehicleUse(state.world, state.playerId)) return;
   state.stationMenuState.open = stationMenuVisible(state.world, state.playerId, true);
   state.vehiclePadMenuState.open =
@@ -515,7 +516,12 @@ function toggleUseMenu(state: BaseAssetsViewState): void {
 function syncVehicleStationMenu(state: BaseAssetsViewState): void {
   const { world, playerId, vehiclePadMenuState: menu } = state;
   const trigger = vehicleStationTriggerAt(world, playerId);
-  if (trigger !== null && trigger !== menu.triggerPad) {
+  if (
+    trigger !== null &&
+    trigger !== menu.triggerPad &&
+    state.commanderMapCanvas.hidden &&
+    !state.voiceMenu.visible
+  ) {
     menu.open = true;
     state.stationMenuState.open = false;
     state.stationMenu.hide();
@@ -567,12 +573,18 @@ export function vehicleRenderData(state: {
  *  budget, the same reason `syncMenus` already exists as its own function. */
 function syncMapAndVoiceToggles(state: BaseAssetsViewState): void {
   const { input } = state;
-  if (input.commandCirclePressedThisFrame()) {
+  const mapPressed = input.commandCirclePressedThisFrame();
+  const voicePressed = input.voiceMenuPressedThisFrame();
+  if (state.stationMenuState.open || state.vehiclePadMenuState.open) return;
+  if (mapPressed) {
+    state.voiceMenu.hide();
     state.commanderMapCanvas.hidden = !state.commanderMapCanvas.hidden;
     if (state.commanderMapCanvas.hidden) state.orderState.pending = null;
   }
   if (!state.commanderMapCanvas.hidden) drawCommanderMapForTeam(state);
-  if (input.voiceMenuPressedThisFrame()) {
+  if (voicePressed) {
+    state.commanderMapCanvas.hidden = true;
+    state.orderState.pending = null;
     if (state.voiceMenu.visible) state.voiceMenu.hide();
     else state.voiceMenu.show();
   }
@@ -1235,9 +1247,11 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       if (net) net.sendLoadout(armor, repairPack);
       else applyLoadoutRequest(world, playerId, armor, repairPack);
       stationMenuState.open = false;
+      input.setUiOpen(false);
     },
     () => {
       stationMenuState.open = false;
+      input.setUiOpen(false);
     },
   );
   const vehiclePadMenuState = { open: false, triggerPad: null as number | null };
@@ -1247,9 +1261,11 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       if (net) net.sendVehicleSpawn(padId, kind);
       else spawnVehicleAtPad(world, padId, kind);
       vehiclePadMenuState.open = false;
+      input.setUiOpen(false);
     },
     () => {
       vehiclePadMenuState.open = false;
+      input.setUiOpen(false);
     },
   );
   const commanderMapCanvas = document.createElement('canvas');

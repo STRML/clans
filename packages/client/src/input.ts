@@ -81,15 +81,8 @@ export class Input {
   setUiOpen(open: boolean): void {
     if (open === this.uiOpen) return;
     this.uiOpen = open;
-    this.fire = false;
-    this.jet = false;
-    if (!open) {
-      // A menu digit must not also select a weapon. Preserve new movement keys pressed
-      // just after a button click, before the next render synchronizes the closed menu.
-      for (const code of this.keys) if (code.startsWith('Digit')) this.keys.delete(code);
-    }
+    this.releaseAll();
     if (open) {
-      this.releaseAll();
       this.resumeClick = true;
       if (document.pointerLockElement === this.target) document.exitPointerLock();
     }
