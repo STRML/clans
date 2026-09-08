@@ -334,7 +334,7 @@ function handleVehicleSpawn(
   if (!world.players.active[playerId] || !world.players.alive[playerId]) return;
   if (world.baseObjects.team[padId] !== world.players.team[playerId]) return;
   const [px, py, pz] = positionAt(world.players.position, playerId * 3);
-  const [bx, by, bz] = positionAt(world.baseObjects.position, padId * 3);
+  const [bx, by, bz] = positionAt(world.baseObjects.usePosition, padId * 3);
   if (Math.hypot(px - bx, py - by, pz - bz) > VEHICLE_PAD_USE_RADIUS) return;
   spawnVehicleAtPad(world, padId, kind);
 }

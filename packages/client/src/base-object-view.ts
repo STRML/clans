@@ -228,10 +228,22 @@ export function createBaseObjectView(
   assets: Pick<KatabaticAssets, 'scene'>,
 ): BaseObjectView {
   const baseObjectMeshes = new Map<number, THREE.Object3D>();
+  const vehicleStationMeshes = new Map<number, THREE.Object3D>();
   const turretMeshes = new Map<number, THREE.Object3D>();
   const interiorMeshes = new Map<number, THREE.Object3D>();
   assets.scene.baseObjects.forEach((placement, id) => {
     addBaseObjectMesh(scene, baseObjectMeshes, assets, placement, id);
+    if (placement.kind === BaseObjectKind.StationVehiclePad && placement.usePosition) {
+      const station = placeholderMesh();
+      station.name = 'vehicle-control-station';
+      station.position.fromArray(placement.usePosition);
+      applyShapeTransform(station, placement);
+      loadShapeInto(station, 'vehicle_pad_station', Math.PI);
+      station.userData.structureKind = 'baseObject';
+      station.userData.structureId = id;
+      scene.add(station);
+      vehicleStationMeshes.set(id, station);
+    }
   });
   assets.scene.turrets.forEach((placement, id) => {
     addTurretMesh(scene, turretMeshes, assets, placement, id);
@@ -246,6 +258,7 @@ export function createBaseObjectView(
     interiorMeshes,
     sync(baseObjects, turrets) {
       syncBaseObjects(baseObjectMeshes, baseObjects);
+      syncBaseObjects(vehicleStationMeshes, baseObjects);
       syncTurrets(turretMeshes, turrets);
     },
   };

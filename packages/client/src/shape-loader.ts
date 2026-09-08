@@ -44,6 +44,7 @@ export function loadShapeInto(
   root: THREE.Object3D,
   name: string | undefined,
   modelRotationY = 0,
+  onLoad?: (scene: THREE.Group, animations: THREE.AnimationClip[]) => void,
 ): void {
   if (!name) return;
   const url = shapeUrl(name);
@@ -90,6 +91,7 @@ export function loadShapeInto(
         gltf.scene.applyMatrix4(new THREE.Matrix4().makeRotationY(modelRotationY));
         root.add(gltf.scene);
         root.userData.shapeStatus = 'loaded';
+        onLoad?.(gltf.scene, gltf.animations);
       },
       undefined,
       fail,

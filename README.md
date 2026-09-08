@@ -29,7 +29,7 @@ Open http://127.0.0.1:5173, click to capture the mouse, and ski.
 | Left mouse | fire the held weapon |
 | 1 2 3 4 5 | Spinfusor, Chaingun, Mortar, Laser Rifle, Blaster |
 | G | throw a hand grenade |
-| E | open the loadout menu at a powered inventory station, or open the vehicle spawn menu at a powered vehicle pad; mount an unoccupied vehicle within range, or dismount your own |
+| E | open the loadout menu at a powered inventory station, or open the vehicle spawn menu at a powered vehicle control station; mount an unoccupied vehicle within range, or dismount your own |
 | R | hold to fire a Repair Pack beam (heals a damaged player, base asset, or turret) |
 | C | open the commander map (see Command circuit below) |
 | V | open the voice-bind quick-chat menu (see Voice binds below) |
@@ -78,11 +78,16 @@ map showing your team's base status and any enemy contacts inside your team's se
 `docs/superpowers/specs/2026-09-05-clans-tribes2-browser-demo-design.md` for exactly how
 power, shields, and sensor coverage work.
 
+Nearby usable stations and vehicles show an `E` prompt. Popup menus release the mouse cursor;
+close them with their Close button or Escape, then click the game to resume mouse look.
+
 ## Vehicles
 
 Each team's vehicle pad spawns a Shrike (a fast, armed flyer) or a Wildcat (a hovering ground
-scout) once its team has power. Stand within the pad's use radius and press `E` to open the
-spawn menu; picking a vehicle destroys whatever the pad already hosts. Walk up to an
+scout) once its team has power. Walk onto the small control station beside the pad to open
+the spawn menu, or press `E` near that station. The control station uses the original model
+and the pad's authored attachment position. Picking a vehicle replaces whatever the pad
+already hosts; the new vehicle appears on the large platform. Walk up to an
 unoccupied vehicle and press `E` to mount it — your own weapons go silent, the camera moves
 to a third-person chase view, and WASD/mouse drive the vehicle's real T2 flight or hover
 physics instead of your own movement. The Shrike's twin-barrel blaster fires from your own
@@ -139,8 +144,8 @@ is explicit demo tuning. Energy Packs are not implemented.
 
 ## Rendering limitations
 
-First-person weapons use a small procedural model with basic weapon variants; original held-gun
-art and firing/reload animations are not implemented. Imported structures and vehicles retain
+All five first-person weapons use their original textured models and authored grip points.
+Firing/reload animations are not implemented. Imported structures and vehicles retain
 their GLB materials and geometry. Source power/destruction visibility is supported for structures,
 but animated mechanical parts and turret aiming remain static. Failed shape loads retain a neutral
 fallback and report the asset URL in the browser console. If a vehicle GLB is unavailable,

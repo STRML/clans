@@ -1580,11 +1580,16 @@ describe('startNetServer', () => {
     expect(extras.vehicles[0]?.kind).toBe(VehicleKind.Wildcat);
   });
 
-  it('a VehicleSpawn message from a player near a powered pad spawns a vehicle', async () => {
+  it('a VehicleSpawn message from a player near its powered control station spawns a vehicle', async () => {
     const vehicleWorld = createWorld(terrain, 1, 8);
     createBaseObjects(vehicleWorld, [
       { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
-      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: 1, y: 0, z: 0 } },
+      {
+        kind: BaseObjectKind.StationVehiclePad,
+        team: 1,
+        position: { x: 20, y: 0, z: 0 },
+        usePosition: { x: 1, y: 0, z: 0 },
+      },
     ]);
     stepPower(vehicleWorld);
     const vehicleSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];

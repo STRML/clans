@@ -1,3 +1,4 @@
+import type { App } from '../packages/client/src/app.js';
 import { expect, test, type Page } from '@playwright/test';
 
 declare global {
@@ -58,10 +59,39 @@ test('spawn a Wildcat, mount, drive, dismount', async ({ page }) => {
   await pressEUntil(page, () => wildcatButton.isVisible());
   await wildcatButton.click();
 
-  // Single-player spawns the vehicle synchronously (no server round trip): the Wildcat lands
-  // 2 m above the pad, well within MOUNT_RANGE (4 m) of the player standing on the pad, so no
-  // walking is needed before the next E press mounts it.
-  await page.waitForTimeout(300);
+  // Vehicles spawn on the platform, separate from the control station. Walk over to it.
+  const destination = await page.evaluate(() => {
+    const app = (window as unknown as { __app: App }).__app;
+    const v = app.world.vehicles;
+    const id = Array.from(v.active).findIndex(Boolean);
+    const x = v.position[id * 3]!,
+      z = v.position[id * 3 + 2]!;
+    app.input.yaw = Math.atan2(
+      x - app.world.players.position[app.playerId * 3]!,
+      z - app.world.players.position[app.playerId * 3 + 2]!,
+    );
+    return { x, z };
+  });
+  await page.keyboard.down('KeyW');
+  await page.keyboard.down('Space');
+  try {
+    await expect
+      .poll(
+        () =>
+          page.evaluate(({ x, z }) => {
+            const app = (window as unknown as { __app: App }).__app;
+            return Math.hypot(
+              app.world.players.position[app.playerId * 3]! - x,
+              app.world.players.position[app.playerId * 3 + 2]! - z,
+            );
+          }, destination),
+        { timeout: 20_000, intervals: [100] },
+      )
+      .toBeLessThan(3);
+  } finally {
+    await page.keyboard.up('KeyW');
+    await page.keyboard.up('Space');
+  }
 
   // #hud-vehicle is empty while unmounted (hud.ts's vehicleRow) and reads
   // "Vehicle <health>% — <speed> m/s" once mounted -- this is the "we're driving" signal.

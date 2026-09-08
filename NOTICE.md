@@ -70,5 +70,6 @@ four are build-time-only devDependencies of `packages/assets`: their output is t
 data under `assets/out/`, not code any shipped package imports at runtime.
 
 The browser also ships the Apache-2.0 Draco WebAssembly decoder and wrapper distributed with
-Three.js. Vite bundles these files locally; no external decoder CDN is used. The procedural
-first-person weapon model is original presentation geometry created for this project.
+Three.js. Vite bundles these files locally; no external decoder CDN is used. First-person
+weapon models, the vehicle control station, and their textures are original Tribes 2 assets
+from the exogen/t2-mapper source credited above.

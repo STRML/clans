@@ -68,6 +68,42 @@
         font-size: 12px;
         text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
       }
+      #interaction-prompt {
+        position: fixed;
+        left: 50%;
+        top: 62%;
+        transform: translateX(-50%);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
+        background: rgba(10, 15, 24, 0.9);
+        border: 1px solid rgba(216, 224, 234, 0.5);
+        border-radius: 4px;
+        pointer-events: none;
+      }
+      #interaction-prompt[hidden] {
+        display: none;
+      }
+      #interaction-prompt kbd {
+        border: 1px solid currentColor;
+        padding: 3px 7px;
+        border-radius: 3px;
+      }
+      #station-menu h2,
+      #vehicle-pad-menu h2 {
+        margin: 0 0 6px;
+        font-size: 18px;
+      }
+      #station-menu button[aria-pressed='true'] {
+        background: #27556b;
+        border-color: #79d8ff;
+      }
+      #station-menu small,
+      #vehicle-pad-menu small {
+        max-width: 270px;
+        opacity: 0.8;
+      }
       #station-menu,
       #vehicle-pad-menu,
       #voice-menu {

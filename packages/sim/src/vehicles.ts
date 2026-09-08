@@ -280,9 +280,9 @@ export function vehiclePadAt(world: World, playerId: number): number | null {
     if (baseObjects.team[id] !== team || !baseObjects.powered[id]) continue;
     const base = id * 3;
     const padPos: Vec3 = {
-      x: at(baseObjects.position, base),
-      y: at(baseObjects.position, base + 1),
-      z: at(baseObjects.position, base + 2),
+      x: at(baseObjects.usePosition, base),
+      y: at(baseObjects.usePosition, base + 1),
+      z: at(baseObjects.usePosition, base + 2),
     };
     const dist = Math.hypot(playerPos.x - padPos.x, playerPos.y - padPos.y, playerPos.z - padPos.z);
     if (dist <= VEHICLE_PAD_USE_RADIUS) return id;
