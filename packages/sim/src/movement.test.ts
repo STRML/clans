@@ -672,3 +672,78 @@ describe('MIN_PUSH_DEPTH: floating-point-noise-level interior contact (M4 regres
     expect(realVX).toBeLessThan(refVX * 0.5);
   });
 });
+
+describe('airborne momentum', () => {
+  it.each([false, true])(
+    'keeps horizontal momentum below resistance speed while airborne (jet=%s)',
+    (jet) => {
+      const world = createWorld(flat, 1);
+      const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+      world.players.velocity.set([9, 0, 12], id * 3);
+      for (let tick = 0; tick < 63; tick++) stepWorld(world, inputMap(id, { moveZ: 1, jet }));
+      expect(world.players.onGround[id]).toBe(0);
+      expect(world.players.velocity[id * 3]).toBeCloseTo(9, 8);
+      expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(12, 8);
+    },
+  );
+
+  it('carries running speed into a jump-and-jet instead of needing a landing to regain it', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 100, y: 0, z: 100 });
+    for (let tick = 0; tick < 32; tick++) stepWorld(world, inputMap(id, { moveZ: 1 }));
+    const runSpeed = world.players.velocity[id * 3 + 2]!;
+    expect(runSpeed).toBeCloseTo(15);
+    for (let tick = 0; tick < 50; tick++)
+      stepWorld(world, inputMap(id, { moveZ: 1, jump: true, jet: true }));
+    expect(world.players.onGround[id]).toBe(0);
+    expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(runSpeed, 8);
+  });
+});
+
+it.each([33.001, 50, 100])(
+  'resists only horizontal speed above the threshold (speed=%s)',
+  (speed) => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+    world.players.velocity[id * 3 + 2] = speed;
+    stepWorld(world, inputMap(id, { jet: true }));
+    const capped = Math.min(speed, 68);
+    expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(
+      capped - 0.35 * FIXED_DT * (capped - 33),
+      8,
+    );
+  },
+);
+
+it('holding Space preserves momentum across repeated landings; releasing it restores ground braking', () => {
+  const world = createWorld(flat, 1);
+  const id = addPlayer(world, { x: 100, y: 0, z: 100 });
+  world.players.velocity[id * 3 + 2] = 25;
+  let landings = 0;
+  let wasGrounded = true;
+  for (let tick = 0; tick < 320; tick++) {
+    stepWorld(world, inputMap(id, { jump: true }));
+    const grounded = world.players.onGround[id] === 1;
+    if (grounded && !wasGrounded) landings++;
+    wasGrounded = grounded;
+    expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(25, 8);
+  }
+  expect(landings).toBeGreaterThan(5);
+  for (let tick = 0; tick < 100; tick++) stepWorld(world, inputMap(id, {}));
+  expect(world.players.onGround[id]).toBe(1);
+  expect(world.players.velocity[id * 3 + 2]).toBe(0);
+});
+
+it.each([25.641, 50, 100, -100])(
+  'applies upward resistance only to excess upward speed (vy=%s)',
+  (vy) => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+    world.players.velocity[id * 3 + 1] = vy;
+    stepWorld(world, inputMap(id, {}));
+    const accelerated = vy - 20 * FIXED_DT;
+    const capped = Math.min(accelerated, 80);
+    const expected = capped > 25 ? capped - 0.3 * FIXED_DT * (capped - 25) : capped;
+    expect(world.players.velocity[id * 3 + 1]).toBeCloseTo(expected, 8);
+  },
+);

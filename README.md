@@ -129,6 +129,10 @@ TLS-terminating proxy in front of your server) or the connection will never open
 can't reach the server you gave it, it shows a "couldn't connect" message rather than staying
 silently blank.
 
+Airborne movement preserves horizontal momentum below the armor's speed-resistance threshold.
+Jumping and vertical jet thrust do not apply an extra horizontal drag term. Releasing ski
+on landing restores normal running control, which can brake speeds above the run cap.
+
 ## Rendering limitations
 
 First-person weapons use a small procedural model with basic weapon variants; original held-gun
