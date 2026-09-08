@@ -29,6 +29,89 @@
         pointer-events: none;
         white-space: pre;
       }
+      /* The HUD overlays the canvas at all times (createHud never sets `hidden`). Every other
+         panel here toggles `hidden` itself (station/vehicle-pad menus, the voice menu, the
+         commander map); their only job here is to render as a centered overlay instead of a
+         canvas-height block once shown, and to lay their button rows out sanely. */
+      #hud {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 12px;
+        display: flex;
+        justify-content: center;
+        gap: 16px;
+        padding: 0 16px;
+        font-size: 14px;
+        pointer-events: none;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+      }
+      #hud-kill-feed {
+        position: fixed;
+        top: 8px;
+        right: 8px;
+        left: auto;
+        bottom: auto;
+        text-align: right;
+        font-size: 12px;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+      }
+      #station-menu,
+      #vehicle-pad-menu,
+      #voice-menu {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 16px 20px;
+        background: rgba(10, 15, 24, 0.85);
+        border: 1px solid rgba(216, 224, 234, 0.3);
+        border-radius: 4px;
+      }
+      #station-menu[hidden],
+      #vehicle-pad-menu[hidden],
+      #voice-menu[hidden] {
+        display: none;
+      }
+      #station-menu button,
+      #vehicle-pad-menu button {
+        font-family: inherit;
+        font-size: 14px;
+        padding: 6px 12px;
+        background: rgba(216, 224, 234, 0.1);
+        color: inherit;
+        border: 1px solid rgba(216, 224, 234, 0.3);
+        border-radius: 3px;
+        cursor: pointer;
+      }
+      #commander-map {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 512px;
+        height: 512px;
+        background: rgba(10, 15, 24, 0.85);
+        border: 1px solid rgba(216, 224, 234, 0.3);
+      }
+      #commander-map[hidden] {
+        display: none;
+      }
+      #crosshair {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        width: 6px;
+        height: 6px;
+        margin: -3px 0 0 -3px;
+        border-radius: 50%;
+        background: rgba(216, 224, 234, 0.85);
+        box-shadow: 0 0 2px rgba(0, 0, 0, 0.9);
+        pointer-events: none;
+      }
     </style>
   </head>
   <body>

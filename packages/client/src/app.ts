@@ -1173,6 +1173,9 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const flagMeshes = new Map<number, THREE.Group>();
   const effects: Effect[] = [];
   const seenEventSeq = { seq: 0 };
+  const crosshair = document.createElement('div');
+  crosshair.id = 'crosshair';
+  document.body.appendChild(crosshair);
   const hud = createHud(document.body, hudSourceFrom(world, playerId, net));
   const stationMenuState = { open: false };
   const stationMenu: StationMenu = createStationMenu(
