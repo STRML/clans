@@ -138,5 +138,4 @@ test('original disc, chaingun, mortar and blaster animate with simulated fire st
     mortarRecoil: true,
     blasterFlash: true,
   });
-  await page.screenshot({ path: '/private/tmp/clans-animated-blaster.png' });
 });
