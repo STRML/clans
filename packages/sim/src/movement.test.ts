@@ -672,3 +672,38 @@ describe('MIN_PUSH_DEPTH: floating-point-noise-level interior contact (M4 regres
     expect(realVX).toBeLessThan(refVX * 0.5);
   });
 });
+
+describe('airborne momentum', () => {
+  it.each([false, true])(
+    'keeps horizontal momentum below resistance speed while airborne (jet=%s)',
+    (jet) => {
+      const world = createWorld(flat, 1);
+      const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+      world.players.velocity.set([9, 0, 12], id * 3);
+      for (let tick = 0; tick < 63; tick++) stepWorld(world, inputMap(id, { moveZ: 1, jet }));
+      expect(world.players.onGround[id]).toBe(0);
+      expect(world.players.velocity[id * 3]).toBeCloseTo(9, 8);
+      expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(12, 8);
+    },
+  );
+
+  it('carries running speed into a jump-and-jet instead of needing a landing to regain it', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 100, y: 0, z: 100 });
+    for (let tick = 0; tick < 32; tick++) stepWorld(world, inputMap(id, { moveZ: 1 }));
+    const runSpeed = world.players.velocity[id * 3 + 2]!;
+    expect(runSpeed).toBeCloseTo(15);
+    for (let tick = 0; tick < 50; tick++)
+      stepWorld(world, inputMap(id, { moveZ: 1, jump: true, jet: true }));
+    expect(world.players.onGround[id]).toBe(0);
+    expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(runSpeed, 8);
+  });
+});
+
+it('still applies horizontal resistance above its threshold while airborne', () => {
+  const world = createWorld(flat, 1);
+  const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+  world.players.velocity[id * 3 + 2] = 50;
+  stepWorld(world, inputMap(id, { jet: true }));
+  expect(world.players.velocity[id * 3 + 2]).toBeCloseTo(50 * (1 - 0.35 * FIXED_DT));
+});

@@ -155,11 +155,10 @@ function applyGround(body: Body, sample: TerrainSample, dt: number): void {
   body.vz += GRAVITY * ny * nz * dt;
 }
 
-function applyAir(body: Body, armor: ArmorData, dt: number): void {
+function applyAir(body: Body, dt: number): void {
   body.vy -= GRAVITY * dt;
-  const airDrag = Math.max(0, 1 - armor.drag * dt);
-  body.vx *= airDrag;
-  body.vz *= airDrag;
+  // Preserve horizontal momentum during ski hops and jetting. Speed-dependent
+  // resistance belongs to applyResistance, not unconditional airborne braking.
 }
 
 /**
@@ -312,7 +311,7 @@ function applyForces(
   const mayJump = ctx.grounded && jumpEdge && ctx.slope <= armor.jumpSurfaceAngle;
   const startVy = body.vy;
   if (ctx.grounded) applyGround(body, ctx.sample, dt);
-  else applyAir(body, armor, dt);
+  else applyAir(body, dt);
   if (ctx.mayRun) applyRun(body, input, ctx.sample.normal, armor, dt);
   // The jump comes after the run steering, as in Torque, so the steering toward a
   // horizontal target cannot eat part of the impulse on the tick it fires. It scales and

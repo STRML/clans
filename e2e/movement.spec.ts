@@ -36,3 +36,40 @@ test('loads Katabatic and reaches running speed', async ({ page }) => {
   const ground = Number(await page.locator('#debug-ground').getAttribute('data-value'));
   expect([0, 1]).toContain(ground);
 });
+
+test('jetting preserves airborne horizontal momentum', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#debug-stats[data-ready="1"]').waitFor({ state: 'attached' });
+  const startTick = await page.evaluate(() => {
+    const app = (window as unknown as { __app: App }).__app;
+    // Isolate flight from terrain slopes and walls; the sim regression covers takeoff.
+    app.world.players.position.set([0, 200, 0], app.playerId * 3);
+    app.world.players.velocity.set([0, 0, 15], app.playerId * 3);
+    return app.world.tick;
+  });
+  await page.keyboard.down('KeyW');
+  await page.keyboard.down('Space');
+  await page.mouse.down({ button: 'right' });
+  try {
+    await expect
+      .poll(() => page.evaluate(() => (window as unknown as { __app: App }).__app.world.tick), {
+        timeout: 20000,
+      })
+      .toBeGreaterThan(startTick + 30);
+    const state = await page.evaluate(() => {
+      const app = (window as unknown as { __app: App }).__app;
+      return {
+        speed: app.world.players.velocity[app.playerId * 3 + 2],
+        grounded: app.world.players.onGround[app.playerId],
+        energy: app.world.players.energy[app.playerId],
+      };
+    });
+    expect(state.grounded).toBe(0);
+    expect(state.energy).toBeLessThan(60);
+    expect(state.speed).toBeCloseTo(15, 5);
+  } finally {
+    await page.mouse.up({ button: 'right' });
+    await page.keyboard.up('Space');
+    await page.keyboard.up('KeyW');
+  }
+});
