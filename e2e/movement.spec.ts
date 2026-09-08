@@ -67,9 +67,26 @@ test('jetting preserves airborne horizontal momentum', async ({ page }) => {
     expect(state.grounded).toBe(0);
     expect(state.energy).toBeLessThan(60);
     expect(state.speed).toBeCloseTo(15, 5);
+    await page.keyboard.up('KeyW');
+    const steerTick = await page.evaluate(
+      () => (window as unknown as { __app: App }).__app.world.tick,
+    );
+    await page.keyboard.down('KeyD');
+    await expect
+      .poll(() => page.evaluate(() => (window as unknown as { __app: App }).__app.world.tick), {
+        timeout: 20000,
+      })
+      .toBeGreaterThan(steerTick + 15);
+    const steered = await page.evaluate(() => {
+      const app = (window as unknown as { __app: App }).__app;
+      return Array.from(app.world.players.velocity.slice(app.playerId * 3, app.playerId * 3 + 3));
+    });
+    expect(steered[0]).toBeLessThan(-1);
+    expect(steered[2]).toBeCloseTo(15, 5);
   } finally {
     await page.mouse.up({ button: 'right' });
     await page.keyboard.up('Space');
     await page.keyboard.up('KeyW');
+    await page.keyboard.up('KeyD');
   }
 });

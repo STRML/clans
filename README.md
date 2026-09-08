@@ -130,8 +130,12 @@ can't reach the server you gave it, it shows a "couldn't connect" message rather
 silently blank.
 
 Airborne movement preserves horizontal momentum below the armor's speed-resistance threshold.
-Jumping and vertical jet thrust do not apply an extra horizontal drag term. Releasing ski
-on landing restores normal running control, which can brake speeds above the run cap.
+Jumping and vertical jet thrust do not apply an extra horizontal drag term. Movement keys
+add slight directional thrust while jetting, preserving existing sideways momentum.
+Releasing ski on landing restores normal running control, which can brake speeds above the run cap.
+Energy recharges even while jetting: light armor provides about 3.5 seconds of continuous
+thrust from full energy. Capacity and drain use the T2 script values; jet steering strength
+is explicit demo tuning. Energy Packs are not implemented.
 
 ## Rendering limitations
 

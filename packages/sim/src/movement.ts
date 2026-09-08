@@ -176,7 +176,28 @@ function applyJump(body: Body, armor: ArmorData, startVy: number): boolean {
   return true;
 }
 
-/** Returns true when the jet fired this tick. Recharges only while the jet key is up. */
+// Demo tuning: slight directional thrust, not a claimed original T2 engine constant.
+const JET_STEERING_FRACTION = 0.2;
+
+function applyJetSteering(body: Body, input: PlayerInput, armor: ArmorData, dt: number): void {
+  const magnitude = Math.hypot(input.moveX, input.moveZ);
+  if (magnitude === 0) return;
+  const sin = Math.sin(input.yaw),
+    cos = Math.cos(input.yaw);
+  const x = (input.moveZ * sin - input.moveX * cos) / magnitude;
+  const z = (input.moveZ * cos + input.moveX * sin) / magnitude;
+  // Add only the requested component. Never steer the entire velocity toward a run
+  // target, which would erase skiing momentum perpendicular to the input.
+  const room = Math.max(0, desiredSpeed(input, armor) - (body.vx * x + body.vz * z));
+  const acceleration = Math.min(
+    room,
+    (armor.jetForce / armor.mass) * JET_STEERING_FRACTION * dt * Math.min(1, magnitude),
+  );
+  body.vx += x * acceleration;
+  body.vz += z * acceleration;
+}
+
+/** Recharge each tick, then return whether enough energy was available to fire the jet. */
 function applyJet(
   players: PlayerStore,
   id: number,
@@ -185,13 +206,14 @@ function applyJet(
   armor: ArmorData,
   dt: number,
 ): boolean {
-  const energy = players.energy[id] ?? 0;
+  // ShapeBase-style recharge runs every tick, before movement consumes energy.
+  const energy = Math.min(armor.maxEnergy, (players.energy[id] ?? 0) + armor.rechargeRate);
+  players.energy[id] = energy;
   if (input.jet && energy > armor.minJetEnergy) {
     body.vy += (armor.jetForce / armor.mass) * dt;
     players.energy[id] = Math.max(0, energy - armor.jetEnergyDrain);
     return true;
   }
-  if (!input.jet) players.energy[id] = Math.min(armor.maxEnergy, energy + armor.rechargeRate);
   return false;
 }
 
@@ -316,6 +338,7 @@ function applyForces(
   // and steering can't push a jump on the refusal edge into being wrongly refused or scaled.
   const jumped = mayJump && applyJump(body, armor, startVy);
   const jetted = applyJet(players, id, body, input, armor, dt);
+  if (jetted && !ctx.grounded) applyJetSteering(body, input, armor, dt);
   return { jumped, jetted };
 }
 
@@ -390,8 +413,26 @@ function sweepChest(
   const length = Math.hypot(dx, dy, dz);
   if (length === 0) return null;
   const direction: Vec3 = { x: dx / length, y: dy / length, z: dz / length };
-  const hit = raycastInteriors(colliders, prevChest, direction, length);
-  return hit && { point: hit.point, normal: hit.normal };
+  // Extend the ray a tiny distance backward. A previous collision can leave the chest
+  // exactly on a triangle plane; rayTriangle intentionally rejects t=0, so without this
+  // overlap the next upward tick starts on the roof and tunnels straight through it.
+  const SWEEP_EPSILON = 1e-4;
+  const origin = {
+    x: prevChest.x - direction.x * SWEEP_EPSILON,
+    y: prevChest.y - direction.y * SWEEP_EPSILON,
+    z: prevChest.z - direction.z * SWEEP_EPSILON,
+  };
+  const hit = raycastInteriors(colliders, origin, direction, length + SWEEP_EPSILON);
+  if (!hit) return null;
+  // Interior triangle winding is not guaranteed to point toward the player. Orient the
+  // contact normal against this movement so all callers get the same inward-facing normal.
+  const facing =
+    hit.normal.x * direction.x + hit.normal.y * direction.y + hit.normal.z * direction.z;
+  const sign = facing > 0 ? -1 : 1;
+  return {
+    point: hit.point,
+    normal: { x: hit.normal.x * sign, y: hit.normal.y * sign, z: hit.normal.z * sign },
+  };
 }
 
 /** Stops the body at a chest-height swept-segment hit (if any) -- converting the hit point
@@ -403,11 +444,16 @@ function stopAtSweepHit(
   body: Body,
   hit: { point: Vec3; normal: Vec3 } | null,
   chestOffsetY: number,
+  radius: number,
 ): void {
   if (!hit) return;
-  body.x = hit.point.x;
-  body.y = hit.point.y - chestOffsetY;
-  body.z = hit.point.z;
+  // The ray hits the chest center path, while the player is a sphere/capsule. Leave one
+  // radius of clearance on the interior side of the surface; stopping at the hit point
+  // embeds the chest sphere in a ceiling and makes the next tick start on the plane again.
+  const clearance = radius + 1e-4;
+  body.x = hit.point.x + hit.normal.x * clearance;
+  body.y = hit.point.y + hit.normal.y * clearance - chestOffsetY;
+  body.z = hit.point.z + hit.normal.z * clearance;
   const into = body.vx * hit.normal.x + body.vy * hit.normal.y + body.vz * hit.normal.z;
   if (into < 0) {
     body.vx -= into * hit.normal.x;
@@ -427,7 +473,12 @@ function resolveInteriors(world: World, body: Body, armor: ArmorData, previous: 
   const chestOffsetY = height - radius;
   const prevChest = { x: previous.x, y: previous.y + chestOffsetY, z: previous.z };
   const chestBeforePush = { x: body.x, y: body.y + chestOffsetY, z: body.z };
-  stopAtSweepHit(body, sweepChest(world.interiors, prevChest, chestBeforePush), chestOffsetY);
+  stopAtSweepHit(
+    body,
+    sweepChest(world.interiors, prevChest, chestBeforePush),
+    chestOffsetY,
+    radius,
+  );
   const feet = { x: body.x, y: body.y + radius, z: body.z };
   const chest = { x: body.x, y: body.y + chestOffsetY, z: body.z };
   const push =
@@ -467,7 +518,7 @@ function resolveForceFields(
   const chestOffsetY = height - radius;
   const prevChest = { x: previous.x, y: previous.y + chestOffsetY, z: previous.z };
   const chestBeforePush = { x: body.x, y: body.y + chestOffsetY, z: body.z };
-  stopAtSweepHit(body, sweepChest(blockers, prevChest, chestBeforePush), chestOffsetY);
+  stopAtSweepHit(body, sweepChest(blockers, prevChest, chestBeforePush), chestOffsetY, radius);
   const chest = { x: body.x, y: body.y + chestOffsetY, z: body.z };
   const push = resolveSphereAgainstInteriors(blockers, chest, radius);
   // Same floating-point-noise floor resolveInteriors applies above -- see MIN_PUSH_DEPTH's
