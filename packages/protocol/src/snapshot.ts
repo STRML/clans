@@ -262,7 +262,12 @@ function readHeader(cursor: Cursor): SnapshotHeader {
 // whole new wire byte for one bit -- see PlayerSnapshotData.wasJumpHeld's doc comment
 // (sim/snapshot.ts) for the misprediction this closes.
 function statusByte(data: PlayerSnapshotData): number {
-  return (data.onGround ? 1 : 0) | (data.ski ? 2 : 0) | (data.wasJumpHeld ? 4 : 0);
+  return (
+    (data.onGround ? 1 : 0) |
+    (data.ski ? 2 : 0) |
+    (data.wasJumpHeld ? 4 : 0) |
+    ((data.wasUseHeld ?? 0) << 3)
+  );
 }
 
 // A NaN or Infinity in any of these would otherwise reach client-side prediction
@@ -344,6 +349,7 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
     onGround: flags & 1 ? 1 : 0,
     ski: flags & 2 ? 1 : 0,
     wasJumpHeld: flags & 4 ? 1 : 0,
+    ...((flags >> 3) & 3 ? { wasUseHeld: ((flags >> 3) & 3) as 1 | 2 | 3 } : {}),
     health,
     weaponSlot,
     respawnSeq,
@@ -744,7 +750,12 @@ function energyChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
   return Math.abs(a.energy - b.energy) > EPSILON;
 }
 function statusChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
-  return a.onGround !== b.onGround || a.ski !== b.ski || a.wasJumpHeld !== b.wasJumpHeld;
+  return (
+    a.onGround !== b.onGround ||
+    a.ski !== b.ski ||
+    a.wasJumpHeld !== b.wasJumpHeld ||
+    (a.wasUseHeld ?? 0) !== (b.wasUseHeld ?? 0)
+  );
 }
 // Codex round 1, finding 2: armor/hasRepairPack folded into the same bit team already used
 // (renamed from teamChanged) rather than claiming one of their own -- every mask bit is
@@ -994,6 +1005,8 @@ function readChangedStatus(cursor: Cursor, next: PlayerSnapshotData): void {
   next.onGround = flags & 1 ? 1 : 0;
   next.ski = flags & 2 ? 1 : 0;
   next.wasJumpHeld = flags & 4 ? 1 : 0;
+  delete next.wasUseHeld;
+  if ((flags >> 3) & 3) next.wasUseHeld = ((flags >> 3) & 3) as 1 | 2 | 3;
 }
 function readChangedEnergy(cursor: Cursor, next: PlayerSnapshotData): void {
   const energy = readF32(cursor);

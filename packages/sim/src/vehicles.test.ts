@@ -333,6 +333,26 @@ describe('resolveVehicleCollision', () => {
     expect(world.vehicles.damage[id]).toBeGreaterThan(0);
   });
 
+  it('a fast skim spends no shield; a harder landing spends shield before hull', () => {
+    const { world, id } = shrikeWorld();
+    world.vehicles.position.set([5, 5.4, 0], id * 3);
+    world.vehicles.velocity.set([160, -3.2, 0], id * 3);
+    resolveVehicleCollision(world, id, { x: 0, y: 5.5, z: 0 }, 1 / 32);
+    expect(world.vehicles.energy[id]).toBe(280);
+    expect(world.vehicles.damage[id]).toBe(0);
+    expect(world.vehicles.velocity[id * 3]).toBe(160);
+    // 20 m/s downward: 0.6 damage, entirely absorbed by the full shield.
+    world.vehicles.position.set([5, 5.4, 0], id * 3);
+    resolveVehicleCollision(world, id, { x: 5, y: 6.025, z: 0 }, 1 / 32);
+    expect(world.vehicles.energy[id]).toBeCloseTo(184);
+    expect(world.vehicles.damage[id]).toBe(0);
+    world.vehicles.energy[id] = 0;
+    world.vehicles.position.set([5, 5.4, 0], id * 3);
+    resolveVehicleCollision(world, id, { x: 5, y: 6.025, z: 0 }, 1 / 32);
+    expect(world.vehicles.damage[id]).toBeCloseTo(0.6);
+    expect(world.vehicles.destroyed[id]).toBe(0);
+  });
+
   it('a low-speed landing (below collDamageThresholdVel and groundImpactMinSpeed) takes no damage', () => {
     const { world, id } = shrikeWorld();
     world.vehicles.position.set([0, 5, 0], id * 3); // inside checkRadius (5.5) of the ground
@@ -410,6 +430,37 @@ describe('stepVehicles: mount/dismount', () => {
     stepVehicles(world, new Map([[playerId, useInput(true)]]), 1 / 32);
     expect(world.players.mountedVehicleId[playerId]).toBe(vId);
     expect(world.vehicles.driverId[vId]).toBe(playerId);
+  });
+
+  it('boards without E, stays dismounted through held/released E, and boards on reentry', () => {
+    const world = createWorld(flat, 1);
+    const vId = spawnVehicleAtPad(world, poweredPad(world), VehicleKind.Wildcat)!;
+    const playerId = addPlayer(world, vehiclePos(world, vId), 1);
+    const step = (use: boolean) =>
+      stepVehicles(world, new Map([[playerId, useInput(use)]]), 1 / 32);
+    step(false);
+    expect(world.players.mountedVehicleId[playerId]).toBe(vId);
+    step(true);
+    step(true);
+    step(false);
+    step(false);
+    expect(world.players.mountedVehicleId[playerId]).toBe(-1);
+    world.players.position.set([100, 100, 100], playerId * 3);
+    step(false);
+    const pos = vehiclePos(world, vId);
+    world.players.position.set([pos.x, pos.y, pos.z], playerId * 3);
+    step(false);
+    expect(world.players.mountedVehicleId[playerId]).toBe(vId);
+  });
+
+  it('never automatically boards a dead player', () => {
+    const world = createWorld(flat, 1);
+    const vId = spawnVehicleAtPad(world, poweredPad(world), VehicleKind.Wildcat)!;
+    const playerId = addPlayer(world, vehiclePos(world, vId), 1);
+    world.players.alive[playerId] = 0;
+    stepVehicles(world, new Map([[playerId, useInput(false)]]), 1 / 32);
+    expect(world.players.mountedVehicleId[playerId]).toBe(-1);
+    expect(world.vehicles.driverId[vId]).toBe(-1);
   });
 
   it('a player outside MOUNT_RANGE pressing use does not mount', () => {
@@ -716,6 +767,34 @@ describe('vehicle id retention and reuse', () => {
       stepVehicles(world, new Map(), 1 / 32);
     }
     expect(world.pendingVehicleDestroyed.length).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('vehicle wall impacts', () => {
+  it('slides along a wall at speed without treating tangential travel as crash damage', () => {
+    const { world, id } = shrikeWorld();
+    world.interiors = [
+      buildInteriorCollider(
+        {
+          positions: new Float32Array([
+            0, 0, -100, 0, 200, -100, 0, 200, 100, 0, 0, -100, 0, 200, 100, 0, 0, 100,
+          ]),
+        },
+        { position: { x: 0, y: 0, z: 0 }, rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 } },
+      ),
+    ];
+    world.vehicles.position.set([5.4, 100, 5], id * 3);
+    world.vehicles.velocity.set([-3.2, 0, 160], id * 3);
+    resolveVehicleCollision(world, id, { x: 5.5, y: 100, z: 0 }, 1 / 32);
+    expect(world.vehicles.energy[id]).toBe(280);
+    expect(world.vehicles.damage[id]).toBe(0);
+    expect(world.vehicles.velocity[id * 3]).toBeCloseTo(0);
+    expect(world.vehicles.velocity[id * 3 + 2]).toBe(160);
+    // A swept crossing stops outside the wall and a genuinely hard normal hit destroys it.
+    world.vehicles.position.set([-1, 100, 5], id * 3);
+    resolveVehicleCollision(world, id, { x: 6, y: 100, z: 0 }, 1 / 32);
+    expect(world.vehicles.position[id * 3]).toBeCloseTo(5.5);
+    expect(world.vehicles.destroyed[id]).toBe(1);
   });
 });
 

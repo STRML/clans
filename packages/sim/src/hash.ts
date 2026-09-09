@@ -63,6 +63,7 @@ function mixPlayer(hash: number, players: World['players'], id: number): number 
   h = mix(h, num(players.ski, id));
   h = mix(h, num(players.wasGrounded, id));
   h = mix(h, num(players.wasJumpHeld, id));
+  h = mix(h, num(players.wasUseHeld, id));
   h = mix(h, num(players.damage, id));
   h = mix(h, num(players.godMode, id));
   h = mix(h, num(players.alive, id));

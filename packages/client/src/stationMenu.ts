@@ -1,7 +1,25 @@
-import { ArmorId, stationAt, type World } from '@clans/sim';
+import { ArmorId, armorFor, stationAt, type World } from '@clans/sim';
 
 export function stationMenuVisible(world: World, playerId: number, menuOpen: boolean): boolean {
   return menuOpen && stationAt(world, playerId) !== null;
+}
+
+/** Original inventory trigger: 1.5 m wide, from 0.1 to 2.4 m above the station. */
+export function inventoryStationTriggerAt(world: World, playerId: number): number | null {
+  if (!world.players.alive[playerId] || (world.players.mountedVehicleId[playerId] ?? -1) !== -1)
+    return null;
+  const station = stationAt(world, playerId);
+  if (station === null) return null;
+  const p = playerId * 3,
+    base = station * 3;
+  const dx = world.players.position[p]! - world.baseObjects.position[base]!;
+  const dy = world.players.position[p + 1]! - world.baseObjects.position[base + 1]!;
+  const dz = world.players.position[p + 2]! - world.baseObjects.position[base + 2]!;
+  return Math.hypot(dx, dz) <= 0.75 &&
+    dy + armorFor(world, playerId).boundingBox[2] >= 0.1 &&
+    dy <= 2.4
+    ? station
+    : null;
 }
 
 export interface StationMenu {

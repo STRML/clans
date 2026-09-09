@@ -62,11 +62,11 @@ test('spawn a Wildcat, mount, drive, dismount', async ({ page }) => {
   // E opens the pad menu -- app.ts's syncBaseAssetsView toggles it open the same tick this
   // key registers, once the player is within VEHICLE_PAD_USE_RADIUS of a powered pad.
   const wildcatButton = page.locator('#vehicle-pad-menu button', { hasText: 'Wildcat' });
-  await pressEUntil(page, () => wildcatButton.isVisible());
+  await expect(wildcatButton).toBeVisible();
   await wildcatButton.click();
 
   // Vehicles spawn on the platform, separate from the control station. Walk over to it.
-  const destination = await page.evaluate(() => {
+  await page.evaluate(() => {
     const app = (window as unknown as { __app: App }).__app;
     const v = app.world.vehicles;
     const id = Array.from(v.active).findIndex(Boolean);
@@ -83,16 +83,13 @@ test('spawn a Wildcat, mount, drive, dismount', async ({ page }) => {
     await expect
       .poll(
         () =>
-          page.evaluate(({ x, z }) => {
+          page.evaluate(() => {
             const app = (window as unknown as { __app: App }).__app;
-            return Math.hypot(
-              app.world.players.position[app.playerId * 3]! - x,
-              app.world.players.position[app.playerId * 3 + 2]! - z,
-            );
-          }, destination),
+            return app.world.players.mountedVehicleId[app.playerId];
+          }),
         { timeout: 20_000, intervals: [100] },
       )
-      .toBeLessThan(3);
+      .toBeGreaterThanOrEqual(0);
   } finally {
     await page.keyboard.up('KeyW');
   }
@@ -102,7 +99,7 @@ test('spawn a Wildcat, mount, drive, dismount', async ({ page }) => {
   const hudVehicle = page.locator('#hud-vehicle');
   const isMounted = async (): Promise<boolean> =>
     ((await hudVehicle.getAttribute('data-value')) ?? '') !== '';
-  await pressEUntil(page, isMounted);
+  await expect.poll(isMounted).toBe(true);
 
   // The freshly-spawned/just-mounted Wildcat still carries some small vertical velocity from
   // its own hover spring settling onto its rest height -- comparing against this baseline

@@ -58,7 +58,7 @@ every tick.
 ## Base assets
 
 Three armors are playable: Light, Medium, Heavy, each with its own speed, weapon slots, and
-ammo caps. Visit a powered inventory station and press `E` to switch armor or equip a Repair
+ammo caps. Walk onto a powered inventory station to switch armor or equip a Repair
 Pack.
 
 Each team's base runs on power: at least one living generator keeps that team's stations,
@@ -88,13 +88,16 @@ scout) once its team has power. Walk onto the small control station beside the p
 the spawn menu, or press `E` near that station. The control station uses the original model
 and the pad's authored attachment position. Picking a vehicle replaces whatever the pad
 already hosts; the new vehicle appears on the large platform. Walk up to an
-unoccupied vehicle and press `E` to mount it — your own weapons go silent, the camera moves
+unoccupied vehicle to board it automatically — your own weapons go silent, the camera moves
 to a third-person chase view, and WASD/mouse drive the vehicle's real T2 flight or hover
 physics instead of your own movement. The Shrike's twin-barrel blaster fires from your own
 fire button. Both vehicles take collision, ground-impact, and weapon damage against a shielded
 energy pool, and explode past their damage cap, ejecting the pilot. Each team's AA barrel
 turret now finds and fires on enemy vehicles in range with line of sight. Press `E` again to
-dismount.
+dismount; leave boarding range before walking back to board again. The vehicle HUD shows
+shield energy and hull health separately. Collision damage depends on speed into the surface,
+so a fast glancing scrape does not count as a head-on crash. Destruction produces an expanding
+explosion and sound.
 
 ## Command circuit
 

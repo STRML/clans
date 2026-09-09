@@ -564,6 +564,7 @@ export class NetClient {
     deserializePlayer(this.world, { ...serverState, id: LOCAL_SLOT });
     this.world.players.wasGrounded[LOCAL_SLOT] = previousOnGround;
     this.world.players.wasJumpHeld[LOCAL_SLOT] = serverState.wasJumpHeld;
+    this.world.players.wasUseHeld[LOCAL_SLOT] = serverState.wasUseHeld ?? 0;
     // Must be set before the replay loop below: movement.ts/weapons.ts both gate this
     // player's own simulation on mountedVehicleId, so an unmounted-vs-mounted mismatch here
     // would replay every pending input against the wrong branch.

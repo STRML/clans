@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { addPlayer, createWorld, type Heightfield } from '@clans/sim';
 import { createBaseObjects, BaseObjectKind, stepPower } from '@clans/sim';
-import { stationMenuVisible } from './stationMenu.js';
+import { inventoryStationTriggerAt, stationMenuVisible } from './stationMenu.js';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -39,4 +39,23 @@ describe('stationMenuVisible', () => {
     const player = addPlayer(world, { x: 500, y: 0, z: 0 }, 1);
     expect(stationMenuVisible(world, player, true)).toBe(false);
   });
+});
+
+it('requires inventory pad contact and a living, unmounted player for automatic entry', () => {
+  const world = createWorld(flat, 1);
+  createBaseObjects(world, [
+    { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+    { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 1, y: 0, z: 0 } },
+  ]);
+  stepPower(world);
+  const player = addPlayer(world, { x: 1, y: 0, z: 0 }, 1);
+  expect(inventoryStationTriggerAt(world, player)).toBe(1);
+  world.players.position[player * 3] = 2;
+  expect(inventoryStationTriggerAt(world, player)).toBeNull();
+  world.players.position[player * 3] = 1;
+  world.players.mountedVehicleId[player] = 0;
+  expect(inventoryStationTriggerAt(world, player)).toBeNull();
+  world.players.mountedVehicleId[player] = -1;
+  world.players.alive[player] = 0;
+  expect(inventoryStationTriggerAt(world, player)).toBeNull();
 });

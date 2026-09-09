@@ -166,7 +166,7 @@ describe('describeHud', () => {
     world.vehicles.velocity.set([3, 0, 4], 0); // 5 m/s
     world.players.mountedVehicleId[source.playerId] = 0;
     const rows = rowsOf(source);
-    expect(rows['hud-vehicle']).toBe('Vehicle 50% — 5.0 m/s');
+    expect(rows['hud-vehicle']).toBe('Hull 50% · Shield 0% — 5.0 m/s');
   });
 });
 

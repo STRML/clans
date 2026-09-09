@@ -22,6 +22,8 @@ test('inventory menu releases captured mouse and accepts a real loadout click', 
   });
   await page.goto('/');
   await page.locator('#debug-stats[data-ready="1"]').waitFor({ state: 'attached' });
+  await page.locator('#app canvas').first().click();
+  await expect.poll(() => page.evaluate(() => document.pointerLockElement !== null)).toBe(true);
   await page.evaluate(() => {
     const app = (window as unknown as { __app: App }).__app;
     const objects = app.world.baseObjects;
@@ -34,12 +36,7 @@ test('inventory menu releases captured mouse and accepts a real loadout click', 
     );
     app.world.players.velocity.set([0, 0, 0], app.playerId * 3);
   });
-  await expect(page.locator('#interaction-prompt')).toContainText('Inventory station');
-  await page.locator('#app canvas').first().click();
-  await expect.poll(() => page.evaluate(() => document.pointerLockElement !== null)).toBe(true);
-  await page.keyboard.down('KeyE');
   await expect(page.locator('#station-menu')).toBeVisible();
-  await page.keyboard.up('KeyE');
   await expect.poll(() => page.evaluate(() => document.pointerLockElement === null)).toBe(true);
   await page.keyboard.press('KeyC');
   await page.keyboard.press('KeyV');

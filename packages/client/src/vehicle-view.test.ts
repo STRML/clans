@@ -73,6 +73,28 @@ describe('createVehicleView', () => {
     loadSpy.mockRestore();
   });
 
+  it('points its +Z nose along the flight heading, including positive climb pitch', () => {
+    const view = createVehicleView(new THREE.Scene(), proceduralAssets);
+    const yaw = 0.7,
+      pitch = 0.3;
+    view.sync([vehicleData({ yaw, pitch })]);
+    const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(view.meshes.get(0)!.quaternion);
+    expect(forward.x).toBeCloseTo(Math.sin(yaw) * Math.cos(pitch));
+    expect(forward.y).toBeCloseTo(Math.sin(pitch));
+    expect(forward.z).toBeCloseTo(Math.cos(yaw) * Math.cos(pitch));
+  });
+
+  it('emits destruction feedback once for a visible vehicle, never for historical deaths', () => {
+    const destroyed = vi.fn();
+    const view = createVehicleView(new THREE.Scene(), proceduralAssets, destroyed);
+    view.sync([vehicleData({ id: 1, destroyed: 1 })]);
+    expect(destroyed).not.toHaveBeenCalled();
+    view.sync([vehicleData({})]);
+    view.sync([vehicleData({ destroyed: 1, damage: 1.4 })]);
+    view.sync([vehicleData({ destroyed: 1, damage: 1.4 })]);
+    expect(destroyed).toHaveBeenCalledTimes(1);
+  });
+
   it('a glb-tier vehicle requests its real shape', () => {
     const loadSpy = vi.spyOn(GLTFLoader.prototype, 'load');
     const scene = new THREE.Scene();
