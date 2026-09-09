@@ -30,3 +30,18 @@ it('disposes a late load instead of attaching it to a despawned vehicle', () => 
   expect(dispose).toHaveBeenCalledOnce();
   expect(root.children).toHaveLength(0);
 });
+
+it('restores additive DTS glow blending without solid white surfaces or depth occlusion', () => {
+  const load = vi.spyOn(GLTFLoader.prototype, 'load').mockImplementation(() => {});
+  const root = new THREE.Group();
+  loadShapeInto(root, 'weapon_sniper');
+  const material = new THREE.MeshBasicMaterial({ map: new THREE.Texture() });
+  material.userData.flag_names = ['SelfIlluminating', 'Translucent', 'Additive'];
+  const scene = new THREE.Group();
+  scene.add(new THREE.Mesh(new THREE.PlaneGeometry(), material));
+  load.mock.calls[0]![1]({ scene } as never);
+  expect(material.blending).toBe(THREE.AdditiveBlending);
+  expect(material.transparent).toBe(true);
+  expect(material.depthWrite).toBe(false);
+  disposeShape(root);
+});

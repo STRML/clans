@@ -191,7 +191,11 @@ function syncStructure(root: THREE.Object3D, destroyed: boolean, powered: boolea
     if (!(node instanceof THREE.Mesh)) return;
     const materials = Array.isArray(node.material) ? node.material : [node.material];
     for (const material of materials) {
-      if (!(material instanceof THREE.MeshStandardMaterial)) continue;
+      if (!(
+        material instanceof THREE.MeshStandardMaterial ||
+        material instanceof THREE.MeshBasicMaterial
+      ))
+        continue;
       if (!originalColors.has(material)) originalColors.set(material, material.color.clone());
       material.color.copy(destroyed ? DESTROYED_COLOR : originalColors.get(material)!);
     }
