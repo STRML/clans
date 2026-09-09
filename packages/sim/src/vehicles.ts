@@ -358,7 +358,6 @@ export function vehiclePadAt(world: World, playerId: number): number | null {
 // numbers table is collected in the plan's "ours" numbers table alongside its citation.
 const SHRIKE_MIN_DRAG = 30;
 const SHRIKE_MANEUVERING_FORCE = 3000; // vehicles/vehicle_shrike.cs:140
-const SHRIKE_HORIZONTAL_SURFACE_FORCE = 6; // vehicles/vehicle_shrike.cs:138
 const SHRIKE_VERT_THRUST_MULTIPLE = 3; // vehicles/vehicle_shrike.cs:152
 const SHRIKE_MAX_AUTO_SPEED = 15; // vehicles/vehicle_shrike.cs:131
 const SHRIKE_AUTO_LINEAR_FORCE = 300; // vehicles/vehicle_shrike.cs:132 — ours table
@@ -401,11 +400,14 @@ function applyShrikeAutoStabilize(
   id: number,
   speed: number,
   dt: number,
+  verticalThrustActive: boolean,
 ): void {
-  if (speed >= SHRIKE_MAX_AUTO_SPEED) return;
   const mass = VEHICLE_DATA[VehicleKind.Shrike].mass;
   const base = id * 3;
   for (let axis = 0; axis < 3; axis += 1) {
+    // Keep active vertical thrust responsive, while allowing a released craft's
+    // residual vertical velocity to settle even at high horizontal speed.
+    if (axis === 1 ? verticalThrustActive : speed >= SHRIKE_MAX_AUTO_SPEED) continue;
     const v = vehicles.velocity[base + axis] ?? 0;
     vehicles.velocity[base + axis] =
       v - Math.sign(v) * Math.min(Math.abs(v), (SHRIKE_AUTO_LINEAR_FORCE / mass) * dt);
@@ -468,14 +470,24 @@ function applyShrikeThrust(
     (vehicles.velocity[base + 2] ?? 0) + heading.z * input.moveZ * thrust * dt;
 }
 
-function applyShrikeJetThrust(vehicles: VehicleStore, id: number, dt: number): void {
+function applyShrikeJetThrust(
+  vehicles: VehicleStore,
+  id: number,
+  input: PlayerInput,
+  dt: number,
+): void {
   const data = VEHICLE_DATA[VehicleKind.Shrike];
   const base = id * 3;
-  const heading = headingOf(at(vehicles.yaw, id), at(vehicles.pitch, id));
   const jet = SHRIKE_JET_FORCE / data.mass;
-  vehicles.velocity[base] = at(vehicles.velocity, base) + heading.x * jet * dt;
-  vehicles.velocity[base + 1] = at(vehicles.velocity, base + 1) + heading.y * jet * dt;
-  vehicles.velocity[base + 2] = at(vehicles.velocity, base + 2) + heading.z * jet * dt;
+  if (input.moveX === 0 && input.moveZ === 0) {
+    vehicles.velocity[base + 1] =
+      at(vehicles.velocity, base + 1) + jet * SHRIKE_VERT_THRUST_MULTIPLE * dt;
+  } else {
+    const heading = headingOf(at(vehicles.yaw, id), at(vehicles.pitch, id));
+    vehicles.velocity[base] = at(vehicles.velocity, base) + heading.x * jet * dt;
+    vehicles.velocity[base + 1] = at(vehicles.velocity, base + 1) + heading.y * jet * dt;
+    vehicles.velocity[base + 2] = at(vehicles.velocity, base + 2) + heading.z * jet * dt;
+  }
   vehicles.energy[id] = at(vehicles.energy, id) - SHRIKE_JET_ENERGY_DRAIN;
 }
 
@@ -487,28 +499,25 @@ function applyShrikeAfterburner(
   id: number,
   input: PlayerInput,
   dt: number,
-): void {
+): boolean {
   const data = VEHICLE_DATA[VehicleKind.Shrike];
   if (!input.jet) {
     vehicles.energy[id] = Math.min(data.maxEnergy, at(vehicles.energy, id) + data.rechargeRate);
-    return;
+    return false;
   }
-  if (at(vehicles.energy, id) < SHRIKE_MIN_JET_ENERGY) return;
-  applyShrikeJetThrust(vehicles, id, dt);
+  if (at(vehicles.energy, id) < SHRIKE_MIN_JET_ENERGY) return false;
+  applyShrikeJetThrust(vehicles, id, input, dt);
+  return true;
 }
 
-/** Lift ("bite") opposing gravity while moving forward, plus gravity and the Shrike's own
- *  minDrag -- split out of stepShrike to keep its complexity under budget. */
-function applyShrikeLiftAndGravity(vehicles: VehicleStore, id: number, dt: number): void {
+function shrikeVerticalThrustActive(input: PlayerInput, jetActive: boolean): boolean {
+  return jetActive || input.moveZ !== 0;
+}
+
+/** Shrikes are self-supporting flyers: retain horizontal drag without passive gravity or lift. */
+function applyShrikeDrag(vehicles: VehicleStore, id: number, dt: number): void {
   const data = VEHICLE_DATA[VehicleKind.Shrike];
   const base = id * 3;
-  const heading = headingOf(vehicles.yaw[id] ?? 0, vehicles.pitch[id] ?? 0);
-  const forwardSpeed =
-    (vehicles.velocity[base] ?? 0) * heading.x + (vehicles.velocity[base + 2] ?? 0) * heading.z;
-  vehicles.velocity[base + 1] =
-    (vehicles.velocity[base + 1] ?? 0) +
-    Math.max(0, forwardSpeed) * (SHRIKE_HORIZONTAL_SURFACE_FORCE / data.mass) * dt -
-    GRAVITY * dt;
   const dragScale = 1 - Math.min(1, (SHRIKE_MIN_DRAG / data.mass) * dt);
   vehicles.velocity[base] = (vehicles.velocity[base] ?? 0) * dragScale;
   vehicles.velocity[base + 2] = (vehicles.velocity[base + 2] ?? 0) * dragScale;
@@ -534,15 +543,15 @@ export function stepShrike(world: World, id: number, input: PlayerInput, dt: num
 
   applyShrikeSteering(vehicles, id, input, dt);
   applyShrikeThrust(vehicles, id, input, dt);
-  applyShrikeAfterburner(vehicles, id, input, dt);
-  applyShrikeLiftAndGravity(vehicles, id, dt);
+  const jetActive = applyShrikeAfterburner(vehicles, id, input, dt);
+  applyShrikeDrag(vehicles, id, dt);
 
   const speed = Math.hypot(
     vehicles.velocity[base] ?? 0,
     vehicles.velocity[base + 1] ?? 0,
     vehicles.velocity[base + 2] ?? 0,
   );
-  applyShrikeAutoStabilize(vehicles, id, speed, dt);
+  applyShrikeAutoStabilize(vehicles, id, speed, dt, shrikeVerticalThrustActive(input, jetActive));
   clampShrikeSpeed(vehicles, id, speed);
 
   vehicles.position[base] = (vehicles.position[base] ?? 0) + (vehicles.velocity[base] ?? 0) * dt;

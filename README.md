@@ -91,7 +91,8 @@ already hosts. The pad animates during a 6.5-second fabrication sequence; the ve
 appears after 4.8 seconds, its wings unfold, and you are automatically teleported into it. Walk up to an
 unoccupied vehicle to board it automatically — your own weapons go silent, the camera moves
 to the Shrike's authored cockpit eye (the Wildcat retains a chase camera). WASD/mouse
-control the vehicle, with damped steering and A/D lateral thrust on the Shrike. The flight
+control the vehicle, with damped steering and A/D lateral thrust on the Shrike. The Shrike hovers without spending jet energy. Holding jet
+without WASD provides upward thrust; combining jet with WASD boosts the current heading. The flight
 controller is a demo adaptation using T2 force values, not a port of Torque's rigid-body solver. The Shrike's twin-barrel blaster fires from your own
 fire button. Both vehicles take collision, ground-impact, and weapon damage against a shielded
 energy pool, and explode past their damage cap, ejecting the pilot. Each team's AA barrel

@@ -174,10 +174,11 @@ function shrikeWorld(): { world: ReturnType<typeof createWorld>; id: number } {
 }
 
 describe('stepShrike', () => {
-  it('an idle Shrike with no input falls under gravity like any unpowered body', () => {
+  it('an idle Shrike hovers without passive gravity', () => {
     const { world, id } = shrikeWorld();
-    stepShrike(world, id, idleInput, 1 / 32);
-    expect(world.vehicles.velocity[id * 3 + 1]).toBeLessThan(0);
+    for (let tick = 0; tick < 200; tick += 1) stepShrike(world, id, idleInput, 1 / 32);
+    expect(world.vehicles.position[id * 3 + 1]).toBeCloseTo(100);
+    expect(world.vehicles.velocity[id * 3 + 1]).toBeCloseTo(0);
   });
 
   it('forward thrust (moveZ) accelerates the Shrike along its heading', () => {
@@ -189,6 +190,54 @@ describe('stepShrike', () => {
       world.vehicles.velocity[id * 3 + 2] ?? 0,
     );
     expect(speed).toBeGreaterThan(5);
+    expect(world.vehicles.velocity[id * 3 + 1]).toBeCloseTo(0);
+  });
+
+  it('neutral jet thrust points upward independently of pitch', () => {
+    const { world, id } = shrikeWorld();
+    world.vehicles.pitch[id] = 0.8;
+    const before = world.vehicles.velocity[id * 3 + 1] ?? 0;
+    stepShrike(world, id, { ...idleInput, jet: true, pitch: 0.8 }, 1 / 32);
+    expect(world.vehicles.velocity[id * 3 + 1]).toBeGreaterThan(before);
+    expect(world.vehicles.velocity[id * 3]).toBeCloseTo(0);
+    expect(world.vehicles.velocity[id * 3 + 2]).toBeCloseTo(0);
+  });
+
+  it('an empty-energy Shrike remains level while neutral jet is held', () => {
+    const { world, id } = shrikeWorld();
+    world.vehicles.energy[id] = 0;
+    for (let tick = 0; tick < 60; tick += 1)
+      stepShrike(world, id, { ...idleInput, jet: true }, 1 / 32);
+    expect(world.vehicles.position[id * 3 + 1]).toBeCloseTo(100);
+    expect(world.vehicles.velocity[id * 3 + 1]).toBeCloseTo(0);
+  });
+
+  it('directional jet thrust follows the current heading', () => {
+    const boosted = shrikeWorld();
+    const unboosted = shrikeWorld();
+    boosted.world.vehicles.pitch[boosted.id] = 0.6;
+    unboosted.world.vehicles.pitch[unboosted.id] = 0.6;
+    stepShrike(
+      boosted.world,
+      boosted.id,
+      { ...idleInput, moveZ: 1, jet: true, pitch: 0.6 },
+      1 / 32,
+    );
+    stepShrike(unboosted.world, unboosted.id, { ...idleInput, moveZ: 1, pitch: 0.6 }, 1 / 32);
+    expect(boosted.world.vehicles.velocity[boosted.id * 3 + 2]).toBeGreaterThan(
+      unboosted.world.vehicles.velocity[unboosted.id * 3 + 2] ?? 0,
+    );
+    expect(boosted.world.vehicles.energy[boosted.id]).toBeLessThan(
+      unboosted.world.vehicles.energy[unboosted.id] ?? 0,
+    );
+  });
+
+  it('released vertical velocity settles even above the auto-stabilizer speed', () => {
+    const { world, id } = shrikeWorld();
+    world.vehicles.velocity.set([80, 4, 0], id * 3);
+    for (let tick = 0; tick < 200; tick += 1) stepShrike(world, id, idleInput, 1 / 32);
+    expect(world.vehicles.velocity[id * 3 + 1]).toBeCloseTo(0);
+    expect(world.vehicles.velocity[id * 3]).toBeGreaterThan(15);
   });
 
   it('settles on mouse heading without repeated overshoot or spiralling', () => {
