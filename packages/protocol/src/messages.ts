@@ -39,7 +39,16 @@ export enum OrderKind {
 // wire-format change, in both directions.
 // M7's flag-audio events add new EventKind values. Event payloads are still six bytes, but a
 // stale client would not know how to interpret the new kinds, so reject mixed versions.
-export const PROTOCOL_VERSION = 8;
+//
+// #14/#24/#15 bump 8 -> 9: three wire-format changes an 8.x peer cannot decode correctly.
+// BaseObjectSnapshotData/TurretSnapshotData gain a trailing energy f32 and TurretSnapshotData
+// a trailing targetKind u8 (#14/#24) -- an old decoder stops reading a turret/base-object
+// record five/four bytes early and misaligns every later array; and ProjectileSnapshotData's
+// ownerId changed u16 -> i16 (#15) so the turret-shot "no owner" -1 sentinel survives the
+// wire instead of decoding as a phantom player 65535. Same frame size (PROJECTILE_BYTES is
+// unchanged), different meaning. WelcomeStatus.VersionMismatch catches all of this in both
+// directions, exactly as the M7 bump below already reasoned.
+export const PROTOCOL_VERSION = 9;
 
 export enum WelcomeStatus {
   Ok = 0,
@@ -168,8 +177,10 @@ export const MAX_SNAPSHOT_FLAGS = 8;
 export const MAX_SNAPSHOT_BASE_OBJECTS = 64; // Matches @clans/sim's BASE_OBJECT_CAPACITY.
 export const MAX_SNAPSHOT_TURRETS = 16; // Matches @clans/sim's TURRET_CAPACITY.
 export const MAX_SNAPSHOT_VEHICLES = 255; // Matches @clans/sim's VehicleStore capacity (8) with
-// headroom; capped at 255 (not 256) because the wire count is a single unchecked-write u8 --
-// see snapshot.ts's writeExtras for why 255 is the real ceiling, not just a round number.
+// headroom; capped at 255 (not 256) because the wire count is a single u8 -- since the #16
+// fix every u8 extras count (vehicles here, flags/baseObjects/turrets at their own tighter
+// MAX ceilings above) is guard-thrown at write time instead of silently wrapping, so 255
+// stays the real ceiling, not just a round number. See snapshot.ts's writeExtras.
 export const MAX_SNAPSHOT_BOTS = 32; // Ours -- TARGET_TEAM_SIZE * 2 (M6's own "ours" numbers table).
 export const MAX_SNAPSHOT_ORDERS = 2; // Ours -- one active order per team, no queue.
 export const VOICE_LINE_COUNT = 9; // Ours -- see M7 plan's "ours" numbers table.

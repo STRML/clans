@@ -1,5 +1,6 @@
 import { ARMORS, armorFor, type ArmorId } from './armor.js';
 import type { PlayerStore, World } from './types.js';
+import { VEHICLE_DATA } from './vehicles.js';
 import { ammoIndex, WeaponId } from './weapons.js';
 
 export interface PlayerSnapshotData {
@@ -289,6 +290,16 @@ export function serializeActiveVehicles(world: World): VehicleSnapshotData[] {
 export function deserializeVehicle(world: World, data: VehicleSnapshotData): void {
   const v = world.vehicles;
   if (data.id >= v.active.length) return;
+  // Issue #25: `kind` is a raw wire byte (readVehicle does no range check -- the protocol
+  // package carries it as a plain number, the same convention as every other sim enum on
+  // the wire), so a corrupted frame, a server bug, or a hostile byte used to be written
+  // into the store with its slot ACTIVATED, and the very next prediction tick crashed
+  // stepVehicles on a `VEHICLE_DATA[kind]` lookup that does not exist. Reject it here,
+  // before the slot is activated or `count` grown -- mirroring spawnVehicleAtPad's own
+  // `!(kind in VEHICLE_DATA)` check (vehicles.ts), which inspects the actual backing table
+  // so a future third kind that forgets to touch this guard fails closed too. Dropping just
+  // this entry (not the whole decode) keeps the rest of the frame's world state live.
+  if (!(data.kind in VEHICLE_DATA)) return;
   if (data.id >= v.count) v.count = data.id + 1;
   v.active[data.id] = 1;
   v.kind[data.id] = data.kind;

@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createBaseObjectView, raycastAimedStructure } from './base-object-view.js';
 import { shapeUrl } from './assets.js';
+import { baseFor } from '@clans/sim';
 
 const baseScene = {
   baseObjects: [
@@ -111,10 +112,42 @@ describe('createBaseObjectView', () => {
     const camera = new THREE.PerspectiveCamera();
     camera.position.set(0, 0, 5);
     camera.updateMatrixWorld(true);
-    const world = { baseObjects: { kind: [0], damage: [0] } } as never;
-    expect(raycastAimedStructure(camera, view, world)?.name).toBe('Generator');
+    // energy rides along since #14: aimedBaseObjectInfo reports the shield pool next to
+    // health, so the stub world has to model it (Generator maxEnergy 50, pool at 30 -> 60%).
+    const world = { baseObjects: { kind: [0], damage: [0], energy: [30] } } as never;
+    const info = raycastAimedStructure(camera, view, world);
+    expect(info?.name).toBe('Generator');
+    expect(info?.shieldPercent).toBe(60);
     part.visible = false;
     expect(raycastAimedStructure(camera, view, world)).toBeNull();
+  });
+
+  it('reports turret shield percent from the sim store energy, and omits it for pools that do not exist (issue #14)', () => {
+    const scene = new THREE.Scene();
+    const view = createBaseObjectView(scene, stubAssets);
+    scene.updateMatrixWorld(true);
+    // The stub scene's turret sits at [10, 0, 0]; a camera on +z aims straight at it. Its
+    // fallback placeholder is a real BoxGeometry mesh, so the raycast hits it without any
+    // GLTF decode (every load call is mocked to a no-op in beforeEach).
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(10, 0, 5);
+    camera.updateMatrixWorld(true);
+    const turretBase = baseFor(2 as never);
+    const world = {
+      turrets: { barrel: [2], damage: [0], energy: [turretBase.maxEnergy / 4] },
+    } as never;
+    const info = raycastAimedStructure(camera, view, world);
+    expect(info?.name).toBe('Turret');
+    expect(info?.shieldPercent).toBe(25);
+    // No pool (maxEnergy 0) -> no shieldPercent key at all, not a pinned 0%.
+    const poolLess = {
+      baseObjects: { kind: [3], damage: [0], energy: [0] }, // kind 3 = StationVehiclePad
+    } as never;
+    const stationCamera = new THREE.PerspectiveCamera();
+    stationCamera.position.set(0, 0, 5);
+    stationCamera.updateMatrixWorld(true);
+    const stationInfo = raycastAimedStructure(stationCamera, view, poolLess);
+    expect(stationInfo?.shieldPercent).toBeUndefined();
   });
 
   it('reports synchronous loader errors and empty decoded scenes', () => {

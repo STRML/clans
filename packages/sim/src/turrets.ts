@@ -1,4 +1,5 @@
 import { teamHasPower } from './baseObjects.js';
+import { segmentBlockedByInteriors } from './occlusion.js';
 import { sampleTerrain } from './terrain.js';
 import { ProjectileType } from './weapons.js';
 import type { Vec3, World } from './types.js';
@@ -25,6 +26,19 @@ export function hasLineOfSight(world: World, from: Vec3, to: Vec3): boolean {
     if (!sample.empty && sample.height >= from.y + dy * t) return false;
   }
   return true;
+}
+
+/** Issue #49: the full sight test every turret LOS decision shares -- acquisition
+ *  (`nearestPlayerTarget`/`nearestVehicleTarget`) and retention (`targetStillValid`)
+ *  alike. `hasLineOfSight` keeps its original terrain-only semantics (packages/bots
+ *  perception/waypoints and sim/repair.ts depend on exactly those), so the interior/
+ *  enemy-force-field half comes from occlusion.ts and the two answers AND together. The
+ *  field test runs against the turret's OWN team, so only an opposing field can blind
+ *  it, and the turret's own assembly (turretHitbox) is deliberately not part of the
+ *  test at all: a sightline grazing the turret's own envelope must still resolve, or no
+ *  turret could ever see past its own barrel. */
+function turretCanSee(world: World, eye: Vec3, target: Vec3, team: number): boolean {
+  return hasLineOfSight(world, eye, target) && !segmentBlockedByInteriors(world, eye, target, team);
 }
 
 export enum TurretBarrelId {
@@ -251,10 +265,12 @@ export function applyTurretDamage(world: World, id: number, amount: number): voi
 
 /**
  * Codex round 1, finding 1: writes a decoded snapshot's DYNAMIC turret fields (damage/
- * destroyed/powered/targetId/state) onto the store by id, growing `store.count` to fit an id
- * that's never been locally placed yet -- the turret-store sibling of baseObjects.ts's
- * `applyBaseObjectSnapshot`; see that function's own comment for why static placement
- * (barrel/team/position) never needs to be on the wire at all.
+ * destroyed/powered/targetId/state, plus the optional protocol-9 energy/targetKind) onto
+ * the store by id, growing `store.count` to fit an id that's never been locally placed yet
+ * -- the turret-store sibling of baseObjects.ts's `applyBaseObjectSnapshot`; see that
+ * function's own comment for why static placement (barrel/team/position) never needs to be
+ * on the wire at all. The two optional fields are skipped entirely when absent, so
+ * pre-protocol-9 snapshots and hand-built test literals leave the store defaults alone.
  */
 export function applyTurretSnapshot(
   world: World,
@@ -265,6 +281,8 @@ export function applyTurretSnapshot(
     powered: 0 | 1;
     targetId: number;
     state: number;
+    energy?: number;
+    targetKind?: number;
   },
 ): void {
   const store = world.turrets;
@@ -275,6 +293,11 @@ export function applyTurretSnapshot(
   store.powered[data.id] = data.powered;
   store.targetId[data.id] = data.targetId;
   store.state[data.id] = data.state;
+  // Optional protocol-9 fields: absent on every pre-9 snapshot and on hand-built test
+  // literals, and assigning undefined into a typed array would silently store NaN -- so
+  // only write what actually arrived.
+  if (data.energy !== undefined) store.energy[data.id] = data.energy;
+  if (data.targetKind !== undefined) store.targetKind[data.id] = data.targetKind;
 }
 
 /** Mirrors `baseObjects.ts`'s `stepPower`, but turrets are always `needsPower: true` (a
@@ -326,7 +349,9 @@ function turretEye(pos: Vec3): Vec3 {
 }
 
 /** Nearest living enemy player within the barrel's engagement range and with a clear line of
- *  sight from the turret's eye position to the player. Matches the real T2 sensor's
+ *  sight from the turret's eye position to the player — terrain (`hasLineOfSight`) AND
+ *  interiors/enemy force fields (`turretCanSee`; issue #49: the sensor must not track a
+ *  target its own barrel could not reach). Matches the real T2 sensor's
  *  `detectsUsingLOS = true` (`turret.cs:142`, `turrets/sentryTurret.cs:129`) — failure matrix
  *  row 16. */
 function nearestPlayerTarget(
@@ -344,7 +369,7 @@ function nearestPlayerTarget(
     const target = playerPoint(world, playerId);
     const d = distance(pos.x, pos.y, pos.z, target.x, target.y, target.z);
     if (d > range || d >= nearestDistance) continue;
-    if (!hasLineOfSight(world, eye, target)) continue;
+    if (!turretCanSee(world, eye, target, team)) continue;
     nearest = playerId;
     nearestDistance = d;
   }
@@ -354,7 +379,8 @@ function nearestPlayerTarget(
 /** `vehiclesOnly` barrels' own version of `nearestPlayerTarget` (M5, Task 8) — dormant since
  *  M4, this is the one deliberate gap the plan closes: an AA barrel with line of sight to an
  *  enemy vehicle in range now acquires and fires on it, same rules as a ground turret firing
- *  on a player (failure matrix row 15). */
+ *  on a player (failure matrix row 15) — including `turretCanSee`'s interior/force-field
+ *  half, so a vehicle parked behind a wall is just as invisible as a player (issue #49). */
 function nearestVehicleTarget(
   world: World,
   pos: Vec3,
@@ -371,7 +397,7 @@ function nearestVehicleTarget(
     const target = vehiclePoint(world, vehicleId);
     const d = distance(pos.x, pos.y, pos.z, target.x, target.y, target.z);
     if (d > range || d >= nearestDistance) continue;
-    if (!hasLineOfSight(world, eye, target)) continue;
+    if (!turretCanSee(world, eye, target, team)) continue;
     nearest = vehicleId;
     nearestDistance = d;
   }
@@ -399,9 +425,11 @@ function acquireTarget(world: World, id: number): number {
 /** True when the current target is still a valid one to keep engaging — alive/active (or, for
  *  a vehicle target, active and not destroyed), an enemy, still in range, and still visible.
  *  Reacquisition (`acquireTarget`) always runs when this is false, covering "target died"
- *  (failure matrix row 12), "target walked out of range", and "target walked behind terrain"
- *  (failure matrix row 16) alike — there is no separate code path for any of the three
- *  causes. Branches on `targetKind` to read the right store for a vehicle target (M5). */
+ *  (failure matrix row 12), "target walked out of range", "target walked behind terrain"
+ *  (failure matrix row 16), and now "target stepped behind an interior wall or an enemy
+ *  force field" (issue #49, via `turretCanSee`) alike — there is no separate code path for
+ *  any of these causes. Branches on `targetKind` to read the right store for a vehicle
+ *  target (M5). */
 function targetStillValid(world: World, id: number): boolean {
   const store = world.turrets;
   const targetId = store.targetId[id] ?? -1;
@@ -415,7 +443,10 @@ function targetStillValid(world: World, id: number): boolean {
   const pos = turretPosition(store, id);
   const target = isVehicle ? vehiclePoint(world, targetId) : playerPoint(world, targetId);
   const d = distance(pos.x, pos.y, pos.z, target.x, target.y, target.z);
-  return d <= engagementRange(barrelId) && hasLineOfSight(world, turretEye(pos), target);
+  return (
+    d <= engagementRange(barrelId) &&
+    turretCanSee(world, turretEye(pos), target, store.team[id] ?? 0)
+  );
 }
 
 export interface TurretFireEvent {

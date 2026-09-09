@@ -19,11 +19,13 @@ import {
 } from '@clans/sim';
 import { bytesOf, createWriter, writeU16, writeU32, writeU8 } from './codec.js';
 import {
+  MAX_SNAPSHOT_BASE_OBJECTS,
   MAX_SNAPSHOT_BOTS,
   MAX_SNAPSHOT_FLAGS,
   MAX_SNAPSHOT_ORDERS,
   MAX_SNAPSHOT_PLAYERS,
   MAX_SNAPSHOT_PROJECTILES,
+  MAX_SNAPSHOT_TURRETS,
   MessageType,
   OrderKind,
 } from './messages.js';
@@ -31,11 +33,13 @@ import {
   decodeSnapshot,
   emptyExtras,
   encodeSnapshot,
+  type BaseObjectSnapshotData,
   type BotDebugSnapshotData,
   type DecodedSnapshot,
   type FlagSnapshotData,
   type OrderSnapshotData,
   type ProjectileSnapshotData,
+  type TurretSnapshotData,
   type WorldExtras,
 } from './snapshot.js';
 
@@ -699,12 +703,23 @@ describe('WorldExtras: baseObjects and turrets', () => {
     expect(extras.baseObjects).toEqual([]);
     expect(extras.turrets).toEqual([]);
   });
-  it('a full snapshot round-trips baseObjects and turrets exactly', () => {
+  it('a full snapshot round-trips baseObjects and turrets exactly, including shield energy and targetKind (issues #14/#24)', () => {
     const extras = {
       ...emptyExtras(),
-      baseObjects: [{ id: 0, damage: 0.5, destroyed: 0 as const, powered: 1 as const }],
+      baseObjects: [
+        { id: 0, damage: 0.5, destroyed: 0 as const, powered: 1 as const, energy: 37.5 },
+      ],
       turrets: [
-        { id: 3, damage: 0, destroyed: 0 as const, powered: 1 as const, targetId: 7, state: 1 },
+        {
+          id: 3,
+          damage: 0,
+          destroyed: 0 as const,
+          powered: 1 as const,
+          targetId: 7,
+          state: 1,
+          energy: 112.5,
+          targetKind: 0,
+        },
       ],
     };
     const bytes = encodeSnapshot(1, 100, 5, [], null, extras);
@@ -716,12 +731,273 @@ describe('WorldExtras: baseObjects and turrets', () => {
     const extras = {
       ...emptyExtras(),
       turrets: [
-        { id: 0, damage: 1.25, destroyed: 1 as const, powered: 0 as const, targetId: -1, state: 0 },
+        {
+          id: 0,
+          damage: 1.25,
+          destroyed: 1 as const,
+          powered: 0 as const,
+          targetId: -1,
+          state: 0,
+          energy: 0,
+          targetKind: 0,
+        },
       ],
     };
     const bytes = encodeSnapshot(1, 0, 0, [], null, extras);
     const decoded = decodeSnapshot(bytes, null);
     expect(decoded.turrets[0]).toEqual(extras.turrets[0]);
+  });
+});
+
+describe('snapshot wire fixes (issues #14/#24/#15/#16/#25)', () => {
+  it('round-trips targetKind so a turret aimed at player 5 and one aimed at a vehicle that shares id 5 stay distinguishable (issue #24)', () => {
+    // Player ids and vehicle ids are independent spaces that CAN collide, so a decoder
+    // that only carried targetId could not tell these two snapshots apart -- the exact
+    // ambiguity acquireTarget/targetStillValid/fireAt resolve with TurretStore.targetKind.
+    const makeExtras = (targetKind: number): WorldExtras => ({
+      ...emptyExtras(),
+      turrets: [
+        {
+          id: 0,
+          damage: 0,
+          destroyed: 0 as const,
+          powered: 1 as const,
+          targetId: 5,
+          state: 1,
+          energy: 150,
+          targetKind,
+        },
+      ],
+    });
+    const decodedPlayer = decodeSnapshot(encodeSnapshot(1, 0, 0, [], null, makeExtras(0)), null);
+    const decodedVehicle = decodeSnapshot(encodeSnapshot(1, 0, 0, [], null, makeExtras(1)), null);
+    expect(decodedPlayer.turrets[0]).toEqual({ ...makeExtras(0).turrets[0] });
+    expect(decodedVehicle.turrets[0]?.targetId).toBe(5);
+    expect(decodedVehicle.turrets[0]?.targetKind).toBe(1);
+    expect(decodedPlayer.turrets[0]?.targetKind).toBe(0);
+  });
+
+  it('still encodes a pre-#14 turret/base-object literal without the new fields, decoding to zeroed defaults', () => {
+    // The optional fields exist so existing object literals in other packages keep
+    // compiling (see TurretSnapshotData.targetKind's doc comment); writeTurret/writeBaseObject
+    // default a missing energy to 0 and a missing targetKind to 0 (player) -- the stores'
+    // own zero-init values.
+    const extras = {
+      ...emptyExtras(),
+      baseObjects: [{ id: 1, damage: 0.25, destroyed: 0 as const, powered: 1 as const }],
+      turrets: [
+        { id: 2, damage: 0, destroyed: 0 as const, powered: 1 as const, targetId: -1, state: 0 },
+      ],
+    } as WorldExtras;
+    const decoded = decodeSnapshot(encodeSnapshot(1, 0, 0, [], null, extras), null);
+    expect(decoded.baseObjects[0]).toEqual({
+      id: 1,
+      damage: 0.25,
+      destroyed: 0,
+      powered: 1,
+      energy: 0,
+    });
+    expect(decoded.turrets[0]).toEqual({
+      id: 2,
+      damage: 0,
+      destroyed: 0,
+      powered: 1,
+      targetId: -1,
+      state: 0,
+      energy: 0,
+      targetKind: 0,
+    });
+  });
+
+  it('round-trips the turret-shot ownerId -1 sentinel instead of corrupting it to 65535, and leaves real player ids alone (issue #15)', () => {
+    // spawnTurretShot (projectiles.ts) writes ownerId -1 for a shot with no player
+    // identity; the old u16 write turned that into 65535 on the wire, so every consumer
+    // comparing a decoded owner against real player ids (self-exclusion, kill attribution)
+    // saw a phantom player. A turret shot (-1) and a player shot (a real id) must both
+    // survive the round trip -- and stay distinct from each other.
+    const makeProjectile = (ownerId: number): ProjectileSnapshotData => ({
+      id: 9,
+      type: 0,
+      weaponId: 0,
+      x: 1,
+      y: 2,
+      z: 3,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      ownerId,
+      armed: 1,
+    });
+    const extrasFor = (ownerId: number): WorldExtras => ({
+      ...emptyExtras(),
+      projectiles: [makeProjectile(ownerId)],
+    });
+    const turretShot = decodeSnapshot(encodeSnapshot(1, 0, 0, [], null, extrasFor(-1)), null);
+    const playerShot = decodeSnapshot(encodeSnapshot(1, 0, 0, [], null, extrasFor(12)), null);
+    expect(turretShot.projectiles[0]?.ownerId).toBe(-1);
+    expect(playerShot.projectiles[0]?.ownerId).toBe(12);
+    expect(turretShot.projectiles[0]?.ownerId).not.toBe(playerShot.projectiles[0]?.ownerId);
+  });
+
+  it('throws at encode time when flags, baseObjects, or turrets exceed their MAX_SNAPSHOT ceilings, instead of silently wrapping the u8 count (issue #16)', () => {
+    // Before this guard, each count was an UNCHECKED u8 write: a length of exactly 256
+    // wrapped to 0 on the wire with no error, and the decoder then read zero records where
+    // 256 were written -- silently dropping the entire array and misaligning everything
+    // after it. Guarding at the same MAX_SNAPSHOT_* ceilings readExtras enforces (each far
+    // below the u8 wrap point) makes the wrap unreachable and the encode fail loudly, the
+    // same explicit-throw convention the vehicles/bots/orders blocks always had.
+    const flag = (i: number): FlagSnapshotData => ({
+      id: i,
+      team: 1,
+      state: 0,
+      x: 0,
+      y: 0,
+      z: 0,
+      carrierId: -1,
+      returnInS: -1,
+    });
+    const baseObject = (i: number): BaseObjectSnapshotData => ({
+      id: i,
+      damage: 0,
+      destroyed: 0 as const,
+      powered: 1 as const,
+      energy: 50,
+    });
+    const turret = (i: number): TurretSnapshotData => ({
+      id: i,
+      damage: 0,
+      destroyed: 0 as const,
+      powered: 1 as const,
+      targetId: -1,
+      state: 0,
+      energy: 150,
+      targetKind: 0,
+    });
+    const extras = emptyExtras();
+    expect(() =>
+      encodeSnapshot(1, 0, 0, [], null, {
+        ...extras,
+        flags: Array.from({ length: MAX_SNAPSHOT_FLAGS + 1 }, (_, i) => flag(i)),
+      }),
+    ).toThrow(RangeError);
+    expect(() =>
+      encodeSnapshot(1, 0, 0, [], null, {
+        ...extras,
+        baseObjects: Array.from({ length: MAX_SNAPSHOT_BASE_OBJECTS + 1 }, (_, i) => baseObject(i)),
+      }),
+    ).toThrow(RangeError);
+    expect(() =>
+      encodeSnapshot(1, 0, 0, [], null, {
+        ...extras,
+        turrets: Array.from({ length: MAX_SNAPSHOT_TURRETS + 1 }, (_, i) => turret(i)),
+      }),
+    ).toThrow(RangeError);
+  });
+
+  it('still encodes arrays at exactly the MAX_SNAPSHOT ceiling, and they decode back intact (issue #16 boundary)', () => {
+    const flags: FlagSnapshotData[] = Array.from({ length: MAX_SNAPSHOT_FLAGS }, (_, i) => ({
+      id: i,
+      team: 1,
+      state: 0,
+      x: i,
+      y: 0,
+      z: 0,
+      carrierId: -1,
+      returnInS: -1,
+    }));
+    const baseObjects: BaseObjectSnapshotData[] = Array.from(
+      { length: MAX_SNAPSHOT_BASE_OBJECTS },
+      (_, i) => ({
+        id: i,
+        damage: 0,
+        destroyed: 0 as const,
+        powered: 1 as const,
+        energy: 50,
+      }),
+    );
+    const turrets: TurretSnapshotData[] = Array.from({ length: MAX_SNAPSHOT_TURRETS }, (_, i) => ({
+      id: i,
+      damage: 0,
+      destroyed: 0 as const,
+      powered: 1 as const,
+      targetId: -1,
+      state: 0,
+      energy: 150,
+      targetKind: 0,
+    }));
+    const decoded = decodeSnapshot(
+      encodeSnapshot(1, 0, 0, [], null, { ...emptyExtras(), flags, baseObjects, turrets }),
+      null,
+    );
+    expect(decoded.flags).toHaveLength(MAX_SNAPSHOT_FLAGS);
+    expect(decoded.baseObjects).toHaveLength(MAX_SNAPSHOT_BASE_OBJECTS);
+    expect(decoded.turrets).toHaveLength(MAX_SNAPSHOT_TURRETS);
+    // The "no silent corruption of later arrays" half of #16: every array keeps its own
+    // records, in order, all the way to the last one.
+    expect(decoded.baseObjects[MAX_SNAPSHOT_BASE_OBJECTS - 1]?.id).toBe(
+      MAX_SNAPSHOT_BASE_OBJECTS - 1,
+    );
+    expect(decoded.turrets[MAX_SNAPSHOT_TURRETS - 1]?.energy).toBe(150);
+  });
+  it('a hostile frame declaring an implausible u8 count fails loudly instead of decoding fewer records and misaligning the arrays after it (issue #16)', () => {
+    // Same header + "player count 0, projectile count 0" framing the plausible-maximum
+    // tests above use, then a flag-count byte of 255 (a plausible-looking u8 that exceeds
+    // MAX_SNAPSHOT_FLAGS). The decode must throw on the count itself -- not silently
+    // return zero flags and read the base-object count out of what was meant to be flag
+    // payload.
+    const cursor = createWriter(40);
+    writeU8(cursor, MessageType.Snapshot);
+    writeU32(cursor, 1);
+    writeU32(cursor, 0);
+    writeU32(cursor, 0);
+    writeU32(cursor, 0);
+    writeU8(cursor, 0);
+    writeU16(cursor, 0); // player count
+    writeU16(cursor, 0); // projectile count
+    writeU8(cursor, 255); // declared flag count: above MAX_SNAPSHOT_FLAGS, wraps nothing
+    writeU8(cursor, 0); // base-object count, present so misalignment would be observable
+    expect(() => decodeSnapshot(bytesOf(cursor), null)).toThrow(RangeError);
+  });
+
+  it("decodes a structurally valid vehicle frame carrying kind 255 unchanged -- rejection is deserializeVehicle's job (issue #25)", () => {
+    // The protocol layer carries VehicleKind as a plain number (the same convention as
+    // every other sim enum on the wire) and has no VEHICLE_DATA to validate against; the
+    // sim layer's deserializeVehicle rejects the value BEFORE activating the slot, which
+    // sim/src/snapshot.test.ts covers directly. Here we pin the protocol half of the
+    // contract: an out-of-range kind neither throws on decode nor gets rewritten.
+    const extras = {
+      ...emptyExtras(),
+      vehicles: [
+        {
+          id: 0,
+          kind: 255,
+          team: 1,
+          x: 0,
+          y: 0,
+          z: 0,
+          vx: 0,
+          vy: 0,
+          vz: 0,
+          yaw: 0,
+          pitch: 0,
+          roll: 0,
+          angVelYaw: 0,
+          angVelPitch: 0,
+          angVelRoll: 0,
+          energy: 0,
+          damage: 0,
+          destroyed: 0 as const,
+          driverId: -1,
+          padId: -1,
+          weaponTimer: 0,
+          onGround: 0 as const,
+          wasJumpHeld: 0 as const,
+        },
+      ],
+    };
+    const decoded = decodeSnapshot(encodeSnapshot(1, 0, 0, [], null, extras), null);
+    expect(decoded.vehicles).toHaveLength(1);
+    expect(decoded.vehicles[0]?.kind).toBe(255);
   });
 });
 

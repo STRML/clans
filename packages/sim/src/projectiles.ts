@@ -1,6 +1,6 @@
 import { turretHitbox } from './turrets.js';
 import { armorFor } from './armor.js';
-import { activeForceFieldBlockers, applyBaseObjectDamage, BaseObjectKind } from './baseObjects.js';
+import { applyBaseObjectDamage, BaseObjectKind } from './baseObjects.js';
 import {
   applyDamage,
   applyKickback,
@@ -9,7 +9,8 @@ import {
   raySphereDistance,
   type PlayerHitbox,
 } from './damage.js';
-import { raycastInteriors, type InteriorInstance } from './interiors.js';
+import { raycastInteriors } from './interiors.js';
+import { interiorFieldColliders } from './occlusion.js';
 import { GRAVITY } from './movement.js';
 import { sampleTerrain, type Heightfield, type TerrainSample } from './terrain.js';
 import type { PendingFreeId, ProjectileStore, Vec3, World } from './types.js';
@@ -104,16 +105,6 @@ function terrainHitAlongSegment(
   return marchTerrain(terrain, previous, direction, length);
 }
 
-/** Every collider a projectile from `shooterTeam` can hit along a segment or ray: static
- *  interiors (always) plus any powered, non-destroyed enemy force field (never a friendly
- *  one — see `activeForceFieldBlockers`). Both `world.interiors` and force fields resolve
- *  through the exact same `raycastInteriors` interiors.ts already tests, since a force
- *  field's cached geometry is itself an `InteriorInstance` (baseObjects.ts). */
-function collidersFor(world: World, shooterTeam: number): InteriorInstance[] {
-  const fields = activeForceFieldBlockers(world, shooterTeam);
-  return fields.length === 0 ? world.interiors : [...world.interiors, ...fields];
-}
-
 /** The nearer of a terrain hit and an interior/force-field hit along the same
  *  previous->current segment — failure matrix rows 14 and 17. An empty collider list (the
  *  common case for every M1-M3 test, and for any map without buildings or force fields)
@@ -125,7 +116,7 @@ function worldHitAlongSegment(
   shooterTeam: number,
 ): { distance: number; point: Vec3; sample?: TerrainSample; normal?: Vec3 } | null {
   const terrainHit = terrainHitAlongSegment(world.terrain, previous, current);
-  const colliders = collidersFor(world, shooterTeam);
+  const colliders = interiorFieldColliders(world, shooterTeam);
   if (colliders.length === 0) return terrainHit;
   const dx = current.x - previous.x,
     dy = current.y - previous.y,
@@ -150,7 +141,7 @@ function worldMarch(
   shooterTeam: number,
 ): { distance: number } | null {
   const terrainHit = marchTerrain(world.terrain, origin, direction, length);
-  const colliders = collidersFor(world, shooterTeam);
+  const colliders = interiorFieldColliders(world, shooterTeam);
   if (colliders.length === 0) return terrainHit;
   const interiorHit = raycastInteriors(colliders, origin, direction, length);
   if (!terrainHit) return interiorHit;
@@ -1007,24 +998,48 @@ function stepEnergy(world: World, id: number, dt: number): void {
   if (store.active[id] && expireOneTick(store, id, data.lifetime)) free(store, id);
 }
 
-/** Nearest player hit within maxRange, but not through terrain: a target behind a ridge or
- *  hill has always had a clear ray-sphere intersection here, since this search never checked
- *  terrain at all -- only the line-of-sight distance a solid wall of terrain would cut the
- *  ray off at (marchTerrain's first hit, or maxRange if the ray stays clear) limits how far a
- *  hit can be credited. */
-function nearestHitscanTarget(
-  world: World,
-  event: FireEvent,
-  maxRange: number,
-): { playerId: number; distance: number } | null {
-  const terrainHit = worldMarch(
+/** The farthest distance along a Laser Rifle ray that anything solid still lets the beam
+ *  travel: the nearest of a terrain/interior/force-field hit (`worldMarch`) and an intact
+ *  base-object/turret/vehicle hit. Issue #21: `resolveHitscan`/`hitTestHitscan` used to
+ *  consult only the former -- unlike the Chaingun/Spinfusor path's
+ *  `nearestStructureHitFrom` -- so a player standing directly behind an intact generator,
+ *  station, or turret took laser damage straight through it, live and in server/net.ts's
+ *  lag-comp recheck alike (both paths run through `nearestHitscanTarget`). The structure
+ *  half reuses that exact hit-sphere model by synthesizing a segment out to maxRange,
+ *  with -1 for both source ids: a player's own FireEvent is never turret- or
+ *  vehicle-sourced. maxRange when the ray is completely clear. */
+function hitscanVisibleRange(world: World, event: FireEvent, maxRange: number): number {
+  const worldHit = worldMarch(
     world,
     event.origin,
     event.direction,
     maxRange,
     world.players.team[event.playerId] ?? 0,
   );
-  const visibleRange = terrainHit ? terrainHit.distance : maxRange;
+  const structureHit = nearestStructureHitFrom(
+    world,
+    event.origin,
+    {
+      x: event.origin.x + event.direction.x * maxRange,
+      y: event.origin.y + event.direction.y * maxRange,
+      z: event.origin.z + event.direction.z * maxRange,
+    },
+    -1,
+  );
+  return Math.min(worldHit?.distance ?? maxRange, structureHit?.distance ?? maxRange);
+}
+
+/** Nearest player hit within the ray's visible span, but not through terrain,
+ *  interiors/force fields, or an intact structure: a target behind any of them has always
+ *  had a clear ray-sphere intersection here, since this search itself never checks any of
+ *  them -- only the distance the nearest obstruction cuts the ray off at
+ *  (`hitscanVisibleRange`) limits how far a hit can be credited, so whichever obstruction
+ *  is closest always wins. */
+function nearestHitscanTarget(
+  world: World,
+  event: FireEvent,
+  visibleRange: number,
+): { playerId: number; distance: number } | null {
   let nearest: { playerId: number; distance: number } | null = null;
   for (let playerId = 0; playerId < world.players.count; playerId += 1) {
     if (!isValidTarget(world, playerId, event.playerId)) continue;
@@ -1042,20 +1057,16 @@ function resolveHitscan(world: World, event: FireEvent, data: WeaponData): void 
   // review round 4, finding 3).
   event.resolved = true;
   const maxRange = data.maxRange ?? 0;
-  const worldHit = worldMarch(
-    world,
-    event.origin,
-    event.direction,
-    maxRange,
-    world.players.team[event.playerId] ?? 0,
-  );
-  const endpointDistance = worldHit?.distance ?? maxRange;
+  // The beam ends at the nearest obstruction -- terrain, interior/force field, or (issue
+  // #21) an intact base object/turret/vehicle -- not at maxRange, and not past a nearer
+  // obstruction just because a farther one also stands in the way.
+  const endpointDistance = hitscanVisibleRange(world, event, maxRange);
   event.beamEnd = {
     x: event.origin.x + event.direction.x * endpointDistance,
     y: event.origin.y + event.direction.y * endpointDistance,
     z: event.origin.z + event.direction.z * endpointDistance,
   };
-  const nearest = nearestHitscanTarget(world, event, maxRange);
+  const nearest = nearestHitscanTarget(world, event, endpointDistance);
   if (!nearest) return;
   const hitbox = playerHitbox(world, nearest.playerId, armorFor(world, nearest.playerId));
   const hitPoint: Vec3 = {
@@ -1082,9 +1093,13 @@ function resolveHitscan(world: World, event: FireEvent, data: WeaponData): void 
 
 /** `hitTestFireEvent`'s Laser Rifle case: identical search to `resolveHitscan`'s own, minus
  *  applying damage or mutating `event` -- this is the whole point of the split, see
- *  `hitTestFireEvent`'s own doc comment. */
+ *  `hitTestFireEvent`'s own doc comment. Same visible span, too: server/net.ts's lag-comp
+ *  recheck inherits the structure occlusion from `hitscanVisibleRange` for free, so a
+ *  rewound target standing behind an intact generator is not "corrected" into a hit
+ *  through it (issue #21). */
 function hitTestHitscan(world: World, event: FireEvent, data: WeaponData): HitResult {
-  const nearest = nearestHitscanTarget(world, event, data.maxRange ?? 0);
+  const visibleRange = hitscanVisibleRange(world, event, data.maxRange ?? 0);
+  const nearest = nearestHitscanTarget(world, event, visibleRange);
   if (!nearest) return NO_HIT;
   return {
     hitPlayerId: nearest.playerId,

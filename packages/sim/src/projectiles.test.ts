@@ -309,6 +309,132 @@ describe('hitTestFireEvent (lag-comp recheck): base-object/turret occlusion (Cod
   });
 });
 
+describe('Laser Rifle: intact base objects/turrets occlude, live and lag-comp alike (issue #21)', () => {
+  const laserEvent: FireEvent = {
+    playerId: 0,
+    weaponId: WeaponId.LaserRifle,
+    isAltFire: false,
+    origin: { x: 0, y: 1.6, z: 0 },
+    direction: { x: 0, y: 0, z: 1 },
+    shooterVelocity: { x: 0, y: 0, z: 0 },
+    energyScale: 1,
+    hitPlayerId: -1,
+    hitPoint: null,
+    projectileId: -1,
+    resolved: false,
+  };
+
+  /** The wallInterior/wallPlacement shape from the interior-collision describe below,
+   *  parametrized along z so it can stand between this describe's shooter (z=0) and its
+   *  target (z=10) at an arbitrary depth. */
+  function wallAtZ(z: number): InteriorTriangles {
+    const positions = new Float32Array([-4, 0, z, 4, 0, z, 4, 4, z, -4, 0, z, 4, 4, z, -4, 4, z]);
+    return { positions };
+  }
+  const wallPlacement: InteriorPlacement = {
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 },
+  };
+
+  it('the live beam stops at an intact generator: the player behind it takes no damage', () => {
+    const world = createWorld(flat, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const target = addPlayer(world, { x: 0, y: 0, z: 10 }, 2);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 2, position: { x: 0, y: 1.6, z: 5 } },
+    ]);
+    fire(world, { ...laserEvent, playerId: shooter });
+    stepProjectiles(world, FIXED_DT);
+    expect(world.players.damage[target]).toBe(0);
+    // The recorded beam end sits at the generator's hit-sphere entry (center z=5 minus
+    // BASE_OBJECT_HIT_RADIUS 1.5): the structure, the nearest obstruction, won -- the shot
+    // is not merely damage-free while the beam still drew through to the target.
+    expect(world.lastFireEvents[0]?.hitPlayerId).toBe(-1);
+    expect(world.lastFireEvents[0]?.beamEnd?.z).toBeCloseTo(3.5, 3);
+  });
+
+  it('the live beam stops at an intact turret: same occlusion, no damage through it', () => {
+    const world = createWorld(flat, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const target = addPlayer(world, { x: 0, y: 0, z: 10 }, 2);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.PlasmaBarrelLarge, team: 2, position: { x: 0, y: 0, z: 5 } },
+    ]);
+    fire(world, { ...laserEvent, playerId: shooter });
+    stepProjectiles(world, FIXED_DT);
+    expect(world.players.damage[target]).toBe(0);
+    // turretHitbox centers the plasma assembly 1.3 m above its placement with a 2 m
+    // radius: the ray at muzzle height 1.6 passes 0.3 m off that center, so the sphere
+    // entry sits at z = 5 - sqrt(2^2 - 0.3^2).
+    expect(world.lastFireEvents[0]?.beamEnd?.z).toBeCloseTo(5 - Math.sqrt(4 - 0.09), 3);
+  });
+
+  it('closest obstruction wins: a nearer interior wall stops the beam before the generator behind it', () => {
+    const world = createWorld(flat, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const target = addPlayer(world, { x: 0, y: 0, z: 10 }, 2);
+    world.interiors = [buildInteriorCollider(wallAtZ(3), wallPlacement)];
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 2, position: { x: 0, y: 1.6, z: 5 } },
+    ]);
+    fire(world, { ...laserEvent, playerId: shooter });
+    stepProjectiles(world, FIXED_DT);
+    expect(world.players.damage[target]).toBe(0);
+    // The wall (distance 3) is nearer than the generator's sphere entry (3.5): the beam
+    // must stop AT the wall. A fix that only capped the range at the structure distance
+    // would have drawn straight through the wall to z=3.5.
+    expect(world.lastFireEvents[0]?.beamEnd?.z).toBeCloseTo(3, 3);
+  });
+
+  it('sanity: the same shot with the intact generator off the ray still hits the exposed target', () => {
+    const world = createWorld(flat, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const target = addPlayer(world, { x: 0, y: 0, z: 10 }, 2);
+    // Six metres off the shot line: intact, but nowhere near occluding.
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 2, position: { x: 6, y: 1.6, z: 5 } },
+    ]);
+    fire(world, { ...laserEvent, playerId: shooter });
+    stepProjectiles(world, FIXED_DT);
+    expect(world.players.damage[target]).toBeGreaterThan(0);
+  });
+
+  it('the lag-comp recheck (hitTestFireEvent) does not score a laser hit through an intact generator', () => {
+    // server/net.ts's applyLagCompensatedHits reruns the Laser Rifle's hit-test through
+    // hitTestFireEvent against rewound positions when the live sim missed; before the
+    // issue #21 fix that recheck saw only terrain/interiors/force-fields and players, so
+    // a high-ping shooter could have a "hit" corrected in straight through an intact
+    // generator standing between them and the target.
+    const world = createWorld(flat, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    addPlayer(world, { x: 0, y: 0, z: 10 }, 2);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 2, position: { x: 0, y: 1.6, z: 5 } },
+    ]);
+    const result = hitTestFireEvent(world, { ...laserEvent, playerId: shooter }, FIXED_DT);
+    expect(result.hitPlayerId).toBe(-1);
+  });
+
+  it('the lag-comp recheck does not score a laser hit through an intact station either', () => {
+    const world = createWorld(flat, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    addPlayer(world, { x: 0, y: 0, z: 10 }, 2);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.StationInventory, team: 2, position: { x: 0, y: 1.6, z: 5 } },
+    ]);
+    const result = hitTestFireEvent(world, { ...laserEvent, playerId: shooter }, FIXED_DT);
+    expect(result.hitPlayerId).toBe(-1);
+  });
+
+  it('lag-comp sanity: the identical recheck with no structure in the way still reports the hit', () => {
+    const world = createWorld(flat, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const target = addPlayer(world, { x: 0, y: 0, z: 10 }, 2);
+    const result = hitTestFireEvent(world, { ...laserEvent, playerId: shooter }, FIXED_DT);
+    expect(result.hitPlayerId).toBe(target);
+  });
+});
+
 describe('direct hit: nearest target on the ray wins, not the first one found by id', () => {
   it('hits the nearer of two players on the same ray, even though the farther one has the lower id', () => {
     const world = createWorld(flat, 1);

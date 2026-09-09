@@ -12,6 +12,7 @@ import {
 } from '@clans/sim';
 import { EventKind, type EventMessage, type FlagSnapshotData } from '@clans/protocol';
 import { assetUrl } from './assets.js';
+import { type AimedStructureInfo } from './base-object-view.js';
 
 export interface HudSource {
   world: World;
@@ -35,8 +36,10 @@ export interface HudSource {
   gameOverReason: GameOverReason;
   recentEvents: EventMessage[];
   /** The base object or turret the local player is currently aimed at within a short range,
-   *  or null. Set by app.ts's raycastAimedStructure (base-object-view.ts). */
-  aimedStructure: { name: string; healthPercent: number } | null;
+   *  or null. Set by app.ts's raycastAimedStructure (base-object-view.ts). shieldPercent is
+   *  present only for structures with a shield pool (issue #14's client feedback: a hit
+   *  absorbed entirely by shields moves it while healthPercent stays put). */
+  aimedStructure: AimedStructureInfo | null;
 }
 export interface HudRow {
   id: string;
@@ -130,8 +133,12 @@ function clockRow(source: HudSource): HudRow {
 
 function aimedStructureRow(source: HudSource): HudRow {
   if (!source.aimedStructure) return { id: 'hud-aimed', text: '' };
-  const { name, healthPercent } = source.aimedStructure;
-  return { id: 'hud-aimed', text: `${name} ${String(healthPercent)}%` };
+  const { name, healthPercent, shieldPercent } = source.aimedStructure;
+  // Same "Hull X% · Shield Y%" pairing vehicleRow below uses for mounted vehicles, for the
+  // identical reason (#14): a shot the shields absorbed entirely leaves health untouched,
+  // and without the pool on screen the hit is indistinguishable from a miss.
+  const shield = shieldPercent === undefined ? '' : ` · Shield ${String(shieldPercent)}%`;
+  return { id: 'hud-aimed', text: `${name} ${String(healthPercent)}%${shield}` };
 }
 
 /** M5, Task 14: vehicle health/speed row, shown only while the local player is mounted.

@@ -238,7 +238,12 @@ function syncTurrets(
   for (const t of data) {
     const mesh = meshes.get(t.id);
     if (mesh) {
-      const targetKey = mesh.userData.vehicleTargets ? -t.targetId - 2 : t.targetId;
+      // Issue #24: the wire now carries the real player-vs-vehicle discriminator, so use it
+      // when present instead of inferring from the mesh's fixed AA-barrel rule. The
+      // fallback keeps hand-built TurretSnapshotData literals (tests, single-player paths
+      // that predate the field) on the exact pre-#24 behavior.
+      const isVehicleTarget = (t.targetKind ?? (mesh.userData.vehicleTargets ? 1 : 0)) === 1;
+      const targetKey = isVehicleTarget ? -t.targetId - 2 : t.targetId;
       syncTurretPresentation(
         mesh,
         t.targetId === -1 ? undefined : targets?.get(targetKey),
@@ -297,29 +302,54 @@ const BASE_OBJECT_NAME: Record<number, string> = {
   [BaseObjectKind.StationVehiclePad]: 'Vehicle Pad',
   [BaseObjectKind.ForceField]: 'Force Field',
 };
+/** What the HUD's aimed-structure callout shows for the structure under the crosshair.
+ *  `shieldPercent` is present only when the structure actually HAS a shield pool
+ *  (maxEnergy > 0) -- issue #14's client feedback: a hit absorbed entirely by shields
+ *  moves this number while healthPercent stays untouched. */
+export interface AimedStructureInfo {
+  name: string;
+  healthPercent: number;
+  shieldPercent?: number;
+}
+
 const AIM_RANGE = 50; // Ours: a reasonable "aimed at" range for the HUD callout.
+// Mirrors hud.ts's own percent(): integer percentage, 0-floor, 0 for a degenerate max.
+function percentOf(value: number, max: number): number {
+  if (max <= 0) return 0;
+  return Math.round(Math.max(0, Math.min(1, value / max)) * 100);
+}
 
 function healthPercentOf(damage: number, maxHealth: number): number {
   if (maxHealth <= 0) return 100;
   return Math.round(Math.max(0, 1 - damage / maxHealth) * 100);
 }
 
-function aimedBaseObjectInfo(world: World, id: number): { name: string; healthPercent: number } {
+function aimedBaseObjectInfo(world: World, id: number): AimedStructureInfo {
   const kind = (world.baseObjects.kind[id] ?? BaseObjectKind.Generator) as BaseObjectKind;
   const maxHealth = BASE_OBJECT_DATA[kind].maxHealth;
-  return {
+  const info: AimedStructureInfo = {
     name: BASE_OBJECT_NAME[kind] ?? 'Base Object',
     healthPercent: healthPercentOf(world.baseObjects.damage[id] ?? 0, maxHealth),
   };
+  // Issue #14: the shield readout is what makes a fully-absorbed hit visible -- health
+  // alone stays pinned at 100% while applyBaseObjectDamage spends the pool. Same
+  // "Shield N%" pairing vehicleRow (hud.ts) already uses for mounted vehicles. Objects
+  // with no pool at all (maxEnergy 0) get no readout rather than a permanent 0%.
+  const maxEnergy = BASE_OBJECT_DATA[kind].maxEnergy;
+  if (maxEnergy > 0) info.shieldPercent = percentOf(world.baseObjects.energy[id] ?? 0, maxEnergy);
+  return info;
 }
 
-function aimedTurretInfo(world: World, id: number): { name: string; healthPercent: number } {
+function aimedTurretInfo(world: World, id: number): AimedStructureInfo {
   const barrel = (world.turrets.barrel[id] ?? 0) as TurretBarrelId;
-  const maxHealth = baseFor(barrel).maxHealth;
-  return {
+  const base = baseFor(barrel);
+  const info: AimedStructureInfo = {
     name: 'Turret',
-    healthPercent: healthPercentOf(world.turrets.damage[id] ?? 0, maxHealth),
+    healthPercent: healthPercentOf(world.turrets.damage[id] ?? 0, base.maxHealth),
   };
+  if (base.maxEnergy > 0)
+    info.shieldPercent = percentOf(world.turrets.energy[id] ?? 0, base.maxEnergy);
+  return info;
 }
 
 /** Raycasts from the camera's forward direction against every base-object/turret mesh
@@ -335,7 +365,7 @@ export function raycastAimedStructure(
   camera: THREE.Camera,
   view: Pick<BaseObjectView, 'baseObjectMeshes' | 'turretMeshes'>,
   world: World,
-): { name: string; healthPercent: number } | null {
+): AimedStructureInfo | null {
   const raycaster = new THREE.Raycaster();
   raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
   raycaster.far = AIM_RANGE;
@@ -365,6 +395,9 @@ export function baseObjectsFromWorld(world: World): BaseObjectSnapshotData[] {
       damage: store.damage[id] ?? 0,
       destroyed: (store.destroyed[id] ? 1 : 0) as 0 | 1,
       powered: (store.powered[id] ? 1 : 0) as 0 | 1,
+      // Issue #14: single-player must present shields exactly like a networked client's
+      // decoded snapshot would, so the pool rides along here too.
+      energy: store.energy[id] ?? 0,
     });
   }
   return out;
@@ -382,6 +415,10 @@ export function turretsFromWorld(world: World): TurretSnapshotData[] {
       powered: (store.powered[id] ? 1 : 0) as 0 | 1,
       targetId: store.targetId[id] ?? -1,
       state: store.state[id] ?? 0,
+      // Same single-player parity as baseObjectsFromWorld above: energy (#14) and the real
+      // targetKind discriminator (#24) instead of presentation-side inference.
+      energy: store.energy[id] ?? 0,
+      targetKind: store.targetKind[id] ?? 0,
     });
   }
   return out;

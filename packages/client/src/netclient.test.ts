@@ -831,8 +831,23 @@ describe('NetClient', () => {
     expect(client.world.baseObjects.count).toBe(0); // sanity: empty before any snapshot
     const extras: WorldExtras = {
       ...emptyExtras(),
-      baseObjects: [{ id: 0, damage: 0.4, destroyed: 0, powered: 1 }],
-      turrets: [{ id: 0, damage: 0.1, destroyed: 0, powered: 1, targetId: 5, state: 2 }],
+      // Protocol 9 (#14/#24): base-object and turret energy plus the turret targetKind
+      // discriminator now travel on the wire, so this literal carries real non-default
+      // values and the assertions below prove they land in both the decoded copy and the
+      // sim store.
+      baseObjects: [{ id: 0, damage: 0.4, destroyed: 0, powered: 1, energy: 0.75 }],
+      turrets: [
+        {
+          id: 0,
+          damage: 0.1,
+          destroyed: 0,
+          powered: 1,
+          targetId: 5,
+          state: 2,
+          energy: 0.5,
+          targetKind: 1,
+        },
+      ],
       vehicles: [],
     };
     transport.pump([encodeSnapshot(1, 0, 0, [], null, extras)]);
@@ -848,10 +863,13 @@ describe('NetClient', () => {
     expect(client.world.baseObjects.damage[0]).toBeCloseTo(0.4, 5);
     expect(client.world.baseObjects.destroyed[0]).toBe(0);
     expect(client.world.baseObjects.powered[0]).toBe(1);
+    expect(client.world.baseObjects.energy[0]).toBeCloseTo(0.75, 5);
     expect(client.world.turrets.count).toBe(1);
     expect(client.world.turrets.damage[0]).toBeCloseTo(0.1, 5);
     expect(client.world.turrets.targetId[0]).toBe(5);
     expect(client.world.turrets.state[0]).toBe(2);
+    expect(client.world.turrets.energy[0]).toBeCloseTo(0.5, 5);
+    expect(client.world.turrets.targetKind[0]).toBe(1);
   });
 
   it('mirrors gameOver/winnerTeam/gameOverReason onto world so stepWorld freezes prediction', () => {

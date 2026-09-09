@@ -340,4 +340,56 @@ describe('hashWorld', () => {
     b.players.respawnSeq[0] = 3 + 256;
     expect(hashWorld(a)).toBe(hashWorld(b));
   });
+  it("changes when a projectile's team/sourceTurretId/sourceVehicleId, a turret's fire-cycle timer, or a structure's shield energy differs (issue #13, with the #14/#24 audit)", () => {
+    // Issue #13: mixProjectiles stopped at ownerId and never mixed team, sourceTurretId, or
+    // its M5 sibling sourceVehicleId; mixTurrets never mixed the fire-cycle `timer`. All
+    // four decide next-tick behavior (own-team world-hit filtering, firing-structure
+    // exclusion from the structure hit-test, when the turret's next shot fires), so two
+    // worlds differing in exactly one of them hashed the SAME and a real divergence there
+    // was invisible to the determinism check. The #14/#24 audit half: base-object and
+    // turret shield `energy` (the fields the #14 wire fix now carries) and turret
+    // `targetKind` (#24's discriminator) were already mixed by mixBaseObjects/mixTurrets --
+    // asserted here in isolation too, so the newly-wire-carried fields can never silently
+    // lose hash coverage. Each field is checked against a shared, otherwise-identical
+    // baseline; a fix that only covers some of them still fails this test.
+    const baseline = (): World => {
+      const world = createWorld(terrain, 1);
+      world.projectiles.active[0] = 1;
+      world.projectiles.count = 1;
+      world.projectiles.type[0] = 0;
+      world.projectiles.position.set([1, 2, 3], 0);
+      world.turrets.count = 1;
+      world.baseObjects.count = 1;
+      return world;
+    };
+    const before = hashWorld(baseline());
+
+    const teamChanged = baseline();
+    teamChanged.projectiles.team[0] = 2;
+    expect(hashWorld(teamChanged)).not.toBe(before);
+
+    const sourceTurretChanged = baseline();
+    sourceTurretChanged.projectiles.sourceTurretId[0] = 0;
+    expect(hashWorld(sourceTurretChanged)).not.toBe(before);
+
+    const sourceVehicleChanged = baseline();
+    sourceVehicleChanged.projectiles.sourceVehicleId[0] = 0;
+    expect(hashWorld(sourceVehicleChanged)).not.toBe(before);
+
+    const turretTimerChanged = baseline();
+    turretTimerChanged.turrets.timer[0] = 0.42;
+    expect(hashWorld(turretTimerChanged)).not.toBe(before);
+
+    const baseObjectEnergyChanged = baseline();
+    baseObjectEnergyChanged.baseObjects.energy[0] = 30;
+    expect(hashWorld(baseObjectEnergyChanged)).not.toBe(before);
+
+    const turretEnergyChanged = baseline();
+    turretEnergyChanged.turrets.energy[0] = 120;
+    expect(hashWorld(turretEnergyChanged)).not.toBe(before);
+
+    const targetKindChanged = baseline();
+    targetKindChanged.turrets.targetKind[0] = 1;
+    expect(hashWorld(targetKindChanged)).not.toBe(before);
+  });
 });

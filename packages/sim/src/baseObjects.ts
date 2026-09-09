@@ -313,10 +313,14 @@ export function stationAt(world: World, playerId: number): number | null {
  * `loadKatabaticWorld` places objects from, in the same array order, so ids already line up
  * before the first snapshot ever arrives -- only the server-authoritative dynamic fields
  * need to travel over the wire and land here on every snapshot a NetClient decodes.
+ *
+ * `energy` is the optional protocol-9 shield field (#14), skipped entirely when absent so
+ * pre-9 snapshots and hand-built test literals leave the store default alone -- the same
+ * contract `turrets.ts`'s `applyTurretSnapshot` documents for its own optional fields.
  */
 export function applyBaseObjectSnapshot(
   world: World,
-  data: { id: number; damage: number; destroyed: 0 | 1; powered: 0 | 1 },
+  data: { id: number; damage: number; destroyed: 0 | 1; powered: 0 | 1; energy?: number },
 ): void {
   const store = world.baseObjects;
   if (data.id >= BASE_OBJECT_CAPACITY) return;
@@ -324,6 +328,7 @@ export function applyBaseObjectSnapshot(
   store.damage[data.id] = data.damage;
   store.destroyed[data.id] = data.destroyed;
   store.powered[data.id] = data.powered;
+  if (data.energy !== undefined) store.energy[data.id] = data.energy;
 }
 
 export function applyLoadoutRequest(

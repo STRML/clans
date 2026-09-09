@@ -109,7 +109,11 @@ function mixPlayer(hash: number, players: World['players'], id: number): number 
  * decide observable behavior (when a projectile despawns, whether a grenade can still be
  * armed to detonate on contact) -- exactly the kind of state a client/server divergence
  * could disagree on while every mixed field still matched. Codex review round 13 (PR #9),
- * finding 2.
+ * finding 2. Issue #13 closes the same gap for `team`, `sourceTurretId`, and its M5
+ * sibling `sourceVehicleId`: team filters the shot's own worldHitAlongSegment pass, and
+ * the two source ids exclude the firing structure/vehicle from the shot's structure
+ * hit-test (projectiles.ts), so worlds differing in exactly one of them resolve hits
+ * differently from the very next tick.
  */
 function mixProjectiles(hash: number, world: World): number {
   let h = hash;
@@ -126,6 +130,9 @@ function mixProjectiles(hash: number, world: World): number {
     h = mix(h, num(world.projectiles.velocity, base + 1));
     h = mix(h, num(world.projectiles.velocity, base + 2));
     h = mix(h, num(world.projectiles.ownerId, id));
+    h = mix(h, num(world.projectiles.team, id));
+    h = mix(h, num(world.projectiles.sourceTurretId, id));
+    h = mix(h, num(world.projectiles.sourceVehicleId, id));
     h = mix(h, num(world.projectiles.expiresAtTick, id));
     h = mix(h, num(world.projectiles.armed, id));
   }
@@ -190,13 +197,20 @@ function mixTurrets(hash: number, world: World): number {
     // class of gap issue #13 already found in this function omitting `timer`.
     h = mix(h, num(store.targetKind, id));
     h = mix(h, num(store.state, id));
+    // Issue #13: the fire-cycle countdown advanceFireCycle/fireAt (turrets.ts) decrement and
+    // reset every tick -- two worlds whose turret timers differ fire their next shot on
+    // different ticks, so a divergence in exactly this field must move the hash. Not
+    // wire-carried (TurretSnapshotData has no timer; decoded turrets are consumed as DTOs
+    // by the client's presentation, never round-tripped into a World), which puts it in the
+    // same carve-out class hashWorld's POLICY comment already grants expiresAtTick.
+    h = mix(h, num(store.timer, id));
   }
   return h;
 }
 
 /** Mixes in every VehicleStore field that affects future simulation -- deliberately
  *  exhaustive, not a curated subset (M5 plan, Task 9): mixTurrets shipped in M4 missing
- *  `timer` (issue #13, still open on main) precisely because an earlier pass excluded a
+ *  `timer` (issue #13, fixed here) precisely because an earlier pass excluded a
  *  field on the assumption it "should" be redundant with something else. `energy` in
  *  particular is not optional: it is exactly the kind of state applyVehicleDamage's
  *  shield-then-health rule can diverge on between two otherwise-identical worlds, the same
@@ -250,14 +264,17 @@ function mixVehicle(hash: number, vehicles: World['vehicles'], id: number): numb
  *     in principle -- see mixPlayer's own comment) and hashes respawnSeq truncated to its
  *     wire width (`& 0xff`), matching what the wire actually carries rather than the sim's
  *     full-precision internal value.
- *   - The one accepted carve-out: mixProjectiles still hashes expiresAtTick, which is NOT
- *     wire-carried (protocol/snapshot.ts's ProjectileSnapshotData doc comment explains why:
- *     a raw internal tick counter, meaningless across a client/server boundary with
- *     different tick numbering). This does not violate the policy above, because nothing
- *     ever reconstructs World.projectiles FROM wire data the way deserializePlayer
- *     reconstructs players -- decoded projectiles are consumed directly as DTOs
- *     (weapons-view.ts), never round-tripped back into a World to hashWorld against. The
- *     "matches across encode and decode" contract is simply never exercised for this field.
+ *   - The accepted carve-out class: fields hashed here that are NOT wire-carried, joined by
+ *     nothing ever reconstructing that store FROM wire data to hashWorld against. As of the
+ *     issue #13 fix it covers mixProjectiles' expiresAtTick (a raw internal tick counter,
+ *     meaningless across a client/server boundary with different tick numbering --
+ *     protocol/snapshot.ts's ProjectileSnapshotData doc comment explains why it is not
+ *     sent), mixProjectiles' team/sourceTurretId/sourceVehicleId (#13: ProjectileSnapshotData
+ *     carries none of the three, and decoded projectiles are consumed directly as DTOs by
+ *     weapons-view.ts), and mixTurrets' timer (same story: TurretSnapshotData has no timer
+ *     and decoded turrets feed only the client's presentation). None of these violates the
+ *     "matches across encode and decode" contract, because that contract is simply never
+ *     exercised for a store nobody reconstructs from the wire.
  *
  * A future finding that this hash is missing some field, or hashing some field the wire
  * doesn't carry, should be checked against this policy before being treated as a bug: if the

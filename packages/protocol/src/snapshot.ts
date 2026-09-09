@@ -43,6 +43,14 @@ export interface ProjectileSnapshotData {
   vx: number;
   vy: number;
   vz: number;
+  /**
+   * The shooting player's id, or -1 for a shot with no player identity (a turret shot,
+   * projectiles.ts's spawnTurretShot, or a vehicle shot). Carried as I16 on the wire --
+   * the exact convention FlagSnapshotData.carrierId already uses for its own "-1 if not
+   * carried" id -- because the original unsigned u16 write turned -1 into 65535, and every
+   * consumer comparing a decoded owner against real player ids (self-exclusion, kill
+   * attribution) then saw a phantom player 65535 instead of "no owner" (issue #15).
+   */
   ownerId: number;
   /**
    * ProjectileStore.armed (0/1) -- whether this projectile can still detonate on contact
@@ -71,6 +79,16 @@ export interface BaseObjectSnapshotData {
   damage: number;
   destroyed: 0 | 1;
   powered: 0 | 1;
+  /**
+   * BaseObjectStore.energy -- the shield pool applyBaseObjectDamage (baseObjects.ts) spends
+   * at energyPerDamagePoint BEFORE health. Optional only so pre-#14 object literals (tests,
+   * callers that haven't migrated) keep compiling; the wire always carries it (writeBaseObject
+   * defaults a missing field to 0) and readBaseObject always populates it. Without it on the
+   * wire, a shot absorbed entirely by shields left health untouched and the client had no way
+   * to see the hit land at all -- the "unchanged health bar looks like a missed shot" trap
+   * issue #14 describes. Zero-initialization matches the store's own Float64Array defaults.
+   */
+  energy?: number;
 }
 export interface TurretSnapshotData {
   id: number;
@@ -79,6 +97,27 @@ export interface TurretSnapshotData {
   powered: 0 | 1;
   targetId: number; // -1 = none
   state: number; // TurretState from @clans/sim
+  /**
+   * TurretStore.energy -- the shield pool applyTurretDamage (turrets.ts) spends at
+   * energyPerDamagePoint BEFORE health, exactly like BaseObjectSnapshotData.energy above
+   * (issue #14): without it on the wire, a turret shot absorbed entirely by shields left
+   * health untouched and a client never saw the hit register. Optional only so pre-#14
+   * object literals keep compiling; the wire always carries it and readTurret always
+   * populates it (writeTurret defaults a missing field to 0, matching the store's own
+   * Float64Array zero-init).
+   */
+  energy?: number;
+  /**
+   * TurretStore.targetKind (turrets.ts): 0 = targetId refers to world.players, 1 =
+   * world.vehicles. Player and vehicle ids are independent id spaces that CAN collide, so
+   * targetId alone is ambiguous -- acquireTarget/targetStillValid/fireAt branch on this
+   * exact discriminator (M5 Task 8) and hash.ts's mixTurrets has hashed it since M5.
+   * Whole u8 rather than a packed bit: turrets have no existing status byte to pack into,
+   * and one byte per turret (capacity 16) is cheaper than the special-casing. Optional for
+   * the same old-literal reason as energy; writeTurret defaults it to 0 (player), which is
+   * also the store's own zero-init and the only value a non-AA barrel ever sets.
+   */
+  targetKind?: number;
 }
 /** A bot's debug state, mirroring @clans/bots' BotState (0 Idle, 1 Attack, 2 Defend) --
  *  this package doesn't depend on @clans/bots, so the value is carried as a plain number,
@@ -196,11 +235,16 @@ const HEADER_BYTES = 1 + 4 + 4 + 4 + 4 + 1; // type, snapshotId, baselineId, tic
 // damage scaling), and reconcile() all silently disagreed with the server's real loadout.
 // Codex round 1, finding 2.
 const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 4 + 1 + 4 + 2 + 1 + 1 + 1;
-// id, type, weaponId, 6 f32 (pos+vel), ownerId, armed (round 15, PR #9, finding 2).
+// id, type, weaponId, 6 f32 (pos+vel), ownerId i16, armed (round 15, PR #9, finding 2).
+// ownerId is I16 since the #15 fix: a u16 write turned the turret-shot "no owner" sentinel
+// -1 into 65535 on the wire (see ProjectileSnapshotData.ownerId's own comment); the width
+// and therefore this total are unchanged.
 const PROJECTILE_BYTES = 2 + 1 + 1 + 4 * 6 + 2 + 1;
 const FLAG_BYTES = 1 + 1 + 1 + 4 * 3 + 2 + 4; // id, team, state, 3 f32 (pos), carrierId i16, returnInS f32
-const BASE_OBJECT_BYTES = 2 + 4 + 1 + 1; // id, damage f32, destroyed, powered
-const TURRET_BYTES = 2 + 4 + 1 + 1 + 2 + 1; // id, damage f32, destroyed, powered, targetId i16, state
+// id, damage f32, destroyed, powered, energy f32 (#14).
+const BASE_OBJECT_BYTES = 2 + 4 + 1 + 1 + 4;
+// id, damage f32, destroyed, powered, targetId i16, state, energy f32 (#14), targetKind u8 (#24).
+const TURRET_BYTES = 2 + 4 + 1 + 1 + 2 + 1 + 4 + 1;
 const DELTA_FLAG = 1;
 const DIRTY_TRANSFORM = 1;
 const DIRTY_ENERGY = 2;
@@ -378,7 +422,11 @@ function writeProjectile(cursor: Cursor, p: ProjectileSnapshotData): void {
   writeF32(cursor, p.vx);
   writeF32(cursor, p.vy);
   writeF32(cursor, p.vz);
-  writeU16(cursor, p.ownerId);
+  // I16, not U16: -1 is the "no player identity" sentinel spawnTurretShot/spawnVehicleShot
+  // write (projectiles.ts), and a u16 write corrupted it to 65535 on the wire so every
+  // self-exclusion/attribution comparison against real player ids saw a phantom owner
+  // (issue #15). Same signed-id convention FlagSnapshotData.carrierId already uses.
+  writeI16(cursor, p.ownerId);
   writeU8(cursor, p.armed);
 }
 function readProjectile(cursor: Cursor): ProjectileSnapshotData {
@@ -391,7 +439,7 @@ function readProjectile(cursor: Cursor): ProjectileSnapshotData {
   const vx = readF32(cursor);
   const vy = readF32(cursor);
   const vz = readF32(cursor);
-  const ownerId = readU16(cursor);
+  const ownerId = readI16(cursor);
   const armed = readU8(cursor) ? 1 : 0;
   assertFinite([x, y, z, vx, vy, vz]);
   return { id, type, weaponId, x, y, z, vx, vy, vz, ownerId, armed };
@@ -425,14 +473,19 @@ function writeBaseObject(cursor: Cursor, o: BaseObjectSnapshotData): void {
   writeF32(cursor, o.damage);
   writeU8(cursor, o.destroyed);
   writeU8(cursor, o.powered);
+  // Issue #14: the shield pool. Written unconditionally -- the optional field is a
+  // type-level courtesy for pre-#14 literals, not a wire-level choice; a frame either
+  // carries the pool or the receiver cannot tell a shielded hit from a missed one.
+  writeF32(cursor, o.energy ?? 0);
 }
 function readBaseObject(cursor: Cursor): BaseObjectSnapshotData {
   const id = readU16(cursor);
   const damage = readF32(cursor);
-  assertFinite([damage]);
   const destroyed = (readU8(cursor) ? 1 : 0) as 0 | 1;
   const powered = (readU8(cursor) ? 1 : 0) as 0 | 1;
-  return { id, damage, destroyed, powered };
+  const energy = readF32(cursor);
+  assertFinite([damage, energy]);
+  return { id, damage, destroyed, powered, energy };
 }
 function writeTurret(cursor: Cursor, t: TurretSnapshotData): void {
   writeU16(cursor, t.id);
@@ -441,16 +494,24 @@ function writeTurret(cursor: Cursor, t: TurretSnapshotData): void {
   writeU8(cursor, t.powered);
   writeI16(cursor, t.targetId);
   writeU8(cursor, t.state);
+  // Both appended unconditionally, same reasoning as writeBaseObject's energy write above:
+  // energy is the shield pool (issue #14), targetKind the player-vs-vehicle discriminator
+  // targetId needs because the two id spaces collide (issue #24, whole u8 -- see
+  // TurretSnapshotData.targetKind's own comment).
+  writeF32(cursor, t.energy ?? 0);
+  writeU8(cursor, t.targetKind ?? 0);
 }
 function readTurret(cursor: Cursor): TurretSnapshotData {
   const id = readU16(cursor);
   const damage = readF32(cursor);
-  assertFinite([damage]);
   const destroyed = (readU8(cursor) ? 1 : 0) as 0 | 1;
   const powered = (readU8(cursor) ? 1 : 0) as 0 | 1;
   const targetId = readI16(cursor);
   const state = readU8(cursor);
-  return { id, damage, destroyed, powered, targetId, state };
+  const energy = readF32(cursor);
+  const targetKind = readU8(cursor);
+  assertFinite([damage, energy]);
+  return { id, damage, destroyed, powered, targetId, state, energy, targetKind };
 }
 
 // Codex review round 1 (this PR), finding 4: onGround/wasJumpHeld pack into one status byte
@@ -591,34 +652,44 @@ function readOrder(cursor: Cursor): OrderSnapshotData {
 // team u8, kind u8, x f32, z f32, expiresInS f32.
 const ORDER_BYTES = 1 + 1 + 4 + 4 + 4;
 
-// Orders (M7): the new true last block, after `bots` -- see WorldExtras.orders' own comment.
-// Split out of writeExtras to keep it under the complexity budget, not for reuse elsewhere.
-function writeOrders(cursor: Cursor, orders: OrderSnapshotData[]): void {
-  if (orders.length > MAX_SNAPSHOT_ORDERS) {
-    throw new RangeError('Snapshot order count exceeds ' + String(MAX_SNAPSHOT_ORDERS));
+// Issue #16: every u8 extras count goes through this one guard, the write-side mirror of
+// readExtras' own assertPlausibleExtrasCount below. The encode throws when an array
+// exceeds the same MAX_SNAPSHOT_* ceiling the decode enforces (each far below the u8 wrap
+// point, so a count of exactly 256 can never silently wrap to 0 on the wire the way the
+// original unchecked writeU8 calls let it), and because both sides cite the same constants
+// the two limits can never drift apart: the encoder can never emit a frame the decoder
+// rejects, and a hostile or corrupted count still fails loudly on the read. Split out of
+// writeExtras for the same complexity-budget reason as writeOrders/readOrders.
+function writeU8Counted<T>(
+  cursor: Cursor,
+  items: readonly T[],
+  max: number,
+  label: string,
+  writeItem: (cursor: Cursor, item: T) => void,
+): void {
+  if (items.length > max) {
+    throw new RangeError('Snapshot ' + label + ' count exceeds ' + String(max));
   }
-  writeU8(cursor, orders.length);
-  for (const o of orders) writeOrder(cursor, o);
+  writeU8(cursor, items.length);
+  for (const item of items) writeItem(cursor, item);
 }
 
 function writeExtras(cursor: Cursor, extras: WorldExtras): void {
   writeU16(cursor, extras.projectiles.length);
   for (const p of extras.projectiles) writeProjectile(cursor, p);
-  writeU8(cursor, extras.flags.length);
-  for (const f of extras.flags) writeFlag(cursor, f);
-  writeU8(cursor, extras.baseObjects.length);
-  for (const o of extras.baseObjects) writeBaseObject(cursor, o);
-  writeU8(cursor, extras.turrets.length);
-  for (const t of extras.turrets) writeTurret(cursor, t);
-  // Unlike the unchecked u8 writes above (a pre-existing gap tracked separately, issue #16 --
-  // a count of 256 silently wraps to 0 on the wire with no error), this is new code, so it
-  // doesn't inherit that gap: VehicleStore's own capacity (8) makes this practically
-  // unreachable, but the guard is cheap and the discipline is worth keeping regardless.
-  if (extras.vehicles.length > 255) {
-    throw new RangeError('Snapshot vehicle count exceeds 255');
-  }
-  writeU8(cursor, extras.vehicles.length);
-  for (const v of extras.vehicles) writeVehicle(cursor, v);
+  writeU8Counted(cursor, extras.flags, MAX_SNAPSHOT_FLAGS, 'flag', writeFlag);
+  writeU8Counted(
+    cursor,
+    extras.baseObjects,
+    MAX_SNAPSHOT_BASE_OBJECTS,
+    'baseObject',
+    writeBaseObject,
+  );
+  writeU8Counted(cursor, extras.turrets, MAX_SNAPSHOT_TURRETS, 'turret', writeTurret);
+  // Vehicles keep their historical literal 255 rather than MAX_SNAPSHOT_VEHICLES' name --
+  // same number; the messages.ts constant exists to document the u8 ceiling this guard
+  // enforces. VehicleStore's own capacity (8) makes the throw practically unreachable.
+  writeU8Counted(cursor, extras.vehicles, 255, 'vehicle', writeVehicle);
   writeU16(cursor, extras.teamScores[0]);
   writeU16(cursor, extras.teamScores[1]);
   writeU8(cursor, extras.gameOver ? 1 : 0);
@@ -628,14 +699,14 @@ function writeExtras(cursor: Cursor, extras: WorldExtras): void {
   // Bots (M6): the true last block in the payload, after every trailing scalar field
   // above -- not just after turrets/vehicles -- so a pre-M6 decoder that simply stops
   // reading here never has to change (Global Constraints: no PROTOCOL_VERSION bump).
-  // Follows vehicles' own explicit-throw bounds convention, not turrets' still-open
-  // silent-wraparound one (issue #16): new code doesn't have to inherit that gap.
-  if (extras.bots.length > MAX_SNAPSHOT_BOTS) {
-    throw new RangeError('Snapshot bot count exceeds ' + String(MAX_SNAPSHOT_BOTS));
-  }
-  writeU8(cursor, extras.bots.length);
-  for (const b of extras.bots) writeBot(cursor, b);
+  writeU8Counted(cursor, extras.bots, MAX_SNAPSHOT_BOTS, 'bot', writeBot);
   writeOrders(cursor, extras.orders);
+}
+// Orders (M7): the new true last block, after `bots` -- see WorldExtras.orders' own comment.
+// Was split out of writeExtras for the complexity budget; now a thin delegation to the same
+// shared u8-count guard every other extras array uses.
+function writeOrders(cursor: Cursor, orders: OrderSnapshotData[]): void {
+  writeU8Counted(cursor, orders, MAX_SNAPSHOT_ORDERS, 'order', writeOrder);
 }
 function assertPlausibleExtrasCount(count: number, max: number, label: string): void {
   if (count > max) {

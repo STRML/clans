@@ -562,6 +562,10 @@ function snapshotBaseObject(world: World, id: number): BaseObjectSnapshotData {
     damage: store.damage[id] ?? 0,
     destroyed: (store.destroyed[id] ? 1 : 0) as 0 | 1,
     powered: (store.powered[id] ? 1 : 0) as 0 | 1,
+    // Protocol 9 (#14): the shield pool applyBaseObjectDamage spends before health. Sent
+    // unconditionally, like the turret sibling below -- an omitted field would decode as the
+    // reader's default and read as a full shield bar on every client.
+    energy: store.energy[id] ?? 0,
   };
 }
 function snapshotBaseObjects(world: World): BaseObjectSnapshotData[] {
@@ -577,7 +581,9 @@ function snapshotTurret(world: World, id: number): TurretSnapshotData {
     destroyed: (store.destroyed[id] ? 1 : 0) as 0 | 1,
     powered: (store.powered[id] ? 1 : 0) as 0 | 1,
     targetId: store.targetId[id] ?? -1,
+    targetKind: store.targetKind[id] ?? 0,
     state: store.state[id] ?? 0,
+    energy: store.energy[id] ?? 0,
   };
 }
 function snapshotTurrets(world: World): TurretSnapshotData[] {

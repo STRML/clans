@@ -312,6 +312,43 @@ describe('serializeVehicle / deserializeVehicle', () => {
     expect(other.vehicles.onGround[0]).toBe(1);
     expect(other.vehicles.wasJumpHeld[0]).toBe(1);
   });
+
+  it('rejects a decoded vehicle whose kind is not a real VehicleKind, before activating its slot (issue #25)', () => {
+    // readVehicle (protocol) does no range check -- kind rides the wire as a plain number
+    // -- so deserializeVehicle is the last line of defense before prediction's next
+    // stepVehicles tick indexes VEHICLE_DATA[kind] and crashes on a value that does not
+    // exist. The rejection must happen BEFORE the slot is activated or count grown,
+    // leaving the store exactly as it was.
+    const source = createWorld(terrain, 1);
+    source.vehicles.active[0] = 1;
+    source.vehicles.count = 1;
+    source.vehicles.kind[0] = VehicleKind.Shrike;
+    const data = serializeVehicle(source, 0);
+    data.kind = 255;
+    const target = createWorld(terrain, 1);
+    deserializeVehicle(target, data);
+    expect(target.vehicles.active[0]).toBe(0);
+    expect(target.vehicles.count).toBe(0);
+    expect(target.vehicles.kind[0]).toBe(0);
+  });
+
+  it('still applies valid Shrike and Wildcat frames after the kind guard (issue #25)', () => {
+    const source = createWorld(terrain, 1);
+    source.vehicles.active[0] = 1;
+    source.vehicles.count = 1;
+    source.vehicles.kind[0] = VehicleKind.Shrike;
+    const shrike = serializeVehicle(source, 0);
+    source.vehicles.kind[0] = VehicleKind.Wildcat;
+    const wildcat = serializeVehicle(source, 0);
+    const target = createWorld(terrain, 1);
+    deserializeVehicle(target, shrike);
+    expect(target.vehicles.active[0]).toBe(1);
+    expect(target.vehicles.count).toBe(1);
+    expect(target.vehicles.kind[0]).toBe(VehicleKind.Shrike);
+    deserializeVehicle(target, wildcat);
+    expect(target.vehicles.active[0]).toBe(1);
+    expect(target.vehicles.kind[0]).toBe(VehicleKind.Wildcat);
+  });
 });
 
 describe('hashWorld: vehicle coverage (M5, Task 9)', () => {

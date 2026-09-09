@@ -152,6 +152,24 @@ describe('describeHud', () => {
     ).toBe('Generator 62%');
   });
 
+  it('appends a shield readout to the aimed-structure row when the structure has a pool, and none when it does not (issue #14)', () => {
+    // A hit absorbed entirely by shields leaves healthPercent pinned -- the pool readout is
+    // the only thing that moves, which is the whole point of #14's client feedback.
+    expect(
+      rowsOf(
+        baseSource({
+          aimedStructure: { name: 'Generator', healthPercent: 100, shieldPercent: 40 },
+        }),
+      )['hud-aimed'],
+    ).toBe('Generator 100% · Shield 40%');
+    // No pool (shieldPercent undefined, e.g. an invincible vehicle pad) -> no suffix.
+    expect(
+      rowsOf(baseSource({ aimedStructure: { name: 'Vehicle Pad', healthPercent: 100 } }))[
+        'hud-aimed'
+      ],
+    ).toBe('Vehicle Pad 100%');
+  });
+
   it('hides the vehicle row when the local player is not mounted', () => {
     expect(rowsOf(baseSource())['hud-vehicle']).toBe('');
   });

@@ -799,6 +799,85 @@ describe('startNetServer', () => {
     lagServer.close();
   });
 
+  it('lag compensation: an intact generator between shooter and target stops the rewound laser (issue #21)', async () => {
+    // The mirror of the 150ms-ping test above, with one difference: an intact generator
+    // stands directly on the shot line. The rewound recheck must find the target back on
+    // the line AND the generator in front of it, and the structure -- the nearer
+    // obstruction (its hit-sphere entry sits at z=2.5, the target's at ~7.6) -- wins: no
+    // correction damage may be applied for a shot that could never have reached the
+    // target. Muzzle height is 1.6 (MUZZLE_HEIGHT), so a generator sphere centered at
+    // that height sits squarely on the ray; power is irrelevant to structure occlusion
+    // (only destroyed matters), so the generator needs no team-2 power setup here.
+    let clock = 0;
+    const lagServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world,
+      spawns,
+      port: TEST_PORT + 29,
+      now: () => clock,
+    });
+    await lagServer.ready;
+    const targetId = addPlayer(world, { x: 0, y: 0, z: 8 }, 2);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 2, position: { x: 0, y: 1.6, z: 4 } },
+    ]);
+    const shooter = await connect(TEST_PORT + 29);
+    const welcomePromise = receive(shooter);
+    shooter.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    world.players.position.set([0, 0, 0], welcome.playerId * 3);
+
+    // Establish a 150ms ping: send a snapshot, ack it 150ms of server-clock time later.
+    const firstPromise = receive(shooter);
+    lagServer.tick(2);
+    const first = decodeSnapshot(await firstPromise, null);
+    clock = 150;
+    shooter.send(encodeAck({ snapshotId: first.snapshotId }));
+    await wait(20);
+
+    const idle: NetInputSample = {
+      moveX: 0,
+      moveZ: 0,
+      yaw: 0,
+      pitch: 0,
+      jump: false,
+      jet: false,
+      fire: false,
+      altFire: false,
+      slot: 0,
+      packActive: false,
+      use: false,
+    };
+    for (let step = 0; step < 5; step += 1) {
+      world.players.position.set([0, 0, 8], targetId * 3);
+      lagServer.tick(3 + step);
+    }
+
+    shooter.send(
+      encodeInput({
+        sequence: 1,
+        samples: [
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+          { ...idle, slot: 4 },
+        ],
+      }),
+    );
+    await wait(20);
+    lagServer.tick(20); // applies the Laser Rifle slot switch only, still Ready, no shot yet
+    world.players.position.set([500, 0, 500], targetId * 3); // jumps away right before firing
+
+    const fire: NetInputSample = { ...idle, slot: 4, fire: true };
+    shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
+    await wait(20);
+    lagServer.tick(21); // fires with the target rewound back onto the line -- behind the generator
+
+    expect(world.players.damage[targetId]).toBe(0);
+    shooter.close();
+    lagServer.close();
+  });
+
   it('does not keep rewinding or re-hitting a target merely because fire is held through reload (Codex PR #9 round 3, P1 finding 3)', async () => {
     // Eligibility for the lag-comp recheck now comes from world.lastFireEvents -- an
     // actual same-tick hitscan/tracer shot -- not raw input.fire and weapon slot. The old

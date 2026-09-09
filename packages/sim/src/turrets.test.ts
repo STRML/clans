@@ -11,6 +11,11 @@ import {
   TurretBarrelId,
   TurretBaseId,
 } from './turrets.js';
+import {
+  buildInteriorCollider,
+  type InteriorPlacement,
+  type InteriorTriangles,
+} from './interiors.js';
 import { VehicleKind } from './vehicles.js';
 
 const flat: Heightfield = {
@@ -270,6 +275,150 @@ describe('stepTurrets: line of sight (failure matrix row 16)', () => {
     stepTurrets(world, FIXED_DT);
     expect(world.turrets.targetId[turret]).not.toBe(enemy);
     expect(world.pendingTurretFireEvents).toHaveLength(0);
+  });
+});
+
+describe('stepTurrets: interior and force-field occlusion (issue #49)', () => {
+  /** A single quad wall crossing world x=0, spanning y 0..4 and z -4..4 — the interior
+   *  twin of this file's terrain wallAcrossX fixture (same verified axis mapping: grid
+   *  columns map to world X, so a wall "across X" is a YZ-plane quad at x=0). */
+  function wallInterior(): InteriorTriangles {
+    const positions = new Float32Array([0, 0, -4, 0, 4, -4, 0, 4, 4, 0, 0, -4, 0, 4, 4, 0, 0, 4]);
+    return { positions };
+  }
+  const wallPlacement: InteriorPlacement = {
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 },
+  };
+
+  it('an interior wall between the turret and an in-range enemy blocks acquisition', () => {
+    const world = createWorld(flat, 1);
+    world.interiors = [buildInteriorCollider(wallInterior(), wallPlacement)];
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: -8, y: 0, z: 0 } },
+    ]);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.SentryTurretBarrel, team: 1, position: { x: -8, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    // 16 m apart, well inside the sentry's engagement range — only the wall stands in the
+    // way: the eye-to-target sightline crosses x=0 at y≈1, inside the wall's 0..4 span.
+    addPlayer(world, { x: 8, y: 0, z: 0 }, 2);
+    for (let tick = 0; tick < ticksFor(1); tick += 1) stepTurrets(world, FIXED_DT);
+    expect(world.turrets.targetId[0]).toBe(-1);
+    expect(world.pendingTurretFireEvents).toHaveLength(0);
+  });
+
+  it('an enemy force field between the turret and an in-range enemy blocks acquisition', () => {
+    const world = createWorld(flat, 1);
+    // Team 2's generator powers team 2's field; team 1's own generator powers the turret.
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: -8, y: 0, z: 0 } },
+      { kind: BaseObjectKind.Generator, team: 2, position: { x: 0, y: 0, z: 20 } },
+      {
+        kind: BaseObjectKind.ForceField,
+        team: 2,
+        position: { x: 0, y: 2, z: 0 },
+        rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 },
+        scale: { x: 1, y: 4, z: 6 },
+      },
+    ]);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.SentryTurretBarrel, team: 1, position: { x: -8, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    addPlayer(world, { x: 8, y: 0, z: 0 }, 2);
+    for (let tick = 0; tick < ticksFor(1); tick += 1) stepTurrets(world, FIXED_DT);
+    expect(world.turrets.targetId[0]).toBe(-1);
+    expect(world.pendingTurretFireEvents).toHaveLength(0);
+  });
+
+  it('the same layout behind a FRIENDLY field still acquires and fires (fields are team-passable)', () => {
+    const world = createWorld(flat, 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: -8, y: 0, z: 0 } },
+      {
+        kind: BaseObjectKind.ForceField,
+        team: 1,
+        position: { x: 0, y: 2, z: 0 },
+        rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 },
+        scale: { x: 1, y: 4, z: 6 },
+      },
+    ]);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.SentryTurretBarrel, team: 1, position: { x: -8, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    // The built geometry now straddles the sightline exactly like the blocked case — an
+    // enemy field there blinds the turret, so this also proves an exposed target is still
+    // acquired once the only thing in the way is a field of its own team.
+    addPlayer(world, { x: 8, y: 0, z: 0 }, 2);
+    stepTurrets(world, FIXED_DT);
+    expect(world.turrets.targetId[0]).toBe(0);
+    expect(world.pendingTurretFireEvents).toHaveLength(1);
+  });
+
+  it('a target that walks behind an interior wall is dropped, not fired through (retention)', () => {
+    const world = createWorld(flat, 1);
+    world.interiors = [buildInteriorCollider(wallInterior(), wallPlacement)];
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: -8, y: 0, z: 0 } },
+    ]);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.SentryTurretBarrel, team: 1, position: { x: -8, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    // Placed close to the turret, on the same side of the x=0 wall, so the acquisition
+    // tick has clear sight and a real target to later drop.
+    const enemy = addPlayer(world, { x: -6, y: 0, z: 0 }, 2);
+    stepTurrets(world, FIXED_DT);
+    expect(world.turrets.targetId[0]).toBe(enemy);
+    world.players.position.set([8, 0, 0], enemy * 3); // crosses x=0 to the wall's far side
+    stepTurrets(world, FIXED_DT);
+    expect(world.turrets.targetId[0]).not.toBe(enemy);
+    expect(world.pendingTurretFireEvents).toHaveLength(0);
+  });
+
+  it('an AA barrel does not acquire a vehicle parked behind an interior wall', () => {
+    const world = createWorld(flat, 1);
+    world.interiors = [buildInteriorCollider(wallInterior(), wallPlacement)];
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: -8, y: 0, z: 0 } },
+    ]);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.AABarrelLarge, team: 1, position: { x: -8, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.team[0] = 2;
+    // The eye-to-vehicle sightline from (-8, 2, 0) to (8, 5, 0) crosses x=0 at y=3.5 —
+    // inside the wall's 0..4 span — so the vehicle is as invisible as a player would be.
+    world.vehicles.position.set([8, 5, 0], 0);
+    stepTurrets(world, FIXED_DT);
+    expect(world.turrets.targetId[0]).toBe(-1);
+  });
+
+  it('the turret never occludes itself: the sightline grazes its own hitbox and still engages', () => {
+    const world = createWorld(flat, 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: -8, y: 0, z: 0 } },
+    ]);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.PlasmaBarrelLarge, team: 1, position: { x: -8, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    addPlayer(world, { x: 8, y: 0, z: 0 }, 2);
+    stepTurrets(world, FIXED_DT);
+    // Geometry, not charity: turretHitbox centers the plasma assembly at (-8, 1.3, 0)
+    // with a 2 m radius, and the eye->target sightline from (-8, 2, 0) to (8, 0, 0)
+    // passes ~0.72 m from that center — well inside the envelope. A turret that could
+    // occlude itself could never see past its own barrel; acquisition (and the fresh
+    // turret's same-tick fire) must succeed because the occlusion test never consults
+    // the turret's own assembly.
+    expect(world.turrets.targetId[0]).toBe(0);
+    expect(world.pendingTurretFireEvents).toHaveLength(1);
   });
 });
 
