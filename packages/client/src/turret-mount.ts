@@ -294,7 +294,9 @@ export interface TurretSyncOptions {
  * -- a wall-clock-only presentation keeps animating through a pause and plays its clips at
  * half the simulated rate at 2x. Callers that cannot pass a clock yet fall back to the wall
  * clock; pass `dt` (unscaled seconds since this root's previous sync) and `timeScale`
- * (`app.paused ? 0 : app.timeScale`) to pin the presentation to the simulation. */
+ * (`app.paused ? 0 : app.timeScale`) to pin the presentation to the simulation. A caller
+ * that already applied the pause/time-scale gate may instead pass the scaled delta with
+ * `timeScale: 1`; presentationDelta multiplies the two fields together either way. */
 export function syncTurretPresentation(
   root: THREE.Object3D,
   target: THREE.Vector3 | undefined,

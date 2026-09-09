@@ -86,19 +86,12 @@ test('loaded large turret points its muzzle toward the tracked player', async ({
     .toBe(true);
   await page.evaluate(() => {
     const app = (window as unknown as { __app: App }).__app;
-    app.paused = true;
-    const turret = app.scene.children.find(
-      (node) =>
-        node.userData.structureKind === 'turret' &&
-        node.userData.vehicleTargets === false &&
-        !!node.getObjectByName('Muzzlepoint'),
-    )!;
-    const id = turret.userData.structureId as number;
-    app.world.turrets.targetId[id] = app.playerId;
-    app.world.players.position.set(
-      [turret.position.x + 25, turret.position.y + 4, turret.position.z + 25],
-      app.playerId * 3,
-    );
+    // Issue #54: the mount advances in simulated seconds now, so pausing the app freezes the
+    // presentation and this test can no longer hold the world still that way. Keep the world
+    // running and make the tracked player invulnerable (sim applyDamage no-ops on godMode);
+    // the poll below re-pins the turret's target id and the player's position every sample,
+    // because stepTurrets would otherwise retarget and gravity would drop the player.
+    app.godMode = true;
   });
   await expect
     .poll(
@@ -111,6 +104,14 @@ test('loaded large turret points its muzzle toward the tracked player', async ({
               node.userData.vehicleTargets === false &&
               !!node.getObjectByName('Muzzlepoint'),
           )!;
+          const id = turret.userData.structureId as number;
+          const spot = {
+            x: turret.position.x + 25,
+            y: turret.position.y + 4,
+            z: turret.position.z + 25,
+          };
+          app.world.turrets.targetId[id] = app.playerId;
+          app.world.players.position.set([spot.x, spot.y, spot.z], app.playerId * 3);
           const muzzle = turret
             .getObjectByName('Muzzlepoint')!
             .getWorldPosition(app.camera.position.clone());

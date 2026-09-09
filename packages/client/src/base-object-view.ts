@@ -4,6 +4,7 @@ import {
   addTurretAnimations,
   prepareTurretPresentation,
   syncTurretPresentation,
+  type TurretSyncOptions,
 } from './turret-mount.js';
 import {
   BASE_OBJECT_DATA,
@@ -27,6 +28,10 @@ export interface BaseObjectView {
     baseObjects: BaseObjectSnapshotData[],
     turrets: TurretSnapshotData[],
     turretTargets?: ReadonlyMap<number, THREE.Vector3>,
+    /** Issue #54: simulation-scaled presentation clock for the turret mount. Without it the
+     *  mount falls back to wall time, which keeps animating through a pause and plays clips
+     *  at the wrong rate under time scaling (turret-mount.ts's own doc comment). */
+    turretTiming?: TurretSyncOptions,
   ): void;
 }
 
@@ -234,6 +239,7 @@ function syncTurrets(
   meshes: Map<number, THREE.Object3D>,
   data: TurretSnapshotData[],
   targets?: ReadonlyMap<number, THREE.Vector3>,
+  timing?: TurretSyncOptions,
 ): void {
   for (const t of data) {
     const mesh = meshes.get(t.id);
@@ -248,6 +254,7 @@ function syncTurrets(
         mesh,
         t.targetId === -1 ? undefined : targets?.get(targetKey),
         t.state,
+        timing,
       );
       syncStructure(mesh, t.destroyed === 1, t.powered === 1);
     }
@@ -287,10 +294,10 @@ export function createBaseObjectView(
     baseObjectMeshes,
     turretMeshes,
     interiorMeshes,
-    sync(baseObjects, turrets, turretTargets) {
+    sync(baseObjects, turrets, turretTargets, turretTiming) {
       syncBaseObjects(baseObjectMeshes, baseObjects);
       syncBaseObjects(vehicleStationMeshes, baseObjects);
-      syncTurrets(turretMeshes, turrets, turretTargets);
+      syncTurrets(turretMeshes, turrets, turretTargets, turretTiming);
     },
   };
 }

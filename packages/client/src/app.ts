@@ -797,7 +797,11 @@ function networkTurretTargets(
   return targets;
 }
 
-function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): void {
+function syncBaseAssetsView(
+  state: BaseAssetsViewState,
+  usePressed: boolean,
+  turretTiming: { dt: number; timeScale: number },
+): void {
   const { world, playerId, net } = state;
   const connected = net ? net.connected : true;
   const baseObjectData: BaseObjectSnapshotData[] =
@@ -807,6 +811,7 @@ function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): vo
     baseObjectData,
     turretData,
     turretTargetPositions(world, playerId, net, connected),
+    turretTiming,
   );
   state.vehicleView.sync(vehicleRenderData(state));
 
@@ -1901,6 +1906,11 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
           audio,
         },
         usePressed,
+        // Issue #54: the turret mount's clips, muzzle flash and aim smoothing must advance in
+        // simulated seconds. Reuse the weapon-animation gate (0 while paused or after the
+        // match ends) and hand the mount an already-scaled delta with timeScale 1, which
+        // presentationDelta multiplies out to the same value.
+        { dt: weaponAnimationDelta(app, dtSeconds), timeScale: 1 },
       );
 
       // Issue #51: the beam, its loop and the feedback row follow the state this frame's
