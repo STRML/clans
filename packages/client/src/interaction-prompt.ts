@@ -1,11 +1,10 @@
-import { canSendVehicleUse, stationAt, vehiclePadAt, type World } from '@clans/sim';
+import { canSendVehicleUse, stationAt, type World } from '@clans/sim';
 
 export function interactionLabel(world: World, playerId: number): string {
   if (!world.players.alive[playerId] || world.gameOver) return '';
   if ((world.players.mountedVehicleId[playerId] ?? -1) !== -1) return 'Dismount vehicle';
   if (canSendVehicleUse(world, playerId)) return 'Mount vehicle';
   if (stationAt(world, playerId) !== null) return 'Inventory station';
-  if (vehiclePadAt(world, playerId) !== null) return 'Vehicle station';
   return '';
 }
 
@@ -21,6 +20,7 @@ export function createInteractionPrompt(container: HTMLElement) {
   return {
     update(world: World, playerId: number, hidden: boolean): void {
       const label = hidden ? '' : interactionLabel(world, playerId);
+      root.dataset['piloting'] = String((world.players.mountedVehicleId[playerId] ?? -1) !== -1);
       root.hidden = !label;
       text.textContent = label;
     },

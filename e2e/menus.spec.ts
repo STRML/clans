@@ -78,12 +78,12 @@ test('walking onto the separate vehicle station opens its menu and permits a spa
     app.world.players.velocity.set([0, 0, 0], app.playerId * 3);
     app.input.yaw = 0;
   });
-  await expect(page.locator('#interaction-prompt')).toContainText('Vehicle station');
+  await expect(page.locator('#interaction-prompt')).toBeHidden();
   await expect(page.locator('#vehicle-pad-menu')).toBeHidden();
   await page.keyboard.down('KeyW');
   await expect(page.locator('#vehicle-pad-menu')).toBeVisible({ timeout: 20_000 });
   await page.keyboard.up('KeyW');
-  await page.getByRole('button', { name: 'Wildcat', exact: true }).click();
+  await page.keyboard.press('Digit2');
   await expect(page.locator('#vehicle-pad-menu')).toBeHidden();
   await expect
     .poll(() =>

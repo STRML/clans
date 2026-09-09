@@ -59,43 +59,28 @@ test('spawn a Wildcat, mount, drive, dismount', async ({ page }) => {
   await page.evaluate(() => window.__clansDebug?.teleportToVehiclePad(1));
   await page.waitForTimeout(300);
 
-  // E opens the pad menu -- app.ts's syncBaseAssetsView toggles it open the same tick this
-  // key registers, once the player is within VEHICLE_PAD_USE_RADIUS of a powered pad.
+  // Walking onto the control station opens the picker.
   const wildcatButton = page.locator('#vehicle-pad-menu button', { hasText: 'Wildcat' });
   await expect(wildcatButton).toBeVisible();
   await wildcatButton.click();
 
-  // Vehicles spawn on the platform, separate from the control station. Walk over to it.
-  await page.evaluate(() => {
+  // Advance the actual app/simulation through fabrication without tying its 6.5-second
+  // clock to software-GPU wall time. The accumulator caps catch-up at five ticks/frame.
+  const mounted = await page.evaluate(() => {
     const app = (window as unknown as { __app: App }).__app;
-    const v = app.world.vehicles;
-    const id = Array.from(v.active).findIndex(Boolean);
-    const x = v.position[id * 3]!,
-      z = v.position[id * 3 + 2]!;
-    app.input.yaw = Math.atan2(
-      x - app.world.players.position[app.playerId * 3]!,
-      z - app.world.players.position[app.playerId * 3 + 2]!,
-    );
-    return { x, z };
+    const render = app.renderer.render;
+    app.renderer.render = () => {};
+    try {
+      for (let tick = 0; tick < 210; tick++) app.frame(0.032);
+      return app.world.players.mountedVehicleId[app.playerId];
+    } finally {
+      app.renderer.render = render;
+      app.frame(0);
+    }
   });
-  await page.keyboard.down('KeyW');
-  try {
-    await expect
-      .poll(
-        () =>
-          page.evaluate(() => {
-            const app = (window as unknown as { __app: App }).__app;
-            return app.world.players.mountedVehicleId[app.playerId];
-          }),
-        { timeout: 20_000, intervals: [100] },
-      )
-      .toBeGreaterThanOrEqual(0);
-  } finally {
-    await page.keyboard.up('KeyW');
-  }
+  expect(mounted).toBeGreaterThanOrEqual(0);
 
-  // #hud-vehicle is empty while unmounted (hud.ts's vehicleRow) and reads
-  // "Vehicle <health>% — <speed> m/s" once mounted -- this is the "we're driving" signal.
+  // The vehicle HUD is populated only while driving.
   const hudVehicle = page.locator('#hud-vehicle');
   const isMounted = async (): Promise<boolean> =>
     ((await hudVehicle.getAttribute('data-value')) ?? '') !== '';
@@ -108,10 +93,15 @@ test('spawn a Wildcat, mount, drive, dismount', async ({ page }) => {
   const restingSpeed = speedOf(await hudVehicle.getAttribute('data-value'));
 
   await page.keyboard.down('KeyW');
-  await page.waitForTimeout(1_500);
-  const drivingSpeed = speedOf(await hudVehicle.getAttribute('data-value'));
-  await page.keyboard.up('KeyW');
-  expect(drivingSpeed).toBeGreaterThan(restingSpeed + 1);
+  try {
+    await expect
+      .poll(async () => speedOf(await hudVehicle.getAttribute('data-value')), {
+        timeout: 15_000,
+      })
+      .toBeGreaterThan(restingSpeed + 1);
+  } finally {
+    await page.keyboard.up('KeyW');
+  }
 
   // Let the release itself settle before the next key edge -- back-to-back key transitions
   // faster than the render loop's own frame cadence risk missing usePressedThisFrame()'s

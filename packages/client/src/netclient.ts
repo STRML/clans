@@ -110,7 +110,7 @@ const REMOTE_VEHICLE_DRIVER = 30000; // deliberately far outside any realistic p
  *     0-based and whoever connects first gets exactly 0 -- their vehicle would silently
  *     stomp this player's own seat-locked position every tick.
  */
-function remapVehicleDriverId(driverId: number, localPlayerId: number): number {
+function remapVehicleDriverId(driverId: number = -1, localPlayerId: number): number {
   if (driverId === -1) return -1;
   return driverId === localPlayerId ? LOCAL_SLOT : REMOTE_VEHICLE_DRIVER;
 }
@@ -474,6 +474,7 @@ export class NetClient {
       deserializeVehicle(this.world, {
         ...data,
         driverId: remapVehicleDriverId(data.driverId, this.playerId),
+        reservedPilotId: remapVehicleDriverId(data.reservedPilotId, this.playerId),
       });
     }
     // Codex review round 1 (this PR), finding 3: deserializeVehicle above writes each

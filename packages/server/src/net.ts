@@ -18,7 +18,7 @@ import {
   serializeActivePlayers,
   serializeActiveVehicles,
   setGodMode,
-  spawnVehicleAtPad,
+  requestVehicleAtPad,
   stepWorld,
   VEHICLE_PAD_USE_RADIUS,
   type FireEvent,
@@ -336,7 +336,7 @@ function handleVehicleSpawn(
   const [px, py, pz] = positionAt(world.players.position, playerId * 3);
   const [bx, by, bz] = positionAt(world.baseObjects.usePosition, padId * 3);
   if (Math.hypot(px - bx, py - by, pz - bz) > VEHICLE_PAD_USE_RADIUS) return;
-  spawnVehicleAtPad(world, padId, kind);
+  requestVehicleAtPad(world, playerId, padId, kind);
 }
 
 const ORDER_KINDS = new Set<number>([OrderKind.Attack, OrderKind.Defend, OrderKind.Repair]);

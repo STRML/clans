@@ -35,6 +35,7 @@ function disposeMeshes(root: THREE.Object3D): void {
 /** Invalidate pending loads as well as freeing the currently displayed model. */
 export function disposeShape(root: THREE.Object3D): void {
   root.userData.shapeDisposed = true;
+  root.userData.shapeAnimation?.dispose();
   disposeMeshes(root);
   root.clear();
 }
@@ -102,6 +103,7 @@ export function loadShapeInto(
         gltf.scene.applyMatrix4(new THREE.Matrix4().makeRotationY(modelRotationY));
         root.add(gltf.scene);
         root.userData.shapeStatus = 'loaded';
+        root.userData.animationClips = gltf.animations;
         onLoad?.(gltf.scene, gltf.animations);
       },
       undefined,

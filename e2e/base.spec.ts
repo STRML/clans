@@ -59,6 +59,15 @@ test('the HUD and crosshair actually render inside the viewport, not just in the
   expect(hudBox?.y).toBeGreaterThanOrEqual(0);
   expect(hudBox?.y).toBeLessThan(viewport.height);
 
+  const health = await page.locator('#hud-health').boundingBox();
+  const weapons = await page.locator('#hud-weapon-rack').boundingBox();
+  const flags = await page.locator('#hud-team-scores').boundingBox();
+  expect(health!.x).toBeGreaterThan(viewport.width * 0.6);
+  expect(health!.y).toBeLessThan(viewport.height * 0.15);
+  expect(weapons!.x).toBeGreaterThan(viewport.width * 0.8);
+  expect(flags!.x).toBeLessThan(viewport.width * 0.1);
+  expect(flags!.y).toBeGreaterThan(viewport.height * 0.7);
+
   const crosshairBox = await page.locator('#crosshair').boundingBox();
   expect(crosshairBox).not.toBeNull();
   expect(crosshairBox?.x).toBeGreaterThanOrEqual(0);

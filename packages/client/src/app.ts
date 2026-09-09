@@ -21,7 +21,7 @@ import {
   respawnPlayer,
   findSpawnPosition,
   setGodMode,
-  spawnVehicleAtPad,
+  requestVehicleAtPad,
   stepPower,
   stepWorld,
   vehiclePadAt,
@@ -224,15 +224,7 @@ function moveFreeCam(app: App, dt: number): void {
   if (app.input.isDown('ControlLeft')) app.freeCamPosition.y -= speed;
 }
 
-/** Third-person chase camera while mounted (M5, Task 13): positioned cameraMaxDist behind
- *  and cameraOffset above the vehicle along its own current heading (not the player's own
- *  look direction -- input.yaw/pitch instead steer the vehicle itself, see vehicles.ts's
- *  normalizeAngle-based steering), smoothed toward that target by cameraLag rather than
- *  snapping there every frame, the same "not a hard snap" feel moveFreeCam's own free-cam
- *  movement already has. Numbers are real, per vehicle kind (vehicles/vehicle_shrike.cs:
- *  112-114, vehicles/vehicle_wildcat.cs:98-100).
- *  Returns whether it placed a vehicle camera; `placeCamera` falls back to the player's own
- *  first-person view when this returns false (not mounted). */
+/** Shrike uses its authored Eye node; Wildcat keeps a trailing chase camera. */
 function placeVehicleCamera(app: App, vehicleId: number, dt: number): boolean {
   const vehicles = app.world.vehicles;
   const kind = vehicles.kind[vehicleId] as VehicleKind;
@@ -250,6 +242,15 @@ function placeVehicleCamera(app: App, vehicleId: number, dt: number): boolean {
     Math.sin(pitch),
     Math.cos(yaw) * Math.cos(pitch),
   );
+  if (kind === VehicleKind.Shrike) {
+    const mesh = app.scene.getObjectByName(`vehicle-${String(vehicleId)}`);
+    const eye = mesh?.getObjectByName('Eye');
+    if (eye) eye.getWorldPosition(app.camera.position);
+    else app.camera.position.copy(vehiclePos).add(new THREE.Vector3(0, 1.4, 0.5));
+    aimCamera(app.camera, yaw, pitch);
+    app.camera.rotateZ(-(vehicles.roll[vehicleId] ?? 0));
+    return true;
+  }
   const desired = vehiclePos
     .clone()
     .addScaledVector(heading, -data.cameraMaxDist)
@@ -265,8 +266,28 @@ function placeVehicleCamera(app: App, vehicleId: number, dt: number): boolean {
   return true;
 }
 
+function syncPilotInput(app: App, previous: number): number {
+  const mounted = app.world.players.mountedVehicleId[app.playerId] ?? -1;
+  if (mounted !== -1 && mounted !== previous) {
+    app.input.yaw = app.world.vehicles.yaw[mounted] ?? 0;
+    app.input.pitch = app.world.vehicles.pitch[mounted] ?? 0;
+  }
+  return mounted;
+}
+
+function cameraFov(app: App, mounted: number): number {
+  return !app.freeCam && mounted !== -1 && app.world.vehicles.kind[mounted] === VehicleKind.Shrike
+    ? 65
+    : 90;
+}
+
 function placeCamera(app: App, sky: THREE.Object3D, dt: number): void {
   const mountedVehicleId = app.world.players.mountedVehicleId[app.playerId] ?? -1;
+  const fov = cameraFov(app, mountedVehicleId);
+  if (app.camera.fov !== fov) {
+    app.camera.fov = fov;
+    app.camera.updateProjectionMatrix();
+  }
   if (app.freeCam) {
     aimCamera(app.camera, app.input.yaw, app.input.pitch);
     app.camera.position.copy(app.freeCamPosition);
@@ -1236,10 +1257,15 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   // (Task 11) -- without this, a client walking into a wall or a powered force field would
   // predict straight through it until the next snapshot corrected the mispredict.
   const baseObjectView = createBaseObjectView(scene, assets);
-  const vehicleView = createVehicleView(scene, assets, (vehicle) => {
-    spawnVehicleExplosion(scene, effects, vehicle);
-    audio.explosion(vehicle);
-  });
+  const vehicleView = createVehicleView(
+    scene,
+    assets,
+    (vehicle) => {
+      spawnVehicleExplosion(scene, effects, vehicle);
+      audio.explosion(vehicle);
+    },
+    baseObjectView.baseObjectMeshes,
+  );
   const weaponModel = createWeaponModel();
 
   const camera = new THREE.PerspectiveCamera(
@@ -1287,9 +1313,10 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     document.body,
     (padId: number, kind: VehicleKind) => {
       if (net) net.sendVehicleSpawn(padId, kind);
-      else spawnVehicleAtPad(world, padId, kind);
+      else requestVehicleAtPad(world, playerId, padId, kind);
       vehiclePadMenuState.open = false;
       input.setUiOpen(false);
+      input.resumeMouseLook();
     },
     () => {
       vehiclePadMenuState.open = false;
@@ -1333,6 +1360,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   // assigns `app.godMode = enabled`.
   let godModeFlag = false;
 
+  let previousMounted = -1;
   const app: App = {
     world,
     playerId,
@@ -1386,6 +1414,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     dispose(): void {
       audio.dispose();
       weaponModel.dispose();
+      vehicleView.dispose();
       interactionPrompt.dispose();
     },
     frame(dtSeconds: number): void {
@@ -1402,6 +1431,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       // and syncBaseAssetsView's own station/pad menu toggles below, rather than each calling
       // it separately.
       const usePressed = !app.freeCam && input.usePressedThisFrame();
+      previousMounted = syncPilotInput(app, previousMounted);
       const currentInput = gameplayInput(app, usePressed);
       const simStart = performance.now();
       if (net) {

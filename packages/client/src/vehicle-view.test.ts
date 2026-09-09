@@ -95,6 +95,28 @@ describe('createVehicleView', () => {
     expect(destroyed).toHaveBeenCalledTimes(1);
   });
 
+  it('disposes vehicle geometry, fabrication effects, and pad mixers on teardown', () => {
+    const scene = new THREE.Scene();
+    const pad = new THREE.Group();
+    const disposeMixer = vi.fn();
+    pad.userData.shapeAnimation = { dispose: disposeMixer };
+    const view = createVehicleView(scene, proceduralAssets, undefined, new Map([[0, pad]]));
+    view.sync([vehicleData({ spawnTime: 4, padId: 0 })]);
+    const mesh = view.meshes.get(0)!;
+    const geometry = (mesh.children[0]!.children[0] as THREE.Mesh).geometry;
+    const disposeGeometry = vi.spyOn(geometry, 'dispose');
+    const effect = scene.getObjectByName('vehicle-fabrication') as THREE.Mesh;
+    const disposeEffect = vi.spyOn(effect.geometry, 'dispose');
+    view.dispose();
+    expect(disposeGeometry).toHaveBeenCalled();
+    expect(disposeEffect).toHaveBeenCalledOnce();
+    expect(disposeMixer).toHaveBeenCalledOnce();
+    expect(view.meshes.size).toBe(0);
+    expect(scene.children).toHaveLength(0);
+    view.sync([vehicleData({})]);
+    expect(view.meshes.size).toBe(0);
+  });
+
   it('a glb-tier vehicle requests its real shape', () => {
     const loadSpy = vi.spyOn(GLTFLoader.prototype, 'load');
     const scene = new THREE.Scene();

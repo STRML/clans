@@ -170,6 +170,7 @@ export function removePlayer(world: World, id: number): void {
   // it was -- only the dangling driverId is cleared, not the vehicle's position/velocity.
   for (let vId = 0; vId < world.vehicles.count; vId += 1) {
     if (world.vehicles.driverId[vId] === id) world.vehicles.driverId[vId] = -1;
+    if (world.vehicles.reservedPilotId[vId] === id) world.vehicles.reservedPilotId[vId] = -1;
   }
 }
 

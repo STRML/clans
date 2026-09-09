@@ -78,19 +78,21 @@ map showing your team's base status and any enemy contacts inside your team's se
 `docs/superpowers/specs/2026-09-05-clans-tribes2-browser-demo-design.md` for exactly how
 power, shields, and sensor coverage work.
 
-Nearby usable stations and vehicles show an `E` prompt. Popup menus release the mouse cursor;
+Inventory stations show an optional `E` prompt; vehicle stations activate on contact without one. Popup menus release the mouse cursor;
 close them with their Close button or Escape, then click the game to resume mouse look.
 
 ## Vehicles
 
 Each team's vehicle pad spawns a Shrike (a fast, armed flyer) or a Wildcat (a hovering ground
 scout) once its team has power. Walk onto the small control station beside the pad to open
-the spawn menu, or press `E` near that station. The control station uses the original model
+the spawn menu. Press `1` for a Shrike or `2` for a Wildcat, or click its button. The control station uses the original model
 and the pad's authored attachment position. Picking a vehicle replaces whatever the pad
-already hosts; the new vehicle appears on the large platform. Walk up to an
+already hosts. The pad animates during a 6.5-second fabrication sequence; the vehicle
+appears after 4.8 seconds, its wings unfold, and you are automatically teleported into it. Walk up to an
 unoccupied vehicle to board it automatically — your own weapons go silent, the camera moves
-to a third-person chase view, and WASD/mouse drive the vehicle's real T2 flight or hover
-physics instead of your own movement. The Shrike's twin-barrel blaster fires from your own
+to the Shrike's authored cockpit eye (the Wildcat retains a chase camera). WASD/mouse
+control the vehicle, with damped steering and A/D lateral thrust on the Shrike. The flight
+controller is a demo adaptation using T2 force values, not a port of Torque's rigid-body solver. The Shrike's twin-barrel blaster fires from your own
 fire button. Both vehicles take collision, ground-impact, and weapon damage against a shielded
 energy pool, and explode past their damage cap, ejecting the pilot. Each team's AA barrel
 turret now finds and fires on enemy vehicles in range with line of sight. Press `E` again to
@@ -98,6 +100,20 @@ dismount; leave boarding range before walking back to board again. The vehicle H
 shield energy and hull health separately. Collision damage depends on speed into the surface,
 so a fast glancing scrape does not count as a head-on crash. Destruction produces an expanding
 explosion and sound.
+
+## Screenshots
+
+Katabatic on foot, with the corner HUD and original weapon model:
+
+![First-person gameplay on Katabatic](docs/screenshots/katabatic.jpg)
+
+Vehicle fabrication using the original pad animation:
+
+![Vehicle pad activation and blue fabrication field](docs/screenshots/vehicle-fabrication.jpg)
+
+The Shrike cockpit, with its nose visible and flight instruments below:
+
+![First-person Shrike cockpit over Katabatic](docs/screenshots/shrike-cockpit.jpg)
 
 ## Command circuit
 

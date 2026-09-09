@@ -37,7 +37,7 @@ export enum OrderKind {
 // orders block, throwing on every single snapshot. Bumping the version instead makes
 // WelcomeStatus.VersionMismatch catch this exactly like it already catches every other
 // wire-format change, in both directions.
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 export enum WelcomeStatus {
   Ok = 0,

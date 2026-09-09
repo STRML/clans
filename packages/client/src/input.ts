@@ -23,17 +23,20 @@ export class Input {
 
   constructor(private readonly target: HTMLElement) {}
 
+  /** Called only from a click/key gesture, including vehicle selection. */
+  resumeMouseLook(): void {
+    if (this.uiOpen) return;
+    this.resumeClick = false;
+    if (document.pointerLockElement !== this.target) {
+      void this.target.requestPointerLock()?.catch(() => {
+        this.resumeClick = true;
+      });
+    }
+  }
+
   attach(): void {
     const { target } = this;
-    target.addEventListener('click', () => {
-      if (this.uiOpen) return;
-      this.resumeClick = false;
-      if (document.pointerLockElement !== target) {
-        void target.requestPointerLock()?.catch(() => {
-          this.resumeClick = true;
-        });
-      }
-    });
+    target.addEventListener('click', () => this.resumeMouseLook());
     target.addEventListener('contextmenu', (event) => event.preventDefault());
     window.addEventListener('keydown', (event) => {
       if (event.code === 'Space' || event.code.startsWith('F')) event.preventDefault();
