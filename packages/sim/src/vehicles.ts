@@ -158,8 +158,20 @@ function flushPendingVehicleFreeIds(vehicles: VehicleStore): void {
   const stillPending: PendingFreeId[] = [];
   for (const entry of vehicles.pendingFreeIds) {
     entry.ticksRemaining -= 1;
-    if (entry.ticksRemaining <= 0) vehicles.freeIds.push(entry.id);
-    else stillPending.push(entry);
+    if (entry.ticksRemaining > 0) {
+      stillPending.push(entry);
+      continue;
+    }
+    // Issue #26: the tick the id actually frees is also the tick the slot must stop being
+    // a live snapshot entry -- serializeActiveVehicles ships every slot with active === 1,
+    // so without this the wreck's entry kept going out on every snapshot for the rest of
+    // the match even after its id was back in freeIds. Deactivating exactly here, not at
+    // destruction time, is what keeps the row-18 visibility window whole (see the
+    // VEHICLE_ID_REUSE_DELAY_TICKS comment above): the slot stays active+destroyed for all
+    // three retained ticks, so every snapshot inside the window still reads destroyed=1,
+    // and spawnVehicleAtPad reactivates the slot itself when the freed id is reused.
+    vehicles.active[entry.id] = 0;
+    vehicles.freeIds.push(entry.id);
   }
   vehicles.pendingFreeIds = stillPending;
 }

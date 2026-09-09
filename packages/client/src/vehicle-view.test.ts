@@ -151,6 +151,22 @@ describe('createVehicleView', () => {
     view.sync([]);
     expect(view.meshes.size).toBe(0);
   });
+
+  it('a reused id arriving as a different kind recreates the mesh instead of reusing the old one (issue #27)', () => {
+    const scene = new THREE.Scene();
+    const view = createVehicleView(scene, proceduralAssets);
+    view.sync([vehicleData({ id: 3, kind: VehicleKind.Shrike, x: 10 })]);
+    const shrikeMesh = view.meshes.get(3);
+    expect(shrikeMesh).toBeDefined();
+    // Same id, still alive, different kind: only id reuse produces this on the wire, and
+    // the new vehicle must never render with the old one's mesh (issue #27).
+    view.sync([vehicleData({ id: 3, kind: VehicleKind.Wildcat, x: 12 })]);
+    const wildcatMesh = view.meshes.get(3);
+    expect(wildcatMesh).toBeDefined();
+    expect(wildcatMesh).not.toBe(shrikeMesh);
+    expect(scene.children).not.toContain(shrikeMesh);
+    expect(scene.children).toContain(wildcatMesh);
+  });
 });
 
 // Codex review round 1 (this PR), finding 9: before VehicleBuffer existed, every OTHER
@@ -184,6 +200,36 @@ describe('VehicleBuffer', () => {
     expect(buffer.latest()?.energy).toBe(100);
     expect(buffer.latest()?.damage).toBeCloseTo(0.2);
     expect(buffer.latest()?.driverId).toBe(3);
+  });
+
+  it('a same-id destroy/respawn resets history: the respawn does not interpolate from the wreck (issue #27)', () => {
+    const buffer = new VehicleBuffer();
+    buffer.push(0, vehicleData({ x: 100, destroyed: 1 }));
+    // Same kind, respawned 5 m from the wreck -- under any teleport threshold, so only
+    // the destroyed -> alive lifecycle boundary can catch this one.
+    buffer.push(100, vehicleData({ x: 105 }));
+    expect(buffer.positionAt(150)?.x).toBeCloseTo(105);
+  });
+
+  it('a kind change on a live id is reuse: history resets with no destroyed sample in between (issue #27)', () => {
+    const buffer = new VehicleBuffer();
+    buffer.push(0, vehicleData({ kind: VehicleKind.Shrike, x: 0 }));
+    buffer.push(100, vehicleData({ kind: VehicleKind.Wildcat, x: 2 }));
+    expect(buffer.positionAt(150)?.x).toBeCloseTo(2);
+  });
+
+  it('a respawn far from the last sample snaps instead of smearing even with no destroyed sample observed (issue #27)', () => {
+    const buffer = new VehicleBuffer();
+    buffer.push(0, vehicleData({ x: 0 }));
+    buffer.push(100, vehicleData({ x: 100 }));
+    expect(buffer.positionAt(150)?.x).toBeCloseTo(100);
+  });
+
+  it('an ordinary death keeps history: the wreck interpolates from where the vehicle actually was', () => {
+    const buffer = new VehicleBuffer();
+    buffer.push(0, vehicleData({ x: 0 }));
+    buffer.push(100, vehicleData({ x: 10, destroyed: 1 }));
+    expect(buffer.positionAt(150)?.x).toBeCloseTo(5);
   });
 });
 

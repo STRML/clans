@@ -90,6 +90,39 @@ function lerpVehiclePose(
   };
 }
 
+// Issue #27: a pushed sample that continues a DIFFERENT vehicle's id must not land in the
+// same interpolation history as the old one, or the respawn smears from where the wreck
+// died. app.ts's pruneStaleVehicleBuffers is the primary reset -- a freed slot vanishes
+// from snapshots entirely once vehicles.ts deactivates it -- but it only observes absence
+// if some snapshot lands while the id is gone, and one dropped snapshot can cover the
+// whole VEHICLE_ID_REUSE_DELAY_TICKS retention window, leaving push() to see the wreck's
+// last destroyed=1 sample followed directly by the respawn. Lifecycle identity first,
+// geometry last:
+// - a kind change on the same id is always reuse -- continuous motion never changes kind;
+// - destroyed -> alive is always reuse -- nothing in the sim un-destroys a vehicle. This
+//   is the only mechanism that can catch a same-kind respawn NEAR the wreck, where any
+//   distance heuristic structurally fails (remote.ts's own WONTFIX comment, PR #4 M2,
+//   explains why players can't do better -- they carry no lifecycle flag on the wire;
+//   vehicles do, in the destroyed bit);
+// - distance is only the backstop for the one hole samples cannot close: a same-kind
+//   respawn with every in-between snapshot dropped. Same 15 m threshold as remote.ts's
+//   TELEPORT_DISTANCE_M: a legitimate gap that big needs >= 150 ms of dropped snapshots
+//   at a full Shrike sprint (SHRIKE_MAX_FORWARD_SPEED 100 m/s; a Wildcat tops out at 15),
+//   and under real packet loss an instant snap is the correct artifact anyway.
+const VEHICLE_TELEPORT_DISTANCE_M = 15; // matches remote.ts's own TELEPORT_DISTANCE_M
+
+function vehicleIdReusesPreviousSample(
+  previous: VehicleSample,
+  data: VehicleSnapshotData,
+): boolean {
+  if (previous.data.kind !== data.kind) return true;
+  if (previous.data.destroyed && !data.destroyed) return true;
+  return (
+    Math.hypot(previous.data.x - data.x, previous.data.y - data.y, previous.data.z - data.z) >
+    VEHICLE_TELEPORT_DISTANCE_M
+  );
+}
+
 /** One vehicle id's own interpolation history. Only position/orientation are smoothed --
  *  everything else on a sample (kind/team/energy/damage/destroyed/driverId/...) is discrete
  *  logical state a client should show as of the LATEST sample, never blended, so callers read
@@ -98,6 +131,8 @@ export class VehicleBuffer {
   private samples: VehicleSample[] = [];
 
   push(atMs: number, data: VehicleSnapshotData): void {
+    const latest = this.samples.at(-1);
+    if (latest && vehicleIdReusesPreviousSample(latest, data)) this.samples.length = 0;
     this.samples.push({ atMs, data });
     if (this.samples.length > VEHICLE_HISTORY_LENGTH) this.samples.shift();
   }
@@ -210,6 +245,36 @@ function createVehicleMesh(assets: Pick<KatabaticAssets, 'scene'>, kind: Vehicle
   return group;
 }
 
+/** Returns id's own mesh, recreating it whenever the id no longer matches the mesh that
+ *  exists for it. Issue #27: mesh identity must track the vehicle's kind, not just its id
+ *  -- a reused Shrike id arriving as a Wildcat (or vice versa) must not redress the old
+ *  vehicle's mesh. Like VehicleBuffer's own kind-change reset, this only comes up when
+ *  reuse lands without an observed destroyed=1 sample in between (a dropped snapshot
+ *  spanning the whole retention window): a destroyed vehicle is pruned by
+ *  pruneVehicleMeshes, so its replacement builds a fresh mesh anyway. Split out of sync
+ *  to keep that function's own ESLint complexity budget flat. */
+function ensureVehicleMesh(
+  scene: THREE.Scene,
+  assets: Pick<KatabaticAssets, 'scene'>,
+  meshes: Map<number, THREE.Object3D>,
+  data: VehicleSnapshotData,
+): THREE.Object3D {
+  const existing = meshes.get(data.id);
+  if (existing && existing.userData.vehicleKind !== data.kind) {
+    scene.remove(existing);
+    disposeShape(existing);
+    meshes.delete(data.id);
+  }
+  const mesh = meshes.get(data.id);
+  if (mesh) return mesh;
+  const created = createVehicleMesh(assets, data.kind as VehicleKind);
+  created.userData.vehicleKind = data.kind;
+  created.name = `vehicle-${String(data.id)}`;
+  scene.add(created);
+  meshes.set(data.id, created);
+  return created;
+}
+
 function pruneVehicleMeshes(
   scene: THREE.Scene,
   meshes: Map<number, THREE.Object3D>,
@@ -255,13 +320,7 @@ export function createVehicleView(
       const liveIds = new Set(live.map((v) => v.id));
       pruneVehicleMeshes(scene, meshes, liveIds);
       for (const data of live) {
-        let mesh = meshes.get(data.id);
-        if (!mesh) {
-          mesh = createVehicleMesh(assets, data.kind as VehicleKind);
-          mesh.name = `vehicle-${String(data.id)}`;
-          scene.add(mesh);
-          meshes.set(data.id, mesh);
-        }
+        const mesh = ensureVehicleMesh(scene, assets, meshes, data);
         placeVehicleMesh(mesh, data);
         poseVehicleActivation(mesh, data.spawnTime ?? 0);
         syncLaunchEffect(scene, launchEffects, pads, data);

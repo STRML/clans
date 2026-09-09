@@ -5,6 +5,7 @@ import {
   buildInteriorCollider,
   createWorld,
   removePlayer,
+  serializeActiveVehicles,
   type Heightfield,
   type PlayerInput,
 } from './index.js';
@@ -859,6 +860,53 @@ describe('vehicle id retention and reuse', () => {
       stepVehicles(world, new Map(), 1 / 32);
     }
     expect(world.pendingVehicleDestroyed.length).toBeLessThanOrEqual(1);
+  });
+
+  it('a combat-destroyed vehicle stays serialized as destroyed for the whole retention window, then stops shipping (issue #26)', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const id = spawnVehicleAtPad(world, padId, VehicleKind.Shrike) as number;
+    world.vehicles.energy[id] = 0;
+    applyVehicleDamage(world, id, 10, -1);
+    // Inside the window the slot is still active, still serialized, and still reads
+    // destroyed=1 -- exactly the visibility the VEHICLE_ID_REUSE_DELAY_TICKS delay exists
+    // to preserve (failure matrix row 18).
+    stepVehicles(world, new Map(), 1 / 32);
+    expect(world.vehicles.active[id]).toBe(1);
+    expect(serializeActiveVehicles(world).some((v) => v.id === id && v.destroyed === 1)).toBe(true);
+    stepVehicles(world, new Map(), 1 / 32);
+    expect(world.vehicles.active[id]).toBe(1);
+    // The flush that frees the id deactivates it in the same breath: the wreck's entry
+    // stops shipping instead of persisting for the rest of the match (issue #26).
+    stepVehicles(world, new Map(), 1 / 32);
+    expect(world.vehicles.active[id]).toBe(0);
+    expect(serializeActiveVehicles(world).some((v) => v.id === id)).toBe(false);
+    expect(world.vehicles.freeIds).toContain(id);
+  });
+
+  it('allocation cannot hand out a destroyed id until its flush has deactivated it, and the reuse reactivates it (issue #26)', () => {
+    const world = createWorld(flat, 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: 5, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationVehiclePad, team: 1, position: { x: -5, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    const first = spawnVehicleAtPad(world, 1, VehicleKind.Shrike) as number;
+    expect(first).toBe(0);
+    world.vehicles.energy[first] = 0;
+    applyVehicleDamage(world, first, 10, -1);
+    // Still retained and still active mid-window: the other pad's spawn must take a
+    // fresh id, not the wreck's.
+    expect(spawnVehicleAtPad(world, 2, VehicleKind.Wildcat)).not.toBe(first);
+    expect(world.vehicles.freeIds).not.toContain(first);
+    for (let tick = 0; tick < 3; tick += 1) stepVehicles(world, new Map(), 1 / 32);
+    expect(world.vehicles.active[first]).toBe(0);
+    expect(world.vehicles.freeIds).toContain(first);
+    const respawned = spawnVehicleAtPad(world, 2, VehicleKind.Shrike) as number;
+    expect(respawned).toBe(first);
+    expect(world.vehicles.active[first]).toBe(1);
+    expect(world.vehicles.destroyed[first]).toBe(0);
   });
 });
 
