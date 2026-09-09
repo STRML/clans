@@ -1,6 +1,12 @@
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   addPlayer,
+  createBaseObjects,
+  createFlags,
+  createTurrets,
   createWorld,
   stepWorld,
   raycastInteriors,
@@ -13,6 +19,7 @@ import {
   smallerTeam,
   spawnPointFor,
   teamCount,
+  WORLD_CAPACITY,
   type SceneSpawn,
 } from './world.js';
 
@@ -132,10 +139,85 @@ describe('server world bootstrap', () => {
   });
 });
 
+// Issue #58: this loop used to call loadKatabaticWorld() once per spawn sample --
+// 64 full fixture loads per run, each re-reading heights.bin plus all 29 interior
+// collision files and rebuilding every interior collider (roughly 2,100 file reads
+// and 1,856 collider builds per test, ~1.6 s isolated). Under a loaded full-suite
+// run that crossed vitest's 5 s per-test budget even though spawning itself was
+// fine. Only the fixture's immutable pieces are expensive, so load them once:
+// interiors.ts builds each collider's uniform grid exactly once at load and every
+// consumer (raycastInteriors, resolveSphereAgainstInteriors, the movement sweeps)
+// takes readonly instances, and sampleTerrain only reads the heightfield. The
+// per-sample world is still pristine -- fresh flags, base objects, turrets and
+// player store each iteration via the same create* calls loadKatabaticWorld makes
+// -- so turret aim and projectile state cannot leak between spawn samples the way
+// stepping all 64 samples in one shared world would allow.
 it('every real spawn lets a player walk forward out of the starting area', async () => {
+  const { world: fixture, spawns } = await loadKatabaticWorld();
+  // The same committed scene loadKatabaticWorld reads, re-read here only because
+  // it does not return the scene; one small JSON read beats re-decoding every
+  // binary asset per sample.
+  const scene = JSON.parse(
+    await readFile(
+      resolve(
+        fileURLToPath(new URL('../', import.meta.url)),
+        '../../assets/out/katabatic',
+        'scene.json',
+      ),
+      'utf8',
+    ),
+  ) as {
+    flagStands: Array<{ team: number; position: [number, number, number] }>;
+    baseObjects: Array<{
+      kind: number;
+      team: number;
+      position: [number, number, number];
+      usePosition?: [number, number, number];
+      rotation?: { axis: [number, number, number]; degrees: number };
+      scale?: [number, number, number];
+    }>;
+    turrets: Array<{ barrel: number; team: number; position: [number, number, number] }>;
+  };
   for (const team of [1, 2])
     for (const index of Array.from({ length: 32 }, (_, i) => i)) {
-      const { world, spawns } = await loadKatabaticWorld();
+      const world = createWorld(fixture.terrain, 1, WORLD_CAPACITY);
+      createFlags(
+        world,
+        scene.flagStands.map(({ team, position: [x, y, z] }) => ({ team, position: { x, y, z } })),
+      );
+      createBaseObjects(
+        world,
+        scene.baseObjects.map(
+          ({ kind, team, position: [x, y, z], usePosition, rotation, scale }) => ({
+            kind,
+            team,
+            position: { x, y, z },
+            ...(usePosition && {
+              usePosition: { x: usePosition[0], y: usePosition[1], z: usePosition[2] },
+            }),
+            ...(rotation && {
+              rotation: {
+                axis: {
+                  x: rotation.axis[0],
+                  y: rotation.axis[1],
+                  z: rotation.axis[2],
+                },
+                degrees: rotation.degrees,
+              },
+            }),
+            ...(scale && { scale: { x: scale[0], y: scale[1], z: scale[2] } }),
+          }),
+        ),
+      );
+      createTurrets(
+        world,
+        scene.turrets.map(({ barrel, team, position: [x, y, z] }) => ({
+          barrel,
+          team,
+          position: { x, y, z },
+        })),
+      );
+      world.interiors = fixture.interiors;
       const [x, y, z] = spawnPointFor(world.terrain, spawns, team, index, world.interiors);
       const id = addPlayer(world, { x, y, z }, team);
       const input = {

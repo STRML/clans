@@ -90,6 +90,16 @@ export async function createTerrain(data: KatabaticAssets): Promise<THREE.Mesh> 
       },
     },
     vertexShader: `varying vec2 vUv; varying float vFogDepth; varying vec3 vNormal; void main(){vUv=uv;vNormal=normalize(mat3(modelMatrix)*normal);vec4 mv=modelViewMatrix*vec4(position,1.0);vFogDepth=-mv.z;gl_Position=projectionMatrix*mv;}`,
+    // Issue #2: T2's terrain renderer tiles each material per terrain square (8 m)
+    // with a per-material scale, but no committed evidence pins down Katabatic's
+    // actual number: the .ter v2 layout the m1 asset decoder documents stores only
+    // heights, material indices, material names and alpha maps (no scale field),
+    // assets/out/katabatic/terrain.json has no scale either, docs/ui-audio-reference.md
+    // covers UI/audio/projectile fidelity but not terrain tiling, and the Torque
+    // terrain renderer source that would set the repeat is not in the repo. So the
+    // 64 below stays the pre-issue artistic guess (~32 m per repeat over the 2048 m
+    // block) until a side-by-side Katabatic screenshot comparison supplies the real
+    // scale -- do not bump this constant without that evidence.
     fragmentShader: `uniform sampler2D map0,map1,map2,map3,alpha0,alpha1,alpha2,alpha3;uniform vec3 fogColor,sunDirection,sunColor,ambientColor;uniform float fogNear,fogFar;varying vec2 vUv;varying float vFogDepth;varying vec3 vNormal;void main(){vec2 tile=vUv*64.0;vec4 w=vec4(texture2D(alpha0,vUv).r,texture2D(alpha1,vUv).r,texture2D(alpha2,vUv).r,texture2D(alpha3,vUv).r);w/=max(dot(w,vec4(1.0)),0.0001);vec3 albedo=texture2D(map0,tile).rgb*w.x+texture2D(map1,tile).rgb*w.y+texture2D(map2,tile).rgb*w.z+texture2D(map3,tile).rgb*w.w;float lambert=max(dot(normalize(vNormal),sunDirection),0.0);vec3 color=albedo*(ambientColor+sunColor*lambert);float fog=smoothstep(fogNear,fogFar,vFogDepth);gl_FragColor=vec4(mix(color,fogColor,fog),1.0);}`,
   });
   const mesh = new THREE.Mesh(buildTerrainGeometry(data), material);
