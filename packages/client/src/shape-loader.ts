@@ -39,6 +39,24 @@ export function disposeShape(root: THREE.Object3D): void {
   root.clear();
 }
 
+function prepareMaterial(material: THREE.Material): void {
+  // glTF has no additive blend mode; preserve Torque's exported flag at runtime.
+  const flags = material.userData.flag_names as string[] | undefined;
+  if (flags?.includes('Additive')) {
+    material.blending = THREE.AdditiveBlending;
+    material.transparent = true;
+    material.depthWrite = false;
+  }
+  if (!(material instanceof THREE.MeshStandardMaterial)) return;
+  // DIF exports carry baked lighting in glTF's emissive texture / UV1.
+  if (material.emissiveMap?.channel === 1) {
+    material.lightMap = material.emissiveMap;
+    material.lightMap.colorSpace = THREE.SRGBColorSpace;
+    material.emissiveMap = null;
+    material.needsUpdate = true;
+  }
+}
+
 /** Retain the fallback on failure, but make the failing asset visible in diagnostics. */
 export function loadShapeInto(
   root: THREE.Object3D,
@@ -67,14 +85,7 @@ export function loadShapeInto(
           if (node instanceof THREE.Mesh) {
             hasMesh = true;
             for (const material of Array.isArray(node.material) ? node.material : [node.material]) {
-              if (!(material instanceof THREE.MeshStandardMaterial)) continue;
-              // DIF exports carry baked lighting in glTF's emissive texture / UV1.
-              if (material.emissiveMap?.channel === 1) {
-                material.lightMap = material.emissiveMap;
-                material.lightMap.colorSpace = THREE.SRGBColorSpace;
-                material.emissiveMap = null;
-                material.needsUpdate = true;
-              }
+              prepareMaterial(material);
             }
           }
           if (typeof node.userData.vis === 'number') node.visible = node.userData.vis > 0;

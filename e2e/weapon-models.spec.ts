@@ -18,6 +18,40 @@ test('all five original first-person weapons load textured geometry and render w
       { timeout: 20_000 },
     )
     .toBe(5);
+  const badGlowMaterials = await page.evaluate(() => {
+    const app = (window as unknown as { __app: App }).__app;
+    const bad: string[] = [];
+    app.weaponModel.root.traverse((node) => {
+      const material = (
+        node as unknown as {
+          material?: {
+            name: string;
+            type: string;
+            map?: unknown;
+            userData: { flag_names?: string[] };
+            blending: number;
+            transparent: boolean;
+            depthWrite: boolean;
+          };
+        }
+      ).material;
+      if (!material) return;
+      const flags = material.userData.flag_names ?? [];
+      if (
+        flags.includes('SelfIlluminating') &&
+        (material.type !== 'MeshBasicMaterial' || !material.map)
+      )
+        bad.push(material.name);
+      // THREE.AdditiveBlending = 2; black pixels in glow textures must not become solid faces.
+      if (
+        flags.includes('Additive') &&
+        (material.blending !== 2 || !material.transparent || material.depthWrite)
+      )
+        bad.push(material.name);
+    });
+    return bad;
+  });
+  expect(badGlowMaterials).toEqual([]);
   for (let weapon = 0; weapon < 5; weapon++) {
     await page.evaluate((id) => {
       const app = (window as unknown as { __app: App }).__app;

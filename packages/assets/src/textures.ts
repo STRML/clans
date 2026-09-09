@@ -2,10 +2,15 @@ import type { VehicleShapeResult } from './vehicleShapes.js';
 import textureSources from './texture-sources.json' with { type: 'json' };
 
 interface GltfMaterial {
-  extras?: { resource_path?: string };
+  extras?: { resource_path?: string; flag_names?: string[] };
+  extensions?: Record<string, unknown>;
+  emissiveFactor?: number[];
+  emissiveTexture?: { index: number; texCoord?: number };
+  alphaMode?: string;
   pbrMetallicRoughness?: { baseColorTexture?: { index: number }; baseColorFactor?: number[] };
 }
 interface GltfJson {
+  extensionsUsed?: string[];
   materials?: GltfMaterial[];
   images?: Array<{ uri?: string }>;
   textures?: Array<{ source: number; sampler?: number }>;
@@ -18,6 +23,19 @@ export function textureKey(resource: string): string {
 
 function materialResource(material: GltfMaterial): string | undefined {
   return material.extras?.resource_path;
+}
+
+function applyDtsFlags(material: GltfMaterial, gltf: GltfJson): void {
+  const flags = material.extras?.flag_names ?? [];
+  if (flags.includes('Translucent')) material.alphaMode = 'BLEND';
+  if (!flags.includes('SelfIlluminating')) return;
+  // Torque self-illumination displays the texture without scene lighting. The exporter
+  // left an untextured white emissive factor, which hides every diffuse detail in white.
+  material.extensions = { ...material.extensions, KHR_materials_unlit: {} };
+  delete material.emissiveFactor;
+  delete material.emissiveTexture;
+  const used = (gltf.extensionsUsed ??= []);
+  if (!used.includes('KHR_materials_unlit')) used.push('KHR_materials_unlit');
 }
 
 function applyDiffuse(material: GltfMaterial, index: number): void {
@@ -51,6 +69,7 @@ export function attachShapeTextures(bytes: Uint8Array): Uint8Array {
       mapped.set(key, index);
     }
     applyDiffuse(material, index);
+    applyDtsFlags(material, gltf);
   }
   return replaceJsonChunk(bytes, gltf, jsonLength);
 }

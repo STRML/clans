@@ -32,3 +32,20 @@ it('uses the procedural vehicle when the unconverted STL fallback is returned', 
     prepareVehicleAsset({ source: 'stl', bytes: new TextEncoder().encode('solid vehicle') }),
   ).toEqual({ source: 'procedural', bytes: null });
 });
+
+it('preserves self-illuminating texture colors instead of a flat white emission', async () => {
+  const original = await readFile(
+    new URL('../../../assets/out/katabatic/shapes/weapon_sniper.glb', import.meta.url),
+  );
+  const transformed = attachShapeTextures(original);
+  const length = new DataView(transformed.buffer).getUint32(12, true);
+  const gltf = JSON.parse(new TextDecoder().decode(transformed.subarray(20, 20 + length)));
+  expect(gltf.extensionsUsed).toContain('KHR_materials_unlit');
+  for (const material of gltf.materials) {
+    expect(material.extensions.KHR_materials_unlit).toEqual({});
+    expect(material.emissiveFactor).toBeUndefined();
+    expect(material.pbrMetallicRoughness.baseColorTexture).toBeDefined();
+    if (material.extras.flag_names.includes('Translucent'))
+      expect(material.alphaMode).toBe('BLEND');
+  }
+});
