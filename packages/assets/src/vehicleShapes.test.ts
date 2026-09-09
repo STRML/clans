@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { convertVehicleShape } from './vehicleShapes.js';
+import { prepareVehicleAsset } from './textures.js';
 
 const GLB_URL = 'https://example.invalid/real.glb';
-const STL_URL = 'https://example.invalid/fallback.stl';
 
 function okResponse(bytes: Uint8Array): Response {
   return {
@@ -30,28 +30,39 @@ describe('convertVehicleShape', () => {
       }),
     );
 
-    const result = await convertVehicleShape(GLB_URL, STL_URL);
+    const result = await convertVehicleShape(GLB_URL);
     expect(result.source).toBe('glb');
     expect(result.bytes).toEqual(glbBytes);
   });
 
-  it('falls back to the STL when the glb fetch fails', async () => {
-    const stlBytes = new Uint8Array([4, 5, 6]);
+  // Issue #29 acceptance: forcing the glb tier to fail must NOT produce bytes that get
+  // published under a .glb name GLTFLoader cannot parse. The old second tier returned
+  // raw STL bytes under source: 'stl' — unrenderable by every consumer — so the tier is
+  // skipped outright: no STL fetch happens at all, and the composed build pipeline
+  // (build.ts's exact convertVehicleShape -> prepareVehicleAsset -> write-if-bytes
+  // sequence) emits no file and labels the vehicle honestly as procedural.
+  it('falls back to procedural without fetching an STL when the glb fetch fails', async () => {
+    const requested: string[] = [];
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: string | URL) => {
-        if (String(url) === GLB_URL) return failResponse(404);
-        if (String(url) === STL_URL) return okResponse(stlBytes);
-        throw new Error(`unexpected url: ${String(url)}`);
+        requested.push(String(url));
+        return failResponse(404);
       }),
     );
 
-    const result = await convertVehicleShape(GLB_URL, STL_URL);
-    expect(result.source).toBe('stl');
-    expect(result.bytes).toEqual(stlBytes);
+    const result = await convertVehicleShape(GLB_URL);
+    expect(result).toEqual({ source: 'procedural', bytes: null });
+    expect(requested).toEqual([GLB_URL]);
+
+    // The seam build.ts actually publishes through: no bytes -> no .glb written, and
+    // scene.json's vehicles[kind].source reads 'procedural', which the client treats as
+    // "keep the placeholder mesh, never attempt a GLTFLoader load".
+    const prepared = prepareVehicleAsset(result);
+    expect(prepared).toEqual({ source: 'procedural', bytes: null });
   });
 
-  it('falls back to procedural when both the glb and the STL fail', async () => {
+  it('falls back to procedural when the glb fetch throws', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
@@ -59,7 +70,7 @@ describe('convertVehicleShape', () => {
       }),
     );
 
-    const result = await convertVehicleShape(GLB_URL, STL_URL);
+    const result = await convertVehicleShape(GLB_URL);
     expect(result.source).toBe('procedural');
     expect(result.bytes).toBeNull();
   });

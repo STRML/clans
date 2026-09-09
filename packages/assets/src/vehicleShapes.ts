@@ -15,19 +15,21 @@ async function tryFetch(url: string): Promise<Uint8Array | null> {
   }
 }
 
-export async function convertVehicleShape(
-  glbUrl: string,
-  stlUrl: string,
-): Promise<VehicleShapeResult> {
+export async function convertVehicleShape(glbUrl: string): Promise<VehicleShapeResult> {
   const glb = await tryFetch(glbUrl);
   if (glb) return { source: 'glb', bytes: glb };
 
-  // Full STL -> glb triangle conversion is deferred: this tier is not exercised
-  // by the real Katabatic build this milestone, since the glb tier already
-  // resolves for both vehicles (see the plan's Task 11 numbers table). Return
-  // the raw STL bytes so callers/tests can observe that the fallback happened.
-  const stl = await tryFetch(stlUrl);
-  if (stl) return { source: 'stl', bytes: stl };
-
+  // Issue #29 (PR #23 review round 2, finding 8): this function used to fetch the raw
+  // .stl source here and return those bytes under source: 'stl', but no consumer can
+  // render them — build.ts writes a shape result straight to its .glb output path and
+  // the client hands that file to GLTFLoader, which cannot parse STL data; the loader's
+  // failure is swallowed and the procedural placeholder stays up anyway. Only
+  // prepareVehicleAsset's discard guard kept those bytes out of the published asset, so
+  // the fetch bought nothing but a guaranteed-discarded network round trip. Skip the
+  // tier explicitly and fall through to the procedural tier, which is what rendered
+  // regardless. 'stl' deliberately remains in the VehicleShapeResult union (and
+  // prepareVehicleAsset keeps defending against it) for the day a real STL -> glb
+  // converter lands; neither Katabatic vehicle exercises this path today — both resolve
+  // the glb tier from the fetch.ts cache.
   return { source: 'procedural', bytes: null };
 }

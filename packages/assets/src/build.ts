@@ -216,27 +216,25 @@ if (totalBytes > ASSET_SIZE_BUDGET_BYTES) {
 // no interior collision triangles here — the sim collides them against terrain/interiors
 // with a simple sphere radius (VEHICLE_DATA[kind].checkRadius) instead of a mesh. Prefer the
 // glb `fetch.ts` already cached locally; only fall through to convertVehicleShape's
-// live-fetch STL/procedural chain if that cache entry is missing.
+// live-fetch glb/procedural chain if that cache entry is missing. There is deliberately
+// no STL tier: a raw .stl cannot be published under a .glb name (issue #29), so an
+// unrenderable-shape day falls through to the client's procedural placeholder.
 const T2_MAPPER_SHAPES_BASE =
   'https://raw.githubusercontent.com/exogen/t2-mapper/HEAD/docs/base/@vl2/shapes.vl2/shapes/';
-const STL_FALLBACK_BASE = 'https://files.nastyhobbit.org/t2-models/stl-files/';
 interface VehicleShapeSpec {
   kind: 'shrike' | 'wildcat';
   cacheName: string;
-  stlName: string;
   outputName: string;
 }
 const VEHICLE_SHAPES: VehicleShapeSpec[] = [
   {
     kind: 'shrike',
     cacheName: 'vehicle_air_scout',
-    stlName: 'Shrike-Fighter',
     outputName: 'vehicle_shrike.glb',
   },
   {
     kind: 'wildcat',
     cacheName: 'vehicle_grav_scout',
-    stlName: 'Wildcat-Grav-Cycle',
     outputName: 'vehicle_wildcat.glb',
   },
 ];
@@ -255,10 +253,7 @@ for (const spec of VEHICLE_SHAPES) {
   const cachedPath = resolve(cache, 'shapes.vl2/shapes', `${spec.cacheName}.glb`);
   const resolved: VehicleShapeResult = (await exists(cachedPath))
     ? { source: 'glb', bytes: await readFile(cachedPath) }
-    : await convertVehicleShape(
-        `${T2_MAPPER_SHAPES_BASE}${spec.cacheName}.glb`,
-        `${STL_FALLBACK_BASE}${spec.stlName}.stl`,
-      );
+    : await convertVehicleShape(`${T2_MAPPER_SHAPES_BASE}${spec.cacheName}.glb`);
   const prepared = prepareVehicleAsset(resolved);
   if (prepared.bytes) {
     await writeFile(resolve(shapesDir, spec.outputName), prepared.bytes);
