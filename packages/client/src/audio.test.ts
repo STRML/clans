@@ -112,6 +112,43 @@ describe('createAudioEngine', () => {
     expect(ctx.createGain).toHaveBeenCalledTimes(2); // master + one pending loop
   });
 
+  // Issue #51: the repair beam's dedicated loop. These follow the exact setJetting loop
+  // assertions above -- the engine never fabricates an oscillator while the (volume-less,
+  // t2-mapper) sample is unavailable, and repeated start calls reuse one pending loop.
+  it('setRepairBeam does not synthesize an oscillator while the sample is unavailable', () => {
+    const ctx = fakeAudioContext();
+    const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
+    engine.setRepairBeam(0, true);
+    expect(ctx.createOscillator).not.toHaveBeenCalled();
+    expect(ctx.createBufferSource).not.toHaveBeenCalled();
+  });
+
+  it('setRepairBeam(true) then setRepairBeam(false) does not leak a running node past dispose', () => {
+    const ctx = fakeAudioContext();
+    const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
+    engine.setRepairBeam(0, true);
+    engine.setRepairBeam(0, false);
+    expect(() => engine.dispose()).not.toThrow();
+  });
+
+  it('setRepairBeam(true) twice only creates one pending loop', () => {
+    const ctx = fakeAudioContext();
+    const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
+    engine.setRepairBeam(0, true);
+    engine.setRepairBeam(0, true);
+    expect(ctx.createGain).toHaveBeenCalledTimes(2); // master + one pending loop
+  });
+
+  it('the repair loop is distinct from the jet loop for the same player', () => {
+    const ctx = fakeAudioContext();
+    const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
+    engine.setJetting(0, true, 1);
+    engine.setRepairBeam(0, true);
+    // Master + two separate pending loops: one repair cue must never steal or share the
+    // jet loop's node graph.
+    expect(ctx.createGain).toHaveBeenCalledTimes(3);
+  });
+
   it('does not start a loop when its sample decodes after dispose', async () => {
     const ctx = fakeAudioContext();
     const resolvers: Array<(buffer: AudioBuffer) => void> = [];

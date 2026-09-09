@@ -4,6 +4,8 @@ import {
   applyDamage,
   createWorld,
   LIGHT_ARMOR,
+  stepPower,
+  stepWorld,
   type Heightfield,
   type PlayerInput,
 } from './index.js';
@@ -116,8 +118,8 @@ describe('stepRepairPacks', () => {
     // 2.5 spends the shield (capacity 50/30 = 1.667) and lets 0.833 through to health --
     // comfortably under maxHealth (1.5), so the generator is damaged but not destroyed. The
     // plan's own text used 20 here, which overkills a Generator's 1.5 maxHealth outright and
-    // destroys it, making it unhealable (stepRepairPacks correctly refuses a destroyed
-    // target) -- a bug in the plan's test data, not this implementation.
+    // destroys it -- since issue #50 a wreck is rebuildable rather than unhealable, but this
+    // test pins the plain damaged-asset heal, so the overkill stays out on purpose.
     applyBaseObjectDamage(world, 0, 2.5);
     expect(world.baseObjects.destroyed[0]).toBe(0);
     const before = world.baseObjects.damage[0] ?? 0;
@@ -181,13 +183,86 @@ describe('stepRepairPacks', () => {
     expect(world.vehicles.destroyed[0]).toBe(1);
   });
 
-  it('failure matrix row 15: does not revive a destroyed generator', () => {
+  it('issue #50: rebuilds a friendly destroyed generator and restores team power', () => {
     const world = createWorld(flat, 1);
     createBaseObjects(world, [
-      { kind: BaseObjectKind.Generator, team: 1, position: { x: 5, y: 0, z: 0 } },
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 5, y: 1, z: 0 } },
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: -5, y: 1, z: 0 } },
     ]);
     applyBaseObjectDamage(world, 0, 1000);
     expect(world.baseObjects.destroyed[0]).toBe(1);
+    // Without a living generator the whole team is unpowered -- the exact perma-offline
+    // state issue #50 set out to make recoverable.
+    stepPower(world);
+    expect(world.baseObjects.powered[1]).toBe(0);
+    const healer = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[healer] = 1;
+    const input = new Map<number, PlayerInput>([
+      [healer, { ...IDLE, packActive: true, yaw: aimingAt({ x: 0, z: 0 }, { x: 5, z: 0 }) }],
+    ]);
+    // The wreck's overkill damage is clamped to maxHealth on the first heal tick, so the
+    // rebuild takes maxHealth/rate ticks: 1.5 / 0.0033 = ~455, not the raw 1000 overkill.
+    for (let tick = 0; tick < 400; tick += 1) stepRepairPacks(world, input, FIXED_DT);
+    expect(world.baseObjects.destroyed[0]).toBe(1);
+    for (let tick = 0; tick < 60; tick += 1) stepRepairPacks(world, input, FIXED_DT);
+    expect(world.baseObjects.destroyed[0]).toBe(0);
+    expect(world.baseObjects.damage[0]).toBe(0);
+    // stepWorld's own stepPower cadence picks the rebuild up: one extra tick restores the
+    // station's powered bit without any manual bookkeeping.
+    stepWorld(world, input);
+    expect(world.baseObjects.powered[1]).toBe(1);
+  });
+
+  it('issue #50: rebuilds a friendly destroyed inventory station', () => {
+    const world = createWorld(flat, 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 5, y: 1, z: 0 } },
+    ]);
+    applyBaseObjectDamage(world, 0, 3);
+    expect(world.baseObjects.destroyed[0]).toBe(1);
+    const healer = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[healer] = 1;
+    const input = new Map<number, PlayerInput>([
+      [healer, { ...IDLE, packActive: true, yaw: aimingAt({ x: 0, z: 0 }, { x: 5, z: 0 }) }],
+    ]);
+    // 1.0 maxHealth / 0.0033 per tick = ~303 ticks of sustained beam work; the station only
+    // returns to service at full rebuild, the same threshold the generator test pins.
+    for (let tick = 0; tick < 290; tick += 1) stepRepairPacks(world, input, FIXED_DT);
+    expect(world.baseObjects.destroyed[0]).toBe(1);
+    for (let tick = 0; tick < 20; tick += 1) stepRepairPacks(world, input, FIXED_DT);
+    expect(world.baseObjects.destroyed[0]).toBe(0);
+    expect(world.baseObjects.damage[0]).toBe(0);
+  });
+
+  it('cannot repair an enemy damaged generator', () => {
+    const world = createWorld(flat, 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 2, position: { x: 5, y: 1, z: 0 } },
+    ]);
+    applyBaseObjectDamage(world, 0, 2.5);
+    const before = world.baseObjects.damage[0] ?? 0;
+    const healer = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[healer] = 1;
+    stepRepairPacks(
+      world,
+      new Map([
+        [healer, { ...IDLE, packActive: true, yaw: aimingAt({ x: 0, z: 0 }, { x: 5, z: 0 }) }],
+      ]),
+      FIXED_DT,
+    );
+    expect(world.baseObjects.damage[0]).toBe(before);
+  });
+
+  it('cannot rebuild an enemy destroyed generator', () => {
+    const world = createWorld(flat, 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 2, position: { x: 5, y: 1, z: 0 } },
+    ]);
+    applyBaseObjectDamage(world, 0, 1000);
+    expect(world.baseObjects.destroyed[0]).toBe(1);
+    // 1000 overkill minus the 50/30 = 1.667 shield capacity: the wreck's raw stored damage,
+    // which must stay untouched by a hostile beam (no clamp, no heal).
+    const before = world.baseObjects.damage[0] ?? 0;
     const healer = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
     world.players.hasRepairPack[healer] = 1;
     stepRepairPacks(
@@ -198,7 +273,26 @@ describe('stepRepairPacks', () => {
       FIXED_DT,
     );
     expect(world.baseObjects.destroyed[0]).toBe(1);
-    expect(world.baseObjects.damage[0]).toBeGreaterThan(0);
+    expect(world.baseObjects.damage[0]).toBe(before);
+  });
+
+  it('cannot repair a friendly generator through terrain', () => {
+    const world = createWorld(wallAcrossX(10), 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 4, y: 1, z: 0 } },
+    ]);
+    applyBaseObjectDamage(world, 0, 2.5);
+    const before = world.baseObjects.damage[0];
+    const healer = addPlayer(world, { x: -4, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[healer] = 1;
+    stepRepairPacks(
+      world,
+      new Map([
+        [healer, { ...IDLE, packActive: true, yaw: aimingAt({ x: -4, z: 0 }, { x: 4, z: 0 }) }],
+      ]),
+      FIXED_DT,
+    );
+    expect(world.baseObjects.damage[0]).toBe(before);
   });
 
   it('repairs a friendly destroyed sentry turret, restoring it only below its disabled level', () => {

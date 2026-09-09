@@ -1,4 +1,4 @@
-import { activeForceFieldBlockers } from './baseObjects.js';
+import { BASE_OBJECT_DATA, BaseObjectKind, activeForceFieldBlockers } from './baseObjects.js';
 import { armorFor } from './armor.js';
 import { playerHitbox, raySphereDistance, type PlayerHitbox } from './damage.js';
 import { raycastInteriors } from './interiors.js';
@@ -13,6 +13,9 @@ interface RepairCandidate {
   kind: 'player' | 'baseObject' | 'turret' | 'vehicle';
   id: number;
   distance: number;
+  /** Target center the beam terminates on -- the same point the line-of-sight check uses,
+   *  so repairBeamTarget can hand the client exact beam endpoints for free. */
+  point: Vec3;
 }
 
 function eyeOrigin(world: World, id: number): Vec3 {
@@ -41,7 +44,7 @@ function candidateFromHitbox(
 ): RepairCandidate | null {
   const distance = raySphereDistance(origin, direction, hitbox);
   if (distance === null || distance > BEAM_RANGE) return null;
-  return { kind, id, distance };
+  return { kind, id, distance, point: hitbox.center };
 }
 
 function nearerCandidate(
@@ -92,13 +95,21 @@ function findDamagedPlayerCandidate(
 
 function findDamagedBaseObjectCandidate(
   world: World,
+  healerId: number,
   origin: Vec3,
   direction: Vec3,
 ): RepairCandidate | null {
   const bases = world.baseObjects;
+  const healerTeam = world.players.team[healerId] ?? 0;
   let nearest: RepairCandidate | null = null;
   for (let id = 0; id < bases.count; id += 1) {
-    if (bases.destroyed[id] || (bases.damage[id] ?? 0) <= 0) continue;
+    // Same rule the turret search already enforces: an enemy asset is never a repair target,
+    // while a friendly WRECK stays targetable so the beam can rebuild it (issue #50 --
+    // destroying both generators used to leave a team permanently without power). A
+    // destroyed object always has damage > 0, so the damaged check below keeps only that
+    // distinction; invincible kinds (vehicle pad, force field) can never accumulate damage
+    // and are excluded here for free.
+    if (bases.team[id] !== healerTeam || (bases.damage[id] ?? 0) <= 0) continue;
     const base = id * 3;
     const hitbox: PlayerHitbox = {
       center: {
@@ -109,6 +120,10 @@ function findDamagedBaseObjectCandidate(
       radius: BASE_OBJECT_HIT_RADIUS,
       headY: Infinity,
     };
+    // The beam follows a real line of sight, the same rule turret candidates already obey:
+    // terrain cannot be rebuilt through. Use the same target point as the ray/sphere hit
+    // test so visual aiming and repair selection agree.
+    if (!hasRepairLineOfSight(world, healerTeam, origin, hitbox.center)) continue;
     nearest = nearerCandidate(
       nearest,
       candidateFromHitbox('baseObject', id, hitbox, origin, direction),
@@ -154,7 +169,10 @@ function findDamagedTurretCandidate(
  *  aren't healable, only their still-standing damaged siblings are" rule; energy (shield) is
  *  deliberately left untouched, matching those same two candidate kinds -- it already
  *  recharges passively every tick inside stepShrike/stepWildcat, so a repair beam heals
- *  `damage` only, never energy, for any of the three structure kinds. */
+ *  `damage` only, never energy, for any of the three structure kinds. Note this is now the
+ *  ONLY candidate kind that still excludes wrecks: base objects (#50) and turrets rebuild,
+ *  vehicles deliberately do not (a wreck's only way back into service is its team's vehicle
+ *  pad, so the pad keeps its spawn cost and cooldown). */
 function findDamagedVehicleCandidate(
   world: World,
   origin: Vec3,
@@ -191,7 +209,7 @@ function findRepairTarget(
   direction: Vec3,
 ): RepairCandidate | null {
   const player = findDamagedPlayerCandidate(world, healerId, origin, direction);
-  const baseObject = findDamagedBaseObjectCandidate(world, origin, direction);
+  const baseObject = findDamagedBaseObjectCandidate(world, healerId, origin, direction);
   const turret = findDamagedTurretCandidate(world, healerId, origin, direction);
   const vehicle = findDamagedVehicleCandidate(world, origin, direction);
   return nearerCandidate(nearerCandidate(nearerCandidate(player, baseObject), turret), vehicle);
@@ -201,37 +219,120 @@ function findRepairTarget(
  *  vehicle, or player." repairRate is the same 0.0033/tick for every armor (the spec's Armor
  *  numbers table), applied as a flat per-call reduction -- stepRepairPacks always runs once
  *  per fixed 32 ms tick via stepWorld, the same convention applyJet's jetEnergyDrain already
- *  uses. */
+ *  uses. Each store kind gets its own heal helper below so the dispatch stays flat. */
 function healCandidate(world: World, healerId: number, candidate: RepairCandidate): void {
   const rate = armorFor(world, healerId).repairRate;
-  if (candidate.kind === 'player') {
-    world.players.damage[candidate.id] = Math.max(
-      0,
-      (world.players.damage[candidate.id] ?? 0) - rate,
-    );
-  } else if (candidate.kind === 'baseObject') {
-    world.baseObjects.damage[candidate.id] = Math.max(
-      0,
-      (world.baseObjects.damage[candidate.id] ?? 0) - rate,
-    );
-  } else if (candidate.kind === 'turret') {
-    world.turrets.damage[candidate.id] = Math.max(
-      0,
-      (world.turrets.damage[candidate.id] ?? 0) - rate,
-    );
-    // Base turrets return to service only after repair crosses the original T2 disabledLevel;
-    // a barely-repaired wreck remains offline. Vehicles deliberately retain their non-revivable
-    // rule.
-    const barrel = world.turrets.barrel[candidate.id] as TurretBarrelId;
-    if ((world.turrets.damage[candidate.id] ?? 0) < baseFor(barrel).disabledDamage) {
-      world.turrets.destroyed[candidate.id] = 0;
-    }
-  } else {
-    world.vehicles.damage[candidate.id] = Math.max(
-      0,
-      (world.vehicles.damage[candidate.id] ?? 0) - rate,
-    );
+  if (candidate.kind === 'player') healPlayer(world, candidate.id, rate);
+  else if (candidate.kind === 'baseObject') healBaseObject(world, candidate.id, rate);
+  else if (candidate.kind === 'turret') healTurret(world, candidate.id, rate);
+  else healVehicle(world, candidate.id, rate);
+}
+
+function healPlayer(world: World, id: number, rate: number): void {
+  world.players.damage[id] = Math.max(0, (world.players.damage[id] ?? 0) - rate);
+}
+
+function healBaseObject(world: World, id: number, rate: number): void {
+  const store = world.baseObjects;
+  const maxHealth = BASE_OBJECT_DATA[store.kind[id] as BaseObjectKind].maxHealth;
+  // A wreck's repair clock starts from its real max health, not the destroying shot's
+  // overkill: applyBaseObjectDamage has no destruction-time cap to reuse, so the clamp
+  // lands here, giving base wrecks the same "repairable in the same finite time
+  // regardless of overkill" property applyTurretDamage's own cap gives turret wrecks.
+  if (store.destroyed[id] && (store.damage[id] ?? 0) > maxHealth) {
+    store.damage[id] = maxHealth;
   }
+  store.damage[id] = Math.max(0, (store.damage[id] ?? 0) - rate);
+  // Issue #50 rebuild threshold: stock T2 static shapes carry no turret-style
+  // disabledLevel, and a threshold of "any repair below maxHealth" would revive a capped
+  // wreck in a single tick -- contradicting the rebuild pacing the same spec's repairRate
+  // implies (a 1.5-health generator needs ~455 ticks ~= 14.6 s of sustained beam work).
+  // So a base asset returns to service only once the beam has carried the damage all the
+  // way back to zero. stepWorld's stepPower call re-derives the team's powered bits from
+  // teamHasPower on the next tick, and the client's snapshot-driven views restore the
+  // model's visibility from the same cleared flag -- no extra bookkeeping needed here.
+  if (store.destroyed[id] && (store.damage[id] ?? 0) <= 0) {
+    store.destroyed[id] = 0;
+  }
+}
+
+function healTurret(world: World, id: number, rate: number): void {
+  world.turrets.damage[id] = Math.max(0, (world.turrets.damage[id] ?? 0) - rate);
+  // Base turrets return to service only after repair crosses the original T2 disabledLevel;
+  // a barely-repaired wreck remains offline. Vehicles deliberately retain their non-revivable
+  // rule.
+  const barrel = world.turrets.barrel[id] as TurretBarrelId;
+  if ((world.turrets.damage[id] ?? 0) < baseFor(barrel).disabledDamage) {
+    world.turrets.destroyed[id] = 0;
+  }
+}
+
+function healVehicle(world: World, id: number, rate: number): void {
+  world.vehicles.damage[id] = Math.max(0, (world.vehicles.damage[id] ?? 0) - rate);
+}
+
+/** BEAM_RANGE exposed for the client's feedback row -- one source of truth for the beam's
+ *  10 m reach (packs/repairpack.cs:48). */
+export const REPAIR_BEAM_RANGE = BEAM_RANGE;
+
+function remainingHealthFraction(world: World, candidate: RepairCandidate): number {
+  let damage = 0;
+  let max = 0;
+  if (candidate.kind === 'player') {
+    damage = world.players.damage[candidate.id] ?? 0;
+    max = armorFor(world, candidate.id).maxDamage;
+  } else if (candidate.kind === 'baseObject') {
+    damage = world.baseObjects.damage[candidate.id] ?? 0;
+    max = BASE_OBJECT_DATA[world.baseObjects.kind[candidate.id] as BaseObjectKind].maxHealth;
+  } else if (candidate.kind === 'turret') {
+    damage = world.turrets.damage[candidate.id] ?? 0;
+    max = baseFor(world.turrets.barrel[candidate.id] as TurretBarrelId).maxHealth;
+  } else {
+    damage = world.vehicles.damage[candidate.id] ?? 0;
+    max = VEHICLE_DATA[world.vehicles.kind[candidate.id] as VehicleKind].maxDamage;
+  }
+  return max > 0 ? Math.min(1, Math.max(0, 1 - damage / max)) : 0;
+}
+
+export interface RepairTargetInfo {
+  kind: RepairCandidate['kind'];
+  id: number;
+  /** Eye-to-target-center distance in metres; never beyond REPAIR_BEAM_RANGE. */
+  distance: number;
+  /** The healer's eye point the beam itself is drawn from (eyeOrigin's conventions). */
+  origin: Vec3;
+  /** Target center the beam terminates on. */
+  point: Vec3;
+  /** 0-1 share of the target's damage budget still standing, for client feedback rows. */
+  healthFraction: number;
+  /** BaseObjectKind id when `kind` is 'baseObject'; the client resolves its own label. */
+  baseObjectKind?: number;
+}
+
+/** Client-side twin of stepRepairPacks's own targeting: the repair beam a player sees must
+ *  be exactly the target the sim would heal (same range, team, wreck and line-of-sight
+ *  rules), so this is the same findRepairTarget query and NOT a re-implementation. Read-only
+ *  -- no world field is written, so the client can call it every rendered frame. */
+export function repairBeamTarget(
+  world: World,
+  healerId: number,
+  yaw: number,
+  pitch: number,
+): RepairTargetInfo | null {
+  const origin = eyeOrigin(world, healerId);
+  const candidate = findRepairTarget(world, healerId, origin, aimDirection(yaw, pitch));
+  if (!candidate) return null;
+  return {
+    kind: candidate.kind,
+    id: candidate.id,
+    distance: candidate.distance,
+    origin,
+    point: candidate.point,
+    healthFraction: remainingHealthFraction(world, candidate),
+    ...(candidate.kind === 'baseObject' && {
+      baseObjectKind: world.baseObjects.kind[candidate.id],
+    }),
+  };
 }
 
 export function stepRepairPacks(

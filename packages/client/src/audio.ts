@@ -57,6 +57,12 @@ type SoundId =
   | 'outrider-engine'
   | 'shrike-engine'
   | 'shrike-blaster'
+  // Issue #51: the Repair Pack beam's own loop. The t2-mapper audio.vl2 volume this repo
+  // samples everything else from carries no repair-beam sample, so until
+  // katabatic/audio/repair-beam.m4a is added to packages/assets the entry loads like every
+  // other sample (warn-once fetch failure) and stays silent -- never a synthesized
+  // substitute, per this module's own test suite.
+  | 'repair-beam'
   | 'voice-target-destroyed'
   | 'voice-flag-take'
   | 'voice-thanks'
@@ -89,6 +95,7 @@ const SOUND_FILE: Record<SoundId, string> = {
   'mortar-projectile': 'mortar-projectile.m4a',
   'blaster-impact': 'blaster-impact.m4a',
   'blaster-projectile': 'blaster-projectile.m4a',
+  'repair-beam': 'repair-beam.m4a',
   'chaingun-impact': 'chaingun-impact.m4a',
   'chaingun-projectile': 'chaingun-projectile.m4a',
   'sniper-impact': 'sniper-impact.m4a',
@@ -177,6 +184,10 @@ export interface AudioEngine {
   setJetting(playerId: number, active: boolean, energyFraction: number): void;
   setSkiing(playerId: number, active: boolean, speed: number): void;
   footstep(position: Vec3): void;
+  /** Issue #51: the local Repair Pack's beam loop, keyed per player exactly like the jet
+   *  loop. Start = the beam went live, stop = it released for any reason (release, occlusion,
+   *  range, depletion, death, menu), so the audio cue tracks the beam's lifecycle 1:1. */
+  setRepairBeam(id: number, active: boolean): void;
   setStationHum(id: number, position: Vec3, active: boolean): void;
   setGeneratorHum(id: number, position: Vec3, active: boolean): void;
   setVehicleEngine(id: number, kind: 'wildcat' | 'shrike', position: Vec3, active: boolean): void;
@@ -329,6 +340,12 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
       } else if (!active) skiing.delete(id);
     },
     footstep: (position) => play('armor-footstep', CLOSE, position),
+    // Issue #51: the Repair Pack beam's loop, keyed per player like the jet loop and CLOSE
+    // like it -- the local player's own beam sits at the listener. loop()'s pending-start
+    // queue means a start before the sample decodes still fires once it lands, while a
+    // missing sample stays a silent pending loop rather than a synthesized substitute.
+    setRepairBeam: (id, active) =>
+      setLoop(loops, `repair:${String(id)}`, active, () => loop('repair-beam', CLOSE)),
     setStationHum: (id, position, active) =>
       setSpatialLoop(`station:${String(id)}`, 'station-hum', CLOSE, position, active),
     setGeneratorHum: (id, position, active) =>

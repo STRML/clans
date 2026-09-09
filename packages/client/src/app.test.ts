@@ -1,7 +1,8 @@
 import * as THREE from 'three';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 import {
   addPlayer,
+  applyBaseObjectDamage,
   applyDamage,
   BaseObjectKind,
   createBaseObjects,
@@ -18,6 +19,7 @@ import {
   type PlayerInput,
   type PlayerSnapshotData,
   type VehicleSnapshotData,
+  type World,
 } from '@clans/sim';
 import {
   EventKind,
@@ -38,12 +40,14 @@ import {
   setLocalGodMode,
   snapshotFlagAudioState,
   stepSinglePlayer,
+  syncRepairBeamView,
   syncWorldView,
   teleportPlayerToFlag,
   teleportPlayerToVehiclePad,
   updateRemotes,
   updateVehicleBuffers,
   vehicleRenderData,
+  type RepairBeamFrame,
 } from './app.js';
 import { flagsFromWorld } from './flag-view.js';
 import { RemoteBuffer } from './remote.js';
@@ -1028,5 +1032,166 @@ describe('drainNewEvents', () => {
     const cursor = { seq: 0 };
     const buffer = [event(1), event(2), event(3)];
     expect(drainNewEvents(buffer, cursor).map((e) => e.seq)).toEqual([1, 2, 3]);
+  });
+});
+
+// Issue #51: every listed beam stop reason flips the view, the audio loop, and the feedback
+// row off on the same frame -- driven through the app's own wiring function, so the gates
+// here are the gates the game actually runs.
+describe('syncRepairBeamView', () => {
+  const aimingAt = (from: { x: number; z: number }, to: { x: number; z: number }): number =>
+    Math.atan2(to.x - from.x, to.z - from.z);
+
+  function wallAcrossX(height: number): Heightfield {
+    const size = 11;
+    const heights = new Uint16Array(size * size);
+    for (let row = 0; row < size; row += 1) heights[row * size + 5] = height;
+    return {
+      gridSize: size,
+      squareSize: 2,
+      originX: -10,
+      originY: 0,
+      originZ: 0,
+      heightScale: 1,
+      heights,
+    };
+  }
+
+  interface Harness {
+    world: World;
+    healer: number;
+    hurt: number;
+    view: { sync: Mock; dispose: Mock };
+    audio: { setRepairBeam: Mock };
+    feedback: { textContent: string; hidden: boolean };
+  }
+
+  /** One damaged teammate 5 m ahead of the healer, both holding the Repair Pack setup. */
+  function harness(terrain: Heightfield = flat): Harness {
+    const world = createWorld(terrain, 1);
+    const healer = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const hurt = addPlayer(world, { x: 5, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[healer] = 1;
+    applyDamage(world, hurt, 0.3, -1, LIGHT_ARMOR);
+    return {
+      world,
+      healer,
+      hurt,
+      view: { sync: vi.fn(), dispose: vi.fn() },
+      audio: { setRepairBeam: vi.fn() },
+      feedback: { textContent: '', hidden: true },
+    };
+  }
+
+  function frame(
+    h: Harness,
+    packActive: boolean,
+    overrides: Partial<{ uiOpen: boolean; freeCam: boolean }> = {},
+  ): RepairBeamFrame {
+    return {
+      world: h.world,
+      playerId: h.healer,
+      input: { ...IDLE_INPUT, packActive, yaw: aimingAt({ x: 0, z: 0 }, { x: 5, z: 0 }) },
+      uiOpen: overrides.uiOpen ?? false,
+      freeCam: overrides.freeCam ?? false,
+    };
+  }
+
+  it('starts the beam, its audio loop, and the feedback row on a valid target', () => {
+    const h = harness();
+    syncRepairBeamView(frame(h, true), h.view, h.audio, h.feedback);
+    expect(h.view.sync).toHaveBeenCalledWith(expect.objectContaining({ kind: 'player' }));
+    expect(h.audio.setRepairBeam).toHaveBeenCalledWith(h.healer, true);
+    expect(h.feedback.hidden).toBe(false);
+    expect(h.feedback.textContent).toContain('REPAIRING Player');
+    expect(h.feedback.textContent).toContain('ENERGY');
+  });
+
+  it('stops on release', () => {
+    const h = harness();
+    syncRepairBeamView(frame(h, true), h.view, h.audio, h.feedback);
+    syncRepairBeamView(frame(h, false), h.view, h.audio, h.feedback);
+    expect(h.view.sync).toHaveBeenLastCalledWith(null);
+    expect(h.audio.setRepairBeam).toHaveBeenLastCalledWith(h.healer, false);
+    expect(h.feedback.hidden).toBe(true);
+    expect(h.feedback.textContent).toBe('');
+  });
+
+  it('stops when a menu opens', () => {
+    const h = harness();
+    syncRepairBeamView(frame(h, true, { uiOpen: true }), h.view, h.audio, h.feedback);
+    expect(h.view.sync).toHaveBeenLastCalledWith(null);
+    expect(h.audio.setRepairBeam).toHaveBeenLastCalledWith(h.healer, false);
+  });
+
+  it('stops in free cam', () => {
+    const h = harness();
+    syncRepairBeamView(frame(h, true, { freeCam: true }), h.view, h.audio, h.feedback);
+    expect(h.view.sync).toHaveBeenLastCalledWith(null);
+    expect(h.audio.setRepairBeam).toHaveBeenLastCalledWith(h.healer, false);
+  });
+
+  it('stops on death', () => {
+    const h = harness();
+    h.world.players.alive[h.healer] = 0;
+    syncRepairBeamView(frame(h, true), h.view, h.audio, h.feedback);
+    expect(h.view.sync).toHaveBeenLastCalledWith(null);
+    expect(h.audio.setRepairBeam).toHaveBeenLastCalledWith(h.healer, false);
+  });
+
+  it('stops when the shared energy pool is depleted, naming the depletion', () => {
+    const h = harness();
+    h.world.players.energy[h.healer] = 0;
+    syncRepairBeamView(frame(h, true), h.view, h.audio, h.feedback);
+    expect(h.view.sync).toHaveBeenLastCalledWith(null);
+    expect(h.audio.setRepairBeam).toHaveBeenLastCalledWith(h.healer, false);
+    expect(h.feedback.textContent).toContain('ENERGY DEPLETED');
+  });
+
+  it('stops when the target leaves the 10 m beam range', () => {
+    const h = harness();
+    h.world.players.position[h.hurt * 3] = 11;
+    syncRepairBeamView(frame(h, true), h.view, h.audio, h.feedback);
+    expect(h.view.sync).toHaveBeenLastCalledWith(null);
+    expect(h.audio.setRepairBeam).toHaveBeenLastCalledWith(h.healer, false);
+    expect(h.feedback.textContent).toContain('NO TARGET');
+  });
+
+  it('stops when terrain occludes the beam', () => {
+    const world = createWorld(wallAcrossX(10), 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 4, y: 1, z: 0 } },
+    ]);
+    applyBaseObjectDamage(world, 0, 2.5);
+    const healer = addPlayer(world, { x: -4, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[healer] = 1;
+    const view = { sync: vi.fn(), dispose: vi.fn() };
+    const audio = { setRepairBeam: vi.fn() };
+    const feedback = { textContent: '', hidden: true };
+    // Healer at -4 so the beam segment actually crosses the wall column at x=0; base
+    // candidates enforce line of sight (repair.test.ts pins the same rule sim-side).
+    syncRepairBeamView(
+      {
+        world,
+        playerId: healer,
+        input: { ...IDLE_INPUT, packActive: true, yaw: aimingAt({ x: -4, z: 0 }, { x: 4, z: 0 }) },
+        uiOpen: false,
+        freeCam: false,
+      },
+      view,
+      audio,
+      feedback,
+    );
+    expect(view.sync).toHaveBeenLastCalledWith(null);
+    expect(audio.setRepairBeam).toHaveBeenLastCalledWith(healer, false);
+  });
+
+  it('never starts without the Repair Pack, even with the trigger held', () => {
+    const h = harness();
+    h.world.players.hasRepairPack[h.healer] = 0;
+    syncRepairBeamView(frame(h, true), h.view, h.audio, h.feedback);
+    expect(h.view.sync).toHaveBeenLastCalledWith(null);
+    expect(h.audio.setRepairBeam).toHaveBeenLastCalledWith(h.healer, false);
+    expect(h.feedback.hidden).toBe(true);
   });
 });

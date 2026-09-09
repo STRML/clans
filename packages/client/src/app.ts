@@ -25,6 +25,7 @@ import {
   findSpawnPosition,
   setGodMode,
   requestVehicleAtPad,
+  repairBeamTarget,
   stepPower,
   stepWorld,
   vehiclePadAt,
@@ -71,6 +72,12 @@ import {
   type TimestampedEvent,
 } from './netclient.js';
 import { RemoteBuffer, syncRemoteMeshes } from './remote.js';
+import {
+  createRepairBeamView,
+  repairBeamStatusText,
+  type RepairBeamFeedback,
+  type RepairBeamView,
+} from './repair-beam.js';
 import {
   createStationMenu,
   inventoryStationTriggerAt,
@@ -1218,10 +1225,11 @@ export function debugKillGenerator(world: World, team: number): void {
   stepPower(world);
 }
 
-/** Revives exactly one of the team's generators (real T2 has no in-mission generator
- *  rebuild either -- this is a debug-only capability, not a Repair Pack simulation; Repair
- *  Pack correctly refuses to revive a destroyed generator, see repair.test.ts's failure
- *  matrix row 15 case). */
+/** Revives exactly one of the team's generators. Kept as a debug-only shortcut that stays
+ *  distinct from the in-game Repair Pack: since issue #50 the pack itself rebuilds destroyed
+ *  generators and stations (~455 ticks of sustained beam work per generator, see
+ *  repair.ts's healCandidate rebuild threshold), while this stays an instant e2e/test hook
+ *  that bypasses beam targeting, range and line-of-sight entirely. */
 export function debugRepairGenerator(world: World, team: number): void {
   const bases = world.baseObjects;
   for (let id = 0; id < bases.count; id += 1) {
@@ -1454,6 +1462,71 @@ function updateStationActivationAudio(
   audio.stationActivate(kind, previous.position);
 }
 
+export interface RepairBeamFrame {
+  world: World;
+  playerId: number;
+  /** The input this frame's simulation ran with (gameplayInput's product). */
+  input: PlayerInput;
+  /** Any full-screen UI (station/pad menu, commander map, voice menu) -- opening one stops
+   *  the beam even though Input itself would also zero packActive while a menu is up. */
+  uiOpen: boolean;
+  freeCam: boolean;
+}
+
+/** The pack/trigger precondition gate: stepRepairPacks's own preconditions (pack equipped,
+ *  alive, trigger held) plus the client-only ones the sim never sees (menus open, free cam).
+ *  Both the target query and the active decision below run off this one gate. */
+function repairBeamHeld(
+  world: World,
+  playerId: number,
+  input: PlayerInput,
+  uiOpen: boolean,
+  freeCam: boolean,
+): boolean {
+  return (
+    world.players.hasRepairPack[playerId] === 1 &&
+    world.players.alive[playerId] === 1 &&
+    input.packActive &&
+    !uiOpen &&
+    !freeCam
+  );
+}
+
+/** Issue #51 wiring: one place decides whether the local Repair Pack's beam is live this
+ *  frame, then drives the beam mesh, the dedicated audio loop, and the feedback row off
+ *  that single decision. The gates mirror stepRepairPacks's own preconditions exactly --
+ *  pack equipped, alive, trigger held -- plus the client-only ones the sim never sees
+ *  (menus open, free cam) and the shared energy pool the jet loop already gates on (the
+ *  same `energy > 0` check updateJetAudio uses), so releasing R, opening any menu, dying,
+ *  or draining the pool all stop the beam and its sound on the same frame. The target
+ *  itself comes from the sim's own repairBeamTarget query, so the occlusion/range/team/
+ *  wreck rules can never drift between what the beam shows and what the server heals.
+ *  Exported for a focused unit test; every engine call below is idempotent per frame
+ *  (setLoop no-ops a redundant start/stop), so calling this every rendered frame is cheap. */
+export function syncRepairBeamView(
+  frame: RepairBeamFrame,
+  view: RepairBeamView,
+  audio: Pick<AudioEngine, 'setRepairBeam'>,
+  feedback: RepairBeamFeedback,
+): void {
+  const { world, playerId, input } = frame;
+  const held = repairBeamHeld(world, playerId, input, frame.uiOpen, frame.freeCam);
+  const target = held ? repairBeamTarget(world, playerId, input.yaw, input.pitch) : null;
+  const energy = world.players.energy[playerId] ?? 0;
+  // Same depletion gate the jet loop uses: the pack fires out of the shared armor energy
+  // pool, so an empty pool stops the beam even with a valid target still under the crosshair.
+  const active = held && energy > 0 && target !== null;
+  view.sync(active ? target : null);
+  audio.setRepairBeam(playerId, active);
+  feedback.textContent = repairBeamStatusText({
+    held,
+    active,
+    energyFraction: energy / armorFor(world, playerId).maxEnergy,
+    target,
+  });
+  feedback.hidden = !held;
+}
+
 export async function createApp(container: HTMLElement, options: AppOptions = {}): Promise<App> {
   const assets = await loadKatabatic();
   const terrain = toHeightfield(assets);
@@ -1557,6 +1630,9 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     baseObjectView.baseObjectMeshes,
   );
   const weaponModel = createWeaponModel();
+  // Issue #51: the repair beam's persistent scene object -- created once like the weapon
+  // model, moved in place every frame by syncRepairBeamView.
+  const repairBeam = createRepairBeamView(scene);
 
   const camera = new THREE.PerspectiveCamera(
     90,
@@ -1582,6 +1658,12 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const crosshair = document.createElement('div');
   crosshair.id = 'crosshair';
   document.body.appendChild(crosshair);
+  // Issue #51: the repair feedback row -- target/range/energy text under the crosshair,
+  // hidden outright whenever the Repair Pack trigger is not held (repairBeamStatusText's
+  // own resting-state rule).
+  const repairStatus = document.createElement('div');
+  repairStatus.id = 'repair-status';
+  document.body.appendChild(repairStatus);
   const hud = createHud(document.body, hudSourceFrom(world, playerId, net));
   const interactionPrompt = createInteractionPrompt(document.body);
   const stationMenuState = { open: false, triggerStation: null as number | null };
@@ -1709,6 +1791,8 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       window.removeEventListener('keydown', resumeAudio);
       renderer.domElement.removeEventListener('click', resumeAudio);
       audio.dispose();
+      repairBeam.dispose();
+      repairStatus.remove();
       weaponModel.dispose();
       vehicleView.dispose();
       interactionPrompt.dispose();
@@ -1817,6 +1901,17 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
           audio,
         },
         usePressed,
+      );
+
+      // Issue #51: the beam, its loop and the feedback row follow the state this frame's
+      // sync pass just produced -- after syncBaseAssetsView so input.uiOpen already
+      // reflects any menu this frame's E-press opened, keeping "menu opens" a same-frame
+      // beam stop.
+      syncRepairBeamView(
+        { world, playerId, input: currentInput, uiOpen: input.uiOpen, freeCam: app.freeCam },
+        repairBeam,
+        audio,
+        repairStatus,
       );
 
       interactionPrompt.update(world, playerId, input.uiOpen || app.freeCam);
