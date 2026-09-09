@@ -908,6 +908,21 @@ describe('the Shrike blaster becomes a real, damaging projectile', () => {
     expect(world.players.damage[enemy]).toBeGreaterThan(before);
   });
 
+  it('hits the elevated turret barrel, drains its shield, then damages the turret', () => {
+    const world = createWorld(flat, 1);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.PlasmaBarrelLarge, team: 2, position: { x: 0, y: 0, z: 10 } },
+    ]);
+    const energy = world.turrets.energy[0]!;
+    fireVehicle(world, { origin: { x: 0, y: 2.4, z: 0 } });
+    stepProjectiles(world, FIXED_DT);
+    expect(world.turrets.energy[0]).toBeLessThan(energy);
+    world.turrets.energy[0] = 0;
+    fireVehicle(world, { origin: { x: 0, y: 2.4, z: 0 } });
+    stepProjectiles(world, FIXED_DT);
+    expect(world.turrets.damage[0]).toBeCloseTo(SHRIKE_BLASTER_DATA.directDamage);
+  });
+
   it('does not immediately self-hit the vehicle that fired it', () => {
     const world = createWorld(flat, 1);
     world.vehicles.active[0] = 1;

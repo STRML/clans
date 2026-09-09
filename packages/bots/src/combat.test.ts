@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { addPlayer, ammoIndex, createWorld, WeaponId, type Heightfield } from '@clans/sim';
-import { aimAndFire, chooseWeapon, CLOSE_RANGE, leadPosition } from './combat.js';
+import {
+  addPlayer,
+  ammoIndex,
+  createWorld,
+  WeaponId,
+  WeaponState,
+  type Heightfield,
+} from '@clans/sim';
+import {
+  aimAndFire,
+  CHAINGUN_RELEASE_RANGE,
+  chooseWeapon,
+  CLOSE_RANGE,
+  leadPosition,
+} from './combat.js';
 import { BotRole, createBotRuntimeState } from './types.js';
 
 const flat: Heightfield = {
@@ -24,6 +37,15 @@ describe('chooseWeapon', () => {
     const world = createWorld(flat, 1);
     const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
     expect(chooseWeapon(world, bot, CLOSE_RANGE - 5)).toBe(WeaponId.Chaingun);
+  });
+
+  it('keeps a spinning Chaingun selected just outside CLOSE_RANGE so its held trigger can finish spinning up', () => {
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.weaponSlot[bot] = WeaponId.Chaingun;
+    world.players.weaponState[bot] = WeaponState.SpinUp;
+    expect(chooseWeapon(world, bot, CLOSE_RANGE + 1)).toBe(WeaponId.Chaingun);
+    expect(chooseWeapon(world, bot, CHAINGUN_RELEASE_RANGE + 1)).toBe(WeaponId.Spinfusor);
   });
 
   it('falls back to the Blaster when both Spinfusor and Chaingun are out of ammo', () => {

@@ -39,7 +39,7 @@ import {
 } from '@clans/protocol';
 import { buildWaypointGraph } from '@clans/bots';
 import { createBotManager, TARGET_TEAM_SIZE, type BotManager } from './bots.js';
-import { buildExtras, startNetServer, type NetServer } from './net.js';
+import { buildExtras, flagEvents, startNetServer, type NetServer } from './net.js';
 import { createOrderBoard, currentOrder } from './orders.js';
 import { teamCount, type SceneSpawn } from './world.js';
 
@@ -98,6 +98,42 @@ function connect(port: number): Promise<WebSocket> {
     socket.once('open', () => resolve(socket));
   });
 }
+
+describe('flagEvents', () => {
+  it('broadcasts authoritative drop and capture transitions alongside flag pickup', () => {
+    const world = createWorld(terrain, 1);
+    createFlags(world, [
+      { team: 1, position: { x: 0, y: 0, z: 0 } },
+      { team: 2, position: { x: 8, y: 0, z: 0 } },
+    ]);
+
+    world.flags.state[1] = FlagState.Carried;
+    world.flags.carrierId[1] = 4;
+    expect(
+      flagEvents(world, [
+        { state: FlagState.Home, carrierId: -1 },
+        { state: FlagState.Home, carrierId: -1 },
+      ]),
+    ).toEqual([{ type: MessageType.Event, kind: EventKind.FlagTouched, a: 4, b: 1 }]);
+
+    world.flags.state[1] = FlagState.Dropped;
+    world.flags.carrierId[1] = -1;
+    expect(
+      flagEvents(world, [
+        { state: FlagState.Home, carrierId: -1 },
+        { state: FlagState.Carried, carrierId: 4 },
+      ]),
+    ).toEqual([{ type: MessageType.Event, kind: EventKind.FlagDropped, a: 4, b: 1 }]);
+
+    world.flags.state[1] = FlagState.Home;
+    expect(
+      flagEvents(world, [
+        { state: FlagState.Home, carrierId: -1 },
+        { state: FlagState.Carried, carrierId: 4 },
+      ]),
+    ).toEqual([{ type: MessageType.Event, kind: EventKind.FlagCaptured, a: 1, b: 4 }]);
+  });
+});
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

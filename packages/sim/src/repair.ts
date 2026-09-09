@@ -1,6 +1,9 @@
+import { activeForceFieldBlockers } from './baseObjects.js';
 import { armorFor } from './armor.js';
 import { playerHitbox, raySphereDistance, type PlayerHitbox } from './damage.js';
-import { BASE_OBJECT_HIT_RADIUS, TURRET_HIT_RADIUS } from './projectiles.js';
+import { raycastInteriors } from './interiors.js';
+import { BASE_OBJECT_HIT_RADIUS } from './projectiles.js';
+import { baseFor, hasLineOfSight, turretHitbox, type TurretBarrelId } from './turrets.js';
 import type { PlayerInput, Vec3, World } from './types.js';
 import { VEHICLE_DATA, type VehicleKind } from './vehicles.js';
 
@@ -48,6 +51,24 @@ function nearerCandidate(
   if (!a) return b;
   if (!b) return a;
   return a.distance <= b.distance ? a : b;
+}
+
+/** The repair beam uses the same terrain and interior collision rules as a fired projectile.
+ *  Allied force fields do not block their owner's beam; enemy force fields do. */
+function hasRepairLineOfSight(world: World, healerTeam: number, from: Vec3, to: Vec3): boolean {
+  if (!hasLineOfSight(world, from, to)) return false;
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dz = to.z - from.z;
+  const length = Math.hypot(dx, dy, dz);
+  if (length === 0) return true;
+  const direction = { x: dx / length, y: dy / length, z: dz / length };
+  return !raycastInteriors(
+    [...world.interiors, ...activeForceFieldBlockers(world, healerTeam)],
+    from,
+    direction,
+    length,
+  );
 }
 
 function findDamagedPlayerCandidate(
@@ -98,23 +119,25 @@ function findDamagedBaseObjectCandidate(
 
 function findDamagedTurretCandidate(
   world: World,
+  healerId: number,
   origin: Vec3,
   direction: Vec3,
 ): RepairCandidate | null {
   const turrets = world.turrets;
   let nearest: RepairCandidate | null = null;
   for (let id = 0; id < turrets.count; id += 1) {
-    if (turrets.destroyed[id] || (turrets.damage[id] ?? 0) <= 0) continue;
-    const base = id * 3;
-    const hitbox: PlayerHitbox = {
-      center: {
-        x: turrets.position[base] ?? 0,
-        y: turrets.position[base + 1] ?? 0,
-        z: turrets.position[base + 2] ?? 0,
-      },
-      radius: TURRET_HIT_RADIUS,
-      headY: Infinity,
-    };
+    // A repair beam must not be able to restore an enemy emplacement, but a destroyed
+    // friendly turret remains a repairable target. Unlike vehicles, T2's base turrets can
+    // be brought back by repair work.
+    if (turrets.team[id] !== world.players.team[healerId] || (turrets.damage[id] ?? 0) <= 0) {
+      continue;
+    }
+    const hitbox = turretHitbox(world, id);
+    // The beam follows a real line of sight: terrain cannot be repaired through. Use the
+    // same target point as the ray/sphere hit test so visual aiming and repair selection agree.
+    if (!hasRepairLineOfSight(world, world.players.team[healerId] ?? 0, origin, hitbox.center)) {
+      continue;
+    }
     nearest = nearerCandidate(
       nearest,
       candidateFromHitbox('turret', id, hitbox, origin, direction),
@@ -169,7 +192,7 @@ function findRepairTarget(
 ): RepairCandidate | null {
   const player = findDamagedPlayerCandidate(world, healerId, origin, direction);
   const baseObject = findDamagedBaseObjectCandidate(world, origin, direction);
-  const turret = findDamagedTurretCandidate(world, origin, direction);
+  const turret = findDamagedTurretCandidate(world, healerId, origin, direction);
   const vehicle = findDamagedVehicleCandidate(world, origin, direction);
   return nearerCandidate(nearerCandidate(nearerCandidate(player, baseObject), turret), vehicle);
 }
@@ -196,6 +219,13 @@ function healCandidate(world: World, healerId: number, candidate: RepairCandidat
       0,
       (world.turrets.damage[candidate.id] ?? 0) - rate,
     );
+    // Base turrets return to service only after repair crosses the original T2 disabledLevel;
+    // a barely-repaired wreck remains offline. Vehicles deliberately retain their non-revivable
+    // rule.
+    const barrel = world.turrets.barrel[candidate.id] as TurretBarrelId;
+    if ((world.turrets.damage[candidate.id] ?? 0) < baseFor(barrel).disabledDamage) {
+      world.turrets.destroyed[candidate.id] = 0;
+    }
   } else {
     world.vehicles.damage[candidate.id] = Math.max(
       0,

@@ -4,7 +4,8 @@ A Tribes 2 tech demo for the browser. Katabatic from the original heightmap, ski
 jetting with the T2 armor numbers, base assets and vehicles, and bots on an authoritative
 Node server.
 
-Status: v1 complete, all seven milestones shipped. See
+Status: all seven demo milestones shipped; gameplay and T2 fidelity still have open work.
+See [the current issue list and continuation notes](docs/ISSUES.md). See
 `docs/superpowers/specs/` for the design and `docs/superpowers/plans/` for what each
 milestone shipped.
 
@@ -66,12 +67,13 @@ Each team's base runs on power: at least one living generator keeps that team's 
 sensors, base turrets, and force fields online. Destroy both of a team's generators and
 everything else on that team goes dark — an unpowered station refuses a loadout change, an
 unpowered turret stops firing, and an unpowered force field stops blocking. A Repair Pack beam
-heals a damaged player, base asset, or turret within 10 m; it never revives something already
-destroyed.
+heals a damaged player, base asset, or friendly turret within 10 m. Equip it at an inventory
+station, aim at your turret, and hold **R**. Friendly turret wrecks can be restored after
+enough repair; walls block the beam. Destroyed vehicles and other base assets cannot be revived.
 
 Base turrets (Plasma and AA barrels on the large turret base, plus the smaller Sentry Turret)
-acquire and fire on enemy players within range and line of sight — a hill or wall between a
-turret and its target blocks it exactly like it blocks a player's own shot. Katabatic's eleven
+acquire targets within range and terrain line of sight. Interior walls block projectiles,
+but turret acquisition still needs interior occlusion (see the issue list). Katabatic's eleven
 interior buildings render and block movement and projectiles through a per-instance collision
 grid built once at load, not brute-force triangle checks. Press `C` for a top-down commander
 map showing your team's base status and any enemy contacts inside your team's sensor coverage
@@ -177,7 +179,8 @@ the Laser Rifle’s indicator lights; its exported model has no mechanical firin
 Self-illuminating surfaces retain their texture colors without scene lighting, and additive
 glows retain their original blending instead of rendering as solid white faces. Imported structures and vehicles retain
 their GLB materials and geometry. Source power/destruction visibility is supported for structures,
-but animated mechanical parts and turret aiming remain static. Failed shape loads retain a neutral
+and turret joints now track targets and play authored firing sequences. Other mechanical
+animation coverage remains incomplete. Failed shape loads retain a neutral
 fallback and report the asset URL in the browser console. If a vehicle GLB is unavailable,
 the procedural vehicle remains usable; the legacy STL fallback has no GLB converter.
 

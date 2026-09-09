@@ -61,6 +61,8 @@ export interface TurretBarrelData {
 }
 export interface TurretBaseData {
   maxHealth: number;
+  /** Damage must fall below this T2 `disabledLevel` before a repaired turret operates again. */
+  disabledDamage: number;
   maxEnergy: number;
   energyPerDamagePoint: number;
   rechargeRate: number;
@@ -127,6 +129,7 @@ export const TURRET_BASE_DATA: Record<TurretBaseId, TurretBaseData> = {
   // are not in the spec table; all three come straight from the script.
   [TurretBaseId.Large]: {
     maxHealth: 2.25,
+    disabledDamage: 1.35,
     maxEnergy: 150,
     energyPerDamagePoint: 50,
     rechargeRate: 0.31,
@@ -138,6 +141,7 @@ export const TURRET_BASE_DATA: Record<TurretBaseId, TurretBaseData> = {
   // every other field here is read from the script.
   [TurretBaseId.Sentry]: {
     maxHealth: 1.2,
+    disabledDamage: 0.84,
     maxEnergy: 150,
     energyPerDamagePoint: 100,
     rechargeRate: 0.4,
@@ -236,7 +240,9 @@ export function applyTurretDamage(world: World, id: number, amount: number): voi
   store.energy[id] = energy - shieldAbsorbed * data.energyPerDamagePoint;
   const throughShield = amount - shieldAbsorbed;
   if (throughShield <= 0) return;
-  store.damage[id] = (store.damage[id] ?? 0) + throughShield;
+  // Keep a destroyed turret at its real max damage. Besides keeping snapshots bounded, this
+  // makes a wreck repairable in the same finite time regardless of the overkill amount.
+  store.damage[id] = Math.min((store.damage[id] ?? 0) + throughShield, data.maxHealth);
   if ((store.damage[id] ?? 0) >= data.maxHealth) {
     store.destroyed[id] = 1;
     store.targetId[id] = -1;
@@ -478,4 +484,21 @@ export function stepTurrets(world: World, dt: number): void {
   stepTurretPower(world);
   world.pendingTurretFireEvents = [];
   for (let id = 0; id < world.turrets.count; id += 1) stepOneTurret(world, id, dt);
+}
+
+/** Shared collision/repair target around the visible turret, above its placement origin.
+ * Large base geometry reaches 2.26 m high; its barrel socket is at 1.83 m.
+ * Conservative sphere envelopes approximate the original mounted GLB geometry. */
+export function turretHitbox(world: World, id: number) {
+  const base = id * 3;
+  const sentry = world.turrets.barrel[id] === TurretBarrelId.SentryTurretBarrel;
+  return {
+    center: {
+      x: world.turrets.position[base] ?? 0,
+      y: (world.turrets.position[base + 1] ?? 0) + (sentry ? -0.07 : 1.3),
+      z: world.turrets.position[base + 2] ?? 0,
+    },
+    radius: sentry ? 0.65 : 2,
+    headY: Infinity,
+  };
 }

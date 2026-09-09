@@ -1,3 +1,4 @@
+import { turretHitbox } from './turrets.js';
 import { armorFor } from './armor.js';
 import { activeForceFieldBlockers, applyBaseObjectDamage, BaseObjectKind } from './baseObjects.js';
 import {
@@ -483,6 +484,7 @@ interface StructureArray {
   /** Per-id override for a store whose hit-sphere radius isn't uniform (vehicles: Shrike
    *  5.5 m vs. Wildcat 1.7785 m) -- falls back to `radius` above when absent. */
   radiusFor?: (id: number) => number;
+  hitboxFor?: (id: number) => PlayerHitbox;
   kind: StructureHit['kind'];
   skip?: (id: number) => boolean;
 }
@@ -500,7 +502,7 @@ function structureCandidateDistance(
   array: StructureArray,
   id: number,
 ): number | null {
-  const hitbox: PlayerHitbox = {
+  const hitbox: PlayerHitbox = array.hitboxFor?.(id) ?? {
     center: positionAt(array.position, id * 3),
     radius: array.radiusFor?.(id) ?? array.radius,
     headY: Infinity,
@@ -559,6 +561,7 @@ function nearestStructureHitFrom(
     position: turrets.position,
     destroyed: turrets.destroyed,
     radius: TURRET_HIT_RADIUS,
+    hitboxFor: (id) => turretHitbox(world, id),
     kind: 'turret',
     // Excludes the turret that fired this exact shot -- see ProjectileStore.sourceTurretId.
     skip: (id) => id === excludeTurretId,

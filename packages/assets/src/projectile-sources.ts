@@ -6,4 +6,5 @@ export const PROJECTILE_SOURCE_FILES = [
   'textures.vl2/textures/special/shrikeBoltCross.png',
   'textures.vl2/textures/special/tracer00.PNG',
   'textures.vl2/textures/special/tracercross.png',
+  'shapes.vl2/shapes/disc_explosion.glb',
 ] as const;

@@ -115,6 +115,29 @@ describe('syncProjectileMeshes', () => {
     expect(mesh?.position.x).toBe(6);
   });
 
+  it('keeps pitched discs level and forward at every cardinal flight heading', () => {
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    const headings = [
+      [20, 4, 0],
+      [0, 4, 20],
+      [-20, 4, 0],
+      [0, 4, -20],
+    ] as const;
+    for (const [index, [vx, vy, vz]] of headings.entries()) {
+      const projectile = { ...disc(index, 0), vx, vy, vz };
+      syncProjectileMeshes(scene, meshes, [projectile], 0);
+      const mesh = meshes.get(index);
+      if (!mesh) throw new Error('expected disc mesh');
+      const velocity = new THREE.Vector3(vx, vy, vz).normalize();
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(mesh.quaternion);
+      const up = new THREE.Vector3(0, 1, 0).applyQuaternion(mesh.quaternion);
+      const levelUp = new THREE.Vector3(0, 1, 0).projectOnPlane(velocity).normalize();
+      expect(forward.angleTo(velocity)).toBeLessThan(1e-6);
+      expect(up.angleTo(levelUp)).toBeLessThan(1e-6);
+    }
+  });
+
   it('disposes a pruned projectile mesh geometry and material instead of leaking them', () => {
     // Codex review round 1, finding 11 (PR #9): pruning only removed the mesh from the
     // scene and map; geometry and material created for it (createProjectileMesh) stayed

@@ -117,3 +117,17 @@ Chaingun and Shrike now use the original `tracer00`/`tracercross` and
 crossed ribbons, source widths/lengths, and compact impact glows. The Shrike's
 blue-violet color comes from its texture, with white material tint. These remain
 an approximation of Torque's camera-facing tracer renderer.
+
+The Spinfusor explosion now uses the original `disc_explosion.glb`, authored geometry
+animation and `blue00`/`disc00` textures at source scale. IFL textures currently use their
+first frame. Flying discs use additive blue glow and a world-up flight frame to avoid
+heading-dependent roll.
+
+Turret barrels mount to the original sockets and track targets through their turn/elevation
+nodes; source Fire clips animate shots. Damage and repair share an elevated hit sphere
+around the visible assembly. Friendly turret wrecks recover below the original disabled
+damage thresholds (large 1.35; sentry 0.84). These spheres remain approximate geometry.
+
+Flag sounds follow `CTFGame.cs`: `flag_snatch`/`flag_taken` for pickups,
+`flag_capture`/`flag_lost` for captures, plus `flag_drop` and `flag_return`.
+Solo play checks each simulation tick; multiplayer consumes authoritative event sequences.

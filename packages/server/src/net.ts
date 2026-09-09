@@ -120,7 +120,7 @@ interface ClientEntry {
   /** Round-trip time to this client, in ms, from its most recent ack. Drives lag comp. */
   pingMs: number;
 }
-interface FlagSnapshotForDiff {
+export interface FlagSnapshotForDiff {
   state: number;
   carrierId: number;
 }
@@ -830,6 +830,25 @@ function captureEvent(
   };
 }
 
+function dropEvent(
+  flagId: number,
+  previous: FlagSnapshotForDiff,
+  state: number,
+): EventMessage | null {
+  if (previous.state !== FlagState.Carried || state !== FlagState.Dropped) return null;
+  return { type: MessageType.Event, kind: EventKind.FlagDropped, a: previous.carrierId, b: flagId };
+}
+
+function returnEvent(
+  flagId: number,
+  previous: FlagSnapshotForDiff,
+  state: number,
+): EventMessage | null {
+  if (previous.state !== FlagState.Dropped || state !== FlagState.Home) return null;
+  // A player-caused return has no carrier transition; -1 distinguishes a timer return.
+  return { type: MessageType.Event, kind: EventKind.FlagReturned, a: -1, b: flagId };
+}
+
 /** Both event kinds this flag transitioned through this tick, if any. */
 function eventsForFlag(
   world: World,
@@ -841,11 +860,13 @@ function eventsForFlag(
   const events = [
     touchEvent(flagId, previous, carrierId),
     captureEvent(world, flagId, previous, state),
+    dropEvent(flagId, previous, state),
+    returnEvent(flagId, previous, state),
   ];
   return events.filter((event): event is EventMessage => event !== null);
 }
 
-function flagEvents(world: World, before: FlagSnapshotForDiff[]): EventMessage[] {
+export function flagEvents(world: World, before: FlagSnapshotForDiff[]): EventMessage[] {
   const events: EventMessage[] = [];
   for (let id = 0; id < world.flags.state.length; id += 1) {
     const previous = before[id];

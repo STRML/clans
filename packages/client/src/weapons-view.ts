@@ -1,3 +1,4 @@
+import { createDiscExplosion } from './disc-explosion.js';
 import * as THREE from 'three';
 import { ProjectileType, WeaponId, type World } from '@clans/sim';
 import { EventKind, type EventMessage, type ProjectileSnapshotData } from '@clans/protocol';
@@ -8,7 +9,7 @@ const LASER_BEAM_LIFETIME_S = 1; // sniperRifle.cs: fadeTime.
 const EXPLOSION_RADIUS = 1.5; // Ours: a visible flash, unrelated to the weapon's damage radius.
 
 const WEAPON_COLOR: Record<number, number> = {
-  [WeaponId.Spinfusor]: 0xffa000,
+  [WeaponId.Spinfusor]: 0x66bbff,
   [WeaponId.Chaingun]: 0xffee55,
   [WeaponId.Mortar]: 0x888888,
   [WeaponId.LaserRifle]: 0xff2222,
@@ -125,7 +126,42 @@ function addTracerCross(mesh: THREE.Mesh, p: ProjectileSnapshotData): void {
 }
 
 function glowProjectile(p: ProjectileSnapshotData): boolean {
-  return isTracer(p) || p.type === ProjectileType.Energy;
+  return isTracer(p) || p.type === ProjectileType.Energy || p.weaponId === WeaponId.Spinfusor;
+}
+
+function projectileOrientation(mesh: THREE.Mesh, p: ProjectileSnapshotData): void {
+  const forward = directionFor(p);
+  if (p.weaponId !== WeaponId.Spinfusor) {
+    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, -1), forward);
+    return;
+  }
+  // A shortest-arc quaternion introduces heading-dependent roll when aiming up/down.
+  // Build the disc's flight frame from world up, keeping the plate level across headings.
+  const right = forward.clone().cross(new THREE.Vector3(0, 1, 0));
+  if (right.lengthSq() < 1e-8) right.set(1, 0, 0);
+  right.normalize();
+  const up = right.clone().cross(forward).normalize();
+  mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, up, forward.negate()));
+}
+
+function addDiscGlow(mesh: THREE.Mesh, p: ProjectileSnapshotData): void {
+  if (p.weaponId !== WeaponId.Spinfusor) return;
+  const glow = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.65, 0.65),
+    new THREE.MeshBasicMaterial({
+      map: DISC_TEXTURE,
+      color: 0x88bbff,
+      transparent: true,
+      opacity: 0.65,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      fog: false,
+      side: THREE.DoubleSide,
+    }),
+  );
+  glow.rotation.x = -Math.PI / 2;
+  glow.name = 'disc-glow';
+  mesh.add(glow);
 }
 
 export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.Mesh {
@@ -135,9 +171,12 @@ export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.
   const mesh = new THREE.Mesh(
     projectileGeometry(projectile),
     new THREE.MeshBasicMaterial({
-      color: projectile.type === ProjectileType.Energy ? 0xffffff : color,
+      color:
+        projectile.type === ProjectileType.Energy || projectile.weaponId === WeaponId.Spinfusor
+          ? 0xffffff
+          : color,
       map: projectileTexture(projectile),
-      transparent: projectile.weaponId !== WeaponId.Spinfusor,
+      transparent: true,
       opacity: projectile.weaponId === WeaponId.Spinfusor ? 1 : 0.9,
       blending: glowProjectile(projectile) ? THREE.AdditiveBlending : THREE.NormalBlending,
       depthWrite: !glowProjectile(projectile),
@@ -147,6 +186,7 @@ export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.
   );
   addProjectileTrail(mesh, projectile, color);
   addTracerCross(mesh, projectile);
+  addDiscGlow(mesh, projectile);
   // Codex review round 2 (PR #9), finding 8: the sim recycles freed projectile ids (same
   // pattern as player id reuse), so a mesh keyed only by id can't tell "same projectile,
   // moved" from "a different projectile got this id". Stamping the type/weaponId it was
@@ -154,7 +194,7 @@ export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.
   mesh.userData.type = projectile.type;
   mesh.userData.weaponId = projectile.weaponId;
   mesh.userData.history = projectile.type === ProjectileType.Energy ? [] : undefined;
-  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, -1), directionFor(projectile));
+  projectileOrientation(mesh, projectile);
   return mesh;
 }
 
@@ -253,7 +293,7 @@ function syncOneProjectile(
     meshes.set(p.id, mesh);
   }
   mesh.position.set(p.x, p.y, p.z);
-  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, -1), directionFor(p));
+  projectileOrientation(mesh, p);
   if (p.weaponId === WeaponId.Spinfusor) {
     mesh.userData.spin = ((mesh.userData.spin as number | undefined) ?? 0) + dt * 30;
     mesh.rotateY(mesh.userData.spin as number);
@@ -317,6 +357,8 @@ export interface Effect {
   mesh: THREE.Object3D;
   ttl: number;
   expanding?: boolean;
+  update?: (dt: number, camera?: THREE.Camera) => void;
+  dispose?: () => void;
 }
 
 function createFlash(position: { x: number; y: number; z: number }, color: number): THREE.Mesh {
@@ -347,6 +389,21 @@ function createProjectileImpact(p: ProjectileSnapshotData): THREE.Mesh {
   return mesh;
 }
 
+function projectileImpactEffect(p: ProjectileSnapshotData): Effect {
+  if (p.weaponId === WeaponId.Spinfusor) {
+    const original = createDiscExplosion(p);
+    if (original) return original;
+    const mesh = createFlash(p, 0x66bbff);
+    mesh.scale.setScalar(3);
+    const material = mesh.material as THREE.MeshBasicMaterial;
+    material.blending = THREE.AdditiveBlending;
+    material.depthWrite = false;
+    material.fog = false;
+    return { mesh, ttl: 0.6, expanding: true };
+  }
+  return { mesh: createProjectileImpact(p), ttl: EXPLOSION_LIFETIME_S };
+}
+
 /** Projectiles present last frame and gone this frame get a one-shot flash at their last known
  * position — there is no explicit "projectile expired" wire message, so the caller diffs. */
 export function spawnExplosionsForExpired(
@@ -367,9 +424,9 @@ export function spawnExplosionsForExpired(
     if (stillAlive && stillAlive.type === last.type && stillAlive.weaponId === last.weaponId) {
       continue;
     }
-    const mesh = createProjectileImpact(last);
-    scene.add(mesh);
-    effects.push({ mesh, ttl: EXPLOSION_LIFETIME_S });
+    const effect = projectileImpactEffect(last);
+    scene.add(effect.mesh);
+    effects.push(effect);
   }
 }
 
@@ -451,11 +508,23 @@ export function spawnLaserBeams(
   }
 }
 
-export function updateEffects(scene: THREE.Scene, effects: Effect[], dtSeconds: number): void {
+function disposeEffect(effect: Effect): void {
+  if (effect.dispose) effect.dispose();
+  else if (effect.mesh instanceof THREE.Mesh || effect.mesh instanceof THREE.Line)
+    disposeMesh(effect.mesh);
+}
+
+export function updateEffects(
+  scene: THREE.Scene,
+  effects: Effect[],
+  dtSeconds: number,
+  camera?: THREE.Camera,
+): void {
   for (let i = effects.length - 1; i >= 0; i -= 1) {
     const effect = effects[i];
     if (!effect) continue;
     effect.ttl -= dtSeconds;
+    effect.update?.(dtSeconds, camera);
     if (effect.mesh instanceof THREE.Line) {
       effect.mesh.traverse((node) => {
         if (node instanceof THREE.Mesh || node instanceof THREE.Line) {
@@ -475,9 +544,7 @@ export function updateEffects(scene: THREE.Scene, effects: Effect[], dtSeconds: 
       // Effect.mesh is every explosion flash (createFlash: a Mesh) and laser beam
       // (createLaserBeam: a Line) this module creates -- both own disposable geometry
       // and material, unlike an arbitrary Object3D.
-      if (effect.mesh instanceof THREE.Mesh || effect.mesh instanceof THREE.Line) {
-        disposeMesh(effect.mesh);
-      }
+      disposeEffect(effect);
       effects.splice(i, 1);
     }
   }

@@ -8,6 +8,7 @@ import {
   BASE_OBJECT_DATA,
   BaseObjectKind,
   FIXED_DT,
+  FlagState,
   FIXED_TICK_MS,
   VEHICLE_DATA,
   VehicleKind,
@@ -401,12 +402,13 @@ export function stepSinglePlayer(
   input: PlayerInput,
   steps: number,
   spawn: { x: number; y: number; z: number },
-  afterStep?: () => void,
+  afterStep?: (flagsBefore: FlagAudioState[]) => void,
 ): void {
   const inputs = new Map<number, PlayerInput>([[playerId, input]]);
   for (let step = 0; step < steps; step += 1) {
+    const flagsBefore = snapshotFlagAudioState(world);
     stepWorld(world, inputs);
-    afterStep?.();
+    afterStep?.(flagsBefore);
     // Codex review round 5, finding 3 (PR #9): stepWorld can flip world.gameOver to true
     // partway through THIS call (the time limit landing on this exact step), and this
     // loop's respawn handling ran unconditionally regardless of that -- the same class of
@@ -416,6 +418,67 @@ export function stepSinglePlayer(
     if (world.gameOver) continue;
     for (const id of dueForRespawn(world)) respawnPlayer(world, id, spawn);
   }
+}
+
+export interface FlagAudioState {
+  state: number;
+  carrierId: number;
+}
+
+export function snapshotFlagAudioState(world: World): FlagAudioState[] {
+  return Array.from(world.flags.state, (state, id) => ({
+    state,
+    carrierId: world.flags.carrierId[id] ?? -1,
+  }));
+}
+
+/** Plays transitions from one completed solo simulation tick exactly once. This is kept out
+ * of syncWorldView because that function runs once per rendered frame and can otherwise miss
+ * a pickup/drop/capture occurring in an earlier step of a multi-step frame. */
+export function playFlagStateAudio(
+  audio: AudioEngine,
+  before: readonly FlagAudioState[],
+  world: World,
+  playerId = 0,
+): void {
+  const localTeam = world.players.team[playerId] ?? 0;
+  for (let id = 0; id < world.flags.state.length; id += 1) {
+    const previous = before[id];
+    if (!previous) continue;
+    playFlagTransition(audio, previous, world, id, localTeam);
+  }
+}
+
+function playFlagTransition(
+  audio: AudioEngine,
+  previous: FlagAudioState,
+  world: World,
+  flagId: number,
+  localTeam: number,
+): void {
+  const state = world.flags.state[flagId] ?? FlagState.Home;
+  const carrierId = world.flags.carrierId[flagId] ?? -1;
+  const ownFlag = (world.flags.team[flagId] ?? 0) === localTeam;
+  if (flagWasTaken(previous, carrierId)) audio.flagTouch(ownFlag);
+  if (flagWasDropped(previous, state)) audio.flagDrop();
+  if (flagWasCaptured(previous, state)) audio.flagCapture(ownFlag);
+  if (flagWasReturned(previous, state)) audio.flagReturn();
+}
+
+function flagWasTaken(previous: FlagAudioState, carrierId: number): boolean {
+  return previous.carrierId === -1 && carrierId !== -1;
+}
+
+function flagWasDropped(previous: FlagAudioState, state: number): boolean {
+  return previous.state === FlagState.Carried && state === FlagState.Dropped;
+}
+
+function flagWasCaptured(previous: FlagAudioState, state: number): boolean {
+  return previous.state === FlagState.Carried && state === FlagState.Home;
+}
+
+function flagWasReturned(previous: FlagAudioState, state: number): boolean {
+  return previous.state === FlagState.Dropped && state === FlagState.Home;
 }
 
 /**
@@ -683,13 +746,61 @@ function syncMapAndVoiceToggles(state: BaseAssetsViewState): void {
   }
 }
 
+function turretTargetPositions(
+  world: World,
+  playerId: number,
+  net: NetClient | null,
+  connected: boolean,
+): Map<number, THREE.Vector3> {
+  const targets =
+    net && connected ? networkTurretTargets(world, playerId, net) : worldTurretTargets(world);
+  const vehicles = net && connected ? net.vehicles : vehiclesFromWorld(world);
+  for (const vehicle of vehicles)
+    targets.set(-vehicle.id - 2, new THREE.Vector3(vehicle.x, vehicle.y, vehicle.z));
+  return targets;
+}
+
+function playerTargetPosition(world: World, playerId: number): THREE.Vector3 {
+  const offset = playerId * 3;
+  return new THREE.Vector3(
+    world.players.position[offset] ?? 0,
+    (world.players.position[offset + 1] ?? 0) + 1.15,
+    world.players.position[offset + 2] ?? 0,
+  );
+}
+
+function worldTurretTargets(world: World): Map<number, THREE.Vector3> {
+  const targets = new Map<number, THREE.Vector3>();
+  for (let id = 0; id < world.players.count; id += 1) {
+    targets.set(id, playerTargetPosition(world, id));
+  }
+  return targets;
+}
+
+function networkTurretTargets(
+  world: World,
+  playerId: number,
+  net: NetClient,
+): Map<number, THREE.Vector3> {
+  const targets = new Map<number, THREE.Vector3>();
+  for (const player of net.remotePlayers.values()) {
+    targets.set(player.id, new THREE.Vector3(player.x, player.y + 1.15, player.z));
+  }
+  targets.set(localNetworkId(net, playerId), playerTargetPosition(world, playerId));
+  return targets;
+}
+
 function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): void {
   const { world, playerId, net } = state;
   const connected = net ? net.connected : true;
   const baseObjectData: BaseObjectSnapshotData[] =
     net && connected ? net.baseObjects : baseObjectsFromWorld(world);
   const turretData: TurretSnapshotData[] = net && connected ? net.turrets : turretsFromWorld(world);
-  state.baseObjectView.sync(baseObjectData, turretData);
+  state.baseObjectView.sync(
+    baseObjectData,
+    turretData,
+    turretTargetPositions(world, playerId, net, connected),
+  );
   state.vehicleView.sync(vehicleRenderData(state));
 
   // `usePressed` is computed once by the caller (frame()), the same edge-triggered read
@@ -753,10 +864,17 @@ function syncProjectileAudio(
  *  kill feed and weapons-view.ts's laser beams already read -- single-player has no event
  *  stream (hudSourceFrom's own single-player branch always returns []), so these stay silent
  *  there, the same limitation spawnLaserBeams already accepts. */
-function playFlagEventAudio(audio: AudioEngine, events: readonly TimestampedEvent[]): void {
+function playFlagEventAudio(
+  audio: AudioEngine,
+  events: readonly TimestampedEvent[],
+  localTeam: number,
+  flagTeam: (flagId: number) => number,
+): void {
   for (const event of events) {
-    if (event.kind === EventKind.FlagTouched) audio.flagTouch();
-    else if (event.kind === EventKind.FlagCaptured) audio.flagCapture();
+    if (event.kind === EventKind.FlagTouched) audio.flagTouch(flagTeam(event.b) === localTeam);
+    else if (event.kind === EventKind.FlagCaptured) audio.flagCapture(event.a !== localTeam);
+    else if (event.kind === EventKind.FlagDropped) audio.flagDrop();
+    else if (event.kind === EventKind.FlagReturned) audio.flagReturn();
   }
 }
 
@@ -773,12 +891,28 @@ function localNetworkId(net: { playerId: number | null } | null, fallback: numbe
   return net?.playerId ?? fallback;
 }
 
+function syncEventAudio(
+  audio: AudioEngine | undefined,
+  events: readonly TimestampedEvent[],
+  world: World,
+  playerId: number,
+  net: Pick<NetClient, 'team' | 'flags'> | null,
+): void {
+  if (!audio) return;
+  const localTeam = net ? net.team : (world.players.team[playerId] ?? 0);
+  const flagTeam = (flagId: number): number =>
+    net?.flags.find((flag) => flag.id === flagId)?.team ?? world.flags.team[flagId] ?? 0;
+  playFlagEventAudio(audio, events, localTeam, flagTeam);
+  playVoiceBindAudio(audio, events);
+}
+
 export function syncWorldView(
   world: World,
   playerId: number,
   net: Pick<
     NetClient,
     | 'playerId'
+    | 'team'
     | 'remotePlayers'
     | 'projectiles'
     | 'flags'
@@ -812,10 +946,7 @@ export function syncWorldView(
 
   const allEvents: TimestampedEvent[] = net ? net.recentEvents : [];
   const newEvents = drainNewEvents(allEvents, seenEventSeq);
-  if (audio) {
-    playFlagEventAudio(audio, newEvents);
-    playVoiceBindAudio(audio, newEvents);
-  }
+  syncEventAudio(audio, newEvents, world, playerId, net);
   spawnLaserBeams(
     scene,
     effects,
@@ -1584,7 +1715,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     },
     frame(dtSeconds: number): void {
       const frameStart = performance.now();
-      updateEffects(scene, effects, dtSeconds);
+      updateEffects(scene, effects, dtSeconds, camera);
       let steps = advance(acc, dtSeconds, app.paused ? 0 : app.timeScale, FIXED_DT);
       if (app.stepOnce) {
         steps = 1;
@@ -1603,9 +1734,10 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       if (net) {
         stepNetworked(net, app.stats, currentInput, steps, scene, remoteMeshes, remoteBuffers);
       } else {
-        stepSinglePlayer(world, playerId, currentInput, steps, localSpawn, () => {
+        stepSinglePlayer(world, playerId, currentInput, steps, localSpawn, (flagsBefore) => {
           playWeaponFireAudio(world, playerId, audio);
           playVehicleFireAudio(world, audio);
+          playFlagStateAudio(audio, flagsBefore, world, playerId);
           for (const event of world.lastFireEvents) {
             if (event.weaponId !== WeaponId.LaserRifle || !event.beamEnd) continue;
             spawnLaserBeams(

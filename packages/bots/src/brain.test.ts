@@ -390,6 +390,21 @@ describe('stepBot', () => {
     const input = stepBot(world, graph, runtime, null);
     expect(input.use).toBe(false);
   });
+
+  it('ignores a repair order from the opposing team when deciding whether to activate its Repair Pack', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[bot] = 1;
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    const graph = buildWaypointGraph([
+      { position: { x: -100, y: 0, z: 0 }, label: 'homeFlag' },
+      { position: { x: 100, y: 0, z: 0 }, label: 'enemyFlag' },
+    ]);
+    const order: TeamOrder = { team: 2, kind: OrderKind.Repair, x: 50, z: 50, expiresAtTick: 1000 };
+
+    expect(stepBot(world, graph, runtime, order).packActive).toBe(false);
+  });
 });
 
 describe('combat actually lands hits end to end (Codex review round 3, P1)', () => {

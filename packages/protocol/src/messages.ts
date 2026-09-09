@@ -37,7 +37,9 @@ export enum OrderKind {
 // orders block, throwing on every single snapshot. Bumping the version instead makes
 // WelcomeStatus.VersionMismatch catch this exactly like it already catches every other
 // wire-format change, in both directions.
-export const PROTOCOL_VERSION = 7;
+// M7's flag-audio events add new EventKind values. Event payloads are still six bytes, but a
+// stale client would not know how to interpret the new kinds, so reject mixed versions.
+export const PROTOCOL_VERSION = 8;
 
 export enum WelcomeStatus {
   Ok = 0,
@@ -83,6 +85,8 @@ export enum EventKind {
   FlagCaptured = 2, // a = team, b = playerId
   LaserFired = 3, // a = shooterId, b = hitPlayerId (-1 = miss)
   VoiceBindPlayed = 4, // a = playerId, b = lineId
+  FlagDropped = 5, // a = previous carrierId, b = flagId
+  FlagReturned = 6, // a = playerId (-1 = timer), b = flagId
 }
 export interface BeamSegment {
   from: { x: number; y: number; z: number };

@@ -50,6 +50,10 @@ type SoundId =
   | 'vehicle-explosion'
   | 'flag-capture'
   | 'flag-snatch'
+  | 'flag-drop'
+  | 'flag-taken'
+  | 'flag-lost'
+  | 'flag-return'
   | 'outrider-engine'
   | 'shrike-engine'
   | 'shrike-blaster'
@@ -92,6 +96,10 @@ const SOUND_FILE: Record<SoundId, string> = {
   'vehicle-explosion': 'vehicle-explosion.m4a',
   'flag-capture': 'flag-capture.m4a',
   'flag-snatch': 'flag-snatch.m4a',
+  'flag-drop': 'flag-drop.m4a',
+  'flag-taken': 'flag-taken.m4a',
+  'flag-lost': 'flag-lost.m4a',
+  'flag-return': 'flag-return.m4a',
   'outrider-engine': 'outrider-engine.m4a',
   'shrike-engine': 'shrike-engine.m4a',
   'shrike-blaster': 'shrike-blaster.m4a',
@@ -162,8 +170,10 @@ export interface AudioEngine {
   ): void;
   vehicleExplosion(position: Vec3): void;
   explosion(position: Vec3): void;
-  flagCapture(): void;
-  flagTouch(): void;
+  flagCapture(enemyCaptured?: boolean): void;
+  flagTouch(enemyTookOwnFlag?: boolean): void;
+  flagDrop(): void;
+  flagReturn(): void;
   setJetting(playerId: number, active: boolean, energyFraction: number): void;
   setSkiing(playerId: number, active: boolean, speed: number): void;
   footstep(position: Vec3): void;
@@ -303,8 +313,12 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
     },
     vehicleExplosion: (position) => play('vehicle-explosion', EXPLOSION, position),
     explosion: (position) => play('mortar-explode', EXPLOSION, position),
-    flagCapture: () => play('flag-capture', DEFAULT),
-    flagTouch: () => play('flag-snatch', DEFAULT),
+    flagCapture: (enemyCaptured = false) =>
+      play(enemyCaptured ? 'flag-lost' : 'flag-capture', DEFAULT),
+    flagTouch: (enemyTookOwnFlag = false) =>
+      play(enemyTookOwnFlag ? 'flag-taken' : 'flag-snatch', DEFAULT),
+    flagDrop: () => play('flag-drop', DEFAULT),
+    flagReturn: () => play('flag-return', DEFAULT),
     setJetting: (id, active) =>
       setLoop(loops, `jet:${String(id)}`, active, () => loop('armor-thrust', CLOSE)),
     // ski_soft is AudioClose3d (not looping) in player.cs; never create a false noise bed.

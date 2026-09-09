@@ -1,6 +1,12 @@
 import * as THREE from 'three';
 import { expect, it } from 'vitest';
-import { mountTurretBarrel } from './turret-mount.js';
+import { TurretState } from '@clans/sim';
+import {
+  addTurretAnimations,
+  mountTurretBarrel,
+  prepareTurretPresentation,
+  syncTurretPresentation,
+} from './turret-mount.js';
 
 it('aligns authored sockets through nested transforms, regardless of load order', () => {
   const root = new THREE.Group();
@@ -37,4 +43,45 @@ it('aligns authored sockets through nested transforms, regardless of load order'
   const position = barrel.position.clone();
   mountTurretBarrel(root);
   expect(barrel.position).toEqual(position);
+});
+
+it('articulates the barrel at its authored socket without displacing the planted base', () => {
+  const root = new THREE.Group();
+  root.position.set(10, 0, 20);
+  const barrel = new THREE.Group();
+  const base = new THREE.Group();
+  const turn = new THREE.Group();
+  turn.name = 'DumTurn';
+  const elevate = new THREE.Group();
+  elevate.name = 'DumElevate';
+  const socket = new THREE.Object3D();
+  socket.name = 'Mount0';
+  elevate.add(socket);
+  turn.add(elevate);
+  base.add(turn);
+  const mount = new THREE.Object3D();
+  mount.name = 'Mountpoint';
+  barrel.add(mount);
+  root.add(barrel, base);
+  prepareTurretPresentation(root, barrel, base);
+  syncTurretPresentation(root, new THREE.Vector3(30, 5, 50), TurretState.Ready);
+  expect(root.position.toArray()).toEqual([10, 0, 20]);
+  expect(base.parent).toBe(root);
+  expect(barrel.parent).toBe(socket);
+  expect(turn.quaternion.angleTo(new THREE.Quaternion())).toBeGreaterThan(0.01);
+});
+
+it('plays a source Fire clip and flashes at its authored muzzle point', () => {
+  const root = new THREE.Group();
+  const barrel = new THREE.Group();
+  const muzzle = new THREE.Object3D();
+  muzzle.name = 'Muzzlepoint';
+  barrel.add(muzzle);
+  root.add(barrel);
+  prepareTurretPresentation(root, barrel);
+  addTurretAnimations(root, barrel, [new THREE.AnimationClip('Fire', 0.1, [])]);
+  syncTurretPresentation(root, undefined, TurretState.Firing);
+  const flash = muzzle.getObjectByName('turret-muzzle-flash') as THREE.PointLight;
+  expect(flash).toBeInstanceOf(THREE.PointLight);
+  expect(flash.intensity).toBeGreaterThan(0);
 });

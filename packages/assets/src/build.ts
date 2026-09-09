@@ -62,7 +62,16 @@ for (const file of GUI_SOURCE_FILES) {
 const projectileOutput = resolve(output, 'projectiles');
 await mkdir(projectileOutput, { recursive: true });
 for (const source of PROJECTILE_SOURCE_FILES) {
-  await copyFile(resolve(cache, source), resolve(projectileOutput, source.split('/').at(-1)!));
+  const filename = source.split('/').at(-1)!;
+  if (filename.endsWith('.glb')) {
+    await mkdir(resolve(output, 'shapes'), { recursive: true });
+    await writeFile(
+      resolve(output, 'shapes', filename),
+      attachShapeTextures(await readFile(resolve(cache, source))),
+    );
+  } else {
+    await copyFile(resolve(cache, source), resolve(projectileOutput, filename));
+  }
 }
 const heightBytes = new Uint8Array(terrain.heights.length * 2);
 const heightView = new DataView(heightBytes.buffer);

@@ -184,8 +184,14 @@ function handleStuck(
     runtime.stuckStreak = 0;
     return false;
   }
+  const elapsed = world.tick - runtime.stuckBaselineTick;
   if (!checkStuck(runtime, world, { x: distanceToTarget, y: 0, z: 0 })) {
-    runtime.stuckStreak = 0;
+    // A false result before the next check window is not progress. Resetting here erased
+    // the streak on the tick immediately after every detected stall, so the configured
+    // consecutive-stall threshold was unreachable during normal per-tick stepping.
+    // checkStuck resets its baseline only after a completed window; that is the one case
+    // where false means the bot made enough progress and should earn a fresh streak.
+    if (elapsed >= STUCK_CHECK_TICKS) runtime.stuckStreak = 0;
     return false;
   }
   runtime.stuckStreak += 1;

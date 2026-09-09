@@ -98,5 +98,7 @@
   "skins/weapon_disc": "skins.vl2/textures/skins/weapon_disc.PNG",
   "skins/weapon_energy": "skins.vl2/textures/skins/weapon_energy.PNG",
   "skins/weapon_mortar": "skins.vl2/textures/skins/weapon_mortar.png",
-  "skins/weapon_sniper": "skins.vl2/textures/skins/weapon_sniper.png"
+  "skins/weapon_sniper": "skins.vl2/textures/skins/weapon_sniper.png",
+  "skins/blue00": "skins.vl2/textures/skins/blue00.PNG",
+  "skins/disc00": "skins.vl2/textures/skins/disc00.PNG"
 }

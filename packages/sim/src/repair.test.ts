@@ -9,6 +9,7 @@ import {
 } from './index.js';
 import { applyBaseObjectDamage, BaseObjectKind, createBaseObjects } from './baseObjects.js';
 import { stepRepairPacks } from './repair.js';
+import { applyTurretDamage, createTurrets, TurretBarrelId } from './turrets.js';
 import { applyVehicleDamage, VehicleKind } from './vehicles.js';
 
 const flat: Heightfield = {
@@ -37,6 +38,21 @@ const IDLE: PlayerInput = {
 };
 const aimingAt = (from: { x: number; z: number }, to: { x: number; z: number }): number =>
   Math.atan2(to.x - from.x, to.z - from.z);
+
+function wallAcrossX(height: number): Heightfield {
+  const size = 11;
+  const heights = new Uint16Array(size * size);
+  for (let row = 0; row < size; row += 1) heights[row * size + 5] = height;
+  return {
+    gridSize: size,
+    squareSize: 2,
+    originX: -10,
+    originY: 0,
+    originZ: 0,
+    heightScale: 1,
+    heights,
+  };
+}
 
 describe('stepRepairPacks', () => {
   it('does nothing for a player without the Repair Pack equipped', () => {
@@ -183,6 +199,87 @@ describe('stepRepairPacks', () => {
     );
     expect(world.baseObjects.destroyed[0]).toBe(1);
     expect(world.baseObjects.damage[0]).toBeGreaterThan(0);
+  });
+
+  it('repairs a friendly destroyed sentry turret, restoring it only below its disabled level', () => {
+    const world = createWorld(flat, 1);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.SentryTurretBarrel, team: 1, position: { x: 5, y: 1.6, z: 0 } },
+    ]);
+    applyTurretDamage(world, 0, 1000);
+    expect(world.turrets.destroyed[0]).toBe(1);
+    // Damage is capped at maxHealth, so repair time is determined by the turret's actual
+    // health rather than by the amount of overkill in the destroying shot.
+    expect(world.turrets.damage[0]).toBeCloseTo(1.2);
+    const healer = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[healer] = 1;
+    const input = new Map([
+      [healer, { ...IDLE, packActive: true, yaw: aimingAt({ x: 0, z: 0 }, { x: 5, z: 0 }) }],
+    ]);
+    for (let tick = 0; tick < 109; tick += 1) stepRepairPacks(world, input, FIXED_DT);
+    expect(world.turrets.damage[0]).toBeGreaterThanOrEqual(0.84);
+    expect(world.turrets.destroyed[0]).toBe(1);
+    stepRepairPacks(world, input, FIXED_DT);
+    expect(world.turrets.damage[0]).toBeLessThan(0.84);
+    expect(world.turrets.destroyed[0]).toBe(0);
+  });
+
+  it('cannot repair an enemy turret', () => {
+    const world = createWorld(flat, 1);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.SentryTurretBarrel, team: 2, position: { x: 5, y: 1.6, z: 0 } },
+    ]);
+    applyTurretDamage(world, 0, 0.3);
+    const before = world.turrets.damage[0];
+    const healer = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[healer] = 1;
+    stepRepairPacks(
+      world,
+      new Map([
+        [healer, { ...IDLE, packActive: true, yaw: aimingAt({ x: 0, z: 0 }, { x: 5, z: 0 }) }],
+      ]),
+      FIXED_DT,
+    );
+    expect(world.turrets.damage[0]).toBe(before);
+  });
+
+  it('repairs a large turret at its elevated visible mount instead of its ground anchor', () => {
+    const world = createWorld(flat, 1);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.PlasmaBarrelLarge, team: 1, position: { x: 5, y: 0, z: 0 } },
+    ]);
+    world.turrets.energy[0] = 0;
+    applyTurretDamage(world, 0, 0.3);
+    const before = world.turrets.damage[0] ?? 0;
+    const healer = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[healer] = 1;
+    stepRepairPacks(
+      world,
+      new Map([
+        [healer, { ...IDLE, packActive: true, yaw: aimingAt({ x: 0, z: 0 }, { x: 5, z: 0 }) }],
+      ]),
+      FIXED_DT,
+    );
+    expect(world.turrets.damage[0]).toBeCloseTo(before - REPAIR_RATE);
+  });
+
+  it('cannot repair a friendly turret through terrain', () => {
+    const world = createWorld(wallAcrossX(10), 1);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.SentryTurretBarrel, team: 1, position: { x: 4, y: 1.6, z: 0 } },
+    ]);
+    applyTurretDamage(world, 0, 0.3);
+    const before = world.turrets.damage[0];
+    const healer = addPlayer(world, { x: -4, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[healer] = 1;
+    stepRepairPacks(
+      world,
+      new Map([
+        [healer, { ...IDLE, packActive: true, yaw: aimingAt({ x: -4, z: 0 }, { x: 4, z: 0 }) }],
+      ]),
+      FIXED_DT,
+    );
+    expect(world.turrets.damage[0]).toBe(before);
   });
 
   it('never reduces damage below zero', () => {

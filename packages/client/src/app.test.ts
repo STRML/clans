@@ -8,6 +8,7 @@ import {
   createFlags,
   createWorld,
   FIXED_DT,
+  FlagState,
   GameOverReason,
   LIGHT_ARMOR,
   RESPAWN_TICKS,
@@ -33,7 +34,9 @@ import {
   hudSourceFrom,
   PilotYawController,
   positionOfPlayer,
+  playFlagStateAudio,
   setLocalGodMode,
+  snapshotFlagAudioState,
   stepSinglePlayer,
   syncWorldView,
   teleportPlayerToFlag,
@@ -426,6 +429,7 @@ describe('syncWorldView (Codex review round 6, finding P2)', () => {
     const fakeNet: Pick<
       NetClient,
       | 'playerId'
+      | 'team'
       | 'remotePlayers'
       | 'projectiles'
       | 'flags'
@@ -437,6 +441,7 @@ describe('syncWorldView (Codex review round 6, finding P2)', () => {
       | 'recentEvents'
     > & { connected: boolean } = {
       playerId: localId,
+      team: 1,
       remotePlayers: new Map(),
       projectiles: [projectile],
       flags: [flag],
@@ -500,6 +505,7 @@ describe('syncWorldView (Codex review round 6, finding P2)', () => {
     const fakeNet: Pick<
       NetClient,
       | 'playerId'
+      | 'team'
       | 'remotePlayers'
       | 'projectiles'
       | 'flags'
@@ -511,6 +517,7 @@ describe('syncWorldView (Codex review round 6, finding P2)', () => {
       | 'recentEvents'
     > & { connected: boolean } = {
       playerId: localId,
+      team: 1,
       remotePlayers: new Map(),
       projectiles: [],
       flags: [],
@@ -540,6 +547,129 @@ describe('syncWorldView (Codex review round 6, finding P2)', () => {
     );
 
     expect(speakVoiceLine).toHaveBeenCalledWith(4, audio);
+  });
+
+  it('plays each network flag event once from the event stream', () => {
+    const world = createWorld(flat, 1);
+    const localId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const scene = new THREE.Scene();
+    const hud = { update: vi.fn() };
+    const fakeNet: Pick<
+      NetClient,
+      | 'playerId'
+      | 'team'
+      | 'remotePlayers'
+      | 'projectiles'
+      | 'flags'
+      | 'teamScores'
+      | 'gameOver'
+      | 'winnerTeam'
+      | 'timeRemainingS'
+      | 'gameOverReason'
+      | 'recentEvents'
+    > & { connected: boolean } = {
+      playerId: localId,
+      team: 1,
+      remotePlayers: new Map(),
+      projectiles: [],
+      flags: [
+        { id: 1, team: 1, state: FlagState.Home, x: 0, y: 0, z: 0, carrierId: -1, returnInS: -1 },
+      ],
+      teamScores: [0, 0],
+      gameOver: false,
+      winnerTeam: 0,
+      timeRemainingS: 0,
+      gameOverReason: 0,
+      recentEvents: [
+        { type: MessageType.Event, kind: EventKind.FlagTouched, a: localId, b: 1, seq: 1 },
+        { type: MessageType.Event, kind: EventKind.FlagDropped, a: localId, b: 1, seq: 2 },
+        { type: MessageType.Event, kind: EventKind.FlagCaptured, a: 1, b: localId, seq: 3 },
+        { type: MessageType.Event, kind: EventKind.FlagCaptured, a: 2, b: localId, seq: 4 },
+      ],
+      connected: true,
+    };
+    const audio = {
+      flagTouch: vi.fn(),
+      flagDrop: vi.fn(),
+      flagCapture: vi.fn(),
+      flagReturn: vi.fn(),
+      voice: vi.fn(),
+    } as unknown as import('./audio.js').AudioEngine;
+    const cursor = { seq: 0 };
+
+    syncWorldView(
+      world,
+      localId,
+      fakeNet,
+      scene,
+      hud,
+      [],
+      new Map(),
+      new Map(),
+      new Map(),
+      cursor,
+      1 / 60,
+      audio,
+    );
+    syncWorldView(
+      world,
+      localId,
+      fakeNet,
+      scene,
+      hud,
+      [],
+      new Map(),
+      new Map(),
+      new Map(),
+      cursor,
+      1 / 60,
+      audio,
+    );
+
+    expect(audio.flagTouch).toHaveBeenCalledWith(true);
+    expect(audio.flagDrop).toHaveBeenCalledTimes(1);
+    expect(audio.flagCapture).toHaveBeenNthCalledWith(1, false);
+    expect(audio.flagCapture).toHaveBeenNthCalledWith(2, true);
+  });
+});
+
+describe('playFlagStateAudio', () => {
+  it('plays pickup, drop, and capture changes per solo simulation tick', () => {
+    const world = createWorld(flat, 1);
+    createFlags(world, [
+      { team: 1, position: { x: 0, y: 0, z: 0 } },
+      { team: 2, position: { x: 10, y: 0, z: 0 } },
+    ]);
+    const audio = {
+      flagTouch: vi.fn(),
+      flagDrop: vi.fn(),
+      flagCapture: vi.fn(),
+      flagReturn: vi.fn(),
+    } as unknown as import('./audio.js').AudioEngine;
+
+    let before = snapshotFlagAudioState(world);
+    world.flags.state[1] = FlagState.Carried;
+    world.flags.carrierId[1] = 3;
+    playFlagStateAudio(audio, before, world);
+
+    before = snapshotFlagAudioState(world);
+    world.flags.state[1] = FlagState.Dropped;
+    world.flags.carrierId[1] = -1;
+    playFlagStateAudio(audio, before, world);
+
+    before = snapshotFlagAudioState(world);
+    world.flags.state[1] = FlagState.Carried;
+    world.flags.carrierId[1] = 3;
+    playFlagStateAudio(audio, before, world);
+    before = snapshotFlagAudioState(world);
+    world.flags.state[1] = FlagState.Home;
+    world.flags.carrierId[1] = -1;
+    playFlagStateAudio(audio, before, world);
+
+    expect(audio.flagTouch).toHaveBeenNthCalledWith(1, false);
+    expect(audio.flagTouch).toHaveBeenNthCalledWith(2, false);
+    expect(audio.flagDrop).toHaveBeenCalledTimes(1);
+    expect(audio.flagCapture).toHaveBeenCalledWith(false);
   });
 });
 

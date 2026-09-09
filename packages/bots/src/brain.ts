@@ -276,8 +276,16 @@ function isRepairOrder(order: TeamOrder | null): order is TeamOrder {
   return order?.kind === OrderKind.Repair;
 }
 
+function isOwnRepairOrder(
+  world: World,
+  runtime: BotRuntimeState,
+  order: TeamOrder | null,
+): boolean {
+  return isRepairOrder(order) && order.team === (world.players.team[runtime.playerId] ?? 0);
+}
+
 function applyRepairOrder(world: World, runtime: BotRuntimeState, order: TeamOrder | null): void {
-  if (isRepairOrder(order)) maybeEquipRepairPack(world, runtime.playerId);
+  if (isOwnRepairOrder(world, runtime, order)) maybeEquipRepairPack(world, runtime.playerId);
 }
 
 function repairPackActive(
@@ -285,7 +293,9 @@ function repairPackActive(
   runtime: BotRuntimeState,
   order: TeamOrder | null,
 ): boolean {
-  return isRepairOrder(order) && world.players.hasRepairPack[runtime.playerId] === 1;
+  return (
+    isOwnRepairOrder(world, runtime, order) && world.players.hasRepairPack[runtime.playerId] === 1
+  );
 }
 
 export function stepBot(

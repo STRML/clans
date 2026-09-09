@@ -5,6 +5,7 @@ import {
   nextRandom,
   playerHitbox,
   WeaponId,
+  WeaponState,
   WEAPON_DATA,
   type Vec3,
   type World,
@@ -12,6 +13,11 @@ import {
 import type { BotRuntimeState } from './types.js';
 
 export const CLOSE_RANGE = 25; // Ours.
+// Keep the Chaingun selected for a small margin while it is spinning. Without this,
+// a target weaving across CLOSE_RANGE switches the bot back to the Spinfusor on the
+// very next tick, which releases the trigger and makes the Chaingun pay its 0.5 s
+// spin-up again on every approach.
+export const CHAINGUN_RELEASE_RANGE = CLOSE_RANGE + 5; // Ours.
 export const MORTAR_MIN_RANGE = 40; // Ours.
 export const AIM_TOLERANCE_DEG = 4; // Ours.
 export const AIM_JITTER_DEG = 2; // Ours, applied as +/-.
@@ -20,12 +26,22 @@ function ammoFor(world: World, botId: number, weaponId: WeaponId): number {
   return world.players.ammo[ammoIndex(botId, weaponId)] ?? 0;
 }
 
+function keepSpinningChaingun(world: World, botId: number, distance: number): boolean {
+  const active =
+    world.players.weaponSlot[botId] === WeaponId.Chaingun &&
+    (world.players.weaponState[botId] === WeaponState.SpinUp || world.players.spunUp[botId] === 1);
+  return (
+    active && distance <= CHAINGUN_RELEASE_RANGE && ammoFor(world, botId, WeaponId.Chaingun) !== 0
+  );
+}
+
 /** Spinfusor/Blaster beyond CLOSE_RANGE, Chaingun inside it, Mortar only for a Heavy
  *  bot engaging beyond MORTAR_MIN_RANGE (its own blast radius makes it unsafe closer;
  *  in practice this only ever fires for Heavy, since every other armor's mortarAmmo is
  *  0), Blaster as the final fallback (ammo is always -1/infinite for it -- weapons.ts's
  *  own resetLoadout convention). Never switches to a weapon with zero ammo. */
 export function chooseWeapon(world: World, botId: number, distance: number): WeaponId {
+  if (keepSpinningChaingun(world, botId, distance)) return WeaponId.Chaingun;
   if (distance > MORTAR_MIN_RANGE && ammoFor(world, botId, WeaponId.Mortar) > 0) {
     return WeaponId.Mortar;
   }

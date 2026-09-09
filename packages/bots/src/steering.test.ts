@@ -99,6 +99,24 @@ describe('steerToward stuck-skip (Codex review round 3, P1)', () => {
     expect(runtime.path).toEqual([{ x: goal.x, z: goal.z }]);
     expect(runtime.pathIndex).toBe(0);
   });
+
+  it('preserves consecutive stalls between per-tick checks, so the fallback is reachable in a real match', () => {
+    const world = createWorld(flat, 1);
+    const graph = buildWaypointGraph([
+      { position: { x: 0, y: 0, z: 0 }, label: 'a' },
+      { position: { x: 50, y: 0, z: 0 }, label: 'b' },
+      { position: { x: 100, y: 0, z: 0 }, label: 'c' },
+    ]);
+    const runtime = createBotRuntimeState(1, BotRole.Attacker, 1);
+    const stuckPosition = { x: 0, y: 0, z: 0 };
+    const goal = { x: 100, y: 0, z: 0 };
+
+    for (world.tick = 0; world.tick <= STUCK_CHECK_TICKS * STUCK_SKIP_THRESHOLD; world.tick += 1) {
+      steerToward(graph, world, 1, runtime, 1, goal, 'goal:c', stuckPosition, LIGHT_ARMOR, 60);
+    }
+
+    expect(runtime.path).toEqual([{ x: goal.x, z: goal.z }]);
+  });
 });
 
 describe('steerToward goal-drift repath (closes #33)', () => {

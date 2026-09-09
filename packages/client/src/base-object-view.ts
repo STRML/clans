@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { loadShapeInto } from './shape-loader.js';
-import { mountTurretBarrel } from './turret-mount.js';
+import {
+  addTurretAnimations,
+  prepareTurretPresentation,
+  syncTurretPresentation,
+} from './turret-mount.js';
 import {
   BASE_OBJECT_DATA,
   BaseObjectKind,
@@ -19,7 +23,11 @@ export interface BaseObjectView {
    *  visible mesh for them -- every interior (sbunk2, the station buildings, etc.) was
    *  invisible geometry a player could walk through the collision of but never see. */
   interiorMeshes: Map<number, THREE.Object3D>;
-  sync(baseObjects: BaseObjectSnapshotData[], turrets: TurretSnapshotData[]): void;
+  sync(
+    baseObjects: BaseObjectSnapshotData[],
+    turrets: TurretSnapshotData[],
+    turretTargets?: ReadonlyMap<number, THREE.Vector3>,
+  ): void;
 }
 
 const DESTROYED_COLOR = new THREE.Color(0x1a1a1a);
@@ -152,17 +160,22 @@ function addTurretMesh(
   const barrel = placeholderMesh();
   // Large turret GLBs contain only the barrel; the mission uses a separate shared pedestal.
   mesh.add(barrel);
-  loadShapeInto(
-    barrel,
-    assets.scene.shapesForTurretBarrel[placement.barrel],
-    placement.barrel === 2 ? Math.PI : 0,
-  );
   if (placement.barrel !== 2) {
     const base = placeholderMesh();
     mesh.add(base);
     loadShapeInto(base, 'turret_base_large', Math.PI);
+    prepareTurretPresentation(mesh, barrel, base);
+  } else {
+    prepareTurretPresentation(mesh, barrel);
   }
+  loadShapeInto(
+    barrel,
+    assets.scene.shapesForTurretBarrel[placement.barrel],
+    placement.barrel === 2 ? Math.PI : 0,
+    (loaded, clips) => addTurretAnimations(mesh, loaded, clips),
+  );
   mesh.userData.structureKind = 'turret';
+  mesh.userData.vehicleTargets = placement.barrel === 1;
   mesh.userData.structureId = id;
   scene.add(mesh);
   meshes.set(id, mesh);
@@ -217,11 +230,20 @@ function syncBaseObjects(
   }
 }
 
-function syncTurrets(meshes: Map<number, THREE.Object3D>, data: TurretSnapshotData[]): void {
+function syncTurrets(
+  meshes: Map<number, THREE.Object3D>,
+  data: TurretSnapshotData[],
+  targets?: ReadonlyMap<number, THREE.Vector3>,
+): void {
   for (const t of data) {
     const mesh = meshes.get(t.id);
     if (mesh) {
-      mountTurretBarrel(mesh);
+      const targetKey = mesh.userData.vehicleTargets ? -t.targetId - 2 : t.targetId;
+      syncTurretPresentation(
+        mesh,
+        t.targetId === -1 ? undefined : targets?.get(targetKey),
+        t.state,
+      );
       syncStructure(mesh, t.destroyed === 1, t.powered === 1);
     }
   }
@@ -260,10 +282,10 @@ export function createBaseObjectView(
     baseObjectMeshes,
     turretMeshes,
     interiorMeshes,
-    sync(baseObjects, turrets) {
+    sync(baseObjects, turrets, turretTargets) {
       syncBaseObjects(baseObjectMeshes, baseObjects);
       syncBaseObjects(vehicleStationMeshes, baseObjects);
-      syncTurrets(turretMeshes, turrets);
+      syncTurrets(turretMeshes, turrets, turretTargets);
     },
   };
 }

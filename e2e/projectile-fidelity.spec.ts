@@ -61,6 +61,7 @@ test('Shrike and chaingun render original glowing tracer textures', async ({ pag
     for (const [type, weaponId, x] of [
       [4, 7, -2],
       [1, 1, 2],
+      [0, 0, 0],
     ]) {
       const mesh = createProjectileMesh({
         id: type,
@@ -105,6 +106,7 @@ test('Shrike and chaingun render original glowing tracer textures', async ({ pag
   expect(result).toEqual([
     { type: 4, textured: true, additive: true, depthWrite: false },
     { type: 1, textured: true, additive: true, depthWrite: false },
+    { type: 0, textured: true, additive: true, depthWrite: false },
   ]);
   await page.screenshot({ path: testInfo.outputPath('tracer-textures.png') });
 });
