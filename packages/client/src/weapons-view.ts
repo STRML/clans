@@ -128,6 +128,7 @@ export function projectilesFromWorld(world: World): ProjectileSnapshotData[] {
 export interface Effect {
   mesh: THREE.Object3D;
   ttl: number;
+  expanding?: boolean;
 }
 
 function createFlash(position: { x: number; y: number; z: number }, color: number): THREE.Mesh {
@@ -163,6 +164,18 @@ export function spawnExplosionsForExpired(
     scene.add(mesh);
     effects.push({ mesh, ttl: EXPLOSION_LIFETIME_S });
   }
+}
+
+export function spawnVehicleExplosion(
+  scene: THREE.Scene,
+  effects: Effect[],
+  position: { x: number; y: number; z: number },
+): void {
+  const mesh = createFlash(position, 0xff8822);
+  mesh.name = 'vehicle-explosion';
+  mesh.scale.setScalar(4);
+  scene.add(mesh);
+  effects.push({ mesh, ttl: 1, expanding: true });
 }
 
 export function createLaserBeam(
@@ -204,6 +217,10 @@ export function updateEffects(scene: THREE.Scene, effects: Effect[], dtSeconds: 
     const effect = effects[i];
     if (!effect) continue;
     effect.ttl -= dtSeconds;
+    if (effect.expanding && effect.mesh instanceof THREE.Mesh) {
+      effect.mesh.scale.addScalar(dtSeconds * 4);
+      (effect.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, effect.ttl) * 0.8;
+    }
     if (effect.ttl <= 0) {
       scene.remove(effect.mesh);
       // Effect.mesh is every explosion flash (createFlash: a Mesh) and laser beam

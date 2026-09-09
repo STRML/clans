@@ -5,6 +5,7 @@ import { raycastInteriors, resolveSphereAgainstInteriors } from './interiors.js'
 import { GRAVITY } from './movement.js';
 import { nextRandom } from './random.js';
 import { groundHeightAt } from './ground.js';
+import { sampleTerrain } from './terrain.js';
 import type { PendingFreeId, PlayerInput, Vec3, World } from './types.js';
 
 export enum VehicleKind {
@@ -749,19 +750,33 @@ function applyCollisionDamage(world: World, id: number, impactSpeed: number): vo
   );
 }
 
-/** Ground contact: clamps the vehicle to sit on the terrain surface and zeroes downward
- *  velocity, applying the ground-impact damage rule (a real, separately-cited T2 rule,
- *  distinct from the generic object-collision one below) when the impact speed passed
- *  groundImpactMinSpeed. */
-function resolveVehicleGround(world: World, id: number, current: Vec3, speed: number): boolean {
+/** Remove only velocity into the contact, retaining motion along the surface. */
+function slideVehicle(world: World, id: number, normal: Vec3): void {
+  const v = world.vehicles.velocity;
+  const base = id * 3;
+  const inward = Math.min(
+    0,
+    at(v, base) * normal.x + at(v, base + 1) * normal.y + at(v, base + 2) * normal.z,
+  );
+  v[base] = at(v, base) - inward * normal.x;
+  v[base + 1] = at(v, base + 1) - inward * normal.y;
+  v[base + 2] = at(v, base + 2) - inward * normal.z;
+}
+
+function closingSpeed(motion: Vec3, normal: Vec3): number {
+  return Math.max(0, -(motion.x * normal.x + motion.y * normal.y + motion.z * normal.z));
+}
+
+function resolveVehicleGround(world: World, id: number, current: Vec3, motion: Vec3): number {
   const vehicles = world.vehicles;
   const data = VEHICLE_DATA[vehicles.kind[id] as VehicleKind];
-  const base = id * 3;
   const ground = groundHeightAt(world, current);
-  if (ground === null) return false;
-  if (current.y - data.checkRadius >= ground) return false;
-  vehicles.position[base + 1] = ground + data.checkRadius;
-  if (at(vehicles.velocity, base + 1) < 0) vehicles.velocity[base + 1] = 0;
+  if (ground === null || current.y - data.checkRadius >= ground) return 0;
+  const terrain = sampleTerrain(world.terrain, current.x, current.z);
+  const normal = terrain.empty ? { x: 0, y: 1, z: 0 } : terrain.normal;
+  vehicles.position[id * 3 + 1] = ground + data.checkRadius;
+  slideVehicle(world, id, normal);
+  const speed = closingSpeed(motion, normal);
   if (speed > data.groundImpactMinSpeed) {
     applyVehicleDamage(
       world,
@@ -770,21 +785,23 @@ function resolveVehicleGround(world: World, id: number, current: Vec3, speed: nu
       -1,
     );
   }
-  return true;
+  return speed;
 }
 
-/** Sweeps the previous->current segment against interiors (a fast vehicle crossing a thin
- *  wall within one 32 ms tick must still stop at it, not tunnel through -- failure matrix
- *  row 14) then resolves any remaining sphere overlap at the vehicle's own checkRadius.
- *  Mirrors movement.ts's own sweepChest pattern (M4's round-1 tunnelling fix): a normalized
- *  direction and a scalar distance, not two raw points. */
-function resolveVehicleInteriors(world: World, id: number, previous: Vec3, current: Vec3): boolean {
+/** Sweep prevents tunnelling; sphere overlap handles resting and glancing contact. */
+function resolveVehicleInteriors(
+  world: World,
+  id: number,
+  previous: Vec3,
+  current: Vec3,
+  motion: Vec3,
+): number {
   const vehicles = world.vehicles;
   const data = VEHICLE_DATA[vehicles.kind[id] as VehicleKind];
   const base = id * 3;
-  const dx = current.x - previous.x;
-  const dy = current.y - previous.y;
-  const dz = current.z - previous.z;
+  const dx = current.x - previous.x,
+    dy = current.y - previous.y,
+    dz = current.z - previous.z;
   const length = Math.hypot(dx, dy, dz);
   const swept =
     length > 0
@@ -795,39 +812,35 @@ function resolveVehicleInteriors(world: World, id: number, previous: Vec3, curre
           length,
         )
       : null;
-  let hit = false;
+  let impact = 0;
   if (swept) {
-    vehicles.position.set([swept.point.x, swept.point.y, swept.point.z], base);
-    vehicles.velocity.set([0, 0, 0], base);
-    hit = true;
-  }
-  const resolvedCurrent: Vec3 = {
-    x: at(vehicles.position, base),
-    y: at(vehicles.position, base + 1),
-    z: at(vehicles.position, base + 2),
-  };
-  const push = resolveSphereAgainstInteriors(world.interiors, resolvedCurrent, data.checkRadius);
-  if (push) {
+    // Mesh triangles are double-sided. Orient the normal toward the incoming vehicle.
+    const sign =
+      motion.x * swept.normal.x + motion.y * swept.normal.y + motion.z * swept.normal.z > 0
+        ? -1
+        : 1;
+    const normal = { x: swept.normal.x * sign, y: swept.normal.y * sign, z: swept.normal.z * sign };
     vehicles.position.set(
-      [resolvedCurrent.x + push.x, resolvedCurrent.y + push.y, resolvedCurrent.z + push.z],
+      [
+        swept.point.x + normal.x * data.checkRadius,
+        swept.point.y + normal.y * data.checkRadius,
+        swept.point.z + normal.z * data.checkRadius,
+      ],
       base,
     );
-    // Depenetration holds the hull outside the floor/wall. Remove velocity into that
-    // contact too, or gravity keeps accumulating while the hull appears stationary.
-    const lengthSq = push.x * push.x + push.y * push.y + push.z * push.z;
-    const inward =
-      (at(vehicles.velocity, base) * push.x +
-        at(vehicles.velocity, base + 1) * push.y +
-        at(vehicles.velocity, base + 2) * push.z) /
-      lengthSq;
-    if (inward < 0) {
-      vehicles.velocity[base] = at(vehicles.velocity, base) - inward * push.x;
-      vehicles.velocity[base + 1] = at(vehicles.velocity, base + 1) - inward * push.y;
-      vehicles.velocity[base + 2] = at(vehicles.velocity, base + 2) - inward * push.z;
-    }
-    hit = true;
+    impact = closingSpeed(motion, normal);
+    slideVehicle(world, id, normal);
   }
-  return hit;
+  const resolved = seatPosition(vehicles, id);
+  const push = resolveSphereAgainstInteriors(world.interiors, resolved, data.checkRadius);
+  if (push) {
+    vehicles.position.set([resolved.x + push.x, resolved.y + push.y, resolved.z + push.z], base);
+    const length = Math.hypot(push.x, push.y, push.z);
+    const normal = { x: push.x / length, y: push.y / length, z: push.z / length };
+    impact = Math.max(impact, closingSpeed(motion, normal));
+    slideVehicle(world, id, normal);
+  }
+  return impact;
 }
 
 export function resolveVehicleCollision(
@@ -836,29 +849,15 @@ export function resolveVehicleCollision(
   previousPosition: Vec3,
   dt: number,
 ): void {
-  const vehicles = world.vehicles;
-  const base = id * 3;
-  const current: Vec3 = {
-    x: at(vehicles.position, base),
-    y: at(vehicles.position, base + 1),
-    z: at(vehicles.position, base + 2),
+  const current = seatPosition(world.vehicles, id);
+  const motion = {
+    x: (current.x - previousPosition.x) / dt,
+    y: (current.y - previousPosition.y) / dt,
+    z: (current.z - previousPosition.z) / dt,
   };
-  const speed = Math.hypot(
-    (current.x - previousPosition.x) / dt,
-    (current.y - previousPosition.y) / dt,
-    (current.z - previousPosition.z) / dt,
-  );
-
-  const hitGround = resolveVehicleGround(world, id, current, speed);
-  const hitInterior = resolveVehicleInteriors(world, id, previousPosition, current);
-  // Ground contact already applied the ground-impact rule (groundImpactMinSpeed/
-  // groundImpactSpeedDamageScale) above, in resolveVehicleGround, when the impact was fast
-  // enough to trip it. This is the separate, generic object-collision rule
-  // (collDamageThresholdVel/collDamageMultiplier) the plan's own numbers table cites as
-  // distinct from that one -- it applies whenever the vehicle hit *anything* solid this tick
-  // (ground or interior) and stacks on top of the ground-impact figure for a genuinely hard
-  // hit, matching a real crash doing more than one kind of damage at once.
-  if (hitGround || hitInterior) applyCollisionDamage(world, id, speed);
+  const groundImpact = resolveVehicleGround(world, id, current, motion);
+  const interiorImpact = resolveVehicleInteriors(world, id, previousPosition, current, motion);
+  applyCollisionDamage(world, id, Math.max(groundImpact, interiorImpact));
 }
 
 // --- Mount/dismount, seat position, weapon takeover (Task 5) ----------------------------
@@ -935,13 +934,14 @@ export function canSendVehicleUse(world: World, playerId: number): boolean {
 
 function tryMountOrDismount(world: World, playerId: number, input: PlayerInput): void {
   const players = world.players;
-  const wasHeld = players.wasUseHeld[playerId] === 1;
+  const wasHeld = (players.wasUseHeld[playerId]! & 1) !== 0;
+  const blocked = (players.wasUseHeld[playerId]! & 2) !== 0;
   const edge = input.use && !wasHeld;
   players.wasUseHeld[playerId] = input.use ? 1 : 0;
-  if (!edge) return;
-
   const currentVehicle = players.mountedVehicleId[playerId] ?? -1;
   if (currentVehicle !== -1) {
+    if (!edge) return;
+    players.wasUseHeld[playerId] = 3; // Block automatic reboarding until leaving contact.
     world.vehicles.driverId[currentVehicle] = -1;
     players.mountedVehicleId[playerId] = -1;
     // While mounted, movement.ts's own guard skips stepPlayer entirely for this id, so
@@ -956,6 +956,10 @@ function tryMountOrDismount(world: World, playerId: number, input: PlayerInput):
     players.wasGrounded[playerId] = 0;
     players.ski[playerId] = 0;
     players.wasJumpHeld[playerId] = 0;
+    return;
+  }
+  if (blocked && findUnoccupiedVehicleInRange(world, playerId) !== null && !edge) {
+    players.wasUseHeld[playerId] = input.use ? 3 : 2;
     return;
   }
   mountNearestVehicle(world, playerId);
@@ -1124,7 +1128,7 @@ export function stepVehicles(
 
   const ids = [...inputs.keys()].sort((a, b) => a - b);
   for (const playerId of ids) {
-    if (!world.players.active[playerId]) continue;
+    if (!world.players.active[playerId] || !world.players.alive[playerId]) continue;
     tryMountOrDismount(world, playerId, inputs.get(playerId) as PlayerInput);
   }
 

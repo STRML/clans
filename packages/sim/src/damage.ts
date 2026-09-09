@@ -166,6 +166,7 @@ export function respawnPlayer(world: World, id: number, spawn: Vec3): void {
   players.ski[id] = 0;
   players.wasGrounded[id] = 0;
   players.wasJumpHeld[id] = 0;
+  players.wasUseHeld[id] = 0;
   // Defense in depth: the only normal path to a mounted player taking lethal damage is
   // vehicle-destruction ejection (vehicles.ts's ejectPilot), which already clears this and
   // the vehicle's own driverId the instant it fires. Clearing it again here means a respawn

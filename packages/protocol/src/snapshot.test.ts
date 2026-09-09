@@ -863,3 +863,27 @@ describe('WorldExtras: orders (M7)', () => {
     );
   });
 });
+
+describe('boarding state snapshots', () => {
+  it('preserves use and boarding suppression through full and delta snapshots, including release', () => {
+    const world = createWorld(terrain, 1);
+    const id = addPlayer(world, { x: 0, y: 10, z: 0 }, 1);
+    world.players.wasUseHeld[id] = 3;
+    const full = decodeSnapshot(
+      encodeSnapshot(1, 0, 0, serializeActivePlayers(world), null, emptyExtras()),
+      null,
+    );
+    expect(full.players[0]?.wasUseHeld).toBe(3);
+    let baseline = { snapshotId: 1, players: full.players };
+    for (const state of [2, 0, 1] as const) {
+      world.players.wasUseHeld[id] = state;
+      const nextId = baseline.snapshotId + 1;
+      const decoded = decodeSnapshot(
+        encodeSnapshot(nextId, nextId, 0, serializeActivePlayers(world), baseline, emptyExtras()),
+        baseline,
+      );
+      expect(decoded.players[0]?.wasUseHeld ?? 0).toBe(state);
+      baseline = { snapshotId: nextId, players: decoded.players };
+    }
+  });
+});

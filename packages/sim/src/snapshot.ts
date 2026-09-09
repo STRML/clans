@@ -88,6 +88,8 @@ export interface PlayerSnapshotData {
    * Codex review round 15 (PR #9), finding 1.
    */
   wasJumpHeld: 0 | 1;
+  /** Bit 0: use held; bit 1: automatic boarding blocked until leaving contact. */
+  wasUseHeld?: 0 | 1 | 2 | 3;
 }
 
 function num(arr: Float64Array | Uint8Array | Uint16Array | Int16Array, i: number): number {
@@ -130,6 +132,7 @@ export function serializePlayer(world: World, id: number): PlayerSnapshotData {
     armor: num(p.armor, id),
     hasRepairPack: bit(p.hasRepairPack, id),
     wasJumpHeld: bit(p.wasJumpHeld, id),
+    ...(p.wasUseHeld[id] ? { wasUseHeld: p.wasUseHeld[id] as 1 | 2 | 3 } : {}),
   };
 }
 
@@ -185,6 +188,7 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   players.score[data.id] = data.score;
   players.godMode[data.id] = data.godMode;
   players.wasJumpHeld[data.id] = data.wasJumpHeld;
+  players.wasUseHeld[data.id] = data.wasUseHeld ?? 0;
 }
 
 /** The wire shape of one vehicle. Unlike base objects/turrets, vehicles have no mission-file

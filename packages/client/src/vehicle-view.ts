@@ -193,7 +193,10 @@ function vehicleAssetFor(
 }
 
 function createVehicleMesh(assets: Pick<KatabaticAssets, 'scene'>, kind: VehicleKind): THREE.Group {
-  const group = proceduralMesh(kind);
+  const group = new THREE.Group();
+  const fallback = proceduralMesh(kind);
+  fallback.rotation.y = Math.PI;
+  group.add(fallback);
   const asset = vehicleAssetFor(assets, kind);
   if (asset.source !== 'procedural') loadShapeInto(group, asset.shape.replace(/\.glb$/, ''));
   return group;
@@ -219,21 +222,23 @@ function pruneVehicleMeshes(
  *  YXZ euler order aimCamera (app.ts) already uses for the player's own look. */
 function placeVehicleMesh(mesh: THREE.Object3D, data: VehicleSnapshotData): void {
   mesh.position.set(data.x, data.y, data.z);
-  mesh.rotation.set(data.pitch, data.yaw + Math.PI, data.roll, 'YXZ');
+  mesh.rotation.set(-data.pitch, data.yaw, data.roll, 'YXZ');
 }
 
 export function createVehicleView(
   scene: THREE.Scene,
   assets: Pick<KatabaticAssets, 'scene'>,
+  onDestroyed: (vehicle: VehicleSnapshotData) => void = () => {},
 ): VehicleView {
   const meshes = new Map<number, THREE.Object3D>();
   return {
     meshes,
     sync(vehicles: VehicleSnapshotData[]): void {
-      // A destroyed vehicle disappears entirely (mirrors flag-view.ts's own disappearance-
-      // based cleanup convention, M3) rather than staying visible in a "destroyed" material
-      // the way a base object/turret does -- Task 7's ejection already flings the pilot
-      // clear the same tick, so there is no reason for the husk to linger on screen.
+      for (const data of vehicles) {
+        // Snapshot transitions survive multiple sim ticks per rendered frame. Joining a
+        // game with an already-dead vehicle, or receiving it again, must not replay FX.
+        if (data.destroyed && meshes.has(data.id)) onDestroyed(data);
+      }
       const live = vehicles.filter((v) => !v.destroyed);
       const liveIds = new Set(live.map((v) => v.id));
       pruneVehicleMeshes(scene, meshes, liveIds);
@@ -241,6 +246,7 @@ export function createVehicleView(
         let mesh = meshes.get(data.id);
         if (!mesh) {
           mesh = createVehicleMesh(assets, data.kind as VehicleKind);
+          mesh.name = `vehicle-${String(data.id)}`;
           scene.add(mesh);
           meshes.set(data.id, mesh);
         }

@@ -68,7 +68,12 @@ import {
   type TimestampedEvent,
 } from './netclient.js';
 import { RemoteBuffer, syncRemoteMeshes } from './remote.js';
-import { createStationMenu, stationMenuVisible, type StationMenu } from './stationMenu.js';
+import {
+  createStationMenu,
+  inventoryStationTriggerAt,
+  stationMenuVisible,
+  type StationMenu,
+} from './stationMenu.js';
 import { addEnvironment, createTerrain } from './terrain.js';
 import { WebSocketTransport } from './transport.js';
 import {
@@ -88,6 +93,7 @@ import { createVoiceMenu, speakVoiceLine, type VoiceMenu } from './voicebinds.js
 import {
   projectilesFromWorld,
   spawnExplosionsForExpired,
+  spawnVehicleExplosion,
   spawnLaserBeams,
   syncProjectileMeshes,
   updateEffects,
@@ -390,7 +396,7 @@ interface BaseAssetsViewState {
   hud: { update(source: HudSource): void };
   baseObjectView: ReturnType<typeof createBaseObjectView>;
   stationMenu: StationMenu;
-  stationMenuState: { open: boolean };
+  stationMenuState: { open: boolean; triggerStation: number | null };
   vehicleView: VehicleView;
   vehicleBuffers: Map<number, VehicleBuffer>;
   vehiclePadMenu: VehiclePadMenu;
@@ -495,6 +501,7 @@ function syncCommandOrders(state: BaseAssetsViewState): void {
  *  that function's own complexity under budget. */
 function syncMenus(state: BaseAssetsViewState, pressed: boolean): void {
   const { world, playerId } = state;
+  syncInventoryStationEntry(state);
   if (pressed) toggleUseMenu(state);
   state.stationMenuState.open =
     stationMenuVisible(world, playerId, state.stationMenuState.open) &&
@@ -502,6 +509,20 @@ function syncMenus(state: BaseAssetsViewState, pressed: boolean): void {
   if (state.stationMenuState.open) state.stationMenu.show();
   else state.stationMenu.hide();
   syncVehicleStationMenu(state);
+}
+
+function syncInventoryStationEntry(state: BaseAssetsViewState): void {
+  const menu = state.stationMenuState;
+  const trigger = inventoryStationTriggerAt(state.world, state.playerId);
+  if (
+    trigger !== null &&
+    trigger !== menu.triggerStation &&
+    state.commanderMapCanvas.hidden &&
+    !state.voiceMenu.visible &&
+    !state.vehiclePadMenuState.open
+  )
+    menu.open = true;
+  menu.triggerStation = trigger;
 }
 
 function toggleUseMenu(state: BaseAssetsViewState): void {
@@ -1215,7 +1236,10 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   // (Task 11) -- without this, a client walking into a wall or a powered force field would
   // predict straight through it until the next snapshot corrected the mispredict.
   const baseObjectView = createBaseObjectView(scene, assets);
-  const vehicleView = createVehicleView(scene, assets);
+  const vehicleView = createVehicleView(scene, assets, (vehicle) => {
+    spawnVehicleExplosion(scene, effects, vehicle);
+    audio.explosion(vehicle);
+  });
   const weaponModel = createWeaponModel();
 
   const camera = new THREE.PerspectiveCamera(
@@ -1244,7 +1268,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   document.body.appendChild(crosshair);
   const hud = createHud(document.body, hudSourceFrom(world, playerId, net));
   const interactionPrompt = createInteractionPrompt(document.body);
-  const stationMenuState = { open: false };
+  const stationMenuState = { open: false, triggerStation: null as number | null };
   const stationMenu: StationMenu = createStationMenu(
     document.body,
     (armor: ArmorId, repairPack) => {

@@ -82,6 +82,7 @@ export interface PlayerStore {
    *  system reads this). Lives on PlayerStore rather than a module-level Map so it resets
    *  cleanly with every fresh World -- a bare module-level map keyed by player id would leak
    *  state across separate World instances (every test in this file creates several). */
+  /** Bit 0: use held; bit 1: wait for contact exit before automatic boarding. */
   wasUseHeld: Uint8Array;
 }
 /** One id freed by `free()`, held out of `freeIds` until it has sat unallocated for at

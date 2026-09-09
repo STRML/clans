@@ -151,7 +151,7 @@ function vehicleRow(source: HudSource): HudRow {
   );
   return {
     id: 'hud-vehicle',
-    text: `Vehicle ${String(percent(health, data.maxDamage))}% — ${speed.toFixed(1)} m/s`,
+    text: `Hull ${String(percent(health, data.maxDamage))}% · Shield ${String(percent(vehicles.energy[vehicleId] ?? 0, data.maxEnergy))}% — ${speed.toFixed(1)} m/s`,
   };
 }
 
