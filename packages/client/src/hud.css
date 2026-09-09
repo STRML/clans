@@ -1,0 +1,268 @@
+/* Compact translucent instruments, following the original T2 screen layout. */
+#hud {
+  --ink: #8ee5df;
+  --panel: rgba(10, 79, 90, 0.72);
+  position: fixed;
+  inset: 0;
+  display: block;
+  padding: 0;
+  color: var(--ink);
+  font:
+    12px 'Arial',
+    sans-serif;
+  text-shadow: 0 1px 2px #002b33;
+  pointer-events: none;
+}
+#hud > div {
+  position: absolute;
+  box-sizing: border-box;
+}
+#hud-kill-feed {
+  top: 12px;
+  left: 12px;
+  right: auto;
+  bottom: auto;
+  width: min(430px, 48vw);
+  min-height: 70px;
+  padding: 8px 10px;
+  border: 2px solid #609a9f88;
+  border-bottom: 4px double #91bcbc99;
+  background: var(--panel);
+  color: #74d69e;
+  text-align: left;
+  white-space: pre-line;
+  line-height: 1.5;
+  font-size: 12px;
+}
+#hud-health,
+#hud-energy {
+  top: 14px;
+  right: 86px;
+  width: clamp(85px, 13vw, 165px);
+  height: 13px;
+  padding-right: 4px;
+  border: 2px solid #66949b;
+  background: linear-gradient(to right, var(--bar) var(--fill), #153e4c var(--fill));
+  font-size: 9px;
+  text-align: right;
+  line-height: 9px;
+  color: #dcfff5;
+}
+#hud-health {
+  --bar: #39d653;
+}
+#hud-energy {
+  --bar: #667aff;
+  top: 32px;
+}
+#hud-clock {
+  top: 10px;
+  right: 12px;
+  width: 65px;
+  height: 65px;
+  border: 5px double #58b8bd;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    #092c40 37%,
+    #2e7786 39%,
+    #154552 63%,
+    #6abfc0 65%,
+    #235365 70%
+  );
+  box-shadow: 0 0 0 2px #417b87;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: bold;
+}
+#hud-team-scores {
+  left: 12px;
+  bottom: 12px;
+  padding: 4px 8px;
+  background: var(--panel);
+  border: 1px solid #4f9caa;
+  white-space: pre;
+  font: 11px/1.5 monospace;
+  color: #7bddb9;
+}
+#hud-flag-status {
+  left: 12px;
+  bottom: 60px;
+  color: #89ffb4;
+}
+#hud-weapon-rack {
+  right: 14px;
+  top: 50%;
+  transform: translateY(-35%);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hud-weapon-slot {
+  width: 35px;
+  height: 43px;
+  display: grid;
+  grid-template-rows: 26px 14px;
+  justify-items: center;
+  border: 1px solid #67b6bd;
+  border-radius: 3px;
+  background: var(--panel);
+  opacity: 0.75;
+}
+.hud-weapon-slot b {
+  color: #9adfe4;
+  font-size: 24px;
+  line-height: 26px;
+}
+.hud-weapon-slot span {
+  font-size: 10px;
+}
+.hud-weapon-slot[data-selected='true'] {
+  opacity: 1;
+  background: #148f82bd;
+  border-right: 4px solid #7affb3;
+}
+#hud-weapon {
+  right: 58px;
+  bottom: 70px;
+  font-size: 11px;
+}
+#hud-ammo {
+  right: 14px;
+  bottom: 64px;
+  width: 35px;
+  text-align: center;
+  font-size: 18px;
+}
+#hud-grenades {
+  bottom: 12px;
+  right: 14px;
+  min-width: 42px;
+  height: 40px;
+  background: var(--panel);
+  border: 1px solid #6db9bc;
+  text-align: center;
+  padding-top: 19px;
+  font-size: 11px;
+}
+#hud-grenades::before {
+  content: '◆';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  font-size: 18px;
+}
+#hud-aimed {
+  top: 55%;
+  left: 50%;
+  transform: translateX(-50%);
+}
+#hud-respawn {
+  top: 38%;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 20px;
+}
+#hud-vehicle {
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0;
+  font-size: 11px;
+}
+.vehicle-silhouette {
+  width: 52px;
+  height: 68px;
+  fill: #1b6575a8;
+  stroke: #80cfd7;
+  stroke-width: 2;
+}
+.vehicle-left,
+.vehicle-right {
+  width: 96px;
+  margin: 0 -3px;
+  padding: 5px 6px;
+  background: var(--panel);
+  border-top: 2px solid #80cbdc88;
+  text-align: center;
+}
+.vehicle-meter {
+  height: 9px;
+  margin-top: 5px;
+  border: 1px solid #70a1ad;
+  background: #233b4c;
+}
+.vehicle-meter i {
+  height: 100%;
+  display: block;
+}
+.vehicle-meter.shield i {
+  background: #667dff;
+}
+.vehicle-meter.hull i {
+  background: #34eb3e;
+}
+#hud[data-piloting='true'] #hud-weapon-rack,
+#hud[data-piloting='true'] #hud-weapon,
+#hud[data-piloting='true'] #hud-ammo,
+#hud[data-piloting='true'] #hud-grenades {
+  display: none;
+}
+#crosshair {
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border: 1px solid #81c6d399;
+  background: transparent;
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 5px #52858c44,
+    inset 0 0 0 5px #52858c33;
+}
+#crosshair::after {
+  content: '';
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  background: #abe1dd;
+  top: 13px;
+  left: 13px;
+}
+@media (max-width: 700px) {
+  #hud-kill-feed {
+    min-height: 48px;
+    font-size: 10px;
+  }
+  #hud-team-scores {
+    font-size: 9px;
+  }
+  .vehicle-left,
+  .vehicle-right {
+    width: 62px;
+  }
+  #hud-vehicle {
+    bottom: 64px;
+  }
+}
+
+#interaction-prompt[data-piloting='true'] {
+  top: auto;
+  left: auto;
+  right: 14px;
+  bottom: 14px;
+  transform: none;
+  font:
+    11px Arial,
+    sans-serif;
+  padding: 5px 8px;
+  background: rgba(10, 79, 90, 0.5);
+  border-color: #609a9f88;
+}
+#interaction-prompt[data-piloting='true'] kbd {
+  font-size: 10px;
+  padding: 1px 4px;
+}

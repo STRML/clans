@@ -85,6 +85,8 @@ export interface VehicleStore {
   destroyed: Uint8Array;
   driverId: Int16Array; // -1 = unpiloted
   padId: Int16Array; // originating BaseObjectStore id, -1 if none
+  spawnTime: Float64Array; // seconds until fabrication and automatic boarding complete
+  reservedPilotId: Int16Array;
   weaponTimer: Float64Array; // Shrike blaster cooldown; unused by Wildcat
   onGround: Uint8Array;
   // Codex review round 1 (this PR), finding 8: the Wildcat's own jump was level-triggered
@@ -120,6 +122,8 @@ export function createVehicleStore(capacity = VEHICLE_CAPACITY): VehicleStore {
     destroyed: new Uint8Array(capacity),
     driverId: new Int16Array(capacity).fill(-1),
     padId: new Int16Array(capacity).fill(-1),
+    spawnTime: new Float64Array(capacity),
+    reservedPilotId: new Int16Array(capacity).fill(-1),
     weaponTimer: new Float64Array(capacity),
     onGround: new Uint8Array(capacity),
     wasJumpHeld: new Uint8Array(capacity),
@@ -254,10 +258,68 @@ export function spawnVehicleAtPad(world: World, padId: number, kind: VehicleKind
   vehicles.destroyed[id] = 0;
   vehicles.driverId[id] = -1;
   vehicles.padId[id] = padId;
+  vehicles.spawnTime[id] = 0;
+  vehicles.reservedPilotId[id] = -1;
   vehicles.weaponTimer[id] = 0;
   vehicles.onGround[id] = 0;
   vehicles.wasJumpHeld[id] = 0;
   return id;
+}
+
+// Original serverVehicleHud.cs: reveal at 4.8 s, mountable at 6.5 s.
+export const VEHICLE_BUILD_TIME = 6.5;
+export const VEHICLE_REVEAL_TIME = 4.8;
+
+function padIsBuilding(v: VehicleStore, padId: number): boolean {
+  for (let id = 0; id < v.count; id++) {
+    if (v.active[id] && !v.destroyed[id] && v.padId[id] === padId && v.spawnTime[id]! > 0)
+      return true;
+  }
+  return false;
+}
+
+export function requestVehicleAtPad(
+  world: World,
+  playerId: number,
+  padId: number,
+  kind: VehicleKind,
+): number | null {
+  const p = world.players;
+  if (
+    !p.active[playerId] ||
+    !p.alive[playerId] ||
+    p.mountedVehicleId[playerId] !== -1 ||
+    vehiclePadAt(world, playerId) !== padId
+  )
+    return null;
+  if (padIsBuilding(world.vehicles, padId)) return null;
+  const id = spawnVehicleAtPad(world, padId, kind);
+  if (id === null) return null;
+  const v = world.vehicles;
+  v.spawnTime[id] = VEHICLE_BUILD_TIME;
+  v.reservedPilotId[id] = playerId;
+  // Orient toward the purchaser's view, avoiding a steering target jump at boarding.
+  v.yaw[id] = p.yaw[playerId] ?? 0;
+  resolveVehicleCollision(world, id, seatPosition(v, id), 1);
+  return id;
+}
+
+function stepVehicleBuild(world: World, id: number, dt: number): boolean {
+  const v = world.vehicles;
+  if (v.spawnTime[id]! <= 0) return false;
+  v.spawnTime[id] = Math.max(0, v.spawnTime[id]! - dt);
+  const pilot = v.reservedPilotId[id]!;
+  if (pilot !== -1 && (world.players.active[pilot] === 0 || world.players.alive[pilot] === 0))
+    v.reservedPilotId[id] = -1;
+  if (v.spawnTime[id] === 0 && v.reservedPilotId[id] !== -1) {
+    if (world.players.mountedVehicleId[pilot] === -1) {
+      v.driverId[id] = pilot;
+      world.players.mountedVehicleId[pilot] = id;
+      seatDriver(world, id, pilot);
+    }
+    v.reservedPilotId[id] = -1;
+  }
+  return true;
 }
 
 /** The id of a powered `StationVehiclePad` belonging to the player's own team within
@@ -296,13 +358,10 @@ export function vehiclePadAt(world: World, playerId: number): number | null {
 // numbers table is collected in the plan's "ours" numbers table alongside its citation.
 const SHRIKE_MIN_DRAG = 30;
 const SHRIKE_MANEUVERING_FORCE = 3000; // vehicles/vehicle_shrike.cs:140
-const SHRIKE_ROLL_FORCE = 4; // vehicles/vehicle_shrike.cs:143
 const SHRIKE_HORIZONTAL_SURFACE_FORCE = 6; // vehicles/vehicle_shrike.cs:138
 const SHRIKE_VERT_THRUST_MULTIPLE = 3; // vehicles/vehicle_shrike.cs:152
 const SHRIKE_MAX_AUTO_SPEED = 15; // vehicles/vehicle_shrike.cs:131
-const SHRIKE_AUTO_ANGULAR_FORCE = 400; // vehicles/vehicle_shrike.cs:131-133 — ours table
 const SHRIKE_AUTO_LINEAR_FORCE = 300; // vehicles/vehicle_shrike.cs:132 — ours table
-const SHRIKE_ROTATIONAL_DRAG = 900; // vehicles/vehicle_shrike.cs:128 — ours table
 const SHRIKE_STEERING_FORCE = 1200; // vehicles/vehicle_shrike.cs:141 — ours table
 const SHRIKE_JET_FORCE = 2000;
 const SHRIKE_MIN_JET_ENERGY = 28;
@@ -336,9 +395,7 @@ function normalizeAngle(angle: number): number {
   return angle - Math.round(angle / (2 * Math.PI)) * 2 * Math.PI;
 }
 
-/** Auto-stabilizer: below maxAutoSpeed, angular velocity relaxes toward zero and linear
- *  velocity toward zero, at autoAngularForce/autoLinearForce -- Torque's own "when you let
- *  go of the stick it levels out" behavior. */
+/** Low-speed linear braking. Angular stabilization belongs to the heading controller. */
 function applyShrikeAutoStabilize(
   vehicles: VehicleStore,
   id: number,
@@ -349,37 +406,14 @@ function applyShrikeAutoStabilize(
   const mass = VEHICLE_DATA[VehicleKind.Shrike].mass;
   const base = id * 3;
   for (let axis = 0; axis < 3; axis += 1) {
-    const av = vehicles.angVel[base + axis] ?? 0;
-    vehicles.angVel[base + axis] =
-      av - Math.sign(av) * Math.min(Math.abs(av), (SHRIKE_AUTO_ANGULAR_FORCE / 1000) * dt);
-  }
-  for (let axis = 0; axis < 3; axis += 1) {
     const v = vehicles.velocity[base + axis] ?? 0;
     vehicles.velocity[base + axis] =
       v - Math.sign(v) * Math.min(Math.abs(v), (SHRIKE_AUTO_LINEAR_FORCE / mass) * dt);
   }
 }
 
-/** The mouse-steering half of applyShrikeSteering (yaw/pitch/roll angular acceleration) --
- *  split out so the drag-and-integrate half below stays under the complexity budget on its
- *  own rather than one long function paying for both. */
-function applyShrikeSteeringInput(
-  vehicles: VehicleStore,
-  id: number,
-  input: PlayerInput,
-  dt: number,
-): void {
-  const mass = VEHICLE_DATA[VehicleKind.Shrike].mass;
-  const base = id * 3;
-  const rate = (SHRIKE_STEERING_FORCE / mass) * dt;
-  const yawError = normalizeAngle(input.yaw - at(vehicles.yaw, id));
-  const pitchError = normalizeAngle(input.pitch - at(vehicles.pitch, id));
-  vehicles.angVel[base + 1] = at(vehicles.angVel, base + 1) + yawError * rate;
-  vehicles.angVel[base] = at(vehicles.angVel, base) + pitchError * rate;
-  vehicles.angVel[base + 2] =
-    at(vehicles.angVel, base + 2) - SHRIKE_ROLL_FORCE * dt * Math.sign(at(vehicles.roll, id));
-}
-
+/** Critically damped heading controller. The script supplies steering force, not
+ * Torque's inertia tensor; these explicit demo rates avoid an underdamped orbit. */
 function applyShrikeSteering(
   vehicles: VehicleStore,
   id: number,
@@ -387,16 +421,29 @@ function applyShrikeSteering(
   dt: number,
 ): void {
   const base = id * 3;
-  // Mouse yaw/pitch accelerate angular velocity via steeringForce, not snap the angle --
-  // integrated below like everything else, so a held mouse input ramps, matching the real
-  // steering-jet model rather than a direct-set rotation.
-  applyShrikeSteeringInput(vehicles, id, input, dt);
-  vehicles.yaw[id] = at(vehicles.yaw, id) + at(vehicles.angVel, base + 1) * dt;
-  vehicles.pitch[id] = at(vehicles.pitch, id) + at(vehicles.angVel, base) * dt;
+  const stiffness = SHRIKE_STEERING_FORCE / VEHICLE_DATA[VehicleKind.Shrike].mass;
+  const damping = 2 * Math.sqrt(stiffness);
+  const targetPitch = Math.max(-1.35, Math.min(1.35, input.pitch));
+  const errors = [
+    normalizeAngle(input.yaw - at(vehicles.yaw, id)),
+    targetPitch - at(vehicles.pitch, id),
+  ];
+  for (let axis = 0; axis < 2; axis++) {
+    const velocity = at(vehicles.angVel, base + axis);
+    vehicles.angVel[base + axis] = Math.max(
+      -1.8,
+      Math.min(1.8, velocity + (errors[axis]! * stiffness - damping * velocity) * dt),
+    );
+  }
+  vehicles.yaw[id] = normalizeAngle(at(vehicles.yaw, id) + at(vehicles.angVel, base) * dt);
+  vehicles.pitch[id] = Math.max(
+    -1.35,
+    Math.min(1.35, at(vehicles.pitch, id) + at(vehicles.angVel, base + 1) * dt),
+  );
+  const bank = Math.max(-0.45, Math.min(0.45, -at(vehicles.angVel, base) * 0.3));
+  const rollRate = at(vehicles.angVel, base + 2);
+  vehicles.angVel[base + 2] = rollRate + ((bank - at(vehicles.roll, id)) * 16 - 8 * rollRate) * dt;
   vehicles.roll[id] = at(vehicles.roll, id) + at(vehicles.angVel, base + 2) * dt;
-  const dragScale = 1 - Math.min(1, (SHRIKE_ROTATIONAL_DRAG / 1000) * dt);
-  vehicles.angVel[base] = at(vehicles.angVel, base) * dragScale;
-  vehicles.angVel[base + 1] = at(vehicles.angVel, base + 1) * dragScale;
 }
 
 function applyShrikeThrust(
@@ -409,6 +456,10 @@ function applyShrikeThrust(
   const base = id * 3;
   const heading = headingOf(vehicles.yaw[id] ?? 0, vehicles.pitch[id] ?? 0);
   const thrust = SHRIKE_MANEUVERING_FORCE / data.mass;
+  const yaw = at(vehicles.yaw, id);
+  vehicles.velocity[base] = at(vehicles.velocity, base) - Math.cos(yaw) * input.moveX * thrust * dt;
+  vehicles.velocity[base + 2] =
+    at(vehicles.velocity, base + 2) + Math.sin(yaw) * input.moveX * thrust * dt;
   vehicles.velocity[base] = (vehicles.velocity[base] ?? 0) + heading.x * input.moveZ * thrust * dt;
   vehicles.velocity[base + 1] =
     (vehicles.velocity[base + 1] ?? 0) +
@@ -902,7 +953,13 @@ function findUnoccupiedVehicleInRange(world: World, playerId: number): number | 
     z: at(world.players.position, pBase + 2),
   };
   for (let vId = 0; vId < vehicles.count; vId += 1) {
-    if (!vehicles.active[vId] || vehicles.destroyed[vId] || vehicles.driverId[vId] !== -1) continue;
+    if (
+      !vehicles.active[vId] ||
+      vehicles.destroyed[vId] ||
+      vehicles.spawnTime[vId]! > 0 ||
+      vehicles.driverId[vId] !== -1
+    )
+      continue;
     const data = VEHICLE_DATA[vehicles.kind[vId] as VehicleKind];
     const vPos = seatPosition(vehicles, vId);
     const dist = Math.hypot(playerPos.x - vPos.x, playerPos.y - vPos.y, playerPos.z - vPos.z);
@@ -1084,6 +1141,7 @@ function stepOneVehicle(
   dt: number,
 ): void {
   const vehicles = world.vehicles;
+  if (stepVehicleBuild(world, vId, dt)) return;
   let driverId = vehicles.driverId[vId] ?? -1;
   if (driverId !== -1 && !driverIsLive(world, driverId)) {
     // Self-heals a mount relationship a dead/removed driver left dangling on the vehicle's
@@ -1094,7 +1152,10 @@ function stepOneVehicle(
     vehicles.driverId[vId] = -1;
     driverId = -1;
   }
-  const input = driverId !== -1 ? (inputs.get(driverId) ?? idleVehicleInput()) : idleVehicleInput();
+  const input =
+    driverId !== -1
+      ? (inputs.get(driverId) ?? idleVehicleInput())
+      : { ...idleVehicleInput(), yaw: at(vehicles.yaw, vId), pitch: at(vehicles.pitch, vId) };
   stepOneVehiclePhysics(world, vId, input, dt);
   // stepOneVehiclePhysics can destroy this vehicle via collision damage (resolveVehicleCollision
   // -> applyVehicleDamage), which ejects the pilot and clears vehicles.driverId[vId] to -1. Using

@@ -5,6 +5,7 @@ import {
   VEHICLE_DATA,
   WeaponId,
   ammoIndex,
+  sampleTerrain,
   armorFor,
   type VehicleKind,
   type World,
@@ -186,10 +187,61 @@ export function describeKillFeed(source: HudSource): string[] {
   return lines.slice(-KILL_FEED_LINES);
 }
 
-/**
- * DOM wiring, exercised by Task 14's Playwright spec rather than Vitest (the client project
- * runs `environment: 'node'`; see `debug.ts` for the same split against `stats.ts`).
- */
+const WEAPON_GLYPHS = ['◉', '▰', '◒', '⌖', '✣'];
+
+function createWeaponRack(hud: HTMLElement): HTMLElement[] {
+  const rack = document.createElement('div');
+  rack.id = 'hud-weapon-rack';
+  hud.append(rack);
+  return WEAPON_GLYPHS.map((glyph, slot) => {
+    const item = document.createElement('div');
+    item.className = 'hud-weapon-slot';
+    item.title = `${String(slot + 1)}: ${WEAPON_NAME[slot] ?? ''}`;
+    const icon = document.createElement('b');
+    icon.textContent = glyph;
+    const ammo = document.createElement('span');
+    item.append(icon, ammo);
+    rack.append(item);
+    return item;
+  });
+}
+
+function updateRack(items: HTMLElement[], source: HudSource): void {
+  for (const [slot, item] of items.entries()) {
+    const ammo = source.world.players.ammo[ammoIndex(source.playerId, slot)] ?? 0;
+    item.lastElementChild!.textContent = ammo < 0 ? '∞' : String(ammo);
+    item.dataset['selected'] = String(source.world.players.weaponSlot[source.playerId] === slot);
+  }
+}
+
+function updateVehicleInstruments(el: HTMLElement, source: HudSource): void {
+  const id = source.world.players.mountedVehicleId[source.playerId] ?? -1;
+  if (id === -1) {
+    el.replaceChildren();
+    return;
+  }
+  if (!el.querySelector('.vehicle-silhouette')) {
+    el.innerHTML =
+      '<div class="vehicle-left"><span class="vehicle-speed"></span><div class="vehicle-meter shield"><i></i></div></div><svg class="vehicle-silhouette" viewBox="0 0 70 90" aria-label="Vehicle"><ellipse cx="35" cy="45" rx="32" ry="42"/><path d="M35 6L42 33L61 54L61 65L41 57L40 78L30 78L29 57L9 65L9 54L28 33Z"/><path d="M35 17V70M29 37H41"/></svg><div class="vehicle-right"><span class="vehicle-altitude"></span><div class="vehicle-meter hull"><i></i></div></div>';
+  }
+  const v = source.world.vehicles,
+    base = id * 3;
+  const data = VEHICLE_DATA[v.kind[id] as VehicleKind];
+  const speed = Math.hypot(v.velocity[base]!, v.velocity[base + 1]!, v.velocity[base + 2]!);
+  const altitude = Math.max(
+    0,
+    v.position[base + 1]! -
+      sampleTerrain(source.world.terrain, v.position[base]!, v.position[base + 2]!).height,
+  );
+  el.querySelector('.vehicle-speed')!.textContent = `${speed.toFixed(0)} m/s`;
+  el.querySelector('.vehicle-altitude')!.textContent = `${altitude.toFixed(0)} m`;
+  (el.querySelector('.shield i') as HTMLElement).style.width =
+    `${String(percent(v.energy[id]!, data.maxEnergy))}%`;
+  (el.querySelector('.hull i') as HTMLElement).style.width =
+    `${String(percent(data.maxDamage - v.damage[id]!, data.maxDamage))}%`;
+  el.setAttribute('aria-label', el.dataset['value'] ?? 'Vehicle instruments');
+}
+
 export function createHud(
   container: HTMLElement,
   initialSource: HudSource,
@@ -204,18 +256,41 @@ export function createHud(
     hud.appendChild(el);
     rows.set(row.id, el);
   }
+  const rack = createWeaponRack(hud);
   const killFeed = document.createElement('div');
   killFeed.id = 'hud-kill-feed';
   hud.appendChild(killFeed);
 
   function update(source: HudSource): void {
+    const mounted = (source.world.players.mountedVehicleId[source.playerId] ?? -1) !== -1;
+    hud.dataset['piloting'] = String(mounted);
     for (const row of describeHud(source)) {
-      const el = rows.get(row.id);
-      if (!el) continue;
-      el.textContent = row.text;
+      const el = rows.get(row.id)!;
       el.dataset['value'] = row.text;
+      if (row.id === 'hud-vehicle') {
+        updateVehicleInstruments(el, source);
+        continue;
+      }
+      el.textContent = row.text;
+      if (row.id === 'hud-health' || row.id === 'hud-energy') {
+        el.style.setProperty('--fill', row.text);
+        el.setAttribute(
+          'aria-label',
+          `${row.id === 'hud-health' ? 'Health' : 'Energy'} ${row.text}`,
+        );
+      }
     }
-    killFeed.textContent = describeKillFeed(source).join(' | ');
+    const scores = rows.get('hud-team-scores')!;
+    scores.textContent = source.teamScores
+      .map((score, i) => {
+        const flag = source.flags.find((f) => f.team === i + 1);
+        const status = flag?.state === FlagState.Home ? '<At Base>' : '<Away>';
+        return `Team ${String(i + 1)}   ${String(score)}   FLAG  ${status}`;
+      })
+      .join('\n');
+    updateRack(rack, source);
+    const messages = describeKillFeed(source);
+    killFeed.textContent = messages.length ? messages.join('\n') : 'Clans · Capture the Flag';
     hud.dataset['ready'] = '1';
   }
   update(initialSource);

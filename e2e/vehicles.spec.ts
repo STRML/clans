@@ -65,34 +65,17 @@ test('spawn a Wildcat, mount, drive, dismount', async ({ page }) => {
   await expect(wildcatButton).toBeVisible();
   await wildcatButton.click();
 
-  // Vehicles spawn on the platform, separate from the control station. Walk over to it.
-  await page.evaluate(() => {
-    const app = (window as unknown as { __app: App }).__app;
-    const v = app.world.vehicles;
-    const id = Array.from(v.active).findIndex(Boolean);
-    const x = v.position[id * 3]!,
-      z = v.position[id * 3 + 2]!;
-    app.input.yaw = Math.atan2(
-      x - app.world.players.position[app.playerId * 3]!,
-      z - app.world.players.position[app.playerId * 3 + 2]!,
-    );
-    return { x, z };
-  });
-  await page.keyboard.down('KeyW');
-  try {
-    await expect
-      .poll(
-        () =>
-          page.evaluate(() => {
-            const app = (window as unknown as { __app: App }).__app;
-            return app.world.players.mountedVehicleId[app.playerId];
-          }),
-        { timeout: 20_000, intervals: [100] },
-      )
-      .toBeGreaterThanOrEqual(0);
-  } finally {
-    await page.keyboard.up('KeyW');
-  }
+  // Fabrication completes before the purchaser is automatically seated.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const app = (window as unknown as { __app: App }).__app;
+          return app.world.players.mountedVehicleId[app.playerId];
+        }),
+      { timeout: 25_000 },
+    )
+    .toBeGreaterThanOrEqual(0);
 
   // #hud-vehicle is empty while unmounted (hud.ts's vehicleRow) and reads
   // "Vehicle <health>% — <speed> m/s" once mounted -- this is the "we're driving" signal.

@@ -2006,6 +2006,21 @@ describe('NetClient', () => {
       };
     }
 
+    it('maps a pending launch reservation to the local prediction slot', () => {
+      const transport = makeTransport(makeLink({ value: 41 }));
+      const client = new NetClient(transport, terrain, { now: () => clock.ms });
+      client.playerId = 7;
+      transport.pump([
+        encodeSnapshot(1, 1, 0, [defaultServerState({ id: 7 })], null, {
+          ...emptyExtras(),
+          vehicles: [vehicleSnapshot({ spawnTime: 4.5, reservedPilotId: 7 })],
+        }),
+      ]);
+      expect(client.world.vehicles.spawnTime[5]).toBe(4.5);
+      expect(client.world.vehicles.reservedPilotId[5]).toBe(0);
+      expect(client.world.players.mountedVehicleId[0]).toBe(-1);
+    });
+
     it('sets players.mountedVehicleId[LOCAL_SLOT] when the snapshot reports this player driving a vehicle', () => {
       const transport = makeTransport(makeLink({ value: 41 }));
       const client = new NetClient(transport, terrain, { now: () => clock.ms });

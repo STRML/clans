@@ -756,6 +756,8 @@ describe('WorldExtras: vehicles (M5)', () => {
           driverId: 3,
           padId: 2,
           weaponTimer: 0.1,
+          spawnTime: 4.5,
+          reservedPilotId: 7,
           onGround: 1 as const,
           wasJumpHeld: 1 as const,
         },
@@ -789,6 +791,8 @@ describe('WorldExtras: vehicles (M5)', () => {
     expect(vehicle.driverId).toBe(3);
     expect(vehicle.padId).toBe(2);
     expect(vehicle.weaponTimer).toBeCloseTo(0.1, 5);
+    expect(vehicle.spawnTime).toBe(4.5);
+    expect(vehicle.reservedPilotId).toBe(7);
     expect(vehicle.onGround).toBe(1);
     expect(vehicle.wasJumpHeld).toBe(1);
   });

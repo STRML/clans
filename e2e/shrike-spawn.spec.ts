@@ -13,8 +13,8 @@ test('an idle Shrike stays alive and undamaged on its vehicle platform', async (
     app.renderer.render = () => {};
     try {
       const records = [];
-      for (let i = 0; i < 160; i++) {
-        app.frame(1 / 32);
+      for (let i = 0; i < 240; i++) {
+        app.frame(0.032);
         const v = app.world.vehicles;
         if (i < 8 || i % 10 === 0 || v.destroyed[0])
           records.push({
@@ -60,13 +60,13 @@ test('Shrike boards automatically, faces its flight heading, and shows crash des
     const render = app.renderer.render;
     app.renderer.render = () => {};
     try {
-      for (let i = 0; i < 32; i++) app.frame(1 / 32);
+      for (let i = 0; i < 220; i++) app.frame(0.032);
       const v = app.world.vehicles,
         p = app.world.players;
       const position = Array.from(v.position.slice(0, 3));
       p.position.set(position, app.playerId * 3);
       p.velocity.set([0, 0, 0], app.playerId * 3);
-      app.frame(1 / 32);
+      app.frame(0.032);
       const boarded = p.mountedVehicleId[app.playerId];
       v.yaw[0] = 0.6;
       v.pitch[0] = 0.2;
@@ -86,7 +86,7 @@ test('Shrike boards automatically, faces its flight heading, and shows crash des
       const impact = (speed: number) => {
         v.position.set(position, 0);
         v.velocity.set([0, -speed, 0], 0);
-        app.frame(1 / 32);
+        app.frame(0.032);
         return { energy: v.energy[0], damage: v.damage[0], destroyed: v.destroyed[0] };
       };
       const shielded = impact(40);
@@ -111,7 +111,7 @@ test('Shrike boards automatically, faces its flight heading, and shows crash des
   });
   expect(result.boarded).toBe(0);
   expect(result.alignment).toBeGreaterThan(0.98);
-  expect(result.behind).toBeLessThan(0);
+  expect(Math.abs(result.behind)).toBeLessThan(4);
   expect(result.shielded.energy).toBeLessThan(280);
   expect(result.shielded.damage).toBe(0);
   expect(result.hullHit.damage).toBeGreaterThan(0);

@@ -1,36 +1,7 @@
 import * as THREE from 'three';
 import { FIXED_DT, WeaponState } from '@clans/sim';
 
-/** DTS visibility tracks live in node extras because glTF has no visibility channel. */
-function withVisibility(
-  root: THREE.Object3D,
-  source: THREE.AnimationClip[],
-): THREE.AnimationClip[] {
-  const clips = new Map(source.map((clip) => [clip.name.toLowerCase(), clip.clone()]));
-  root.traverse((node) => {
-    for (const [key, value] of Object.entries(node.userData)) {
-      if (!key.startsWith('vis_keyframes_') || !Array.isArray(value)) continue;
-      const name = key.slice('vis_keyframes_'.length);
-      const duration = Number(node.userData[`vis_duration_${name}`]);
-      if (!(duration > 0) || value.length < 2) continue;
-      const clip = clips.get(name) ?? new THREE.AnimationClip(name, duration, []);
-      clip.tracks.push(
-        new THREE.BooleanKeyframeTrack(
-          `${node.uuid}.visible`,
-          value.map((_, index) => (index * duration) / (value.length - 1)),
-          value.map((visibility: number) => visibility > 0),
-        ),
-      );
-      clip.duration = Math.max(clip.duration, duration);
-      clips.set(name, clip);
-    }
-  });
-  return [...clips.values()].map((clip) => {
-    // Use the Float32 track endpoint so a clamped one-shot reaches its final off key.
-    clip.resetDuration();
-    return clip;
-  });
-}
+import { withVisibility } from './shape-animation.js';
 
 /** Local presentation only: follow simulated weapon states; never synthesize a shot from input. */
 export function createWeaponAnimation(root: THREE.Object3D, source: THREE.AnimationClip[]) {

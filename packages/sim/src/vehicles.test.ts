@@ -15,6 +15,8 @@ import {
   createVehicleStore,
   resolveVehicleCollision,
   spawnVehicleAtPad,
+  requestVehicleAtPad,
+  VEHICLE_BUILD_TIME,
   stepShrike,
   vehiclePadAt,
   stepVehicles,
@@ -187,6 +189,21 @@ describe('stepShrike', () => {
       world.vehicles.velocity[id * 3 + 2] ?? 0,
     );
     expect(speed).toBeGreaterThan(5);
+  });
+
+  it('settles on mouse heading without repeated overshoot or spiralling', () => {
+    const { world, id } = shrikeWorld();
+    const target = { ...idleInput, yaw: 1, pitch: 0.4 };
+    const yaws: number[] = [];
+    for (let i = 0; i < 250; i++) {
+      stepShrike(world, id, target, 1 / 32);
+      yaws.push(world.vehicles.yaw[id]!);
+    }
+    expect(Math.max(...yaws)).toBeLessThanOrEqual(1.01);
+    expect(world.vehicles.yaw[id]).toBeCloseTo(1, 2);
+    expect(world.vehicles.pitch[id]).toBeCloseTo(0.4, 2);
+    expect(Math.abs(world.vehicles.angVel[id * 3]!)).toBeLessThan(0.01);
+    expect(Math.abs(world.vehicles.roll[id]!)).toBeLessThan(0.01);
   });
 
   it('mouse yaw (input.yaw) steers the Shrike via steeringForce, not a snap', () => {
@@ -829,5 +846,46 @@ describe('vehicle interior support', () => {
     world.vehicles.velocity.set([3, -4, 5], id * 3);
     resolveVehicleCollision(world, id, { x: 0, y: 15.5, z: 0 }, 1 / 32);
     expect(Array.from(world.vehicles.velocity.slice(id * 3, id * 3 + 3))).toEqual([3, 0, 5]);
+  });
+});
+
+describe('vehicle fabrication', () => {
+  it('cancels a disconnected purchaser reservation before their player ID can be reused', () => {
+    const world = createWorld(flat, 1);
+    const pad = poweredPad(world);
+    const player = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.position.set(
+      world.baseObjects.usePosition.slice(pad * 3, pad * 3 + 3),
+      player * 3,
+    );
+    const id = requestVehicleAtPad(world, player, pad, VehicleKind.Shrike)!;
+    removePlayer(world, player);
+    const replacement = addPlayer(world, { x: 100, y: 0, z: 100 }, 1);
+    for (let i = 0; i < 210; i++) stepVehicles(world, new Map([[replacement, idleInput]]), 1 / 32);
+    expect(world.vehicles.reservedPilotId[id]).toBe(-1);
+    expect(world.vehicles.driverId[id]).toBe(-1);
+    expect(world.players.mountedVehicleId[replacement]).toBe(-1);
+  });
+
+  it('reserves the purchaser, rejects duplicate orders, and teleports them after fabrication', () => {
+    const world = createWorld(flat, 1);
+    const pad = poweredPad(world);
+    const player = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.position.set(
+      world.baseObjects.usePosition.slice(pad * 3, pad * 3 + 3),
+      player * 3,
+    );
+    const id = requestVehicleAtPad(world, player, pad, VehicleKind.Shrike)!;
+    expect(id).not.toBeNull();
+    expect(world.vehicles.spawnTime[id]).toBe(VEHICLE_BUILD_TIME);
+    expect(requestVehicleAtPad(world, player, pad, VehicleKind.Wildcat)).toBeNull();
+    for (let i = 0; i < 180; i++) stepVehicles(world, new Map([[player, idleInput]]), 1 / 32);
+    expect(world.players.mountedVehicleId[player]).toBe(-1);
+    for (let i = 0; i < 29; i++) stepVehicles(world, new Map([[player, idleInput]]), 1 / 32);
+    expect(world.players.mountedVehicleId[player]).toBe(id);
+    expect(world.vehicles.driverId[id]).toBe(player);
+    expect(Array.from(world.players.position.slice(player * 3, player * 3 + 3))).toEqual(
+      Array.from(world.vehicles.position.slice(id * 3, id * 3 + 3)),
+    );
   });
 });

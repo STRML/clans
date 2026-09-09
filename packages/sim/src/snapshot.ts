@@ -230,6 +230,8 @@ export interface VehicleSnapshotData {
   destroyed: 0 | 1;
   driverId: number;
   padId: number;
+  spawnTime?: number;
+  reservedPilotId?: number;
   weaponTimer: number;
   onGround: 0 | 1;
   wasJumpHeld: 0 | 1;
@@ -260,6 +262,9 @@ export function serializeVehicle(world: World, id: number): VehicleSnapshotData 
     driverId: num(v.driverId, id),
     padId: num(v.padId, id),
     weaponTimer: num(v.weaponTimer, id),
+    ...(v.spawnTime[id]! > 0
+      ? { spawnTime: v.spawnTime[id], reservedPilotId: v.reservedPilotId[id] }
+      : {}),
     onGround: bit(v.onGround, id),
     wasJumpHeld: bit(v.wasJumpHeld, id),
   };
@@ -300,6 +305,8 @@ export function deserializeVehicle(world: World, data: VehicleSnapshotData): voi
   v.driverId[data.id] = data.driverId;
   v.padId[data.id] = data.padId;
   v.weaponTimer[data.id] = data.weaponTimer;
+  v.spawnTime[data.id] = data.spawnTime ?? 0;
+  v.reservedPilotId[data.id] = data.reservedPilotId ?? -1;
   v.onGround[data.id] = data.onGround;
   v.wasJumpHeld[data.id] = data.wasJumpHeld;
 }

@@ -56,23 +56,41 @@ export function createVehiclePadMenu(
   let currentPadId = -1;
   for (const kind of [VehicleKind.Shrike, VehicleKind.Wildcat] as const) {
     const button = document.createElement('button');
-    button.textContent = VEHICLE_LABEL[kind];
+    button.textContent = `${String(kind + 1)} · ${VEHICLE_LABEL[kind]}`;
+    button.setAttribute('aria-label', VEHICLE_LABEL[kind]);
     button.addEventListener('click', () => {
       if (currentPadId !== -1) onConfirm(currentPadId, kind);
     });
     root.appendChild(button);
   }
+  root.addEventListener('keydown', (event) => {
+    if (root.hidden || event.repeat) return;
+    const kind =
+      event.code === 'Digit1'
+        ? VehicleKind.Shrike
+        : event.code === 'Digit2'
+          ? VehicleKind.Wildcat
+          : null;
+    if (kind === null || currentPadId === -1) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onConfirm(currentPadId, kind);
+  });
+  root.tabIndex = -1;
   const close = document.createElement('button');
   close.textContent = 'Close (Esc)';
   close.addEventListener('click', onClose);
   const help = document.createElement('small');
-  help.textContent = 'Click the game after closing to resume mouse look.';
+  help.textContent = 'Press 1 or 2 to order. Fabrication and automatic boarding take 6.5 seconds.';
   root.append(close, help);
   container.appendChild(root);
   return {
     show(padId: number): void {
       currentPadId = padId;
-      root.hidden = false;
+      if (root.hidden) {
+        root.hidden = false;
+        root.focus();
+      }
     },
     hide(): void {
       root.hidden = true;

@@ -1,6 +1,13 @@
+import { poseShape } from './shape-animation.js';
 import * as THREE from 'three';
 import { disposeShape, loadShapeInto } from './shape-loader.js';
-import { VehicleKind, type World } from '@clans/sim';
+import {
+  VEHICLE_DATA,
+  VEHICLE_BUILD_TIME,
+  VEHICLE_REVEAL_TIME,
+  VehicleKind,
+  type World,
+} from '@clans/sim';
 import type { VehicleSnapshotData } from '@clans/protocol';
 import { type KatabaticAssets } from './assets.js';
 
@@ -229,8 +236,10 @@ export function createVehicleView(
   scene: THREE.Scene,
   assets: Pick<KatabaticAssets, 'scene'>,
   onDestroyed: (vehicle: VehicleSnapshotData) => void = () => {},
+  pads: Map<number, THREE.Object3D> = new Map(),
 ): VehicleView {
   const meshes = new Map<number, THREE.Object3D>();
+  const launchEffects = new Map<number, THREE.Mesh>();
   return {
     meshes,
     sync(vehicles: VehicleSnapshotData[]): void {
@@ -251,9 +260,75 @@ export function createVehicleView(
           meshes.set(data.id, mesh);
         }
         placeVehicleMesh(mesh, data);
+        poseVehicleActivation(mesh, data.spawnTime ?? 0);
+        syncLaunchEffect(scene, launchEffects, pads, data);
+      }
+      for (const [id, effect] of launchEffects) {
+        if (!liveIds.has(id)) {
+          scene.remove(effect);
+          effect.geometry.dispose();
+          (effect.material as THREE.Material).dispose();
+          launchEffects.delete(id);
+        }
       }
     },
   };
+}
+
+function poseVehicleActivation(mesh: THREE.Object3D, remaining: number): void {
+  const elapsed = VEHICLE_BUILD_TIME - remaining;
+  mesh.visible = remaining <= 0 || elapsed >= VEHICLE_REVEAL_TIME;
+  poseShape(
+    mesh,
+    'activate',
+    remaining > 0 ? Math.max(0, elapsed - VEHICLE_REVEAL_TIME) : Infinity,
+  );
+}
+
+function syncLaunchEffect(
+  scene: THREE.Scene,
+  effects: Map<number, THREE.Mesh>,
+  pads: Map<number, THREE.Object3D>,
+  data: VehicleSnapshotData,
+): void {
+  const remaining = data.spawnTime ?? 0;
+  const pad = pads.get(data.padId);
+  if (pad) poseShape(pad, 'activate2', remaining > 0 ? VEHICLE_BUILD_TIME - remaining : Infinity);
+  let effect = effects.get(data.id);
+  if (remaining <= 0) {
+    if (effect) {
+      scene.remove(effect);
+      effect.geometry.dispose();
+      (effect.material as THREE.Material).dispose();
+      effects.delete(data.id);
+    }
+    return;
+  }
+  if (!effect) {
+    effect = new THREE.Mesh(
+      new THREE.SphereGeometry(12, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2),
+      new THREE.MeshBasicMaterial({
+        color: 0x4488ff,
+        transparent: true,
+        opacity: 0.3,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    effect.name = 'vehicle-fabrication';
+    scene.add(effect);
+    effects.set(data.id, effect);
+  }
+  effect.position.set(
+    data.x,
+    data.y - VEHICLE_DATA[data.kind as VehicleKind].checkRadius + 0.2,
+    data.z,
+  );
+  pad?.getObjectByName('Dummy_Pad_Center_Rotate')?.getWorldPosition(effect.position);
+  effect.position.y += 0.15;
+  effect.scale.y = 0.5 + 0.05 * Math.sin((VEHICLE_BUILD_TIME - remaining) * 5);
+  (effect.material as THREE.MeshBasicMaterial).opacity = Math.min(0.15, remaining * 0.15);
 }
 
 /** Single-player mode has no server snapshot; read the sim's own vehicle store directly --
@@ -287,6 +362,8 @@ function vehicleSnapshotFromStore(store: World['vehicles'], id: number): Vehicle
     driverId: num(store.driverId, id),
     padId: num(store.padId, id),
     weaponTimer: num(store.weaponTimer, id),
+    spawnTime: num(store.spawnTime, id),
+    reservedPilotId: num(store.reservedPilotId, id),
     onGround: (store.onGround[id] ? 1 : 0) as 0 | 1,
     wasJumpHeld: (store.wasJumpHeld[id] ? 1 : 0) as 0 | 1,
   };
