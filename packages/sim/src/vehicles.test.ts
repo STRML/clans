@@ -240,6 +240,15 @@ describe('stepShrike', () => {
     expect(world.vehicles.velocity[id * 3]).toBeGreaterThan(15);
   });
 
+  it.each([false, true])('levels out downward momentum while flying forward (jet=%s)', (jet) => {
+    const { world, id } = shrikeWorld();
+    world.vehicles.velocity.set([0, -4, 40], id * 3);
+    for (let tick = 0; tick < 100; tick += 1)
+      stepShrike(world, id, { ...idleInput, moveZ: 1, jet }, 1 / 32);
+    expect(world.vehicles.velocity[id * 3 + 1]).toBeCloseTo(0);
+    expect(world.vehicles.velocity[id * 3 + 2]).toBeGreaterThan(15);
+  });
+
   it('settles on mouse heading without repeated overshoot or spiralling', () => {
     const { world, id } = shrikeWorld();
     const target = { ...idleInput, yaw: 1, pitch: 0.4 };

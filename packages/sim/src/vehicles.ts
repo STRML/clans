@@ -400,14 +400,13 @@ function applyShrikeAutoStabilize(
   id: number,
   speed: number,
   dt: number,
-  verticalThrustActive: boolean,
 ): void {
   const mass = VEHICLE_DATA[VehicleKind.Shrike].mass;
   const base = id * 3;
   for (let axis = 0; axis < 3; axis += 1) {
-    // Keep active vertical thrust responsive, while allowing a released craft's
-    // residual vertical velocity to settle even at high horizontal speed.
-    if (axis === 1 ? verticalThrustActive : speed >= SHRIKE_MAX_AUTO_SPEED) continue;
+    // Vertical stabilization remains engaged during flight: holding forward or
+    // boost must not preserve a dive after the pilot levels the nose.
+    if (axis !== 1 && speed >= SHRIKE_MAX_AUTO_SPEED) continue;
     const v = vehicles.velocity[base + axis] ?? 0;
     vehicles.velocity[base + axis] =
       v - Math.sign(v) * Math.min(Math.abs(v), (SHRIKE_AUTO_LINEAR_FORCE / mass) * dt);
@@ -499,19 +498,14 @@ function applyShrikeAfterburner(
   id: number,
   input: PlayerInput,
   dt: number,
-): boolean {
+): void {
   const data = VEHICLE_DATA[VehicleKind.Shrike];
   if (!input.jet) {
     vehicles.energy[id] = Math.min(data.maxEnergy, at(vehicles.energy, id) + data.rechargeRate);
-    return false;
+    return;
   }
-  if (at(vehicles.energy, id) < SHRIKE_MIN_JET_ENERGY) return false;
+  if (at(vehicles.energy, id) < SHRIKE_MIN_JET_ENERGY) return;
   applyShrikeJetThrust(vehicles, id, input, dt);
-  return true;
-}
-
-function shrikeVerticalThrustActive(input: PlayerInput, jetActive: boolean): boolean {
-  return jetActive || input.moveZ !== 0;
 }
 
 /** Shrikes are self-supporting flyers: retain horizontal drag without passive gravity or lift. */
@@ -543,7 +537,7 @@ export function stepShrike(world: World, id: number, input: PlayerInput, dt: num
 
   applyShrikeSteering(vehicles, id, input, dt);
   applyShrikeThrust(vehicles, id, input, dt);
-  const jetActive = applyShrikeAfterburner(vehicles, id, input, dt);
+  applyShrikeAfterburner(vehicles, id, input, dt);
   applyShrikeDrag(vehicles, id, dt);
 
   const speed = Math.hypot(
@@ -551,7 +545,7 @@ export function stepShrike(world: World, id: number, input: PlayerInput, dt: num
     vehicles.velocity[base + 1] ?? 0,
     vehicles.velocity[base + 2] ?? 0,
   );
-  applyShrikeAutoStabilize(vehicles, id, speed, dt, shrikeVerticalThrustActive(input, jetActive));
+  applyShrikeAutoStabilize(vehicles, id, speed, dt);
   clampShrikeSpeed(vehicles, id, speed);
 
   vehicles.position[base] = (vehicles.position[base] ?? 0) + (vehicles.velocity[base] ?? 0) * dt;
