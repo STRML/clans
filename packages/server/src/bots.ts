@@ -128,7 +128,12 @@ export function createBotManager(
   const manager: BotManager = {
     botIds: new Set(),
     runtimes: new Map(),
-    graph: buildWaypointGraph(landmarks),
+    // Issue #32: the production landmark set (every base object alongside spawns and flag
+    // stands) is mostly INDOOR points, so the graph must be built against the real
+    // interiors -- without them edges and final legs validated to nothing and bots
+    // routed straight through base walls (verified: 20k-tick production-landmark run,
+    // zero kills/captures, bots wedged against shed walls).
+    graph: buildWaypointGraph(landmarks, world),
     maxBots,
     nextSeed: 0,
   };

@@ -121,25 +121,110 @@ function decideDefenderGoal(
  *  offering `jet` once energy is low, so a low-energy bot just walks/skis instead, and
  *  `maybeHeal` below still tops off energy for free the moment any goal (CTF, escort, or
  *  this one) happens to walk it past a friendly station. */
+/** The bot's full-health reset of the #32 heal-chase bookkeeping -- any state the chase
+ *  clock built up is stale once healing is no longer needed. */
+function resetHealChase(runtime: BotRuntimeState): void {
+  runtime.healChaseKey = null;
+  runtime.healChaseSinceTick = -1;
+  runtime.healChaseCooldownUntilTick = 0;
+}
+
+/** Issue #32: a carrier NEVER detours to a station. The carry is time-critical (the
+ *  moment it dies the flag drops and a return timer starts), and a wounded carrier
+ *  chasing a 500 m-away station walks backwards off its return route -- observed
+ *  carriers bouncing mid-map for 10k+ ticks between heal goals at under half the
+ *  distance home they had already covered. maybeHeal below still tops a carrier up
+ *  the moment its route passes a station. */
+function isCarryingEnemyFlag(world: World, runtime: BotRuntimeState): boolean {
+  const team = world.players.team[runtime.playerId] ?? 0;
+  return world.flags.carrierId[enemyFlagId(world, team)] === runtime.playerId;
+}
+
+function stationPosition(world: World, stationId: number): Vec3 {
+  const base = stationId * 3;
+  return {
+    x: world.baseObjects.position[base] ?? 0,
+    y: world.baseObjects.position[base + 1] ?? 0,
+    z: world.baseObjects.position[base + 2] ?? 0,
+  };
+}
+
+/** True when the bot's position is within HEAL_CHASE_NEAR_M of `station` -- "basically
+ *  at the station", i.e. progress worth extending patience for. */
+function nearStation(world: World, runtime: BotRuntimeState, station: Vec3): boolean {
+  const base = runtime.playerId * 3;
+  return (
+    Math.hypot(
+      (world.players.position[base] ?? 0) - station.x,
+      (world.players.position[base + 1] ?? 0) - station.y,
+      (world.players.position[base + 2] ?? 0) - station.z,
+    ) <= HEAL_CHASE_NEAR_M
+  );
+}
+
+/** Issue #32: the give-up state machine for a heal chase, run for its side effects on
+ *  the runtime's chase clock. Returns false when the bot should stop chasing (cooldown
+ *  window active, or the chase timed out and just armed the cooldown). Katabatic's
+ *  stations sit inside structures, and a bot whose 2D route cannot actually enter the
+ *  room wedges against the building forever -- verified in production-landmark matches,
+ *  where the entire attack force evaporated into permanent, never-completing heal
+ *  chases by tick ~1200 and no bot ever touched a flag again. After
+ *  HEAL_CHASE_GIVEUP_TICKS of chasing (across nearest-station switches -- see the key
+ *  comment in decideHealGoal) without getting within HEAL_CHASE_NEAR_M of a station,
+ *  the bot commits to its CTF goal for HEAL_CHASE_COOLDOWN_TICKS. */
+function healChaseAllowed(world: World, runtime: BotRuntimeState, station: Vec3): boolean {
+  if (world.tick < runtime.healChaseCooldownUntilTick) return false;
+  if (nearStation(world, runtime, station)) {
+    // Genuine progress: the bot is basically at the station, so any remaining wedge is
+    // worth more patience.
+    runtime.healChaseSinceTick = world.tick;
+    return true;
+  }
+  if (world.tick - runtime.healChaseSinceTick > HEAL_CHASE_GIVEUP_TICKS) {
+    runtime.healChaseCooldownUntilTick = world.tick + HEAL_CHASE_COOLDOWN_TICKS;
+    runtime.healChaseKey = null;
+    runtime.healChaseSinceTick = -1;
+    return false;
+  }
+  return true;
+}
+
 function decideHealGoal(
   world: World,
   runtime: BotRuntimeState,
 ): { position: Vec3; key: string } | null {
   const armor = armorFor(world, runtime.playerId);
   const health = 1 - (world.players.damage[runtime.playerId] ?? 0) / armor.maxDamage;
-  if (health >= LOW_HEALTH_FRACTION) return null;
+  if (health >= LOW_HEALTH_FRACTION) {
+    resetHealChase(runtime);
+    return null;
+  }
+  if (isCarryingEnemyFlag(world, runtime)) return null;
   const stationId = findNearestFriendlyStation(world, runtime.playerId);
   if (stationId === null) return null;
-  const base = stationId * 3;
-  return {
-    position: {
-      x: world.baseObjects.position[base] ?? 0,
-      y: world.baseObjects.position[base + 1] ?? 0,
-      z: world.baseObjects.position[base + 2] ?? 0,
-    },
-    key: `heal:${String(stationId)}`,
-  };
+  const station = stationPosition(world, stationId);
+  if (!healChaseAllowed(world, runtime, station)) return null;
+  const key = `heal:${String(stationId)}`;
+  if (runtime.healChaseKey !== key) {
+    // Track the station, but deliberately DO NOT restart the clock: on the walk home
+    // the nearest friendly station flips between towers every few dozen meters, and a
+    // per-station clock would reset on every flip and never expire.
+    runtime.healChaseKey = key;
+    if (runtime.healChaseSinceTick < 0) runtime.healChaseSinceTick = world.tick;
+  }
+  return { position: station, key };
 }
+// Issue #32 heal-chase bound -- see decideHealGoal. Long enough that a genuine
+// cross-map retreat to the nearest friendly station comfortably completes (the map is
+// ~1 km corner to corner at a ~10 m/s run); short enough that a wedged bot rejoins the
+// fight within a couple of engagements.
+export const HEAL_CHASE_GIVEUP_TICKS = 1800; // Ours.
+export const HEAL_CHASE_NEAR_M = 10; // Ours, meters.
+// How long a bot that gave up on a heal chase commits to its CTF goal before trying
+// any station again. Health recovered (death/respawn or an opportunistic station pass)
+// clears the chase state long before this can matter; a still-wounded bot uses the
+// window to actually GET somewhere (home, with the flag).
+export const HEAL_CHASE_COOLDOWN_TICKS = 3600; // Ours.
 
 /** A commander's Attack/Defend/Repair order for the bot's own team, checked after
  *  decideHealGoal (self-preservation stays the bot's top priority, unchanged by an

@@ -76,7 +76,7 @@ describe('checkStuck', () => {
 });
 
 describe('steerToward stuck-skip (Codex review round 3, P1)', () => {
-  it('bypasses the graph and steers straight at the goal after STUCK_SKIP_THRESHOLD consecutive stalls, instead of retrying the identical unreachable route forever', () => {
+  it('after STUCK_SKIP_THRESHOLD consecutive stalls, escapes along a perpendicular offset before re-approaching the goal instead of steering straight into the same wall (#32)', () => {
     const world = createWorld(flat, 1);
     world.tick = 0;
     const graph = buildWaypointGraph([
@@ -96,11 +96,18 @@ describe('steerToward stuck-skip (Codex review round 3, P1)', () => {
       world.tick += STUCK_CHECK_TICKS + 1;
       steerToward(graph, world, 1, runtime, 1, goal, 'goal:c', stuckPosition, LIGHT_ARMOR, 60);
     }
-    expect(runtime.path).toEqual([{ x: goal.x, z: goal.z }]);
+    // The pre-#32 fallback steered straight at the literal goal -- the exact wall the bot
+    // has been wedged against for three straight windows. The escape now aims 12 m left
+    // (first skip flips the side from its +1 default to -1) of the approach line, THEN at
+    // the goal from the new side.
+    expect(runtime.path).toEqual([
+      { x: 0, z: -12 },
+      { x: goal.x, z: goal.z },
+    ]);
     expect(runtime.pathIndex).toBe(0);
   });
 
-  it('preserves consecutive stalls between per-tick checks, so the fallback is reachable in a real match', () => {
+  it('preserves consecutive stalls between per-tick checks, so the perpendicular escape is reachable in a real match', () => {
     const world = createWorld(flat, 1);
     const graph = buildWaypointGraph([
       { position: { x: 0, y: 0, z: 0 }, label: 'a' },
@@ -115,7 +122,8 @@ describe('steerToward stuck-skip (Codex review round 3, P1)', () => {
       steerToward(graph, world, 1, runtime, 1, goal, 'goal:c', stuckPosition, LIGHT_ARMOR, 60);
     }
 
-    expect(runtime.path).toEqual([{ x: goal.x, z: goal.z }]);
+    expect(runtime.path.length).toBe(2); // escape point + the real goal, not a one-point suicide run
+    expect(runtime.path[1]).toEqual({ x: goal.x, z: goal.z });
   });
 });
 

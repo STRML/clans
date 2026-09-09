@@ -1,4 +1,11 @@
-import { sampleTerrain, type ArmorData, type PlayerInput, type Vec3, type World } from '@clans/sim';
+import {
+  raycastInteriors,
+  sampleTerrain,
+  type ArmorData,
+  type PlayerInput,
+  type Vec3,
+  type World,
+} from '@clans/sim';
 import { findPath, nearestNode, type WaypointGraph } from './waypoints.js';
 import type { BotRuntimeState } from './types.js';
 
@@ -23,6 +30,51 @@ export const STUCK_SKIP_THRESHOLD = 3; // Ours.
 // wherever the target was on the FIRST steerToward call for that goalKey.
 export const GOAL_DRIFT_REPATH_M = 6; // Ours.
 
+// Issue #32 -- the graph's edges and findPath's final leg are now interior-validated at
+// build/route time, but a route is only as straight-line clean as its weakest sample:
+// a moving goal (a carried flag, an escort target) re-pathes straight at wherever it is
+// NOW, and a bot mid-corridor can still face a wall no graph edge ever crossed. Before
+// committing each tick's movement direction, steering probes it against real interiors
+// and deflects along the first clear candidate -- local wall-slide, not a navmesh.
+const AVOIDANCE_PROBE_DISTANCE = 4; // Ours, meters: ~two bot radii past the nose, far
+// enough that a deflection chosen at the wall's face is still valid for a few ticks.
+const AVOIDANCE_PROBE_HEIGHT = 1.2; // Ours, meters above feet: chest height -- low
+// enough to step over sills/ramp lips, high enough that walls and shed sides block it.
+// Alternating left/right, widening to a full about-face; every candidate is probed
+// against the same interiors the sim's own movement resolves against.
+const AVOIDANCE_DEFLECTIONS_DEG = [40, -40, 80, -80, 120, -120, 180]; // Ours.
+// How far a stuck-skip escape goal sits from the approach line -- bigger than
+// WAYPOINT_REACHED_RADIUS so the escape point is a real intermediate waypoint, small
+// enough that the escape hugs the local wall instead of aborting the approach entirely.
+export const STUCK_ESCAPE_OFFSET_M = 12; // Ours, meters.
+// A blocked direction with the goal this much ABOVE the bot is worth jets: the classic
+// Katabatic case is the base deck and its approaches, where the straight route ends at
+// a lip rather than a dead wall -- measured deck lips sit ~1.2 m above the approach
+// terrain (team 2's stand: approach y 88.4 vs deck 89.6), so the gate must clear that.
+const CLIMB_JET_MIN_RISE_M = 1; // Ours, meters.
+// Crawl detection: under this per-tick displacement (vs a ~10 m/s run, ~0.3 m/tick) the
+// bot is pinned by geometry, not just climbing slowly; this many consecutive pinned
+// ticks (~1/3 s) trigger one hurdle jump. Long enough that a single slow frame or a
+// bump against a teammate doesn't fire it, short enough to clear a lip before the
+// 60-tick stall window ever sees the pinning.
+const CRAWL_MAX_STEP_M = 0.15; // Ours, meters per tick.
+const CRAWL_JUMP_TICKS = 10; // Ours, ticks.
+// Altitude tolerance across consecutive pinned jumps: more than this and the jump
+// sequence is gaining height (a live climb), not wedged under something.
+const CRAWL_ALT_GAIN_M = 0.5; // Ours, meters.
+// Goal rise that turns "wedged under geometry" into "skip this waypoint": the base
+// decks and deck-level rooms this targets sit 4-17 m above the crawlspaces bots fall
+// into; a mountable lip is 1-3 m and never trips this.
+const UNDER_FLOOR_MIN_RISE_M = 4; // Ours, meters.
+// Under-floor skips tolerated before arming the jet-escape: one skip may be a single
+// bad waypoint in a route the next one fixes; consecutive skips mean the repath loop
+// is not converging.
+const UNDER_FLOOR_JET_SKIPS = 2; // Ours.
+// How long the jet-escape holds thrust: at LIGHT's ~26 m/s^2 jet force minus gravity,
+// ~1.6 s climbs several meters -- enough to rise back through a fall-in hole without
+// dumping the whole energy pool (the energy floor guard below still bounds the drain).
+const ESCAPE_JET_TICKS = 50; // Ours, ticks.
+
 /** Projects a world-space unit direction onto the yaw-relative forward/right frame
  *  movement.ts's own desiredVelocity uses (forward = (sin yaw, 0, cos yaw), right =
  *  (-cos yaw, 0, sin yaw)) -- the inverse of that construction, so a bot can hold a yaw
@@ -41,6 +93,65 @@ export function worldDirectionToLocalMove(
     moveZ: direction.x * forwardX + direction.z * forwardZ,
     moveX: direction.x * rightX + direction.z * rightZ,
   };
+}
+
+/** Rotates an (assumed unit-length) x/z direction around the vertical axis by `degrees`.
+ *  Named for the formula it carries -- the standard y-rotation for a left-handed y-up
+ *  frame -- rather than for any behavior a reader could skip. */
+function rotateXZDirection(direction: Vec3, degrees: number): Vec3 {
+  const rad = (degrees * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  return {
+    x: direction.x * cos + direction.z * sin,
+    y: 0,
+    z: -direction.x * sin + direction.z * cos,
+  };
+}
+
+function directionClearOfInteriors(world: World, origin: Vec3, direction: Vec3): boolean {
+  return raycastInteriors(world.interiors, origin, direction, AVOIDANCE_PROBE_DISTANCE) === null;
+}
+
+/** Issue #32: returns `direction` unchanged when the straight probe is clear; otherwise
+ *  the first deflected candidate that is clear, with hysteresis -- once a deflection is
+ *  chosen it is re-tried FIRST on every subsequent blocked tick (see
+ *  BotRuntimeState.avoidDeflectionDeg), because re-evaluating all candidates fresh every
+ *  tick lets a bot oscillate between +40 and -40 at a wall face it should be walking
+ *  along. When nothing is clear the bot is truly boxed in; it keeps pressing (the sim's
+ *  own collision resolution holds it in place) and the stuck escalation below owns the
+ *  recovery. Only ever called with world.interiors possibly non-empty -- on an
+ *  interior-less world raycastInteriors returns null and this is a straight pass-through,
+ *  so the flat-terrain tests' behavior is unchanged. */
+function avoidInteriors(
+  world: World,
+  runtime: BotRuntimeState,
+  currentPosition: Vec3,
+  direction: Vec3,
+): Vec3 {
+  if (world.interiors.length === 0) return direction;
+  const origin = {
+    x: currentPosition.x,
+    y: currentPosition.y + AVOIDANCE_PROBE_HEIGHT,
+    z: currentPosition.z,
+  };
+  if (directionClearOfInteriors(world, origin, direction)) {
+    runtime.avoidDeflectionDeg = 0;
+    return direction;
+  }
+  const previous = runtime.avoidDeflectionDeg;
+  const candidates =
+    previous !== 0
+      ? [previous, ...AVOIDANCE_DEFLECTIONS_DEG.filter((deg) => deg !== previous)]
+      : AVOIDANCE_DEFLECTIONS_DEG;
+  for (const degrees of candidates) {
+    const deflected = rotateXZDirection(direction, degrees);
+    if (directionClearOfInteriors(world, origin, deflected)) {
+      runtime.avoidDeflectionDeg = degrees;
+      return deflected;
+    }
+  }
+  return direction;
 }
 
 /** Ours, simple slope read rather than the spec's own "nav cost function rewards
@@ -173,12 +284,19 @@ function handleStuck(
   const target = runtime.path[runtime.pathIndex];
   if (!target) return false;
   const distanceToTarget = Math.hypot(currentPosition.x - target.x, currentPosition.z - target.z);
-  if (runtime.stuckTargetIndex !== runtime.pathIndex) {
+  // Meter-rounded position key, not pathIndex (see BotRuntimeState.stuckTargetKey): on
+  // the interior-validated graph two repaths to the same goal legally converge through
+  // different relay chains whose post-collapse indices differ, and an index comparison
+  // reset the streak every window -- the skip threshold was unreachable exactly at the
+  // base structures this issue is about (verified in a production-landmark match: a bot
+  // sat wedged at its own base for 44 straight stall windows with the streak frozen at 1).
+  const targetKey = `${Math.round(target.x)},${Math.round(target.z)}`;
+  if (runtime.stuckTargetKey !== targetKey) {
     // The target changed since the last check (a new waypoint just reached, a repath, or
     // the very first call this goal) -- reset the baseline immediately instead of
     // comparing against a distance measured against a DIFFERENT target, which would
     // misread the change itself as a burst of progress.
-    runtime.stuckTargetIndex = runtime.pathIndex;
+    runtime.stuckTargetKey = targetKey;
     runtime.stuckBaselineTick = world.tick;
     runtime.stuckBaselinePosition = { x: distanceToTarget, z: 0 };
     runtime.stuckStreak = 0;
@@ -196,25 +314,159 @@ function handleStuck(
   }
   runtime.stuckStreak += 1;
   if (runtime.stuckStreak >= STUCK_SKIP_THRESHOLD) {
-    runtime.path = [{ x: goalPosition.x, z: goalPosition.z }];
+    // Issue #32: the pre-#32 fallback replaced the path with the literal goal -- which is
+    // exactly the wall the bot has been wedged against for three straight windows, so the
+    // escape re-rammed the same face at full throttle. Steer instead at a point offset
+    // PERPENDICULAR to the approach line, alternating sides between skips, then at the
+    // goal from the new side: the escape walks the bot ALONG the wall it is stuck on
+    // (local avoidance clears the walk), and two consecutive failures probe opposite
+    // faces instead of grinding one. Two-point path, not one, so reaching the offset
+    // point advances the path to the real goal rather than orbiting the offset forever.
+    runtime.stuckSkipSide = runtime.stuckSkipSide === 1 ? -1 : 1;
+    const toGoalX = goalPosition.x - currentPosition.x;
+    const toGoalZ = goalPosition.z - currentPosition.z;
+    const approachLength = Math.hypot(toGoalX, toGoalZ) || 1;
+    // Left normal of the approach direction (right-handed y-up), scaled by side.
+    const offsetX = (-toGoalZ / approachLength) * STUCK_ESCAPE_OFFSET_M * runtime.stuckSkipSide;
+    const offsetZ = (toGoalX / approachLength) * STUCK_ESCAPE_OFFSET_M * runtime.stuckSkipSide;
+    runtime.path = [
+      { x: currentPosition.x + offsetX, z: currentPosition.z + offsetZ },
+      { x: goalPosition.x, z: goalPosition.z },
+    ];
     runtime.pathIndex = 0;
     runtime.stuckStreak = 0;
     // Forces the next call's target-change check above to reset the baseline fresh
-    // rather than comparing against the OLD target's distance under a coincidentally
-    // identical pathIndex (both this fallback and the pre-fallback path can land on
-    // index 0).
-    runtime.stuckTargetIndex = -1;
+    // rather than comparing against the OLD target's distance: the escape path starts
+    // from a different point and a different first waypoint, so the old baseline's
+    // distance says nothing about the escape's progress.
+    runtime.stuckTargetKey = '';
     return true;
   }
   runtime.goalKey = null; // forces ensurePath to repath from the bot's actual position next call
   ensurePath(graph, world, team, runtime, currentPosition, goalPosition, goalKey);
-  // stuckTargetIndex is deliberately NOT reset here (unlike the fallback branch below):
+  // stuckTargetKey is deliberately NOT reset here (unlike the fallback branch above):
   // a plain repath from an unchanged position to an unchanged goal recomputes the
-  // identical route on a static graph, so pathIndex converges back to the same target --
+  // identical route on a static graph, so the converged waypoint is the same target --
   // the streak needs to keep counting across repaths, or it would never reach
   // STUCK_SKIP_THRESHOLD at all (every repath would look like "a new target" and reset
-  // it to 0 first).
+  // it to 0 first). The position-key comparison above keeps this correct even when the
+  // recomputed route legally converges through a DIFFERENT relay chain (#32's graph):
+  // a different chain ending at the same waypoint is still the same target.
   return true;
+}
+
+/** Result of the per-tick pinning ladder: whether this tick's jump is a hurdle jump,
+ *  whether the ladder decided the bot is under unreachable floor (skip the waypoint),
+ *  and whether a jet-escape window is currently open. */
+interface PinVerdict {
+  hurdleJump: boolean;
+  underFloorSkip: boolean;
+  escaping: boolean;
+  /** Set by steerToward after local avoidance runs: the straight probe was blocked and
+   *  a deflection is active this tick. Lives here so the vertical-input helpers below
+   *  see one snapshot of the tick's navigation state. */
+  deflected: boolean;
+}
+/** Issue #32: measure pinning against the PREVIOUS call's position, before anything
+ *  else touches movement -- a bot can be physically wedged (feet sphere against a lip)
+ *  while every probe and stall window above still reads healthy. Advances the
+ *  crawl/pin/escape state machine and reports this tick's verdict. */
+function updatePinState(
+  runtime: BotRuntimeState,
+  currentPosition: Vec3,
+  targetDistance: number,
+  goalPosition: Vec3,
+): PinVerdict {
+  const escaping = advanceEscapeWindow(runtime);
+  if (escaping)
+    return { hurdleJump: false, underFloorSkip: false, escaping: true, deflected: false };
+  const moved =
+    runtime.lastSteerPosition === null
+      ? Infinity
+      : Math.hypot(
+          currentPosition.x - runtime.lastSteerPosition.x,
+          currentPosition.z - runtime.lastSteerPosition.z,
+        );
+  runtime.lastSteerPosition = { x: currentPosition.x, z: currentPosition.z };
+  const pinned = moved < CRAWL_MAX_STEP_M && targetDistance > WAYPOINT_REACHED_RADIUS;
+  if (!pinned) {
+    // Free movement: the pocket escape (if any was in progress) succeeded or the bot
+    // was never pinned; the whole pinning ladder resets.
+    runtime.crawlTicks = 0;
+    runtime.crawlBaseY = -1;
+    runtime.underFloorSkips = 0;
+    return { hurdleJump: false, underFloorSkip: false, escaping: false, deflected: false };
+  }
+  runtime.crawlTicks += 1;
+  if (runtime.crawlTicks < CRAWL_JUMP_TICKS) {
+    return { hurdleJump: false, underFloorSkip: false, escaping: false, deflected: false };
+  }
+  runtime.crawlTicks = 0;
+  const underFloorSkip = classifyHurdleJump(runtime, currentPosition, goalPosition);
+  if (underFloorSkip) applyUnderFloorSkip(runtime);
+  return { hurdleJump: true, underFloorSkip, escaping: false, deflected: false };
+}
+
+/** Consumes one tick of an open jet-escape window, if any. */
+function advanceEscapeWindow(runtime: BotRuntimeState): boolean {
+  if (runtime.escapeJetTicks <= 0) return false;
+  runtime.escapeJetTicks -= 1;
+  runtime.crawlTicks = 0;
+  return true;
+}
+
+/** Issue #32: a pinned jump that gains no altitude, twice in a row, with the goal far
+ *  overhead, means the bot is under the floor/walkway its 2D path crossed -- hopping
+ *  harder is not going to help. A genuine altitude gain resets the baseline instead --
+ *  that is a climb in progress, e.g. mounting a deck lip, which the next jump should
+ *  continue. */
+function classifyHurdleJump(
+  runtime: BotRuntimeState,
+  currentPosition: Vec3,
+  goalPosition: Vec3,
+): boolean {
+  if (runtime.crawlBaseY < 0) {
+    runtime.crawlBaseY = currentPosition.y;
+    return false;
+  }
+  if (Math.abs(currentPosition.y - runtime.crawlBaseY) > CRAWL_ALT_GAIN_M) {
+    runtime.crawlBaseY = currentPosition.y;
+    return false;
+  }
+  return goalPosition.y - currentPosition.y > UNDER_FLOOR_MIN_RISE_M;
+}
+
+/** Skips the unreachable waypoint and, when the skips stop converging (the repath loop
+ *  keeps diving back into the floor above -- the bot fell through a hole into a space
+ *  with no graph nodes), arms the jet-escape: hold jets and climb back out the way it
+ *  fell in -- the hole is the one opening it knows is overhead. */
+function applyUnderFloorSkip(runtime: BotRuntimeState): void {
+  runtime.crawlBaseY = -1;
+  runtime.pathIndex += 1;
+  if (runtime.pathIndex >= runtime.path.length) runtime.goalKey = null;
+  runtime.underFloorSkips += 1;
+  if (runtime.underFloorSkips >= UNDER_FLOOR_JET_SKIPS) {
+    runtime.escapeJetTicks = ESCAPE_JET_TICKS;
+    runtime.underFloorSkips = 0;
+  }
+}
+
+/** Issue #32: a deflected (wall-blocked) approach with the goal meaningfully overhead
+ *  is the base-deck/ramp-parapet shape -- hold jets to gain height along the wall until
+ *  either the probe clears or the energy floor (same guard slopeAssist uses) stops the
+ *  climb. On flat goals this never fires: the rise test gates it. */
+function climbJetWanted(
+  pin: PinVerdict,
+  goalPosition: Vec3,
+  currentPosition: Vec3,
+  armor: ArmorData,
+  energy: number,
+): boolean {
+  return (
+    pin.deflected &&
+    goalPosition.y - currentPosition.y > CLIMB_JET_MIN_RISE_M &&
+    energy > armor.minJetEnergy * 2
+  );
 }
 
 /** Advances along the current path, repathing on a stale/exhausted path, a changed
@@ -241,22 +493,54 @@ export function steerToward(
   advancePastReachedWaypoints(runtime, currentPosition);
   handleStuck(graph, world, team, runtime, goalPosition, goalKey, currentPosition);
   const target = advancePastReachedWaypoints(runtime, currentPosition);
-  if (!target) return { moveX: 0, moveZ: 0, jump: false, jet: false, headingYaw: 0 };
+  const targetDistance =
+    target === undefined
+      ? Infinity
+      : Math.hypot(currentPosition.x - target.x, currentPosition.z - target.z);
+  const pin = updatePinState(runtime, currentPosition, targetDistance, goalPosition);
+  if (!target || pin.underFloorSkip) return holdInput(pin.escaping);
   const dx = target.x - currentPosition.x,
     dz = target.z - currentPosition.z;
   const length = Math.hypot(dx, dz) || 1;
-  const direction = { x: dx / length, y: 0, z: dz / length };
+  const straight = { x: dx / length, y: 0, z: dz / length };
+  // Issue #32: probe the straight direction against real interiors before committing.
+  // The deflected result drives BOTH the movement frame and the heading below -- a bot
+  // sliding along a wall should face along its motion, the same as it would in the open.
+  const direction = avoidInteriors(world, runtime, currentPosition, straight);
+  pin.deflected = runtime.avoidDeflectionDeg !== 0;
   const headingYaw = Math.atan2(direction.x, direction.z);
-  const { jump, jet } = slopeAssist(
-    world,
-    currentPosition.x,
-    currentPosition.z,
-    headingYaw,
-    energy,
-    armor,
-  );
+  const slope = slopeAssist(world, currentPosition.x, currentPosition.z, headingYaw, energy, armor);
   const { moveX, moveZ } = worldDirectionToLocalMove(direction, headingYaw);
-  return { moveX, moveZ, jump, jet, headingYaw };
+  return {
+    moveX,
+    moveZ,
+    headingYaw,
+    ...jumpJetFor(slope, pin, goalPosition, currentPosition, armor, energy),
+  };
+}
+
+/** No usable waypoint this tick (path exhausted, or the under-floor skip just advanced
+ *  past it): stand still except for any open jet-escape window. */
+function holdInput(escaping: boolean): Partial<PlayerInput> & { headingYaw: number } {
+  return { moveX: 0, moveZ: 0, jump: false, jet: escaping, headingYaw: 0 };
+}
+
+/** Vertical inputs for this tick: terrain slope assist plus the #32 ladder (hurdle
+ *  jumps, open jet-escape windows, deck-parapet climb jets). */
+function jumpJetFor(
+  slope: { jump: boolean; jet: boolean },
+  pin: PinVerdict,
+  goalPosition: Vec3,
+  currentPosition: Vec3,
+  armor: ArmorData,
+  energy: number,
+): { jump: boolean; jet: boolean } {
+  const climbJet = climbJetWanted(pin, goalPosition, currentPosition, armor, energy);
+  return {
+    jump: slope.jump || pin.hurdleJump || pin.escaping,
+    jet:
+      slope.jet || climbJet || pin.escaping || (pin.hurdleJump && energy > armor.minJetEnergy * 2),
+  };
 }
 
 export { nearestNode };
