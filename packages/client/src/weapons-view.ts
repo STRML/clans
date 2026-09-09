@@ -16,11 +16,18 @@ const WEAPON_COLOR: Record<number, number> = {
 };
 const GRENADE_COLOR = 0x55aa55;
 function sourceTexture(path: string): THREE.Texture | null {
-  return typeof document === 'undefined' ? null : new THREE.TextureLoader().load(assetUrl(path));
+  if (typeof document === 'undefined') return null;
+  const texture = new THREE.TextureLoader().load(assetUrl(path));
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
 }
 const DISC_TEXTURE = sourceTexture('projectiles/disc00.PNG');
 const MORTAR_TEXTURE = sourceTexture('projectiles/Mortar_Projectile.png');
 const BLASTER_TEXTURE = sourceTexture('projectiles/blasterBolt.PNG');
+const SHRIKE_TEXTURE = sourceTexture('projectiles/shrikeBolt.png');
+const SHRIKE_CROSS = sourceTexture('projectiles/shrikeBoltCross.png');
+const TRACER_TEXTURE = sourceTexture('projectiles/tracer00.PNG');
+const TRACER_CROSS = sourceTexture('projectiles/tracercross.png');
 const BLASTER_TRAIL_SECONDS = 0.2;
 const SHRIKE_BOLT_LENGTH = 45;
 const CHAINGUN_TRACER_LENGTH = 15;
@@ -34,12 +41,7 @@ function directionFor(projectile: ProjectileSnapshotData): THREE.Vector3 {
 
 function projectileGeometry(p: ProjectileSnapshotData): THREE.BufferGeometry {
   if (p.weaponId === WeaponId.Spinfusor) return new THREE.CylinderGeometry(0.18, 0.18, 0.045, 16);
-  if (p.type === ProjectileType.VehicleLaser) {
-    const geometry = new THREE.BoxGeometry(0.07, 0.07, SHRIKE_BOLT_LENGTH);
-    geometry.translate(0, 0, SHRIKE_BOLT_LENGTH / 2);
-    return geometry;
-  }
-  if (p.type === ProjectileType.Tracer) return new THREE.BoxGeometry(0.025, 0.025, 0.025);
+  if (isTracer(p)) return tracerGeometry(p);
   if (p.weaponId === WeaponId.Mortar || p.type === ProjectileType.Grenade) {
     return new THREE.SphereGeometry(p.type === ProjectileType.Grenade ? 0.25 : 0.19, 10, 7);
   }
@@ -48,13 +50,15 @@ function projectileGeometry(p: ProjectileSnapshotData): THREE.BufferGeometry {
 
 function projectileColor(p: ProjectileSnapshotData): number {
   if (p.weaponId === WeaponId.Spinfusor) return 0x4da5ff;
-  if (p.type === ProjectileType.VehicleLaser) return 0xff3344;
-  if (p.type === ProjectileType.Tracer) return 0xffee55;
+  if (p.type === ProjectileType.VehicleLaser) return 0xffffff;
+  if (p.type === ProjectileType.Tracer) return 0xd3d778;
   if (p.weaponId === WeaponId.Mortar || p.type === ProjectileType.Grenade) return GRENADE_COLOR;
   return WEAPON_COLOR[p.weaponId] ?? 0xffffff;
 }
 
 function projectileTexture(p: ProjectileSnapshotData): THREE.Texture | null {
+  if (p.type === ProjectileType.VehicleLaser) return SHRIKE_TEXTURE;
+  if (p.type === ProjectileType.Tracer) return TRACER_TEXTURE;
   if (p.weaponId === WeaponId.Spinfusor) return DISC_TEXTURE;
   if (p.weaponId === WeaponId.Mortar) return MORTAR_TEXTURE;
   if (p.type === ProjectileType.Energy) return BLASTER_TEXTURE;
@@ -62,8 +66,8 @@ function projectileTexture(p: ProjectileSnapshotData): THREE.Texture | null {
 }
 
 function addProjectileTrail(mesh: THREE.Mesh, p: ProjectileSnapshotData, color: number): void {
-  if (p.type !== ProjectileType.Energy && p.type !== ProjectileType.Tracer) return;
-  const length = p.type === ProjectileType.Tracer ? CHAINGUN_TRACER_LENGTH : 0;
+  if (p.type !== ProjectileType.Energy) return;
+  const length = 0;
   const trail = new THREE.Line(
     new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(),
@@ -79,6 +83,51 @@ function addProjectileTrail(mesh: THREE.Mesh, p: ProjectileSnapshotData, color: 
   mesh.add(trail);
 }
 
+function isTracer(p: ProjectileSnapshotData): boolean {
+  return p.type === ProjectileType.VehicleLaser || p.type === ProjectileType.Tracer;
+}
+
+function tracerLength(p: ProjectileSnapshotData): number {
+  return p.type === ProjectileType.VehicleLaser ? SHRIKE_BOLT_LENGTH : CHAINGUN_TRACER_LENGTH;
+}
+
+function tracerGeometry(p: ProjectileSnapshotData): THREE.PlaneGeometry {
+  const width = p.type === ProjectileType.VehicleLaser ? 0.55 : 0.1;
+  const length = tracerLength(p);
+  const geometry = new THREE.PlaneGeometry(width, length);
+  geometry.rotateX(Math.PI / 2);
+  geometry.translate(0, 0, length / 2);
+  return geometry;
+}
+
+/** Crossed textured ribbons preserve the original glow from different viewing angles. */
+function addTracerCross(mesh: THREE.Mesh, p: ProjectileSnapshotData): void {
+  if (!isTracer(p)) return;
+  const ribbon = new THREE.Mesh(tracerGeometry(p), mesh.material);
+  ribbon.rotation.z = Math.PI / 2;
+  ribbon.name = 'tracer-ribbon';
+  mesh.add(ribbon);
+  const size = p.type === ProjectileType.VehicleLaser ? 0.99 : 0.2;
+  const head = new THREE.Mesh(
+    new THREE.PlaneGeometry(size, size),
+    new THREE.MeshBasicMaterial({
+      map: p.type === ProjectileType.VehicleLaser ? SHRIKE_CROSS : TRACER_CROSS,
+      color: projectileColor(p),
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  );
+  head.name = 'tracer-head';
+  mesh.add(head);
+}
+
+function glowProjectile(p: ProjectileSnapshotData): boolean {
+  return isTracer(p) || p.type === ProjectileType.Energy;
+}
+
 export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.Mesh {
   // Tribes 2's disc is a spinning flat plate; mortar and grenade are their own chunky
   // green shells, not recoloured copies of the same generic sphere.
@@ -90,12 +139,14 @@ export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.
       map: projectileTexture(projectile),
       transparent: projectile.weaponId !== WeaponId.Spinfusor,
       opacity: projectile.weaponId === WeaponId.Spinfusor ? 1 : 0.9,
-      blending:
-        projectile.type === ProjectileType.Energy ? THREE.AdditiveBlending : THREE.NormalBlending,
-      depthWrite: projectile.type !== ProjectileType.Energy,
+      blending: glowProjectile(projectile) ? THREE.AdditiveBlending : THREE.NormalBlending,
+      depthWrite: !glowProjectile(projectile),
+      fog: !glowProjectile(projectile),
+      side: THREE.DoubleSide,
     }),
   );
   addProjectileTrail(mesh, projectile, color);
+  addTracerCross(mesh, projectile);
   // Codex review round 2 (PR #9), finding 8: the sim recycles freed projectile ids (same
   // pattern as player id reuse), so a mesh keyed only by id can't tell "same projectile,
   // moved" from "a different projectile got this id". Stamping the type/weaponId it was
@@ -207,6 +258,12 @@ function syncOneProjectile(
     mesh.userData.spin = ((mesh.userData.spin as number | undefined) ?? 0) + dt * 30;
     mesh.rotateY(mesh.userData.spin as number);
   }
+  if (isTracer(p)) {
+    const travelled =
+      ((mesh.userData.travelled as number | undefined) ?? 0) + Math.hypot(p.vx, p.vy, p.vz) * dt;
+    mesh.userData.travelled = travelled;
+    mesh.scale.z = Math.min(1, travelled / tracerLength(p));
+  }
   updateBlasterTrail(mesh, p, dt);
 }
 
@@ -271,6 +328,25 @@ function createFlash(position: { x: number; y: number; z: number }, color: numbe
   return mesh;
 }
 
+function createProjectileImpact(p: ProjectileSnapshotData): THREE.Mesh {
+  if (!isTracer(p)) return createFlash(p, WEAPON_COLOR[p.weaponId] ?? 0xffffff);
+  // Bullets make compact impact flashes, not the explosive weapons' metre-wide fireballs.
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 8, 6),
+    new THREE.MeshBasicMaterial({
+      map: p.type === ProjectileType.VehicleLaser ? SHRIKE_CROSS : TRACER_CROSS,
+      color: projectileColor(p),
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+      depthWrite: false,
+    }),
+  );
+  mesh.position.set(p.x, p.y, p.z);
+  mesh.scale.setScalar(p.type === ProjectileType.VehicleLaser ? 0.5 : 0.12);
+  return mesh;
+}
+
 /** Projectiles present last frame and gone this frame get a one-shot flash at their last known
  * position — there is no explicit "projectile expired" wire message, so the caller diffs. */
 export function spawnExplosionsForExpired(
@@ -291,7 +367,7 @@ export function spawnExplosionsForExpired(
     if (stillAlive && stillAlive.type === last.type && stillAlive.weaponId === last.weaponId) {
       continue;
     }
-    const mesh = createFlash(last, WEAPON_COLOR[last.weaponId] ?? 0xffffff);
+    const mesh = createProjectileImpact(last);
     scene.add(mesh);
     effects.push({ mesh, ttl: EXPLOSION_LIFETIME_S });
   }

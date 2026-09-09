@@ -36,6 +36,7 @@ export function createWeaponAnimation(root: THREE.Object3D, source: THREE.Animat
     stopStateActions();
     startLoop('ambient');
     if (state === WeaponState.Ready) play('discspin', true);
+    if (state === WeaponState.SpinUp) startLoop('spin');
     if (state === WeaponState.Firing) {
       if (!play('fire')) play('recoil');
       play('fire_vis');
@@ -63,7 +64,8 @@ export function createWeaponAnimation(root: THREE.Object3D, source: THREE.Animat
         previousState = state;
       }
       previousTimer = timer;
-      if (!spunUp && state !== WeaponState.Firing) actions.get('spin')?.stop();
+      if (!spunUp && state !== WeaponState.Firing && state !== WeaponState.SpinUp)
+        actions.get('spin')?.stop();
       mixer.update(dt);
     },
     dispose(): void {

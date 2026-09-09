@@ -49,12 +49,15 @@ describe('syncProjectileMeshes', () => {
       vy: 0,
       vz: 100,
     });
-    expect(shrike.geometry).toBeInstanceOf(THREE.BoxGeometry);
-    const shrikeGeometry = shrike.geometry as THREE.BoxGeometry;
-    expect(shrikeGeometry.parameters.depth).toBeGreaterThan(shrikeGeometry.parameters.width);
+    expect(shrike.geometry).toBeInstanceOf(THREE.PlaneGeometry);
+    expect((shrike.material as THREE.MeshBasicMaterial).color.getHex()).toBe(0xffffff);
+    expect((shrike.material as THREE.MeshBasicMaterial).blending).toBe(THREE.AdditiveBlending);
+    expect(shrike.getObjectByName('tracer-head')).toBeInstanceOf(THREE.Mesh);
+    const shrikeGeometry = shrike.geometry as THREE.PlaneGeometry;
+    expect(shrikeGeometry.parameters.height).toBeGreaterThan(shrikeGeometry.parameters.width);
     const tracer = createProjectileMesh({ ...disc(2, 0), type: 1, weaponId: 1 });
-    expect(tracer.getObjectByName('projectile-trail')).toBeInstanceOf(THREE.Line);
-    expect((tracer.geometry as THREE.BoxGeometry).parameters.width).toBeLessThan(0.05);
+    expect(tracer.getObjectByName('tracer-ribbon')).toBeInstanceOf(THREE.Mesh);
+    expect((tracer.geometry as THREE.PlaneGeometry).parameters.width).toBe(0.1);
   });
 
   it('keeps a bounded, position-following history trail for bouncing blaster bolts', () => {
@@ -137,7 +140,7 @@ describe('syncProjectileMeshes', () => {
     const scene = new THREE.Scene();
     const meshes = new Map<number, THREE.Mesh>();
     syncProjectileMeshes(scene, meshes, [{ ...disc(1, 0), type: 1, weaponId: 1 }]);
-    const trail = meshes.get(1)?.getObjectByName('projectile-trail') as THREE.Line;
+    const trail = meshes.get(1)?.getObjectByName('tracer-ribbon') as THREE.Mesh;
     const geometryDispose = vi.spyOn(trail.geometry, 'dispose');
     const materialDispose = vi.spyOn(trail.material as THREE.Material, 'dispose');
     syncProjectileMeshes(scene, meshes, []);

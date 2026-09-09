@@ -48,3 +48,63 @@ test('offline laser draws a red beam on a miss even in a multi-tick frame', asyn
   expect(result).toContainEqual({ color: 0xff2222, points: 2 });
   await page.screenshot({ path: testInfo.outputPath('laser-rifle.png') });
 });
+
+test('Shrike and chaingun render original glowing tracer textures', async ({ page }, testInfo) => {
+  await page.goto('/');
+  await page.locator('#debug-stats[data-ready="1"]').waitFor({ state: 'attached' });
+  const result = await page.evaluate(async () => {
+    const app = (window as unknown as { __app: App }).__app;
+    app.paused = true;
+    const modulePath = '/src/weapons-view.ts';
+    const { createProjectileMesh } = await import(modulePath);
+    const results = [];
+    for (const [type, weaponId, x] of [
+      [4, 7, -2],
+      [1, 1, 2],
+    ]) {
+      const mesh = createProjectileMesh({
+        id: type,
+        type,
+        weaponId,
+        x: 0,
+        y: 0,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        vz: -425,
+        ownerId: -1,
+        armed: 1,
+      });
+      const pos = app.camera.position
+        .clone()
+        .set(x, 0, -12)
+        .applyQuaternion(app.camera.quaternion)
+        .add(app.camera.position);
+      mesh.position.copy(pos);
+      mesh.quaternion.copy(app.camera.quaternion);
+      mesh.rotateY(Math.PI / 3);
+      mesh.scale.z = 0.25;
+      app.scene.add(mesh);
+      const texture = mesh.material.map;
+      if (!texture.image?.complete)
+        await new Promise<void>((resolve) =>
+          texture.image
+            ? texture.image.addEventListener('load', () => resolve(), { once: true })
+            : setTimeout(resolve, 500),
+        );
+      results.push({
+        type,
+        textured: !!texture.image?.width,
+        additive: mesh.material.blending === 2,
+        depthWrite: mesh.material.depthWrite,
+      });
+    }
+    app.frame(0);
+    return results;
+  });
+  expect(result).toEqual([
+    { type: 4, textured: true, additive: true, depthWrite: false },
+    { type: 1, textured: true, additive: true, depthWrite: false },
+  ]);
+  await page.screenshot({ path: testInfo.outputPath('tracer-textures.png') });
+});

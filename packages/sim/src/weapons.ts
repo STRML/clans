@@ -18,6 +18,8 @@ export enum WeaponState {
   Reload = 3,
   NoAmmo = 4,
   DryFire = 5,
+  /** Chaingun's source-backed pre-fire spin-up; serialized like every other state. */
+  SpinUp = 6,
 }
 
 export enum ProjectileType {
@@ -55,6 +57,7 @@ export interface WeaponData {
 
 const DRY_FIRE_SECONDS = 0.2; // Ours: a brief empty-click before the persistent NoAmmo state.
 export const MUZZLE_HEIGHT = 1.6; // Ours: roughly chest height on Light's 2.3 m capsule.
+const TIMER_EPSILON = 1e-9;
 
 // Mirrors movement.ts's own IDLE: a player active in the world but missing from this
 // tick's input map (a dropped packet, say) should be treated as holding no keys at all,
@@ -74,9 +77,7 @@ const IDLE_INPUT: PlayerInput = {
   use: false,
 };
 
-// Spec's Weapon numbers table, used exactly. Chaingun's spinDownTime (1.0 s) is kept for the
-// client's future barrel-spin visual but does not gate fire logic this milestone — see the
-// spin-up test for the gating we do implement.
+// Source-derived weapon values, except where the playtest explicitly changes a cadence.
 export const WEAPON_DATA: Record<WeaponId, WeaponData> = {
   [WeaponId.Spinfusor]: {
     id: WeaponId.Spinfusor,
@@ -101,7 +102,8 @@ export const WEAPON_DATA: Record<WeaponId, WeaponData> = {
     radiusDamage: 0,
     radius: 0,
     kickback: 0,
-    fireTime: 0.15,
+    // T2's Fire state is 0.15 s. Playtest tuning requests 0.10 s while held.
+    fireTime: 0.1,
     reloadTime: 0,
     lifetime: 3,
     activateTime: 0,
@@ -153,7 +155,9 @@ export const WEAPON_DATA: Record<WeaponId, WeaponData> = {
     radius: 0,
     kickback: 0,
     fireTime: 0.3,
-    reloadTime: 0.3,
+    // T2's Reload state has no timeout, therefore the Fire state's 0.3 s timeout is
+    // the complete held-trigger cadence.
+    reloadTime: 0,
     lifetime: 3,
     activateTime: 0,
     drag: 0.05,
@@ -342,13 +346,6 @@ function advanceTimer(world: World, id: number, dt: number): void {
   players.weaponTimer[id] = Math.max(0, remaining);
 }
 
-function fireCost(world: World, id: number, data: WeaponData): number {
-  if (data.id !== WeaponId.Chaingun) return data.fireTime;
-  if (world.players.spunUp[id]) return data.fireTime;
-  world.players.spunUp[id] = 1;
-  return (data.spinUpTime ?? 0) + data.fireTime;
-}
-
 function energyScaleFor(world: World, id: number, data: WeaponData): number | null {
   if (data.energyPerShot === undefined) return 1;
   const energy = world.players.energy[id] ?? 0;
@@ -372,7 +369,7 @@ function tryFireWeapon(world: World, id: number, input: PlayerInput): void {
   }
   if (ammo > 0) players.ammo[index] = ammo - 1;
   players.weaponState[id] = WeaponState.Firing;
-  players.weaponTimer[id] = fireCost(world, id, data);
+  players.weaponTimer[id] = data.fireTime;
   world.pendingFireEvents.push({
     playerId: id,
     weaponId,
@@ -386,6 +383,80 @@ function tryFireWeapon(world: World, id: number, input: PlayerInput): void {
     projectileId: -1,
     resolved: false,
   });
+}
+
+/** Advances Blaster's single timed Fire state. Keeping its negative remainder means a
+ * 0.3 s cadence stays 0.3 s on average at the 32 ms simulation tick, instead of becoming
+ * ceil(0.3 / 0.032) ticks for every shot. */
+function advanceHeldBlaster(world: World, id: number, input: PlayerInput, dt: number): void {
+  const players = world.players;
+  const data = WEAPON_DATA[WeaponId.Blaster];
+  let remaining = (players.weaponTimer[id] ?? 0) - dt;
+  while (remaining <= TIMER_EPSILON && input.fire) {
+    players.weaponState[id] = WeaponState.Ready;
+    tryFireWeapon(world, id, input);
+    if (players.weaponState[id] !== WeaponState.Firing) return;
+    remaining += data.fireTime;
+  }
+  if (remaining <= TIMER_EPSILON) {
+    players.weaponState[id] = WeaponState.Ready;
+    players.weaponTimer[id] = 0;
+    return;
+  }
+  players.weaponTimer[id] = remaining;
+}
+
+/** The original Chaingun waits through its 0.5 s Spinup state before its first Fire
+ * state. Thereafter this uses the requested 0.10 s playtest interval. As with Blaster,
+ * carry the overshoot forward so tick rounding does not permanently slow the weapon. */
+function advanceChaingun(world: World, id: number, input: PlayerInput, dt: number): void {
+  const players = world.players;
+  const data = WEAPON_DATA[WeaponId.Chaingun];
+  let remaining = (players.weaponTimer[id] ?? 0) - dt;
+  if (players.weaponState[id] === WeaponState.SpinUp) {
+    if (remaining > TIMER_EPSILON) {
+      players.weaponTimer[id] = remaining;
+      return;
+    }
+    players.spunUp[id] = 1;
+    players.weaponState[id] = WeaponState.Firing;
+  }
+  while (remaining <= TIMER_EPSILON && input.fire) {
+    tryFireWeapon(world, id, input);
+    if (players.weaponState[id] !== WeaponState.Firing) return;
+    remaining += data.fireTime;
+  }
+  players.weaponTimer[id] = Math.max(0, remaining);
+}
+
+function stepChaingun(world: World, id: number, input: PlayerInput, dt: number): void {
+  const players = world.players;
+  if (!input.fire) {
+    players.spunUp[id] = 0;
+    if (
+      players.weaponState[id] === WeaponState.Firing ||
+      players.weaponState[id] === WeaponState.SpinUp
+    ) {
+      players.weaponState[id] = WeaponState.Ready;
+      players.weaponTimer[id] = 0;
+    }
+    advanceTimer(world, id, dt);
+    return;
+  }
+  if (
+    players.weaponState[id] === WeaponState.Ready ||
+    players.weaponState[id] === WeaponState.NoAmmo
+  ) {
+    players.spunUp[id] = 0;
+    players.weaponState[id] = WeaponState.SpinUp;
+    players.weaponTimer[id] = WEAPON_DATA[WeaponId.Chaingun].spinUpTime ?? 0;
+  }
+  if (
+    players.weaponState[id] === WeaponState.Firing ||
+    players.weaponState[id] === WeaponState.SpinUp
+  ) {
+    advanceChaingun(world, id, input, dt);
+  } else advanceTimer(world, id, dt);
 }
 
 function tryThrowGrenade(world: World, id: number, input: PlayerInput): void {
@@ -409,6 +480,23 @@ function tryThrowGrenade(world: World, id: number, input: PlayerInput): void {
   });
 }
 
+function stepHandWeapon(world: World, id: number, input: PlayerInput, dt: number): void {
+  const weaponId = world.players.weaponSlot[id] as WeaponId;
+  if (weaponId === WeaponId.Chaingun) {
+    stepChaingun(world, id, input, dt);
+    return;
+  }
+  const state = world.players.weaponState[id];
+  if (input.fire && (state === WeaponState.Ready || state === WeaponState.NoAmmo)) {
+    tryFireWeapon(world, id, input);
+  }
+  if (weaponId === WeaponId.Blaster && world.players.weaponState[id] === WeaponState.Firing) {
+    advanceHeldBlaster(world, id, input, dt);
+  } else {
+    advanceTimer(world, id, dt);
+  }
+}
+
 /**
  * The fire-eligibility check reads the state from before this tick's advanceTimer runs,
  * and advanceTimer always runs afterward (even on the tick a fresh Firing/DryFire timer
@@ -426,16 +514,11 @@ function stepOnePlayer(world: World, id: number, input: PlayerInput, dt: number)
   // Global Constraints, Task 6). This is the same "exactly one system owns this id's state
   // this tick" rule movement.ts's own mounted guard follows.
   if (players.mountedVehicleId[id] !== -1) return;
-  if (!input.fire) players.spunUp[id] = 0;
   if ((players.grenadeCooldown[id] ?? 0) > 0) {
     players.grenadeCooldown[id] = Math.max(0, (players.grenadeCooldown[id] ?? 0) - dt);
   }
   applySlot(world, id, input);
-  const state = players.weaponState[id];
-  if (input.fire && (state === WeaponState.Ready || state === WeaponState.NoAmmo)) {
-    tryFireWeapon(world, id, input);
-  }
-  advanceTimer(world, id, dt);
+  stepHandWeapon(world, id, input, dt);
   tryThrowGrenade(world, id, input);
 }
 

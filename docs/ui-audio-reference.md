@@ -104,3 +104,16 @@ and explosion flashes remain approximations rather than original animated DTS
 models. Impact effects/sounds currently follow the last visible projectile
 position when it disappears; very short-lived shots between snapshots can be
 missed by this presentation path.
+
+
+September 9 playtest follow-up: the Blaster no longer adds an invented 0.3-second
+reload timeout after its 0.3-second Fire state. Chaingun held fire is tuned to
+0.10 seconds (source: 0.15), and Shrike fire to 0.20 seconds (source: 0.125),
+following the user's faster/slower feedback. These two rates are intentional
+playtest changes, not claimed vanilla constants.
+
+Chaingun and Shrike now use the original `tracer00`/`tracercross` and
+`shrikeBolt`/`shrikeBoltCross` textures from `weapons/chaingun.cs`, with additive
+crossed ribbons, source widths/lengths, and compact impact glows. The Shrike's
+blue-violet color comes from its texture, with white material tint. These remain
+an approximation of Torque's camera-facing tracer renderer.

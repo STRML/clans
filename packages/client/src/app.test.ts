@@ -31,6 +31,7 @@ import {
   debugRepairGenerator,
   drainNewEvents,
   hudSourceFrom,
+  PilotYawController,
   positionOfPlayer,
   setLocalGodMode,
   stepSinglePlayer,
@@ -112,6 +113,33 @@ const flat: Heightfield = {
   heightScale: 1,
   heights: new Uint16Array(4),
 };
+
+describe('PilotYawController', () => {
+  it('keeps sustained large mouse turns on their requested side of the vehicle', () => {
+    const left = new PilotYawController();
+    left.reset(0);
+    let leftTarget = left.constrain(4, 0);
+    expect(leftTarget).toBeGreaterThan(0);
+    leftTarget = left.constrain(leftTarget + 4, 0.2);
+    expect(leftTarget).toBeGreaterThan(0.2);
+
+    const right = new PilotYawController();
+    right.reset(0);
+    let rightTarget = right.constrain(-4, 0);
+    expect(rightTarget).toBeLessThan(0);
+    rightTarget = right.constrain(rightTarget - 4, -0.2);
+    expect(rightTarget).toBeLessThan(-0.2);
+  });
+
+  it('preserves a nearby requested heading while the vehicle crosses the ±pi seam', () => {
+    const pilot = new PilotYawController();
+    pilot.reset(Math.PI - 0.1);
+    const target = Math.PI + 0.1;
+    expect(pilot.constrain(target, Math.PI - 0.1)).toBeCloseTo(target);
+    // This is the same vehicle heading after its wrapped simulation yaw crosses +pi to -pi.
+    expect(pilot.constrain(target, -Math.PI + 0.05)).toBeCloseTo(target);
+  });
+});
 
 const snapshot: PlayerSnapshotData = {
   id: 1,

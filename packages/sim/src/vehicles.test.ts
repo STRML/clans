@@ -653,6 +653,23 @@ describe('Shrike blaster', () => {
     expect(world.pendingVehicleFireEvents[0]?.vehicleId).toBe(vId);
   });
 
+  it('fires immediately then every requested 0.2 s without accumulating 32 ms tick rounding', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Shrike) as number;
+    const playerId = addPlayer(world, vehiclePos(world, vId), 1);
+    stepVehicles(world, new Map([[playerId, useInput(true)]]), 1 / 32); // mount
+    world.pendingVehicleFireEvents.length = 0;
+    const held = new Map([[playerId, { ...idleInput, fire: true }]]);
+
+    for (let tick = 0; tick < 100; tick += 1) stepVehicles(world, held, 32 / 1000);
+
+    // t=0 plus sixteen 200 ms intervals over the following 3.2 seconds. A
+    // fresh full timer each shot would quantize to seven 32 ms ticks and emit
+    // only fifteen shots here.
+    expect(world.pendingVehicleFireEvents).toHaveLength(17);
+  });
+
   it('a Wildcat driver holding fire produces no fire event -- the Wildcat has no weapon', () => {
     const world = createWorld(flat, 1);
     const padId = poweredPad(world);

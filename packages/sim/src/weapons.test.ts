@@ -129,28 +129,66 @@ describe('stepWeapons: idle fallback for a tick with no input entry at all (Code
   });
 });
 
-describe('stepWeapons: Chaingun spin-up (0.5 s once, then 0.15 s per shot while held)', () => {
-  it('the first shot of a burst costs spinUp + fireTime; a held burst then costs only fireTime', () => {
+describe('stepWeapons: Chaingun spin-up (0.5 s, then 0.10 s per shot while held)', () => {
+  it('waits through spin-up, then maintains the requested held-trigger cadence without tick drift', () => {
     const world = createWorld(flat, 1);
     const id = addPlayer(world, { x: 0, y: 0, z: 0 });
-    fireOnce(world, id, WeaponId.Chaingun);
-    expect(world.pendingFireEvents).toHaveLength(1);
-    const spunUpCost =
-      WEAPON_DATA[WeaponId.Chaingun].spinUpTime! + WEAPON_DATA[WeaponId.Chaingun].fireTime;
-    for (let tick = 0; tick < ticksFor(spunUpCost) - 1; tick += 1) {
+    world.players.weaponSlot[id] = WeaponId.Chaingun;
+    const held = new Map([[id, { ...IDLE, fire: true }]]);
+    let shots = 0;
+
+    for (let tick = 0; tick < 15; tick += 1) {
+      stepWeapons(world, held, FIXED_DT);
+      shots += world.pendingFireEvents.length;
+      expect(world.pendingFireEvents).toHaveLength(0);
+    }
+    stepWeapons(world, held, FIXED_DT);
+    shots += world.pendingFireEvents.length;
+    expect(shots).toBe(1);
+
+    for (let tick = 0; tick < 84; tick += 1) {
+      stepWeapons(world, held, FIXED_DT);
+      shots += world.pendingFireEvents.length;
+    }
+    // The first shot follows the 0.5 s spin-up; the remaining 2.7 seconds fit
+    // 27 more 100 ms intervals. Carrying timer overshoot avoids rounding each
+    // interval to four 32 ms ticks (which would only produce 22 more shots).
+    expect(shots).toBe(28);
+  });
+
+  it('releasing fire cancels the spin-up so the next burst pays it again', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    world.players.weaponSlot[id] = WeaponId.Chaingun;
+    stepWeapons(world, new Map([[id, { ...IDLE, fire: true }]]), FIXED_DT);
+    stepWeapons(world, new Map([[id, { ...IDLE, fire: false }]]), FIXED_DT);
+    expect(world.players.spunUp[id]).toBe(0);
+    expect(world.players.weaponState[id]).toBe(WeaponState.Ready);
+    for (let tick = 0; tick < 15; tick += 1) {
       stepWeapons(world, new Map([[id, { ...IDLE, fire: true }]]), FIXED_DT);
       expect(world.pendingFireEvents).toHaveLength(0);
     }
     stepWeapons(world, new Map([[id, { ...IDLE, fire: true }]]), FIXED_DT);
-    expect(world.pendingFireEvents).toHaveLength(1); // second shot: fireTime only, no second spin-up
+    expect(world.pendingFireEvents).toHaveLength(1);
   });
+});
 
-  it('releasing fire clears the spin-up so the next burst pays it again', () => {
+describe('stepWeapons: Blaster held-trigger cadence', () => {
+  it('fires immediately and then every 0.3 s without adding a second reload delay', () => {
     const world = createWorld(flat, 1);
     const id = addPlayer(world, { x: 0, y: 0, z: 0 });
-    fireOnce(world, id, WeaponId.Chaingun);
-    stepWeapons(world, new Map([[id, { ...IDLE, fire: false }]]), FIXED_DT);
-    expect(world.players.spunUp[id]).toBe(0);
+    world.players.weaponSlot[id] = WeaponId.Blaster;
+    const held = new Map([[id, { ...IDLE, fire: true }]]);
+    let shots = 0;
+
+    for (let tick = 0; tick < 100; tick += 1) {
+      stepWeapons(world, held, FIXED_DT);
+      shots += world.pendingFireEvents.length;
+    }
+
+    // t=0 plus ten 300 ms intervals over the following 3.2 seconds. The original
+    // image has no Reload timeout, so its 0.3 s Fire timeout is the whole cadence.
+    expect(shots).toBe(11);
   });
 });
 
@@ -251,7 +289,10 @@ describe('projectile-capacity exhaustion refunds the shot one tick later', () =>
     const world = createWorld(flat, 1);
     const id = addPlayer(world, { x: 0, y: 0, z: 0 });
     world.projectiles.count = PROJECTILE_CAPACITY; // store full: spawnStored can't allocate
-    fireOnce(world, id, WeaponId.Chaingun);
+    world.players.weaponSlot[id] = WeaponId.Chaingun;
+    for (let tick = 0; tick < 16; tick += 1) {
+      stepWeapons(world, new Map([[id, { ...IDLE, fire: true }]]), FIXED_DT);
+    }
     stepProjectiles(world, FIXED_DT); // fails to allocate; the same-tick hit-test never runs
     expect(world.lastFireEvents).toHaveLength(1);
     // Before the fix, resolved didn't exist and a caller (server/net.ts's

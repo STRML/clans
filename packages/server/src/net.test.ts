@@ -8,6 +8,8 @@ import {
   createFlags,
   createWorld,
   FlagState,
+  WeaponState,
+  FIXED_DT,
   LIGHT_ARMOR,
   spawnVehicleAtPad,
   stepPower,
@@ -1224,6 +1226,9 @@ describe('startNetServer', () => {
     );
     await wait(20);
     lagServer.tick(20); // slot switch to Chaingun only, still Ready, no shot yet
+    // Isolate lag compensation from spin-up: the next tick completes the wind-up.
+    world.players.weaponState[welcome.playerId] = WeaponState.SpinUp;
+    world.players.weaponTimer[welcome.playerId] = FIXED_DT;
     // Codex review round 16, finding 2: the rewind amount is half the measured RTT (one-way
     // latency), so the jump-away must happen right before firing, not several ticks earlier.
     world.players.position.set([500, 0, 500], targetA * 3);

@@ -174,9 +174,46 @@ function weaponAnimationDelta(app: App, dt: number): number {
   return app.paused || app.world.gameOver ? 0 : dt * app.timeScale;
 }
 
-function gameplayInput(app: App, usePressed: boolean): PlayerInput {
+const PILOT_YAW_LIMIT = Math.PI - 0.001;
+
+function shortestAngle(angle: number): number {
+  return angle - Math.round(angle / (2 * Math.PI)) * 2 * Math.PI;
+}
+
+/**
+ * Keeps absolute mouse look usable as a vehicle heading request. Input.yaw deliberately
+ * accumulates without a wrap, whereas vehicle yaw is wrapped every simulation tick. Once a
+ * look angle was more than half a turn away, passing it through directly made the simulator's
+ * shortest-arc controller choose the opposite turn. Track the vehicle in the same unwrapped
+ * space, and keep one submitted target within one unambiguous half-turn of it.
+ */
+export class PilotYawController {
+  private vehicleYaw: number | null = null;
+
+  reset(vehicleYaw: number): void {
+    this.vehicleYaw = vehicleYaw;
+  }
+
+  constrain(lookYaw: number, wrappedVehicleYaw: number): number {
+    const previous = this.vehicleYaw;
+    const vehicleYaw =
+      previous === null
+        ? wrappedVehicleYaw
+        : previous + shortestAngle(wrappedVehicleYaw - shortestAngle(previous));
+    this.vehicleYaw = vehicleYaw;
+    return vehicleYaw + Math.max(-PILOT_YAW_LIMIT, Math.min(PILOT_YAW_LIMIT, lookYaw - vehicleYaw));
+  }
+}
+
+function gameplayInput(app: App, usePressed: boolean, pilotYaw: PilotYawController): PlayerInput {
   const { input, world, playerId } = app;
   if (app.freeCam) return { ...IDLE, yaw: input.yaw, pitch: input.pitch };
+  const mounted = world.players.mountedVehicleId[playerId] ?? -1;
+  if (mounted !== -1) {
+    // Rebase look yaw after capping it. Continued mouse movement advances the target, while a
+    // stopped mouse lets the craft settle instead of requesting endless rotations.
+    input.yaw = pilotYaw.constrain(input.yaw, world.vehicles.yaw[mounted] ?? 0);
+  }
   return {
     ...input.snapshot(),
     use: !input.uiOpen && usePressed && canSendVehicleUse(world, playerId),
@@ -268,12 +305,15 @@ function placeVehicleCamera(app: App, vehicleId: number, dt: number): boolean {
   return true;
 }
 
-function syncPilotInput(app: App, previous: number): number {
+function syncPilotInput(app: App, previous: number, pilotYaw: PilotYawController): number {
   const mounted = app.world.players.mountedVehicleId[app.playerId] ?? -1;
   if (mounted !== -1 && mounted !== previous) {
-    app.input.yaw = app.world.vehicles.yaw[mounted] ?? 0;
+    const yaw = app.world.vehicles.yaw[mounted] ?? 0;
+    app.input.yaw = yaw;
     app.input.pitch = app.world.vehicles.pitch[mounted] ?? 0;
+    pilotYaw.reset(yaw);
   }
+  if (mounted === -1 && previous !== -1) pilotYaw.reset(app.input.yaw);
   return mounted;
 }
 
@@ -1483,6 +1523,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   let godModeFlag = false;
 
   let previousMounted = -1;
+  const pilotYaw = new PilotYawController();
   const app: App = {
     world,
     playerId,
@@ -1556,8 +1597,8 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       // and syncBaseAssetsView's own station/pad menu toggles below, rather than each calling
       // it separately.
       const usePressed = !app.freeCam && input.usePressedThisFrame();
-      previousMounted = syncPilotInput(app, previousMounted);
-      const currentInput = gameplayInput(app, usePressed);
+      previousMounted = syncPilotInput(app, previousMounted, pilotYaw);
+      const currentInput = gameplayInput(app, usePressed, pilotYaw);
       const simStart = performance.now();
       if (net) {
         stepNetworked(net, app.stats, currentInput, steps, scene, remoteMeshes, remoteBuffers);

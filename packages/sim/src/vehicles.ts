@@ -100,6 +100,7 @@ export interface VehicleStore {
 
 export const MOUNT_RANGE = 4; // real, both kinds; see VEHICLE_DATA.minMountDist per-kind above
 export const VEHICLE_PAD_USE_RADIUS = 4; // ours — see the plan's numbers table
+const TIMER_EPSILON = 1e-9;
 
 const VEHICLE_CAPACITY = 8; // ours: Katabatic needs at most 2 concurrently; headroom for id retention.
 
@@ -1059,8 +1060,9 @@ export const SHRIKE_BLASTER_DATA = {
   directDamage: 0.125, // weapons/chaingun.cs:503
   speed: 425, // weapons/chaingun.cs:512
   lifetime: 1, // weapons/chaingun.cs:516 (lifetimeMS 1000)
-  fireInterval: 0.125, // vehicles/vehicle_shrike.cs:257 (fireTimeout 125ms) -- ours: single
-  // timer, not twin barrels; see the plan's numbers table.
+  // T2's fireTimeout is 125 ms. Playtest tuning requests 200 ms between shots; this
+  // remains one authoritative shot stream because barrel alternation is presentation-only.
+  fireInterval: 0.2,
   minEnergy: 5, // vehicles/vehicle_shrike.cs:255-256
 };
 
@@ -1069,31 +1071,35 @@ export const SHRIKE_BLASTER_DATA = {
  *  since a mounted player's own weapon system is inert (weapons.ts's stepOnePlayer guard). */
 function tryFireShrikeBlaster(world: World, vId: number, input: PlayerInput, dt: number): void {
   const vehicles = world.vehicles;
-  vehicles.weaponTimer[vId] = Math.max(0, at(vehicles.weaponTimer, vId) - dt);
-  if (!input.fire) return;
-  if (at(vehicles.weaponTimer, vId) > 0) return;
-  if (at(vehicles.energy, vId) < SHRIKE_BLASTER_DATA.minEnergy) return;
-  vehicles.weaponTimer[vId] = SHRIKE_BLASTER_DATA.fireInterval;
-  vehicles.energy[vId] = at(vehicles.energy, vId) - SHRIKE_BLASTER_DATA.minEnergy;
-  const direction = headingOf(at(vehicles.yaw, vId), at(vehicles.pitch, vId));
-  const base = vId * 3;
-  const origin: Vec3 = {
-    x: at(vehicles.position, base),
-    y: at(vehicles.position, base + 1),
-    z: at(vehicles.position, base + 2),
-  };
-  const velocity: Vec3 = {
-    x: at(vehicles.velocity, base),
-    y: at(vehicles.velocity, base + 1),
-    z: at(vehicles.velocity, base + 2),
-  };
-  world.pendingVehicleFireEvents.push({
-    vehicleId: vId,
-    team: at(vehicles.team, vId),
-    origin,
-    direction,
-    velocity,
-  });
+  let remaining = at(vehicles.weaponTimer, vId) - dt;
+  if (!input.fire) {
+    vehicles.weaponTimer[vId] = Math.max(0, remaining);
+    return;
+  }
+  while (remaining <= TIMER_EPSILON && at(vehicles.energy, vId) >= SHRIKE_BLASTER_DATA.minEnergy) {
+    remaining += SHRIKE_BLASTER_DATA.fireInterval;
+    vehicles.energy[vId] = at(vehicles.energy, vId) - SHRIKE_BLASTER_DATA.minEnergy;
+    const direction = headingOf(at(vehicles.yaw, vId), at(vehicles.pitch, vId));
+    const base = vId * 3;
+    const origin: Vec3 = {
+      x: at(vehicles.position, base),
+      y: at(vehicles.position, base + 1),
+      z: at(vehicles.position, base + 2),
+    };
+    const velocity: Vec3 = {
+      x: at(vehicles.velocity, base),
+      y: at(vehicles.velocity, base + 1),
+      z: at(vehicles.velocity, base + 2),
+    };
+    world.pendingVehicleFireEvents.push({
+      vehicleId: vId,
+      team: at(vehicles.team, vId),
+      origin,
+      direction,
+      velocity,
+    });
+  }
+  vehicles.weaponTimer[vId] = Math.max(0, remaining);
 }
 
 function seatDriver(world: World, vId: number, driverId: number): void {
