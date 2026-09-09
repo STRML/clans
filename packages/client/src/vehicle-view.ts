@@ -14,6 +14,7 @@ import { type KatabaticAssets } from './assets.js';
 export interface VehicleView {
   meshes: Map<number, THREE.Object3D>;
   sync(vehicles: VehicleSnapshotData[]): void;
+  dispose(): void;
 }
 
 // --- Remote-vehicle interpolation (Codex review round 1, this PR, finding 9) --------------
@@ -240,9 +241,11 @@ export function createVehicleView(
 ): VehicleView {
   const meshes = new Map<number, THREE.Object3D>();
   const launchEffects = new Map<number, THREE.Mesh>();
+  let disposed = false;
   return {
     meshes,
     sync(vehicles: VehicleSnapshotData[]): void {
+      if (disposed) return;
       for (const data of vehicles) {
         // Snapshot transitions survive multiple sim ticks per rendered frame. Joining a
         // game with an already-dead vehicle, or receiving it again, must not replay FX.
@@ -265,14 +268,28 @@ export function createVehicleView(
       }
       for (const [id, effect] of launchEffects) {
         if (!liveIds.has(id)) {
-          scene.remove(effect);
-          effect.geometry.dispose();
-          (effect.material as THREE.Material).dispose();
+          disposeLaunchEffect(scene, effect);
           launchEffects.delete(id);
         }
       }
     },
+    dispose(): void {
+      disposed = true;
+      pruneVehicleMeshes(scene, meshes, new Set());
+      for (const effect of launchEffects.values()) disposeLaunchEffect(scene, effect);
+      launchEffects.clear();
+      for (const pad of pads.values()) {
+        pad.userData.shapeAnimation?.dispose();
+        delete pad.userData.shapeAnimation;
+      }
+    },
   };
+}
+
+function disposeLaunchEffect(scene: THREE.Scene, effect: THREE.Mesh): void {
+  scene.remove(effect);
+  effect.geometry.dispose();
+  (effect.material as THREE.Material).dispose();
 }
 
 function poseVehicleActivation(mesh: THREE.Object3D, remaining: number): void {
@@ -297,9 +314,7 @@ function syncLaunchEffect(
   let effect = effects.get(data.id);
   if (remaining <= 0) {
     if (effect) {
-      scene.remove(effect);
-      effect.geometry.dispose();
-      (effect.material as THREE.Material).dispose();
+      disposeLaunchEffect(scene, effect);
       effects.delete(data.id);
     }
     return;

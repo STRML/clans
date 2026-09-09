@@ -1414,6 +1414,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     dispose(): void {
       audio.dispose();
       weaponModel.dispose();
+      vehicleView.dispose();
       interactionPrompt.dispose();
     },
     frame(dtSeconds: number): void {
