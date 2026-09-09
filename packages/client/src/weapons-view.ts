@@ -32,6 +32,12 @@ const TRACER_CROSS = sourceTexture('projectiles/tracercross.png');
 const BLASTER_TRAIL_SECONDS = 0.2;
 const SHRIKE_BOLT_LENGTH = 45;
 const CHAINGUN_TRACER_LENGTH = 15;
+// vehicle_shrike.cs mounts the Shrike's blaster images at offset x ±1.93, z +0.044
+// (the "PairImage" at +1.93 fires the right barrel, its sibling at -1.93 the left), and
+// %obj.nextWeaponFire alternates the two image slots per shot -- twin-muzzle emission.
+const SHRIKE_MUZZLE_OFFSET_X = 1.93;
+const SHRIKE_MUZZLE_OFFSET_Y = 0.044;
+let nextShrikeMuzzleSide = 1;
 
 type TrailPoint = { position: THREE.Vector3; age: number };
 
@@ -39,10 +45,16 @@ function directionFor(projectile: ProjectileSnapshotData): THREE.Vector3 {
   const velocity = new THREE.Vector3(projectile.vx, projectile.vy, projectile.vz);
   return velocity.lengthSq() > 1e-6 ? velocity.normalize() : new THREE.Vector3(0, 0, -1);
 }
-
-function projectileGeometry(p: ProjectileSnapshotData): THREE.BufferGeometry {
-  if (p.weaponId === WeaponId.Spinfusor) return new THREE.CylinderGeometry(0.18, 0.18, 0.045, 16);
-  if (isTracer(p)) return tracerGeometry(p);
+function projectileGeometry(
+  p: ProjectileSnapshotData,
+  tail?: { x: number; y: number },
+): THREE.BufferGeometry {
+  // Source proportions from the original projectile shape (t2-mapper's disc.glb, the
+  // disc.cs `projectileShapeName = "disc.dts"` conversion): the Disc plate mesh spans
+  // x/z ±0.408 with y ±0.031 -- a 0.816 m plate 0.062 m thick. The old 0.18 m plate was
+  // under half the authored size and read as a speck at range.
+  if (p.weaponId === WeaponId.Spinfusor) return new THREE.CylinderGeometry(0.408, 0.408, 0.062, 24);
+  if (isTracer(p)) return tracerGeometry(p, tail);
   if (p.weaponId === WeaponId.Mortar || p.type === ProjectileType.Grenade) {
     return new THREE.SphereGeometry(p.type === ProjectileType.Grenade ? 0.25 : 0.19, 10, 7);
   }
@@ -66,6 +78,11 @@ function projectileTexture(p: ProjectileSnapshotData): THREE.Texture | null {
   return null;
 }
 
+/** The Blaster bolt's streak is a short positional history line (updateBlasterHistory
+ * below); the source EnergyBolt's full rendering -- the energy_bolt.dts layered bolt
+ * shape, its 20-long stretched trail and blasterBoltCross quad -- lives only upstream
+ * (t2-mapper), so the committed presentation stays this textured ball plus history
+ * streak. Documented approximation, per issue #53. */
 function addProjectileTrail(mesh: THREE.Mesh, p: ProjectileSnapshotData, color: number): void {
   if (p.type !== ProjectileType.Energy) return;
   const length = 0;
@@ -92,19 +109,54 @@ function tracerLength(p: ProjectileSnapshotData): number {
   return p.type === ProjectileType.VehicleLaser ? SHRIKE_BOLT_LENGTH : CHAINGUN_TRACER_LENGTH;
 }
 
-function tracerGeometry(p: ProjectileSnapshotData): THREE.PlaneGeometry {
+/** Ribbon geometry spanning local z 0..length behind the bolt head. `tail` shears the
+ * far end sideways: the shot origin presentation, so a Shrike bolt's visible tail sits at
+ * the alternating wing barrel instead of the vehicle centreline the sim spawns at. The
+ * server's collision endpoint stays authoritative -- only this far end moves. */
+function tracerGeometry(
+  p: ProjectileSnapshotData,
+  tail?: { x: number; y: number },
+): THREE.PlaneGeometry {
   const width = p.type === ProjectileType.VehicleLaser ? 0.55 : 0.1;
   const length = tracerLength(p);
   const geometry = new THREE.PlaneGeometry(width, length);
   geometry.rotateX(Math.PI / 2);
   geometry.translate(0, 0, length / 2);
+  if (tail) {
+    const position = geometry.getAttribute('position');
+    for (let vertex = 0; vertex < position.count; vertex += 1) {
+      if (position.getZ(vertex) > length / 2) {
+        position.setX(vertex, position.getX(vertex) + tail.x);
+        position.setY(vertex, position.getY(vertex) + tail.y);
+      }
+    }
+  }
   return geometry;
 }
 
-/** Crossed textured ribbons preserve the original glow from different viewing angles. */
-function addTracerCross(mesh: THREE.Mesh, p: ProjectileSnapshotData): void {
+/** Alternates +1/-1 per Shrike bolt built, so consecutive shots present two distinct
+ * origins the way the source's paired image slots do. A recycled projectile id that
+ * rebuilds its mesh flips the side early -- a cosmetic, not a sim, fault. */
+function nextShrikeMuzzleTail(): { x: number; y: number } {
+  const side = nextShrikeMuzzleSide;
+  nextShrikeMuzzleSide = -nextShrikeMuzzleSide;
+  return { x: SHRIKE_MUZZLE_OFFSET_X * side, y: SHRIKE_MUZZLE_OFFSET_Y };
+}
+
+/** Crossed textured ribbons preserve the original glow from different viewing angles.
+ * A Shrike bolt's two ribbons share the alternating muzzle tail; the cross ribbon is the
+ * same geometry rotated a quarter turn about the beam axis, so its shear arrives
+ * pre-rotated (rotation.z maps local +x onto -y) and both tails meet at one point. */
+function addTracerCross(
+  mesh: THREE.Mesh,
+  p: ProjectileSnapshotData,
+  tail?: { x: number; y: number },
+): void {
   if (!isTracer(p)) return;
-  const ribbon = new THREE.Mesh(tracerGeometry(p), mesh.material);
+  const ribbon = new THREE.Mesh(
+    tracerGeometry(p, tail && { x: tail.y, y: -tail.x }),
+    mesh.material,
+  );
   ribbon.rotation.z = Math.PI / 2;
   ribbon.name = 'tracer-ribbon';
   mesh.add(ribbon);
@@ -147,7 +199,7 @@ function projectileOrientation(mesh: THREE.Mesh, p: ProjectileSnapshotData): voi
 function addDiscGlow(mesh: THREE.Mesh, p: ProjectileSnapshotData): void {
   if (p.weaponId !== WeaponId.Spinfusor) return;
   const glow = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.65, 0.65),
+    new THREE.PlaneGeometry(1, 1),
     new THREE.MeshBasicMaterial({
       map: DISC_TEXTURE,
       color: 0x88bbff,
@@ -166,10 +218,13 @@ function addDiscGlow(mesh: THREE.Mesh, p: ProjectileSnapshotData): void {
 
 export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.Mesh {
   // Tribes 2's disc is a spinning flat plate; mortar and grenade are their own chunky
-  // green shells, not recoloured copies of the same generic sphere.
+  // green shells, not recoloured copies of the same generic sphere. Only the Shrike's
+  // bolt carries the twin-muzzle tail: its alternating wing origins come from the source
+  // image-pair offsets, while the handheld Chaingun has the one barrel.
   const color = projectileColor(projectile);
+  const tail = projectile.type === ProjectileType.VehicleLaser ? nextShrikeMuzzleTail() : undefined;
   const mesh = new THREE.Mesh(
-    projectileGeometry(projectile),
+    projectileGeometry(projectile, tail),
     new THREE.MeshBasicMaterial({
       color:
         projectile.type === ProjectileType.Energy || projectile.weaponId === WeaponId.Spinfusor
@@ -185,7 +240,7 @@ export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.
     }),
   );
   addProjectileTrail(mesh, projectile, color);
-  addTracerCross(mesh, projectile);
+  addTracerCross(mesh, projectile, tail);
   addDiscGlow(mesh, projectile);
   // Codex review round 2 (PR #9), finding 8: the sim recycles freed projectile ids (same
   // pattern as player id reuse), so a mesh keyed only by id can't tell "same projectile,
@@ -295,8 +350,11 @@ function syncOneProjectile(
   mesh.position.set(p.x, p.y, p.z);
   projectileOrientation(mesh, p);
   if (p.weaponId === WeaponId.Spinfusor) {
-    mesh.userData.spin = ((mesh.userData.spin as number | undefined) ?? 0) + dt * 30;
-    mesh.rotateY(mesh.userData.spin as number);
+    // The disc spins about its local plate normal. rotateY is a relative rotation, so
+    // this advances by the per-frame delta (30 rad/s ~ 4.8 rev/s, a brisk T2-like spin);
+    // accumulating the total and re-applying it every frame spun the plate quadratically
+    // and broke the plate-level flight frame within a couple of frames.
+    mesh.rotateY(dt * 30);
   }
   if (isTracer(p)) {
     const travelled =

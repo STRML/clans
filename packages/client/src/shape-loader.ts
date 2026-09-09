@@ -4,6 +4,7 @@ import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import decoderJs from 'three/examples/jsm/libs/draco/gltf/draco_wasm_wrapper.js?url';
 import decoderWasm from 'three/examples/jsm/libs/draco/gltf/draco_decoder.wasm?url';
 import { shapeUrl } from './assets.js';
+import { bindIflPlayback } from './shape-animation.js';
 
 // Vite bundles both decoder files locally, including on the relative-base Pages build.
 // Share a bounded worker pool across all structures, interiors, and vehicles.
@@ -88,6 +89,9 @@ export function loadShapeInto(
             for (const material of Array.isArray(node.material) ? node.material : [node.material]) {
               prepareMaterial(material);
             }
+            // Original texture-sequence playback: bind this mesh's IflMaterial so the
+            // sequence mixers (withVisibility's IFL tracks) can drive its frames.
+            bindIflPlayback(node);
           }
           if (typeof node.userData.vis === 'number') node.visible = node.userData.vis > 0;
         });

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { withVisibility } from './shape-animation.js';
+import { withVisibility, bindIflPlayback } from './shape-animation.js';
 import { loadShapeInto } from './shape-loader.js';
 
 const template = new THREE.Group();
@@ -55,7 +55,10 @@ function cloneMaterials(root: THREE.Object3D): THREE.Material[] {
 function playAmbient(root: THREE.Object3D, clips: THREE.AnimationClip[]) {
   const mixer = new THREE.AnimationMixer(root);
   const visibleClips = withVisibility(root, clips);
-  const ambient = visibleClips.filter((clip) => clip.name.toLowerCase() === 'ambient');
+  // The exporter splits the DTS ambient sequence into a node-transform clip plus
+  // per-node `ambient_<mesh>_frame` morph-weight companion clips (the blast wave's
+  // 28-frame morph run). The name filter must keep both or the wave holds frame 0.
+  const ambient = visibleClips.filter((clip) => /^ambient(_.+_frame)?$/i.test(clip.name));
   const selected = ambient.length > 0 ? ambient : visibleClips;
   let duration = 0.5;
   for (const clip of selected) {
@@ -75,6 +78,12 @@ export function createDiscExplosion(position: THREE.Vector3Like): DiscExplosion 
   mesh.name = 'disc-explosion';
   mesh.position.set(position.x, position.y, position.z);
   const materials = cloneMaterials(mesh);
+  // Object3D.copy neither clones onBeforeRender handlers nor remaps them to the clone's
+  // nodes, so the clone's IflMaterial meshes must rebind or the blue flash would hold
+  // its first frame instead of playing blue00/disc00 with the ambient clip.
+  mesh.traverse((node) => {
+    if (node instanceof THREE.Mesh) bindIflPlayback(node);
+  });
   const { mixer, duration } = playAmbient(mesh, templateClips);
   let disposed = false;
 

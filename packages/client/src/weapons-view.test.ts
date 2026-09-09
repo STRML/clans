@@ -138,6 +138,80 @@ describe('syncProjectileMeshes', () => {
     }
   });
 
+  it('matches the source disc plate size and keeps its plate level while spinning at range', () => {
+    // t2-mapper's disc.glb (disc.cs projectileShapeName = "disc.dts"): the Disc plate
+    // mesh spans x/z ±0.408, y ±0.031. Distances 5/30/90 m stress the same orientation
+    // math a viewer sees at short brick throws and long-range spars. The spin advances
+    // the rim only -- a spinning plate's invariants are its normal (level, projected
+    // world up) and its rim staying in the flight plane, never a fixed rim heading.
+    const projectile = createProjectileMesh(disc(1, 0));
+    const geometry = projectile.geometry as THREE.CylinderGeometry;
+    expect(geometry.parameters.radiusTop).toBeCloseTo(0.408);
+    expect(geometry.parameters.height).toBeCloseTo(0.062);
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    for (const distance of [5, 30, 90]) {
+      for (const [index, [vx, vy, vz]] of (
+        [
+          [20, 4, 0],
+          [0, 4, 20],
+          [-20, 4, 0],
+          [0, 4, -20],
+        ] as const
+      ).entries()) {
+        const bolt = { ...disc(index, (vx * distance) / 20), y: 4, vx, vy, vz };
+        for (let frame = 0; frame < 5; frame += 1) {
+          syncProjectileMeshes(scene, meshes, [bolt], 1 / 60);
+          const mesh = meshes.get(index)!;
+          const velocity = new THREE.Vector3(vx, vy, vz).normalize();
+          const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(mesh.quaternion);
+          const up = new THREE.Vector3(0, 1, 0).applyQuaternion(mesh.quaternion);
+          const levelUp = new THREE.Vector3(0, 1, 0).projectOnPlane(velocity).normalize();
+          expect(up.angleTo(levelUp)).toBeLessThan(1e-4);
+          expect(forward.angleTo(levelUp)).toBeCloseTo(Math.PI / 2, 5);
+        }
+      }
+    }
+  });
+
+  it('alternates the Shrike bolt tail between two distinct twin-muzzle origins', () => {
+    // vehicle_shrike.cs mounts the blaster image pair at x ±1.93 and %obj.nextWeaponFire
+    // alternates the slots per shot; the sim has no per-side origins, so the client
+    // shears the bolt's visible tail (head stays on the authoritative flight path). The
+    // shear reads as the average of the two tail corners -- the ribbon's own half-width
+    // offsets cancel out, keeping the check independent of vertex order and module state.
+    const tailShear = (geometry: THREE.BufferGeometry): THREE.Vector2 => {
+      const position = geometry.getAttribute('position');
+      const corners: Array<[number, number]> = [];
+      for (let vertex = 0; vertex < position.count; vertex += 1) {
+        if (position.getZ(vertex) > 0) corners.push([position.getX(vertex), position.getY(vertex)]);
+      }
+      expect(corners.length).toBe(2);
+      return new THREE.Vector2(
+        (corners[0]![0] + corners[1]![0]) / 2,
+        (corners[0]![1] + corners[1]![1]) / 2,
+      );
+    };
+    const first = createProjectileMesh({ ...disc(1, 0), type: 4, weaponId: 1 });
+    const second = createProjectileMesh({ ...disc(2, 0), type: 4, weaponId: 1 });
+    const firstTail = tailShear(first.geometry);
+    const secondTail = tailShear(second.geometry);
+    // Two distinct origins on opposite wings, both lifted by the source's +0.044 z offset.
+    expect(firstTail.x).toBeCloseTo(-secondTail.x);
+    expect(Math.abs(firstTail.x)).toBeCloseTo(1.93);
+    expect(firstTail.y).toBeCloseTo(0.044);
+    expect(secondTail.y).toBeCloseTo(0.044);
+    // The crossed ribbon is the same shear pre-rotated a quarter turn about the beam
+    // axis so both ribbons' tails meet at one origin point.
+    const ribbon = first.getObjectByName('tracer-ribbon') as THREE.Mesh;
+    const ribbonTail = tailShear(ribbon.geometry);
+    expect(ribbonTail.x).toBeCloseTo(0.044);
+    expect(ribbonTail.y).toBeCloseTo(-firstTail.x);
+    // Chaingun tracers have the single handheld barrel: no shear either way.
+    const tracer = createProjectileMesh({ ...disc(3, 0), type: 1, weaponId: 1 });
+    expect(tailShear(tracer.geometry).x).toBe(0);
+  });
+
   it('disposes a pruned projectile mesh geometry and material instead of leaking them', () => {
     // Codex review round 1, finding 11 (PR #9): pruning only removed the mesh from the
     // scene and map; geometry and material created for it (createProjectileMesh) stayed

@@ -21,6 +21,21 @@ export function textureKey(resource: string): string {
   return resource.replaceAll('\\', '/').toLowerCase();
 }
 
+/**
+ * The export key for one IFL frame texture: the resource's manifest directory plus the
+ * frame's lowercase stem (the same normalization `textureKey` applies to whole
+ * materials). `attachShapeTextures` itself ships only frame 0 of each material from
+ * texture-sources.json; a build step that wants original texture-sequence playback
+ * copies the remaining authored frames under these keys (`out/textures/<key>.png`),
+ * where the client's `bindIflPlayback` already looks for them and honestly keeps frame 0
+ * while they are absent. Mirrored client-side in shape-animation.ts because
+ * @clans/client does not depend on this package.
+ */
+export function iflFrameKey(resource: string, frame: string): string {
+  const directory = textureKey(resource).split('/')[0];
+  return `${directory}/${frame.toLowerCase()}`;
+}
+
 function materialResource(material: GltfMaterial): string | undefined {
   return material.extras?.resource_path;
 }
