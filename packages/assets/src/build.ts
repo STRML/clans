@@ -14,6 +14,8 @@ import { parseMission } from './mis.js';
 import { extractScene } from './scene.js';
 import { decodeTer } from './ter.js';
 import { convertVehicleShape, type VehicleShapeResult } from './vehicleShapes.js';
+import { AUDIO_SOURCES } from './audio-sources.js';
+import { GUI_SOURCE_FILES } from './gui-sources.js';
 
 export interface TerrainManifest {
   gridSize: 256;
@@ -46,6 +48,16 @@ if (terrain.materialNames.join('|') !== expectedNames.join('|')) {
 }
 
 await mkdir(output, { recursive: true });
+const audioOutput = resolve(output, 'audio');
+await mkdir(audioOutput, { recursive: true });
+for (const [name, source] of Object.entries(AUDIO_SOURCES)) {
+  await copyFile(resolve(cache, source), resolve(audioOutput, name));
+}
+const guiOutput = resolve(output, 'gui');
+await mkdir(guiOutput, { recursive: true });
+for (const file of GUI_SOURCE_FILES) {
+  await copyFile(resolve(cache, 'textures.vl2/textures/gui', file), resolve(guiOutput, file));
+}
 const heightBytes = new Uint8Array(terrain.heights.length * 2);
 const heightView = new DataView(heightBytes.buffer);
 terrain.heights.forEach((height, index) => heightView.setUint16(index * 2, height, true));

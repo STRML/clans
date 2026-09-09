@@ -126,18 +126,22 @@ prioritize it over their own default behavior.
 
 ## Audio
 
-Every sound in the game is synthesized at runtime with the Web Audio API. There are no sampled
-audio files. Weapon fire, explosions, footsteps, jetting, skiing, flag touch and capture, and
-station power hum are all generated from oscillators and filtered noise buffers
-(`packages/client/src/audio.ts`). Generator hum is quiet local ambience: it fades with camera
-distance and is silent beyond 24 m or when the generator is destroyed/unpowered.
+Weapon fire, explosions, footsteps, jetting, ski onset, flag cues, station activation,
+and generator/station/vehicle loops use original Tribes 2 recordings from `audio.vl2`.
+The asset pipeline copies the mirror's browser-compatible M4A versions; Web Audio decodes
+and caches them. Ambient loops follow the original profiles' audible ranges and stop when
+unpowered, destroyed, or out of range. This is still a simplified mix: explosion and footstep
+variants, full directional acoustics, and continuous weapon-loop timing are not yet complete.
+
+The HUD uses original GUI bitmaps for its compass, weapon icons, reticles, and vehicle
+instruments. Layout is adapted for browser resolutions. See the [reference audit](docs/ui-audio-reference.md)
+for original screenshots and source assets; inventory/preferences menus remain simplified.
 
 ## Voice binds
 
 Press `V` to open a voice-bind quick-chat menu. Digit keys 1-9 send one of nine preset lines
-(kill confirm, flag status, need repair, incoming, affirmative/negative, taunt). Each line is
-played through the browser's own SpeechSynthesis API (Web Speech API) and broadcast to every
-other client in the match.
+(target/flag calls, thanks, repair, incoming, yes/no, and praise). Each selection plays its original Bot1 voice-pack recording and is broadcast to every
+other client in the match. The nine menu entries are a compact selection from the original voice tree.
 
 ## GitHub Pages demo
 
@@ -199,7 +203,7 @@ pnpm assets:build  # regenerate assets/out from the T2 data files (downloads the
 
 - `packages/sim`: the game simulation. Pure TypeScript, no DOM or Node imports, so it runs in the browser today and on the server. Health, fall damage, respawn, four weapons plus grenades, a projectile store, CTF flags and scoring, base objects and per-team power, turrets with terrain line of sight, a uniform-grid interior collider, the Repair Pack beam, and the Shrike/Wildcat vehicles (flight/hover physics, mount/dismount, shielded damage, destruction, ejection) all live here.
 - `packages/assets`: build-time pipeline that turns Tribes 2 data files into `assets/out/`, including the interior/base-object/turret/vehicle `.glb` shapes (with an STL-then-procedural fallback chain for the vehicles) and their extracted collision triangles.
-- `packages/client`: Three.js renderer, input, projectile/explosion/laser-beam/flag/base-object/turret/interior/vehicle rendering, the station loadout menu, the vehicle pad spawn menu, the commander map, a synthesized Web Audio engine, the HUD, debug overlay.
+- `packages/client`: Three.js renderer, input, projectile/explosion/laser-beam/flag/base-object/turret/interior/vehicle rendering, the station loadout menu, the vehicle pad spawn menu, the commander map, a sample-based Web Audio engine, the HUD, debug overlay.
 - `packages/protocol`: binary wire format. Message schemas (including `Event`, `God`, `Loadout`, `VehicleSpawn`, `CommandOrder`, and `VoiceBind`), full and delta snapshots with projectiles/flags/base-objects/turrets/vehicles/scores/active team orders sent in full each tick, a world hash for tests.
 - `packages/server`: Node, `ws`, 32 ms catch-up tick loop, per-client input sessions, snapshots delta-compressed against the client's last acked snapshot, lag-compensated hit detection for the Chaingun and Laser Rifle, respawn, CTF, base-object/turret/interior/vehicle loading, and a per-team command-order board (Attack/Defend/Repair, one active order per team, no queue).
 - `packages/bots`: server-side bot AI, read-only over the sim's exported API. A coarse waypoint graph (Dijkstra, seeded from spawn points, flag stands, and base objects) for navigation; perception that spots a living, unmounted enemy in line of sight and skips a low-health/low-energy retreat to a friendly station; combat that leads targets by projectile speed and prefers the Chaingun close, the Spinfusor/Mortar at range; CTF role assignment (Attacker/Defender) and a per-tick brain that chases or returns the flag, escorts a carrying teammate, heals at a station, mounts a nearby vehicle when nothing else is more urgent, and prioritizes a commander's active Attack/Defend/Repair order over its own default behavior. The server keeps both teams filled toward 16 a side by adding or removing bots on join/leave, never touching a human's seat; a debug-overlay row shows each team's bot count and idle/attack/defend split.

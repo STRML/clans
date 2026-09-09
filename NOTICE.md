@@ -41,8 +41,14 @@ Vehicle shapes (`shapes.vl2/shapes/`): `vehicle_air_scout.glb` (the Shrike),
 Milestone 6 adds no new source files: bot waypoint navigation reads the same base-object,
 spawn, and flag-stand placements already credited above.
 
-Milestone 7 adds no new source data files -- command circuit, audio, and voice binds are
-synthesized or computed at runtime, not fetched or shipped as media.
+The current UI/audio fidelity pass includes original GUI bitmaps from
+`textures.vl2/textures/gui/`, sound recordings from `audio.vl2/audio/`, and the Bot1
+voice recordings from `voice.vl2/audio/voice/Bot1/` in the same t2-mapper mirror.
+The mirror's browser-compatible M4A versions of the original recordings are copied
+without modification. The bounded file lists are maintained in
+`packages/assets/src/gui-sources.ts` and `packages/assets/src/audio-sources.ts`.
+These assets retain the original Tribes 2 rights described above; they are not covered
+by this repository's code license.
 
 ## Sources
 

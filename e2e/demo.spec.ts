@@ -130,6 +130,8 @@ test('loading the demo with a server query param boots the real client against i
   await page.goto(`${DEMO_URL}/?server=ws://127.0.0.1:${String(SERVER_PORT)}`);
   await expect(page.locator('#demo-instructions')).toBeHidden();
   await page.locator('#hud[data-ready="1"]').waitFor({ state: 'attached', timeout: 30_000 });
+  await expect(page.locator('#hud')).toHaveCSS('display', 'block');
+  await expect(page.locator('#hud-status-art')).toHaveCSS('background-image', /hud_new_cog/);
 });
 
 test('an unreachable server shows a connection-failed message instead of a silently blank app (Codex review round 1 of the M7 PR)', async ({

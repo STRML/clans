@@ -9,23 +9,22 @@ describe('VOICE_LINES', () => {
 });
 
 describe('speakVoiceLine', () => {
-  it('speaks the text for a valid line id', () => {
-    const speak = vi.fn();
-    speakVoiceLine(0, { speak });
-    expect(speak).toHaveBeenCalledTimes(1);
-    const utterance = speak.mock.calls[0]?.[0] as SpeechSynthesisUtterance;
-    expect(utterance.text).toBe(VOICE_LINES[0]);
+  it('plays the original voice sample for a valid line id', () => {
+    const voice = vi.fn();
+    speakVoiceLine(0, { voice });
+    expect(voice).toHaveBeenCalledTimes(1);
+    expect(voice).toHaveBeenCalledWith(0);
   });
 
   it('does nothing for an out-of-range line id, never throws', () => {
-    const speak = vi.fn();
-    expect(() => speakVoiceLine(99, { speak })).not.toThrow();
-    expect(speak).not.toHaveBeenCalled();
+    const voice = vi.fn();
+    expect(() => speakVoiceLine(99, { voice })).not.toThrow();
+    expect(voice).not.toHaveBeenCalled();
   });
 
   it('does nothing for a negative line id, never throws', () => {
-    const speak = vi.fn();
-    expect(() => speakVoiceLine(-1, { speak })).not.toThrow();
-    expect(speak).not.toHaveBeenCalled();
+    const voice = vi.fn();
+    expect(() => speakVoiceLine(-1, { voice })).not.toThrow();
+    expect(voice).not.toHaveBeenCalled();
   });
 });

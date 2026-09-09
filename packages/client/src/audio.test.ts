@@ -45,66 +45,55 @@ function fakeAudioContext() {
 }
 
 describe('createAudioEngine', () => {
-  it('keeps distant generator hum silent and updates level as the listener moves', () => {
+  it('does not synthesize a generator hum while its original sample is loading', () => {
     const ctx = fakeAudioContext();
     const position = { x: 100, y: 0, z: 0 };
     const engine = createAudioEngine({ context: ctx as unknown as AudioContext, position });
     engine.setStationHum(0, { x: 0, y: 0, z: 0 }, true);
     expect(ctx.createOscillator).not.toHaveBeenCalled();
-    position.x = 1;
-    engine.setStationHum(0, { x: 0, y: 0, z: 0 }, true);
-    expect(ctx.createOscillator).toHaveBeenCalledTimes(2);
-    const gain = ctx.createGain.mock.results.at(-1)!.value;
-    const near = gain.gain.setTargetAtTime.mock.calls.at(-1)![0] as number;
-    position.x = 12;
-    engine.setStationHum(0, { x: 0, y: 0, z: 0 }, true);
-    expect(gain.gain.setTargetAtTime.mock.calls.at(-1)![0]).toBeLessThan(near);
-    position.x = 100;
-    engine.setStationHum(0, { x: 0, y: 0, z: 0 }, true);
-    for (const osc of ctx.createOscillator.mock.results) expect(osc.value.stop).toHaveBeenCalled();
+    expect(ctx.createBufferSource).not.toHaveBeenCalled();
   });
 
-  it('weaponFire builds an oscillator graph for the Spinfusor', () => {
+  it('weaponFire does not substitute an oscillator when the original sample is unavailable', () => {
     const ctx = fakeAudioContext();
     const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
     engine.weaponFire(WeaponId.Spinfusor, { x: 0, y: 0, z: 0 });
-    expect(ctx.createOscillator).toHaveBeenCalled();
-    expect(ctx.createGain).toHaveBeenCalled();
+    expect(ctx.createOscillator).not.toHaveBeenCalled();
   });
 
-  it('weaponFire falls back to the Chaingun timbre for a weapon with no distinct synth', () => {
+  it('weaponFire keeps the original Blaster mapping distinct from the Chaingun', () => {
     const ctx = fakeAudioContext();
     const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
     engine.weaponFire(WeaponId.Blaster, { x: 0, y: 0, z: 0 });
-    expect(ctx.createOscillator).toHaveBeenCalled();
+    expect(ctx.createOscillator).not.toHaveBeenCalled();
   });
 
-  it('explosion builds a noise-burst graph, not an oscillator-only one', () => {
+  it('explosion does not create a fabricated noise burst while loading', () => {
     const ctx = fakeAudioContext();
     const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
     engine.explosion({ x: 0, y: 0, z: 0 });
-    expect(ctx.createBufferSource).toHaveBeenCalled();
+    expect(ctx.createBufferSource).not.toHaveBeenCalled();
   });
 
-  it('flagCapture plays a three-note fanfare', () => {
+  it('flagCapture does not create a synthetic fanfare', () => {
     const ctx = fakeAudioContext();
     const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
     engine.flagCapture();
-    expect(ctx.createOscillator).toHaveBeenCalledTimes(3);
+    expect(ctx.createOscillator).not.toHaveBeenCalled();
   });
 
-  it('flagTouch plays a single tone', () => {
+  it('flagTouch does not create a synthetic tone', () => {
     const ctx = fakeAudioContext();
     const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
     engine.flagTouch();
-    expect(ctx.createOscillator).toHaveBeenCalledTimes(1);
+    expect(ctx.createOscillator).not.toHaveBeenCalled();
   });
 
-  it('footstep builds a short noise burst', () => {
+  it('footstep does not create a synthetic noise burst', () => {
     const ctx = fakeAudioContext();
     const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
     engine.footstep({ x: 0, y: 0, z: 0 });
-    expect(ctx.createBufferSource).toHaveBeenCalledTimes(1);
+    expect(ctx.createBufferSource).not.toHaveBeenCalled();
   });
 
   it('setJetting(true) then setJetting(false) does not leak a running node past dispose', () => {
@@ -115,12 +104,40 @@ describe('createAudioEngine', () => {
     expect(() => engine.dispose()).not.toThrow();
   });
 
-  it('setJetting(true) twice in a row starts only one loop', () => {
+  it('setJetting(true) twice only creates one pending original-sample loop', () => {
     const ctx = fakeAudioContext();
     const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
     engine.setJetting(0, true, 1);
     engine.setJetting(0, true, 1);
-    expect(ctx.createBufferSource).toHaveBeenCalledTimes(1);
+    expect(ctx.createGain).toHaveBeenCalledTimes(2); // master + one pending loop
+  });
+
+  it('does not start a loop when its sample decodes after dispose', async () => {
+    const ctx = fakeAudioContext();
+    const resolvers: Array<(buffer: AudioBuffer) => void> = [];
+    Object.assign(ctx, {
+      decodeAudioData: vi.fn(() => new Promise<AudioBuffer>((resolve) => resolvers.push(resolve))),
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
+        }),
+      ),
+    );
+    const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
+    await Promise.resolve();
+    await Promise.resolve();
+    engine.setJetting(0, true, 1);
+    engine.dispose();
+    resolvers.forEach((resolve) => resolve({} as AudioBuffer));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ctx.createBufferSource).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 
   it('setSkiing(true) then setSkiing(false) does not leak a running node past dispose', () => {

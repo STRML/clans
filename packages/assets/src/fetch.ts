@@ -3,6 +3,8 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import textureSources from './texture-sources.json' with { type: 'json' };
+import { AUDIO_SOURCES } from './audio-sources.js';
+import { GUI_SOURCE_FILES } from './gui-sources.js';
 
 const BASE = 'https://raw.githubusercontent.com/exogen/t2-mapper/HEAD/docs/base/@vl2/';
 const SOURCES = [
@@ -54,7 +56,12 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-for (const source of [...SOURCES, ...Object.values(textureSources)]) {
+for (const source of [
+  ...SOURCES,
+  ...Object.values(textureSources),
+  ...Object.values(AUDIO_SOURCES),
+  ...GUI_SOURCE_FILES.map((file) => `textures.vl2/textures/gui/${file}`),
+]) {
   const destination = resolve(cacheRoot, source);
   if (await exists(destination)) continue;
   const response = await fetch(new URL(source, BASE));

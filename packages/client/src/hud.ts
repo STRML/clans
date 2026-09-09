@@ -7,10 +7,11 @@ import {
   ammoIndex,
   sampleTerrain,
   armorFor,
-  type VehicleKind,
+  VehicleKind,
   type World,
 } from '@clans/sim';
 import { EventKind, type EventMessage, type FlagSnapshotData } from '@clans/protocol';
+import { assetUrl } from './assets.js';
 
 export interface HudSource {
   world: World;
@@ -187,18 +188,32 @@ export function describeKillFeed(source: HudSource): string[] {
   return lines.slice(-KILL_FEED_LINES);
 }
 
-const WEAPON_GLYPHS = ['◉', '▰', '◒', '⌖', '✣'];
+const WEAPON_ICON = [
+  'hud_new_disc.png',
+  'hud_new_chaingun.png',
+  'hud_new_mortar.png',
+  'hud_new_sniper.png',
+  'hud_new_blaster.png',
+];
+const WEAPON_RETICLE = [
+  'RET_disc.png',
+  'RET_chaingun.png',
+  'RET_mortor.png',
+  'hud_ret_sniper.png',
+  'RET_blaster.png',
+];
 
 function createWeaponRack(hud: HTMLElement): HTMLElement[] {
   const rack = document.createElement('div');
   rack.id = 'hud-weapon-rack';
   hud.append(rack);
-  return WEAPON_GLYPHS.map((glyph, slot) => {
+  return WEAPON_ICON.map((image, slot) => {
     const item = document.createElement('div');
     item.className = 'hud-weapon-slot';
     item.title = `${String(slot + 1)}: ${WEAPON_NAME[slot] ?? ''}`;
-    const icon = document.createElement('b');
-    icon.textContent = glyph;
+    const icon = document.createElement('img');
+    icon.src = assetUrl(`gui/${image}`);
+    icon.alt = '';
     const ammo = document.createElement('span');
     item.append(icon, ammo);
     rack.append(item);
@@ -212,6 +227,16 @@ function updateRack(items: HTMLElement[], source: HudSource): void {
     item.lastElementChild!.textContent = ammo < 0 ? '∞' : String(ammo);
     item.dataset['selected'] = String(source.world.players.weaponSlot[source.playerId] === slot);
   }
+  const vehicleId = source.world.players.mountedVehicleId[source.playerId] ?? -1;
+  const weapon = source.world.players.weaponSlot[source.playerId] ?? WeaponId.Blaster;
+  const crosshair = document.getElementById('crosshair');
+  if (crosshair) {
+    const reticle =
+      vehicleId !== -1 && source.world.vehicles.kind[vehicleId] === VehicleKind.Shrike
+        ? 'hud_ret_shrike.png'
+        : (WEAPON_RETICLE[weapon] ?? 'RET_blaster.png');
+    crosshair.style.backgroundImage = `url(${assetUrl(`gui/${reticle}`)})`;
+  }
 }
 
 function updateVehicleInstruments(el: HTMLElement, source: HudSource): void {
@@ -220,26 +245,37 @@ function updateVehicleInstruments(el: HTMLElement, source: HudSource): void {
     el.replaceChildren();
     return;
   }
-  if (!el.querySelector('.vehicle-silhouette')) {
-    el.innerHTML =
-      '<div class="vehicle-left"><span class="vehicle-speed"></span><div class="vehicle-meter shield"><i></i></div></div><svg class="vehicle-silhouette" viewBox="0 0 70 90" aria-label="Vehicle"><ellipse cx="35" cy="45" rx="32" ry="42"/><path d="M35 6L42 33L61 54L61 65L41 57L40 78L30 78L29 57L9 65L9 54L28 33Z"/><path d="M35 17V70M29 37H41"/></svg><div class="vehicle-right"><span class="vehicle-altitude"></span><div class="vehicle-meter hull"><i></i></div></div>';
+  if (!el.querySelector('.vehicle-dash')) {
+    el.innerHTML = `<div class="vehicle-left"><span class="vehicle-speed"></span><div class="vehicle-meter shield"><i></i></div></div><div class="vehicle-dash"><img src="${assetUrl('gui/hud_veh_new_dash.png')}" alt=""/><img class="vehicle-icon" src="${assetUrl('gui/hud_veh_icon_shrike.png')}" alt=""/></div><div class="vehicle-right"><span class="vehicle-altitude"></span><div class="vehicle-meter hull"><i></i></div></div>`;
   }
   const v = source.world.vehicles,
     base = id * 3;
   const data = VEHICLE_DATA[v.kind[id] as VehicleKind];
+  (el.querySelector('.vehicle-icon') as HTMLImageElement).src = assetUrl(
+    `gui/${v.kind[id] === VehicleKind.Wildcat ? 'hud_veh_icon_hoverbike.png' : 'hud_veh_icon_shrike.png'}`,
+  );
   const speed = Math.hypot(v.velocity[base]!, v.velocity[base + 1]!, v.velocity[base + 2]!);
   const altitude = Math.max(
     0,
     v.position[base + 1]! -
       sampleTerrain(source.world.terrain, v.position[base]!, v.position[base + 2]!).height,
   );
-  el.querySelector('.vehicle-speed')!.textContent = `${speed.toFixed(0)} m/s`;
+  el.querySelector('.vehicle-speed')!.textContent = `${(speed * 3.6).toFixed(0)} KPH`;
   el.querySelector('.vehicle-altitude')!.textContent = `${altitude.toFixed(0)} m`;
   (el.querySelector('.shield i') as HTMLElement).style.width =
     `${String(percent(v.energy[id]!, data.maxEnergy))}%`;
   (el.querySelector('.hull i') as HTMLElement).style.width =
     `${String(percent(data.maxDamage - v.damage[id]!, data.maxDamage))}%`;
   el.setAttribute('aria-label', el.dataset['value'] ?? 'Vehicle instruments');
+}
+
+function updateCompass(el: HTMLElement, source: HudSource): void {
+  const vehicleId = source.world.players.mountedVehicleId[source.playerId] ?? -1;
+  const yaw =
+    vehicleId === -1
+      ? (source.world.players.yaw[source.playerId] ?? 0)
+      : (source.world.vehicles.yaw[vehicleId] ?? 0);
+  (el.querySelector('.hud-compass-labels') as HTMLElement).style.transform = `rotate(${-yaw}rad)`;
 }
 
 export function createHud(
@@ -249,10 +285,27 @@ export function createHud(
   const hud = document.createElement('div');
   hud.id = 'hud';
   container.appendChild(hud);
+  const statusArt = document.createElement('div');
+  statusArt.id = 'hud-status-art';
+  statusArt.style.backgroundImage = `url(${assetUrl('gui/hud_new_cog.png')})`;
+  hud.append(statusArt);
   const rows = new Map<string, HTMLElement>();
   for (const row of describeHud(initialSource)) {
     const el = document.createElement('div');
     el.id = row.id;
+    if (row.id === 'hud-clock') {
+      const dial = document.createElement('img');
+      dial.className = 'hud-clock-dial';
+      dial.src = assetUrl('gui/hud_new_compass.png');
+      dial.alt = '';
+      const time = document.createElement('span');
+      time.className = 'hud-clock-time';
+      const labels = document.createElement('img');
+      labels.className = 'hud-compass-labels';
+      labels.src = assetUrl('gui/hud_new_NSEW.png');
+      labels.alt = '';
+      el.append(dial, labels, time);
+    }
     hud.appendChild(el);
     rows.set(row.id, el);
   }
@@ -271,7 +324,12 @@ export function createHud(
         updateVehicleInstruments(el, source);
         continue;
       }
-      el.textContent = row.text;
+      if (row.id === 'hud-clock') {
+        el.querySelector('.hud-clock-time')!.textContent = row.text;
+        updateCompass(el, source);
+      } else {
+        el.textContent = row.text;
+      }
       if (row.id === 'hud-health' || row.id === 'hud-energy') {
         el.style.setProperty('--fill', row.text);
         el.setAttribute(

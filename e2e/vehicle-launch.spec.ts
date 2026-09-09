@@ -70,5 +70,5 @@ test('number-key order animates the pad and wings, then seats the purchaser at t
   expect(result.fov).toBe(65);
   await expect(page.locator('#hud')).toHaveAttribute('data-piloting', 'true');
   await expect(page.locator('#hud-weapon-rack')).toBeHidden();
-  await expect(page.locator('.vehicle-silhouette')).toBeVisible();
+  await expect(page.locator('.vehicle-icon')).toBeVisible();
 });

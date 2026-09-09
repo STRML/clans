@@ -425,6 +425,7 @@ interface BaseAssetsViewState {
   commanderMapCanvas: HTMLCanvasElement;
   orderState: { pending: { x: number; z: number } | null };
   voiceMenu: VoiceMenu;
+  audio: AudioEngine;
 }
 
 function remoteToPlayerPosition(player: PlayerSnapshotData): PlayerPosition {
@@ -486,7 +487,8 @@ function confirmPendingOrder(state: BaseAssetsViewState, digit: number): boolean
 
 function confirmVoiceLine(state: BaseAssetsViewState, digit: number): void {
   if (!state.voiceMenu.visible || digit < 1) return;
-  state.net?.sendVoiceBind(digit - 1);
+  if (state.net) state.net.sendVoiceBind(digit - 1);
+  else speakVoiceLine(digit - 1, state.audio);
   state.voiceMenu.hide();
 }
 
@@ -708,9 +710,9 @@ function playFlagEventAudio(audio: AudioEngine, events: readonly TimestampedEven
 /** A VoiceBindPlayed event (`a` = speaker playerId, `b` = lineId) is broadcast back to every
  *  client, sender included -- that broadcast, not a local-only echo, is what makes "played for
  *  the local player's own action" true, matching Task 6's own contract. */
-function playVoiceBindAudio(events: readonly TimestampedEvent[]): void {
+function playVoiceBindAudio(audio: AudioEngine, events: readonly TimestampedEvent[]): void {
   for (const event of events) {
-    if (event.kind === EventKind.VoiceBindPlayed) speakVoiceLine(event.b);
+    if (event.kind === EventKind.VoiceBindPlayed) speakVoiceLine(event.b, audio);
   }
 }
 
@@ -754,8 +756,10 @@ export function syncWorldView(
 
   const allEvents: TimestampedEvent[] = net ? net.recentEvents : [];
   const newEvents = drainNewEvents(allEvents, seenEventSeq);
-  if (audio) playFlagEventAudio(audio, newEvents);
-  playVoiceBindAudio(newEvents);
+  if (audio) {
+    playFlagEventAudio(audio, newEvents);
+    playVoiceBindAudio(audio, newEvents);
+  }
   spawnLaserBeams(scene, effects, newEvents, (id) => positionOfPlayer(world, net, id));
   updateEffects(scene, effects, dtSeconds);
 
@@ -1092,12 +1096,12 @@ function updateJetAudio(
   const energy = world.players.energy[playerId] ?? 0;
   audio.setJetting(
     playerId,
-    jetInputActive && energy > 0,
+    jetInputActive && energy > 0 && (world.players.mountedVehicleId[playerId] ?? -1) === -1,
     energy / armorFor(world, playerId).maxEnergy,
   );
 }
 
-/** Cadence-gated (FOOTSTEP_INTERVAL_S) synthesized footsteps -- only while grounded, not
+/** Cadence-gated (FOOTSTEP_INTERVAL_S) footsteps -- only while grounded, not
  *  skiing or mounted, and moving faster than idle jitter. */
 function updateFootstepAudio(
   world: World,
@@ -1137,7 +1141,9 @@ function updateMovementAudio(
   updateJetAudio(world, playerId, audio, jetInputActive);
 
   const speed = localPlayerHorizontalSpeed(world, playerId);
-  const skiing = (world.players.ski[playerId] ?? 0) === 1;
+  const skiing =
+    (world.players.ski[playerId] ?? 0) === 1 &&
+    (world.players.mountedVehicleId[playerId] ?? -1) === -1;
   audio.setSkiing(playerId, skiing, speed);
 
   updateFootstepAudio(world, playerId, audio, skiing, speed, footstep, dtSeconds);
@@ -1150,9 +1156,16 @@ function updateMovementAudio(
 function updateStationHumAudio(world: World, audio: AudioEngine): void {
   const bases = world.baseObjects;
   for (let id = 0; id < bases.count; id += 1) {
-    if (bases.kind[id] !== BaseObjectKind.Generator) continue;
+    const kind = bases.kind[id];
+    if (
+      kind !== BaseObjectKind.Generator &&
+      kind !== BaseObjectKind.StationInventory &&
+      kind !== BaseObjectKind.StationVehiclePad
+    )
+      continue;
     const base = id * 3;
-    audio.setStationHum(
+    const setHum = kind === BaseObjectKind.Generator ? audio.setGeneratorHum : audio.setStationHum;
+    setHum(
       id,
       {
         x: bases.position[base] ?? 0,
@@ -1162,6 +1175,85 @@ function updateStationHumAudio(world: World, audio: AudioEngine): void {
       bases.powered[id] === 1 && bases.destroyed[id] === 0,
     );
   }
+}
+
+function vehicleEngineActive(world: World, id: number): boolean {
+  const v = world.vehicles;
+  return v.active[id] === 1 && v.destroyed[id] === 0 && v.spawnTime[id]! <= 0;
+}
+
+/** Keep original engine loops synchronized, including vehicles removed from snapshots. */
+function updateVehicleEngineAudio(
+  world: World,
+  audio: AudioEngine,
+  previous: Map<number, 'shrike' | 'wildcat'>,
+): void {
+  const vehicles = world.vehicles;
+  const current = new Map<number, 'shrike' | 'wildcat'>();
+  for (let id = 0; id < vehicles.count; id++) {
+    if (!vehicleEngineActive(world, id)) continue;
+    const kind = vehicles.kind[id] === VehicleKind.Shrike ? 'shrike' : 'wildcat';
+    const base = id * 3;
+    if (previous.has(id) && previous.get(id) !== kind) {
+      audio.setVehicleEngine(id, previous.get(id)!, { x: 0, y: 0, z: 0 }, false);
+    }
+    current.set(id, kind);
+    audio.setVehicleEngine(
+      id,
+      kind,
+      {
+        x: vehicles.position[base]!,
+        y: vehicles.position[base + 1]!,
+        z: vehicles.position[base + 2]!,
+      },
+      true,
+    );
+  }
+  for (const [id, kind] of previous) {
+    if (!current.has(id)) audio.setVehicleEngine(id, kind, { x: 0, y: 0, z: 0 }, false);
+  }
+  previous.clear();
+  for (const [id, kind] of current) previous.set(id, kind);
+}
+
+interface StationAudioState {
+  id: number | null;
+  kind: 'inventory' | 'vehicle';
+  position?: Vec3;
+}
+
+function stationAudioTarget(
+  inventory: { open: boolean; triggerStation: number | null },
+  vehicle: { open: boolean; triggerPad: number | null },
+): Pick<StationAudioState, 'id' | 'kind'> {
+  const inventoryId = inventory.open ? inventory.triggerStation : null;
+  return {
+    id: inventoryId ?? (vehicle.open ? vehicle.triggerPad : null),
+    kind: inventoryId !== null ? 'inventory' : 'vehicle',
+  };
+}
+
+function updateStationActivationAudio(
+  world: World,
+  audio: AudioEngine,
+  inventory: { open: boolean; triggerStation: number | null },
+  vehicle: { open: boolean; triggerPad: number | null },
+  previous: StationAudioState,
+): void {
+  const { id, kind } = stationAudioTarget(inventory, vehicle);
+  if (id === previous.id && (id === null || kind === previous.kind)) return;
+  if (previous.id !== null && previous.kind === 'vehicle')
+    audio.stationDeactivate(previous.position);
+  previous.id = id;
+  previous.kind = kind;
+  if (id === null) return;
+  const positions = kind === 'vehicle' ? world.baseObjects.usePosition : world.baseObjects.position;
+  previous.position = {
+    x: positions[id * 3]!,
+    y: positions[id * 3 + 1]!,
+    z: positions[id * 3 + 2]!,
+  };
+  audio.stationActivate(kind, previous.position);
 }
 
 export async function createApp(container: HTMLElement, options: AppOptions = {}): Promise<App> {
@@ -1343,16 +1435,19 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     orderState.pending = canvasToWorld(ctx, assets.scene.missionArea, canvasX, canvasY);
   });
   const voiceMenu = createVoiceMenu(document.body);
-  // Task 7: pure oscillator/noise synthesis, no shipped or fetched audio file (M7 plan,
-  // Global Constraints) -- a real AudioContext, not the fake used by audio.test.ts.
+  // Original game recordings, decoded and cached by the audio engine.
   const audio = createAudioEngine({ context: new AudioContext(), position: camera.position });
   // Browsers start a fresh AudioContext `suspended` under autoplay restriction and require a
   // real user-gesture handler to resume it -- the same click that already requests pointer
   // lock (Input's own listener on this element) is that gesture. Codex review round 1 of the
   // M7 PR: without this, every synthesized sound silently never plays in a browser that
   // enforces the restriction.
-  renderer.domElement.addEventListener('click', () => audio.resume());
+  const resumeAudio = (): void => audio.resume();
+  renderer.domElement.addEventListener('click', resumeAudio);
+  window.addEventListener('keydown', resumeAudio);
   const footstepState: FootstepState = { timer: 0 };
+  const audibleVehicles = new Map<number, 'shrike' | 'wildcat'>();
+  const stationAudioState: StationAudioState = { id: null, kind: 'inventory' };
   // Backs the `godMode` accessor below. A plain data property here would just record
   // whatever the debug UI last set, the way it used to, leaving frame() to poll it every
   // tick and react after the fact (Codex review round 4, finding 5) -- the accessor's
@@ -1412,6 +1507,8 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       teleportPlayerToVehiclePad(world, playerId, team);
     },
     dispose(): void {
+      window.removeEventListener('keydown', resumeAudio);
+      renderer.domElement.removeEventListener('click', resumeAudio);
       audio.dispose();
       weaponModel.dispose();
       vehicleView.dispose();
@@ -1492,6 +1589,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
           commanderMapCanvas,
           orderState,
           voiceMenu,
+          audio,
         },
         usePressed,
       );
@@ -1500,6 +1598,14 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       if (app.freeCam) moveFreeCam(app, dtSeconds);
       placeCamera(app, sky, dtSeconds);
       updateStationHumAudio(world, audio);
+      updateVehicleEngineAudio(world, audio, audibleVehicles);
+      updateStationActivationAudio(
+        world,
+        audio,
+        stationMenuState,
+        vehiclePadMenuState,
+        stationAudioState,
+      );
       renderer.render(scene, camera);
       weaponModel.sync(world, playerId, app.freeCam, weaponAnimationDelta(app, dtSeconds));
       weaponModel.render(renderer, camera.aspect);

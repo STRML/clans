@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { expect, test, type Page } from '@playwright/test';
+import { AUDIO_SOURCES } from '../packages/assets/src/audio-sources.js';
 
 const PORT = 17791; // distinct from every other e2e spec's own server port.
 
@@ -61,7 +62,26 @@ async function tapKeyUntil(page: Page, code: string, check: () => Promise<boolea
   }).toPass({ timeout: 20_000 });
 }
 
-test('pressing V then a digit sends a VoiceBind and speaks the line locally', async ({ page }) => {
+test('pressing V then a digit plays the original voice recording after its server broadcast', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const probe = window as unknown as { __playedDurations: number[]; __decodedCount: number };
+    probe.__playedDurations = [];
+    probe.__decodedCount = 0;
+    const decode = AudioContext.prototype.decodeAudioData;
+    AudioContext.prototype.decodeAudioData = function (bytes: ArrayBuffer) {
+      return decode.call(this, bytes).then((buffer) => {
+        probe.__decodedCount++;
+        return buffer;
+      });
+    };
+    const start = AudioBufferSourceNode.prototype.start;
+    AudioBufferSourceNode.prototype.start = function (...args: Parameters<typeof start>) {
+      if (this.buffer) probe.__playedDurations.push(this.buffer.duration);
+      start.apply(this, args);
+    };
+  });
   // Single-player has no event stream at all (hudSourceFrom's own single-player branch
   // always returns []), so playback -- which only ever fires off the server's own
   // VoiceBindPlayed broadcast, sender included -- needs a real connected client, like
@@ -71,13 +91,20 @@ test('pressing V then a digit sends a VoiceBind and speaks the line locally', as
     .locator('#debug-stats[data-ready="1"]')
     .waitFor({ state: 'attached', timeout: 20_000 });
   await page.locator('#hud[data-ready="1"]').waitFor({ state: 'attached', timeout: 20_000 });
-  await page.evaluate(() => {
-    (window as unknown as { __spoken: string[] }).__spoken = [];
-    const original = window.speechSynthesis.speak.bind(window.speechSynthesis);
-    window.speechSynthesis.speak = (u: SpeechSynthesisUtterance) => {
-      (window as unknown as { __spoken: string[] }).__spoken.push(u.text);
-      original(u);
-    };
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as unknown as { __decodedCount: number }).__decodedCount),
+    )
+    .toBeGreaterThanOrEqual(Object.keys(AUDIO_SOURCES).length);
+  const expectedDuration = await page.evaluate(async () => {
+    const context = new AudioContext();
+    try {
+      const response = await fetch('./katabatic/audio/voice-target-destroyed.m4a');
+      const buffer = await context.decodeAudioData(await response.arrayBuffer());
+      return buffer.duration;
+    } finally {
+      await context.close();
+    }
   });
   await page.bringToFront();
   const menuVisible = async (): Promise<boolean> => page.locator('#voice-menu').isVisible();
@@ -85,8 +112,15 @@ test('pressing V then a digit sends a VoiceBind and speaks the line locally', as
   await tapKeyUntil(page, 'Digit1', async () => !(await menuVisible()));
   await expect
     .poll(
-      () => page.evaluate(() => (window as unknown as { __spoken: string[] }).__spoken.length),
+      () =>
+        page.evaluate(
+          (duration) =>
+            (window as unknown as { __playedDurations: number[] }).__playedDurations.some(
+              (played) => Math.abs(played - duration) < 0.001,
+            ),
+          expectedDuration,
+        ),
       { timeout: 15_000 },
     )
-    .toBeGreaterThan(0);
+    .toBe(true);
 });

@@ -1,230 +1,121 @@
 import { WeaponId, type Vec3 } from '@clans/sim';
 
-// Every synthesis parameter below is an original sound-design pick (no T2 script gives one --
-// T2 shipped sampled audio, not a synthesis spec). See the M7 plan's "ours" numbers table.
-export const AUDIO_MASTER_GAIN = 0.6; // Ours -- headroom so overlapping effects don't clip.
-export const FOOTSTEP_INTERVAL_S = 0.35; // Ours -- reads as a jog, not a machine-gun of clicks.
+// T2 AudioProfile volume is 1.0. This only leaves mix headroom.
+export const AUDIO_MASTER_GAIN = 0.6;
+export const FOOTSTEP_INTERVAL_S = 0.35;
 
 interface AudioLike {
-  /** Mutable listener position, usually the active camera position. */
   position?: Vec3;
   context: Pick<
     AudioContext,
     | 'currentTime'
     | 'destination'
-    | 'createOscillator'
     | 'createGain'
     | 'createBufferSource'
-    | 'createBuffer'
-    | 'createBiquadFilter'
-    | 'createPanner'
+    | 'decodeAudioData'
     | 'resume'
     | 'close'
     | 'state'
   >;
 }
-
-function noiseBuffer(context: AudioLike['context'], seconds: number): AudioBuffer {
-  const sampleRate = 44100;
-  const buffer = context.createBuffer(
-    1,
-    Math.floor(sampleRate * seconds),
-    sampleRate,
-  ) as AudioBuffer;
-  const data = buffer.getChannelData(0);
-  for (let i = 0; i < data.length; i += 1) data[i] = Math.random() * 2 - 1;
-  return buffer;
-}
-
-function envelope(
-  context: AudioLike['context'],
-  gainNode: GainNode,
-  peak: number,
-  attackS: number,
-  releaseS: number,
-): void {
-  const now = context.currentTime;
-  gainNode.gain.setValueAtTime(0, now);
-  gainNode.gain.linearRampToValueAtTime(peak, now + attackS);
-  gainNode.gain.exponentialRampToValueAtTime(0.001, now + attackS + releaseS);
-}
-
-/** Sawtooth 220 -> 90 Hz over 120 ms -- a low thud with an edge. */
-function spinfusorFire(context: AudioLike['context'], master: GainNode): void {
-  const osc = context.createOscillator() as OscillatorNode;
-  const gain = context.createGain() as GainNode;
-  osc.type = 'sawtooth';
-  osc.frequency.setValueAtTime(220, context.currentTime);
-  osc.frequency.exponentialRampToValueAtTime(90, context.currentTime + 0.12);
-  envelope(context, gain, 0.5, 0.005, 0.12);
-  osc.connect(gain).connect(master);
-  osc.start();
-  osc.stop(context.currentTime + 0.15);
-}
-
-/** Square 900 Hz, 12 ms decay -- a short dry click per shot. */
-function chaingunFire(context: AudioLike['context'], master: GainNode): void {
-  const osc = context.createOscillator() as OscillatorNode;
-  const gain = context.createGain() as GainNode;
-  osc.type = 'square';
-  osc.frequency.setValueAtTime(900, context.currentTime);
-  envelope(context, gain, 0.25, 0.001, 0.012);
-  osc.connect(gain).connect(master);
-  osc.start();
-  osc.stop(context.currentTime + 0.02);
-}
-
-/** Sine 60 Hz thump over 200 ms -- a low, distant-feeling launch. */
-function mortarFire(context: AudioLike['context'], master: GainNode): void {
-  const osc = context.createOscillator() as OscillatorNode;
-  const gain = context.createGain() as GainNode;
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(60, context.currentTime);
-  envelope(context, gain, 0.6, 0.01, 0.2);
-  osc.connect(gain).connect(master);
-  osc.start();
-  osc.stop(context.currentTime + 0.25);
-}
-
-/** Sine sweep 800 -> 2000 Hz over 80 ms -- an instant "zap" for the hitscan Laser Rifle. */
-function laserFire(context: AudioLike['context'], master: GainNode): void {
-  const osc = context.createOscillator() as OscillatorNode;
-  const gain = context.createGain() as GainNode;
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(800, context.currentTime);
-  osc.frequency.exponentialRampToValueAtTime(2000, context.currentTime + 0.08);
-  envelope(context, gain, 0.35, 0.002, 0.08);
-  osc.connect(gain).connect(master);
-  osc.start();
-  osc.stop(context.currentTime + 0.1);
-}
-
-const WEAPON_SYNTH: Partial<
-  Record<WeaponId, (ctx: AudioLike['context'], master: GainNode) => void>
-> = {
-  [WeaponId.Spinfusor]: spinfusorFire,
-  [WeaponId.Chaingun]: chaingunFire,
-  [WeaponId.Mortar]: mortarFire,
-  [WeaponId.LaserRifle]: laserFire,
-  [WeaponId.Blaster]: chaingunFire, // closest existing timbre; no distinct spec guidance
-};
-
-function synthExplosion(context: AudioLike['context'], master: GainNode): void {
-  const src = context.createBufferSource() as AudioBufferSourceNode;
-  src.buffer = noiseBuffer(context, 0.4);
-  const filter = context.createBiquadFilter() as BiquadFilterNode;
-  filter.type = 'lowpass';
-  filter.frequency.setValueAtTime(800, context.currentTime);
-  filter.frequency.exponentialRampToValueAtTime(80, context.currentTime + 0.4);
-  const gain = context.createGain() as GainNode;
-  envelope(context, gain, 0.7, 0.005, 0.4);
-  src.connect(filter).connect(gain).connect(master);
-  src.start();
-}
-
-/** Three ascending square-wave notes -- a short capture fanfare. */
-function synthFlagCapture(context: AudioLike['context'], master: GainNode): void {
-  const notes = [523, 659, 784];
-  notes.forEach((freq, i) => {
-    const osc = context.createOscillator() as OscillatorNode;
-    const gain = context.createGain() as GainNode;
-    osc.type = 'square';
-    osc.frequency.setValueAtTime(freq, context.currentTime + i * 0.1);
-    envelope(context, gain, 0.3, 0.005, 0.1);
-    osc.connect(gain).connect(master);
-    osc.start(context.currentTime + i * 0.1);
-    osc.stop(context.currentTime + i * 0.1 + 0.12);
-  });
-}
-
-/** One short sine blip -- a lighter cue than the capture fanfare. */
-function synthFlagTouch(context: AudioLike['context'], master: GainNode): void {
-  const osc = context.createOscillator() as OscillatorNode;
-  const gain = context.createGain() as GainNode;
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(440, context.currentTime);
-  envelope(context, gain, 0.3, 0.005, 0.08);
-  osc.connect(gain).connect(master);
-  osc.start();
-  osc.stop(context.currentTime + 0.1);
-}
-
-/** A short percussive tick -- footsteps are many short bursts, not one sustained note. */
-function synthFootstep(context: AudioLike['context'], master: GainNode): void {
-  const src = context.createBufferSource() as AudioBufferSourceNode;
-  src.buffer = noiseBuffer(context, 0.03);
-  const filter = context.createBiquadFilter() as BiquadFilterNode;
-  filter.type = 'lowpass';
-  filter.frequency.value = 400;
-  const gain = context.createGain() as GainNode;
-  envelope(context, gain, 0.2, 0.001, 0.03);
-  src.connect(filter).connect(gain).connect(master);
-  src.start();
-}
-
 interface Loop {
   setLevel?(level: number): void;
   stop(): void;
 }
+type SoundId =
+  | 'armor-thrust'
+  | 'armor-ski-soft'
+  | 'armor-footstep'
+  | 'station-hum'
+  | 'generator-hum'
+  | 'inventory-pad-on'
+  | 'vehicle-screen-on'
+  | 'vehicle-screen-off'
+  | 'station-denied'
+  | 'spinfusor-fire'
+  | 'chaingun-fire'
+  | 'mortar-fire'
+  | 'sniper-fire'
+  | 'blaster-fire'
+  | 'mortar-explode'
+  | 'flag-capture'
+  | 'flag-snatch'
+  | 'outrider-engine'
+  | 'shrike-engine'
+  | 'voice-target-destroyed'
+  | 'voice-flag-take'
+  | 'voice-thanks'
+  | 'voice-defend-flag'
+  | 'voice-repair-me'
+  | 'voice-enemy-warning'
+  | 'voice-yes'
+  | 'voice-no'
+  | 'voice-nice';
 
-/** Looping filtered-noise jet exhaust; pitch rises slightly with remaining energy. */
-function startJetLoop(
-  context: AudioLike['context'],
-  master: GainNode,
-  energyFraction: number,
-): Loop {
-  const src = context.createBufferSource() as AudioBufferSourceNode;
-  src.buffer = noiseBuffer(context, 1);
-  src.loop = true;
-  const filter = context.createBiquadFilter() as BiquadFilterNode;
-  filter.type = 'bandpass';
-  filter.frequency.value = 300 + energyFraction * 200;
-  const gain = context.createGain() as GainNode;
-  gain.gain.value = 0.3;
-  src.connect(filter).connect(gain).connect(master);
-  src.start();
-  return { stop: () => src.stop() };
+/** Original audio.vl2 samples copied by packages/assets. */
+const SOUND_FILE: Record<SoundId, string> = {
+  'armor-thrust': 'armor-thrust.m4a',
+  'armor-ski-soft': 'armor-ski-soft.m4a',
+  'armor-footstep': 'armor-footstep.m4a',
+  'station-hum': 'station-hum.m4a',
+  'generator-hum': 'generator-hum.m4a',
+  'inventory-pad-on': 'inventory-pad-on.m4a',
+  'vehicle-screen-on': 'vehicle-screen-on.m4a',
+  'vehicle-screen-off': 'vehicle-screen-off.m4a',
+  'station-denied': 'station-denied.m4a',
+  'spinfusor-fire': 'spinfusor-fire.m4a',
+  'chaingun-fire': 'chaingun-fire.m4a',
+  'mortar-fire': 'mortar-fire.m4a',
+  'sniper-fire': 'sniper-fire.m4a',
+  'blaster-fire': 'blaster-fire.m4a',
+  'mortar-explode': 'mortar-explode.m4a',
+  'flag-capture': 'flag-capture.m4a',
+  'flag-snatch': 'flag-snatch.m4a',
+  'outrider-engine': 'outrider-engine.m4a',
+  'shrike-engine': 'shrike-engine.m4a',
+  'voice-target-destroyed': 'voice-target-destroyed.m4a',
+  'voice-flag-take': 'voice-flag-take.m4a',
+  'voice-thanks': 'voice-thanks.m4a',
+  'voice-defend-flag': 'voice-defend-flag.m4a',
+  'voice-repair-me': 'voice-repair-me.m4a',
+  'voice-enemy-warning': 'voice-enemy-warning.m4a',
+  'voice-yes': 'voice-yes.m4a',
+  'voice-no': 'voice-no.m4a',
+  'voice-nice': 'voice-nice.m4a',
+};
+const VOICE_SOUND: readonly SoundId[] = [
+  'voice-target-destroyed',
+  'voice-flag-take',
+  'voice-thanks',
+  'voice-defend-flag',
+  'voice-repair-me',
+  'voice-enemy-warning',
+  'voice-yes',
+  'voice-no',
+  'voice-nice',
+];
+interface Profile {
+  minDistance: number;
+  maxDistance: number;
 }
+const CLOSE: Profile = { minDistance: 10, maxDistance: 50 };
+const DEFAULT: Profile = { minDistance: 20, maxDistance: 100 };
+const EXPLOSION: Profile = { minDistance: 50, maxDistance: 250 };
+const WEAPON_PROFILE: Partial<Record<WeaponId, [SoundId, Profile]>> = {
+  [WeaponId.Spinfusor]: ['spinfusor-fire', DEFAULT],
+  [WeaponId.Chaingun]: ['chaingun-fire', DEFAULT],
+  [WeaponId.Mortar]: ['mortar-fire', DEFAULT],
+  [WeaponId.LaserRifle]: ['sniper-fire', CLOSE],
+  [WeaponId.Blaster]: ['blaster-fire', DEFAULT],
+};
 
-/** Looping filtered-noise ski hiss; pitch and level rise with speed. */
-function startSkiLoop(context: AudioLike['context'], master: GainNode, speed: number): Loop {
-  const src = context.createBufferSource() as AudioBufferSourceNode;
-  src.buffer = noiseBuffer(context, 1);
-  src.loop = true;
-  const filter = context.createBiquadFilter() as BiquadFilterNode;
-  filter.type = 'bandpass';
-  filter.frequency.value = 200 + Math.min(speed, 20) * 50;
-  const gain = context.createGain() as GainNode;
-  gain.gain.value = Math.min(speed / 20, 1) * 0.25;
-  src.connect(filter).connect(gain).connect(master);
-  src.start();
-  return { stop: () => src.stop() };
-}
-
-/** Two detuned low sine oscillators (55/110 Hz) -- a quiet, sustained power hum. */
-function startStationHumLoop(context: AudioLike['context'], master: GainNode): Loop {
-  const oscA = context.createOscillator() as OscillatorNode;
-  const oscB = context.createOscillator() as OscillatorNode;
-  oscA.type = 'sine';
-  oscB.type = 'sine';
-  oscA.frequency.value = 55;
-  oscB.frequency.value = 110;
-  const gain = context.createGain() as GainNode;
-  gain.gain.value = 0;
-  oscA.connect(gain).connect(master);
-  oscB.connect(gain);
-  oscA.start();
-  oscB.start();
-  return {
-    setLevel: (level) => gain.gain.setTargetAtTime(level * 0.025, context.currentTime, 0.1),
-    stop: () => {
-      oscA.stop();
-      oscB.stop();
-      oscA.disconnect();
-      oscB.disconnect();
-      gain.disconnect();
-    },
-  };
+function levelAt(ear: Vec3 | undefined, position: Vec3 | undefined, profile: Profile): number {
+  if (!ear || !position) return 1;
+  const d = Math.hypot(position.x - ear.x, position.y - ear.y, position.z - ear.z);
+  if (d >= profile.maxDistance) return 0;
+  return d <= profile.minDistance
+    ? 1
+    : 1 - (d - profile.minDistance) / (profile.maxDistance - profile.minDistance);
 }
 
 export interface AudioEngine {
@@ -236,25 +127,21 @@ export interface AudioEngine {
   setSkiing(playerId: number, active: boolean, speed: number): void;
   footstep(position: Vec3): void;
   setStationHum(id: number, position: Vec3, active: boolean): void;
-  /** Best-effort resume of a context a browser's autoplay policy started (or later put back
-   *  into) the `suspended` state -- must be called from inside a real user-gesture handler
-   *  (a click, a keydown), the same restriction every browser places on `AudioContext.resume`
-   *  itself. A no-op, not a throw, when the context is already running or resume isn't
-   *  available (Codex review round 1 of the M7 PR). */
+  setGeneratorHum(id: number, position: Vec3, active: boolean): void;
+  setVehicleEngine(id: number, kind: 'wildcat' | 'shrike', position: Vec3, active: boolean): void;
+  stationActivate(kind: 'inventory' | 'vehicle', position?: Vec3): void;
+  stationDeactivate(position?: Vec3): void;
+  stationDenied(position?: Vec3): void;
+  voice(lineId: number): void;
   resume(): void;
   dispose(): void;
 }
 
-/** Starts or stops a keyed loop, no-opping a redundant start or a stop of a key that never
- *  started -- the shared shape setJetting/setSkiing/setStationHum below all follow. */
 function setLoop(loops: Map<string, Loop>, key: string, active: boolean, start: () => Loop): void {
   if (!active) {
     loops.get(key)?.stop();
     loops.delete(key);
-    return;
-  }
-  if (loops.has(key)) return;
-  loops.set(key, start());
+  } else if (!loops.has(key)) loops.set(key, start());
 }
 
 export function createAudioEngine(listener: AudioLike): AudioEngine {
@@ -263,51 +150,141 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
   master.gain.value = AUDIO_MASTER_GAIN;
   master.connect(context.destination);
   const loops = new Map<string, Loop>();
-
+  const skiing = new Set<number>();
+  const oneShots = new Set<AudioBufferSourceNode>();
+  const buffers = new Map<SoundId, AudioBuffer>();
+  const loads = new Map<SoundId, Promise<void>>();
+  const warned = new Set<SoundId>();
+  let disposed = false;
+  if (typeof fetch === 'function' && context.decodeAudioData) {
+    for (const [id, file] of Object.entries(SOUND_FILE) as Array<[SoundId, string]>) {
+      const load = fetch(`${import.meta.env.BASE_URL}katabatic/audio/${file}`)
+        .then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${String(r.status)}`);
+          return r.arrayBuffer();
+        })
+        .then((bytes) => context.decodeAudioData(bytes))
+        .then((buffer) => {
+          if (!disposed) buffers.set(id, buffer);
+        })
+        .catch((error: unknown) => {
+          if (!warned.has(id)) {
+            warned.add(id);
+            console.warn(`Unable to load T2 audio sample ${file}`, error);
+          }
+        });
+      loads.set(id, load);
+    }
+  }
+  const play = (id: SoundId, profile: Profile, position?: Vec3): void => {
+    if (disposed) return;
+    const buffer = buffers.get(id);
+    const level = levelAt(listener.position, position, profile);
+    if (!buffer || level === 0) return;
+    const source = context.createBufferSource() as AudioBufferSourceNode;
+    const gain = context.createGain() as GainNode;
+    source.buffer = buffer;
+    gain.gain.value = level;
+    source.connect(gain).connect(master);
+    oneShots.add(source);
+    source.onended = () => {
+      oneShots.delete(source);
+      source.disconnect();
+      gain.disconnect();
+    };
+    source.start();
+  };
+  const loop = (id: SoundId, profile: Profile, position?: Vec3): Loop => {
+    if (disposed) return { stop: () => undefined };
+    let source: AudioBufferSourceNode | undefined;
+    let stopped = false;
+    const gain = context.createGain() as GainNode;
+    gain.gain.value = levelAt(listener.position, position, profile);
+    const start = (): void => {
+      const buffer = buffers.get(id);
+      if (!disposed && !stopped && !source && buffer) {
+        source = context.createBufferSource() as AudioBufferSourceNode;
+        source.buffer = buffer;
+        source.loop = true;
+        source.connect(gain).connect(master);
+        source.start();
+      }
+    };
+    start();
+    // Decode completes once; a failed fetch remains silent rather than spinning forever.
+    if (!source) void loads.get(id)?.then(start);
+    return {
+      setLevel: (level) => gain.gain.setTargetAtTime(level, context.currentTime, 0.1),
+      stop: () => {
+        stopped = true;
+        source?.stop();
+        source?.disconnect();
+        gain.disconnect();
+      },
+    };
+  };
+  const setSpatialLoop = (
+    key: string,
+    id: SoundId,
+    profile: Profile,
+    position: Vec3,
+    active: boolean,
+  ): void => {
+    if (disposed) return;
+    const level = levelAt(listener.position, position, profile);
+    setLoop(loops, key, active && level > 0, () => loop(id, profile, position));
+    loops.get(key)?.setLevel?.(level);
+  };
   return {
-    weaponFire(weaponId, _position): void {
-      (WEAPON_SYNTH[weaponId] ?? chaingunFire)(context, master);
+    weaponFire: (weapon, position) => {
+      const sound = WEAPON_PROFILE[weapon];
+      if (sound) play(sound[0], sound[1], position);
     },
-    explosion(_position): void {
-      synthExplosion(context, master);
+    explosion: (position) => play('mortar-explode', EXPLOSION, position),
+    flagCapture: () => play('flag-capture', DEFAULT),
+    flagTouch: () => play('flag-snatch', DEFAULT),
+    setJetting: (id, active) =>
+      setLoop(loops, `jet:${String(id)}`, active, () => loop('armor-thrust', CLOSE)),
+    // ski_soft is AudioClose3d (not looping) in player.cs; never create a false noise bed.
+    setSkiing: (id, active) => {
+      if (active && !skiing.has(id)) {
+        skiing.add(id);
+        play('armor-ski-soft', CLOSE);
+      } else if (!active) skiing.delete(id);
     },
-    flagCapture(): void {
-      synthFlagCapture(context, master);
+    footstep: (position) => play('armor-footstep', CLOSE, position),
+    setStationHum: (id, position, active) =>
+      setSpatialLoop(`station:${String(id)}`, 'station-hum', CLOSE, position, active),
+    setGeneratorHum: (id, position, active) =>
+      setSpatialLoop(`generator:${String(id)}`, 'generator-hum', DEFAULT, position, active),
+    setVehicleEngine: (id, kind, position, active) =>
+      setSpatialLoop(
+        `vehicle:${String(id)}`,
+        kind === 'wildcat' ? 'outrider-engine' : 'shrike-engine',
+        DEFAULT,
+        position,
+        active,
+      ),
+    stationActivate: (kind, position) =>
+      play(kind === 'inventory' ? 'inventory-pad-on' : 'vehicle-screen-on', CLOSE, position),
+    stationDeactivate: (position) => play('vehicle-screen-off', CLOSE, position),
+    stationDenied: (position) => play('station-denied', CLOSE, position),
+    voice: (lineId) => {
+      const sound = VOICE_SOUND[lineId];
+      if (sound) play(sound, DEFAULT);
     },
-    flagTouch(): void {
-      synthFlagTouch(context, master);
-    },
-    setJetting(playerId, active, energyFraction): void {
-      setLoop(loops, `jet:${String(playerId)}`, active, () =>
-        startJetLoop(context, master, energyFraction),
-      );
-    },
-    setSkiing(playerId, active, speed): void {
-      setLoop(loops, `ski:${String(playerId)}`, active, () => startSkiLoop(context, master, speed));
-    },
-    footstep(_position): void {
-      synthFootstep(context, master);
-    },
-    setStationHum(id, position, active): void {
-      const ear = listener.position ?? { x: 0, y: 0, z: 0 };
-      const distance = Math.hypot(position.x - ear.x, position.y - ear.y, position.z - ear.z);
-      // Ours: quiet room ambience, inaudible beyond 24 m; no map-wide oscillator bed.
-      const level = Math.max(0, 1 - distance / 24) ** 2;
-      const key = `hum:${String(id)}`;
-      setLoop(loops, key, active && level > 0, () => startStationHumLoop(context, master));
-      loops.get(key)?.setLevel?.(level);
-    },
-    resume(): void {
+    resume: () => {
       if (context.state === 'suspended') void context.resume?.();
     },
-    dispose(): void {
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
       for (const loop of loops.values()) loop.stop();
       loops.clear();
+      skiing.clear();
+      for (const source of oneShots) source.stop();
+      oneShots.clear();
       master.disconnect();
-      // Codex review round 1 of the M7 PR: dispose stopped every loop and disconnected the
-      // master gain, but never closed the underlying AudioContext -- app.ts had no teardown
-      // path calling this at all before this same round, so every App instance (a hot reload,
-      // a test harness creating several) leaked a real OS-level audio device context.
       if (context.state !== 'closed') void context.close?.();
     },
   };

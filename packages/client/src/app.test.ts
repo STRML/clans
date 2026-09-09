@@ -53,7 +53,7 @@ import type {
 import type { Effect } from './weapons-view.js';
 import { speakVoiceLine } from './voicebinds.js';
 
-// speakVoiceLine ultimately reaches window.speechSynthesis (a real browser-only global) --
+// speakVoiceLine ultimately starts a recorded audio clip in the browser --
 // mocked here so syncWorldView's own event-drain wiring is observable without a DOM.
 vi.mock('./voicebinds.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./voicebinds.js')>();
@@ -495,6 +495,7 @@ describe('syncWorldView (Codex review round 6, finding P2)', () => {
       connected: true,
     };
 
+    const audio = { voice: vi.fn() } as unknown as import('./audio.js').AudioEngine;
     syncWorldView(
       world,
       localId,
@@ -507,9 +508,10 @@ describe('syncWorldView (Codex review round 6, finding P2)', () => {
       new Map(),
       { seq: 0 },
       1 / 60,
+      audio,
     );
 
-    expect(speakVoiceLine).toHaveBeenCalledWith(4);
+    expect(speakVoiceLine).toHaveBeenCalledWith(4, audio);
   });
 });
 

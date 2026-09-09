@@ -1,0 +1,35 @@
+/**
+ * Original Tribes 2 samples, published in t2-mapper's `audio.vl2` volume.
+ * Keep these as source files rather than synthesized substitutes: the client
+ * decodes them with Web Audio after the normal asset build copies them below.
+ */
+export const AUDIO_SOURCES = {
+  'armor-thrust.m4a': 'audio.vl2/audio/fx/armor/thrust.m4a',
+  'armor-ski-soft.m4a': 'audio.vl2/audio/fx/armor/ski_soft.m4a',
+  'armor-footstep.m4a': 'audio.vl2/audio/fx/armor/light_LF_soft.m4a',
+  'station-hum.m4a': 'audio.vl2/audio/fx/powered/station_hum.m4a',
+  'generator-hum.m4a': 'audio.vl2/audio/fx/powered/generator_hum.m4a',
+  'inventory-pad-on.m4a': 'audio.vl2/audio/fx/powered/inv_pad_on.m4a',
+  'vehicle-screen-on.m4a': 'audio.vl2/audio/fx/powered/vehicle_screen_on2.m4a',
+  'vehicle-screen-off.m4a': 'audio.vl2/audio/fx/powered/vehicle_screen_off.m4a',
+  'station-denied.m4a': 'audio.vl2/audio/fx/powered/station_denied.m4a',
+  'spinfusor-fire.m4a': 'audio.vl2/audio/fx/weapons/spinfusor_fire.m4a',
+  'chaingun-fire.m4a': 'audio.vl2/audio/fx/weapons/chaingun_fire.m4a',
+  'mortar-fire.m4a': 'audio.vl2/audio/fx/weapons/mortar_fire.m4a',
+  'sniper-fire.m4a': 'audio.vl2/audio/fx/weapons/sniper_fire.m4a',
+  'blaster-fire.m4a': 'audio.vl2/audio/fx/weapons/blaster_fire.m4a',
+  'mortar-explode.m4a': 'audio.vl2/audio/fx/weapons/mortar_explode.m4a',
+  'flag-capture.m4a': 'audio.vl2/audio/fx/misc/flag_capture.m4a',
+  'flag-snatch.m4a': 'audio.vl2/audio/fx/misc/flag_snatch.m4a',
+  'outrider-engine.m4a': 'audio.vl2/audio/fx/vehicles/outrider_engine.m4a',
+  'shrike-engine.m4a': 'audio.vl2/audio/fx/vehicles/shrike_engine.m4a',
+  'voice-target-destroyed.m4a': 'voice.vl2/audio/voice/Bot1/tgt.destroyed.m4a',
+  'voice-flag-take.m4a': 'voice.vl2/audio/voice/Bot1/flg.take.m4a',
+  'voice-thanks.m4a': 'voice.vl2/audio/voice/Bot1/gbl.thanks.m4a',
+  'voice-defend-flag.m4a': 'voice.vl2/audio/voice/Bot1/def.flag.m4a',
+  'voice-repair-me.m4a': 'voice.vl2/audio/voice/Bot1/rep.me.m4a',
+  'voice-enemy-warning.m4a': 'voice.vl2/audio/voice/Bot1/wrn.enemy.m4a',
+  'voice-yes.m4a': 'voice.vl2/audio/voice/Bot1/gbl.yes.m4a',
+  'voice-no.m4a': 'voice.vl2/audio/voice/Bot1/gbl.no.m4a',
+  'voice-nice.m4a': 'voice.vl2/audio/voice/Bot1/gbl.nice.m4a',
+} as const;
