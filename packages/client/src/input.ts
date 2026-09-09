@@ -61,10 +61,11 @@ export class Input {
 
   private look(event: MouseEvent): void {
     if (this.uiOpen || document.pointerLockElement !== this.target) return;
-    this.yaw -= event.movementX * this.sensitivity;
+    const sensitivity = this.sensitivity * (this.isZooming() ? 0.5 : 1);
+    this.yaw -= event.movementX * sensitivity;
     this.pitch = Math.max(
       -PITCH_LIMIT,
-      Math.min(PITCH_LIMIT, this.pitch - event.movementY * this.sensitivity),
+      Math.min(PITCH_LIMIT, this.pitch - event.movementY * sensitivity),
     );
   }
 
@@ -93,6 +94,11 @@ export class Input {
 
   isDown(code: string): boolean {
     return this.keys.has(code);
+  }
+
+  /** Hold Z to zoom; Z avoids the original A binding because A is movement here. */
+  isZooming(): boolean {
+    return !this.uiOpen && this.isDown('KeyZ');
   }
 
   /** True on the call where `E` transitions from up to held since the last call --

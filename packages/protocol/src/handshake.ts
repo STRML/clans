@@ -170,17 +170,38 @@ export function decodeAck(bytes: Uint8Array): AckMessage {
 }
 
 export function encodeEvent(message: Omit<EventMessage, 'type'>): Uint8Array {
-  const cursor = createWriter(6);
+  const cursor = createWriter(message.beam ? 30 : 6);
   writeU8(cursor, MessageType.Event);
   writeU8(cursor, message.kind);
   writeI16(cursor, message.a);
   writeI16(cursor, message.b);
+  if (message.beam) {
+    for (const point of [message.beam.from, message.beam.to]) {
+      writeF32(cursor, point.x);
+      writeF32(cursor, point.y);
+      writeF32(cursor, point.z);
+    }
+  }
   return bytesOf(cursor);
 }
 export function decodeEvent(bytes: Uint8Array): EventMessage {
   const cursor = createReader(bytes);
   expectType(cursor, MessageType.Event);
-  return { type: MessageType.Event, kind: readU8(cursor), a: readI16(cursor), b: readI16(cursor) };
+  const event: EventMessage = {
+    type: MessageType.Event,
+    kind: readU8(cursor),
+    a: readI16(cursor),
+    b: readI16(cursor),
+  };
+  if (bytes.length !== 6 && bytes.length !== 30)
+    throw new RangeError('Invalid event payload length');
+  if (bytes.length === 30) {
+    event.beam = {
+      from: { x: readF32(cursor), y: readF32(cursor), z: readF32(cursor) },
+      to: { x: readF32(cursor), y: readF32(cursor), z: readF32(cursor) },
+    };
+  }
+  return event;
 }
 
 export function encodeGod(message: Omit<GodMessage, 'type'>): Uint8Array {

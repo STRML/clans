@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { EventKind, type EventMessage, type ProjectileSnapshotData } from '@clans/protocol';
 import {
   createLaserBeam,
+  createProjectileMesh,
   spawnExplosionsForExpired,
   spawnLaserBeams,
   syncProjectileMeshes,
@@ -39,6 +40,35 @@ const mortarShell = (id: number, x: number): ProjectileSnapshotData => ({
 });
 
 describe('syncProjectileMeshes', () => {
+  it('orients Shrike bolts along velocity and renders chaingun as a narrow tracer', () => {
+    const shrike = createProjectileMesh({
+      ...disc(1, 0),
+      type: 4,
+      weaponId: 1,
+      vx: 0,
+      vy: 0,
+      vz: 100,
+    });
+    expect(shrike.geometry).toBeInstanceOf(THREE.BoxGeometry);
+    const shrikeGeometry = shrike.geometry as THREE.BoxGeometry;
+    expect(shrikeGeometry.parameters.depth).toBeGreaterThan(shrikeGeometry.parameters.width);
+    const tracer = createProjectileMesh({ ...disc(2, 0), type: 1, weaponId: 1 });
+    expect(tracer.getObjectByName('projectile-trail')).toBeInstanceOf(THREE.Line);
+    expect((tracer.geometry as THREE.BoxGeometry).parameters.width).toBeLessThan(0.05);
+  });
+
+  it('keeps a bounded, position-following history trail for bouncing blaster bolts', () => {
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    const bolt = { ...disc(1, 0), type: 3, weaponId: 4, vx: 10 };
+    syncProjectileMeshes(scene, meshes, [bolt], 0.05);
+    syncProjectileMeshes(scene, meshes, [{ ...bolt, x: 1 }], 0.05);
+    const trail = meshes.get(1)?.getObjectByName('projectile-trail') as THREE.Line;
+    expect(trail.geometry.getAttribute('position').count).toBe(2);
+    syncProjectileMeshes(scene, meshes, [{ ...bolt, x: 10 }], 0.25);
+    expect((meshes.get(1)?.userData.history as unknown[]).length).toBe(1);
+  });
+
   it('adds a mesh per projectile and removes it once the id disappears', () => {
     const scene = new THREE.Scene();
     const meshes = new Map<number, THREE.Mesh>();
@@ -102,6 +132,18 @@ describe('syncProjectileMeshes', () => {
     expect(geometryDispose).toHaveBeenCalledOnce();
     expect(materialDispose).toHaveBeenCalledOnce();
   });
+
+  it('disposes child tracer geometry and material with its projectile', () => {
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    syncProjectileMeshes(scene, meshes, [{ ...disc(1, 0), type: 1, weaponId: 1 }]);
+    const trail = meshes.get(1)?.getObjectByName('projectile-trail') as THREE.Line;
+    const geometryDispose = vi.spyOn(trail.geometry, 'dispose');
+    const materialDispose = vi.spyOn(trail.material as THREE.Material, 'dispose');
+    syncProjectileMeshes(scene, meshes, []);
+    expect(geometryDispose).toHaveBeenCalledOnce();
+    expect(materialDispose).toHaveBeenCalledOnce();
+  });
 });
 
 describe('spawnExplosionsForExpired', () => {
@@ -156,6 +198,25 @@ describe('spawnLaserBeams', () => {
     const events: EventMessage[] = [{ type: 6, kind: EventKind.LaserFired, a: 1, b: -1 }];
     spawnLaserBeams(scene, effects, events, () => ({ x: 0, y: 0, z: 0 }));
     expect(effects).toHaveLength(0);
+  });
+
+  it('draws the authoritative red beam for a terrain miss when endpoints are supplied', () => {
+    const scene = new THREE.Scene();
+    const effects: Effect[] = [];
+    const events: EventMessage[] = [
+      {
+        type: 6,
+        kind: EventKind.LaserFired,
+        a: 1,
+        b: -1,
+        beam: { from: { x: 0, y: 1, z: 0 }, to: { x: 0, y: 1, z: 40 } },
+      },
+    ];
+    spawnLaserBeams(scene, effects, events, () => null);
+    expect(effects).toHaveLength(1);
+    const beam = effects[0]?.mesh;
+    expect(beam).toBeInstanceOf(THREE.Line);
+    expect((beam as THREE.Line).material).toHaveProperty('color');
   });
 
   it('ignores non-LaserFired events', () => {

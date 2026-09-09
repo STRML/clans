@@ -7,8 +7,11 @@ describe('Input.releaseAll', () => {
     input.jet = true;
     input.fire = true;
     (input as unknown as { keys: Set<string> }).keys.add('KeyW');
+    (input as unknown as { keys: Set<string> }).keys.add('KeyZ');
+    expect(input.isZooming()).toBe(true);
     expect(input.snapshot()).toMatchObject({ jet: true, fire: true, moveZ: 1 });
     input.releaseAll();
+    expect(input.isZooming()).toBe(false);
     expect(input.snapshot()).toMatchObject({ jet: false, fire: false, moveZ: 0, jump: false });
   });
 });

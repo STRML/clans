@@ -23,7 +23,7 @@ import {
   TurretBaseId,
 } from './turrets.js';
 import { SHRIKE_BLASTER_DATA, VehicleKind, type VehicleFireEvent } from './vehicles.js';
-import { WeaponId, type FireEvent } from './weapons.js';
+import { ProjectileType, WeaponId, type FireEvent } from './weapons.js';
 import { hitTestFireEvent, stepProjectiles } from './projectiles.js';
 
 const flat: Heightfield = {
@@ -113,6 +113,23 @@ describe('terrain collision', () => {
     const id = firstProjectile(world);
     stepProjectiles(world, FIXED_DT);
     expect(world.projectiles.active[id]).toBe(0);
+  });
+});
+
+describe('EnergyBolt', () => {
+  it('uses the distinct Energy type and bounces from terrain instead of detonating', () => {
+    const world = createWorld(flat, 1);
+    fire(world, {
+      weaponId: WeaponId.Blaster,
+      origin: { x: 0, y: 1, z: 0 },
+      direction: { x: 0, y: -1, z: 0 },
+    });
+    stepProjectiles(world, FIXED_DT);
+    const id = firstProjectile(world);
+    expect(world.projectiles.type[id]).toBe(ProjectileType.Energy);
+    stepProjectiles(world, FIXED_DT);
+    expect(world.projectiles.active[id]).toBe(1);
+    expect(world.projectiles.velocity[id * 3 + 1]).toBeGreaterThan(0);
   });
 });
 
@@ -912,6 +929,18 @@ describe('the Shrike blaster becomes a real, damaging projectile', () => {
     stepProjectiles(world, FIXED_DT);
     const id = firstProjectile(world);
     expect(world.projectiles.velocity[id * 3 + 2]).toBeCloseTo(SHRIKE_BLASTER_DATA.speed + 20, 5);
+  });
+
+  it('uses VehicleLaser so the client can distinguish it from a player Blaster bolt', () => {
+    const world = createWorld(flat, 1);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.position.set([0, 1.6, -50], 0);
+    fireVehicle(world, { origin: { x: 0, y: 1.6, z: -50 } });
+    stepProjectiles(world, FIXED_DT);
+    expect(world.projectiles.type[firstProjectile(world)]).toBe(ProjectileType.VehicleLaser);
+    expect(world.lastVehicleFireEvents).toHaveLength(1);
   });
 });
 

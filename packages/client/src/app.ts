@@ -11,6 +11,8 @@ import {
   FIXED_TICK_MS,
   VEHICLE_DATA,
   VehicleKind,
+  WeaponId,
+  ProjectileType,
   addPlayer,
   canSendVehicleUse,
   createBaseObjects,
@@ -32,7 +34,7 @@ import {
   type Vec3,
   type World,
 } from '@clans/sim';
-import { EventKind, OrderKind } from '@clans/protocol';
+import { EventKind, OrderKind, MessageType } from '@clans/protocol';
 import type {
   BaseObjectSnapshotData,
   ProjectileSnapshotData,
@@ -276,6 +278,7 @@ function syncPilotInput(app: App, previous: number): number {
 }
 
 function cameraFov(app: App, mounted: number): number {
+  if (!app.freeCam && mounted === -1 && app.input.isZooming()) return 45;
   return !app.freeCam && mounted !== -1 && app.world.vehicles.kind[mounted] === VehicleKind.Shrike
     ? 65
     : 90;
@@ -358,10 +361,12 @@ export function stepSinglePlayer(
   input: PlayerInput,
   steps: number,
   spawn: { x: number; y: number; z: number },
+  afterStep?: () => void,
 ): void {
   const inputs = new Map<number, PlayerInput>([[playerId, input]]);
   for (let step = 0; step < steps; step += 1) {
     stepWorld(world, inputs);
+    afterStep?.();
     // Codex review round 5, finding 3 (PR #9): stepWorld can flip world.gameOver to true
     // partway through THIS call (the time limit landing on this exact step), and this
     // loop's respawn handling ran unconditionally regardless of that -- the same class of
@@ -685,15 +690,23 @@ function syncBaseAssetsView(state: BaseAssetsViewState, usePressed: boolean): vo
  * false, feed the mesh-sync functions an empty list so their own pruning naturally clears
  * everything, rather than mutating NetClient state from here.
  */
-/** Task 7 (audio): every explosion flash createFlash added to `effects` since `fromIndex`
- *  gets the matching synthesized boom, at the same position the visual flash already landed
- *  on -- riding the existing expired-projectile diff (spawnExplosionsForExpired) rather than
- *  re-deriving "a projectile just expired" a second way. */
-function playExplosionAudio(audio: AudioEngine, effects: Effect[], fromIndex: number): void {
-  for (let i = fromIndex; i < effects.length; i += 1) {
-    const mesh = effects[i]?.mesh;
-    if (mesh) audio.explosion({ x: mesh.position.x, y: mesh.position.y, z: mesh.position.z });
+/** Keep travel loops and weapon-specific impacts in sync with visible projectiles. */
+function syncProjectileAudio(
+  audio: AudioEngine,
+  previous: Map<number, ProjectileSnapshotData>,
+  current: ProjectileSnapshotData[],
+): void {
+  const live = new Map(current.map((p) => [p.id, p]));
+  for (const last of previous.values()) {
+    const next = live.get(last.id);
+    if (next?.type === last.type && next.weaponId === last.weaponId) continue;
+    audio.setProjectileSound(last.id, last.weaponId, last.type, last, false);
+    audio.weaponImpact(
+      last.type === ProjectileType.VehicleLaser ? WeaponId.Blaster : last.weaponId,
+      last,
+    );
   }
+  for (const p of current) audio.setProjectileSound(p.id, p.weaponId, p.type, p, true);
 }
 
 /** Task 7 (audio): flag touch/capture cues, keyed off the same decoded event list the HUD's
@@ -714,6 +727,10 @@ function playVoiceBindAudio(audio: AudioEngine, events: readonly TimestampedEven
   for (const event of events) {
     if (event.kind === EventKind.VoiceBindPlayed) speakVoiceLine(event.b, audio);
   }
+}
+
+function localNetworkId(net: { playerId: number | null } | null, fallback: number): number {
+  return net?.playerId ?? fallback;
 }
 
 export function syncWorldView(
@@ -745,10 +762,9 @@ export function syncWorldView(
 ): void {
   const connected = net ? net.connected : true;
   const projectiles = net ? (connected ? net.projectiles : []) : projectilesFromWorld(world);
-  const explosionsFrom = effects.length;
   spawnExplosionsForExpired(scene, effects, previousProjectiles, projectiles);
-  if (audio) playExplosionAudio(audio, effects, explosionsFrom);
-  syncProjectileMeshes(scene, projectileMeshes, projectiles);
+  if (audio) syncProjectileAudio(audio, previousProjectiles, projectiles);
+  syncProjectileMeshes(scene, projectileMeshes, projectiles, dtSeconds);
   previousProjectiles.clear();
   for (const projectile of projectiles) previousProjectiles.set(projectile.id, projectile);
 
@@ -760,8 +776,13 @@ export function syncWorldView(
     playFlagEventAudio(audio, newEvents);
     playVoiceBindAudio(audio, newEvents);
   }
-  spawnLaserBeams(scene, effects, newEvents, (id) => positionOfPlayer(world, net, id));
-  updateEffects(scene, effects, dtSeconds);
+  spawnLaserBeams(
+    scene,
+    effects,
+    newEvents,
+    (id) => positionOfPlayer(world, net, id),
+    localNetworkId(net, playerId),
+  );
 
   hud.update(hudSourceFrom(world, playerId, net));
 }
@@ -1065,6 +1086,12 @@ function playWeaponFireAudio(world: World, playerId: number, audio: AudioEngine)
   }
 }
 
+function playVehicleFireAudio(world: World, audio: AudioEngine): void {
+  for (const event of world.lastVehicleFireEvents) {
+    audio.vehicleWeaponFire('shrike', event.origin);
+  }
+}
+
 interface FootstepState {
   timer: number;
 }
@@ -1354,7 +1381,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     assets,
     (vehicle) => {
       spawnVehicleExplosion(scene, effects, vehicle);
-      audio.explosion(vehicle);
+      audio.vehicleExplosion(vehicle);
     },
     baseObjectView.baseObjectMeshes,
   );
@@ -1516,6 +1543,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     },
     frame(dtSeconds: number): void {
       const frameStart = performance.now();
+      updateEffects(scene, effects, dtSeconds);
       let steps = advance(acc, dtSeconds, app.paused ? 0 : app.timeScale, FIXED_DT);
       if (app.stepOnce) {
         steps = 1;
@@ -1534,14 +1562,38 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       if (net) {
         stepNetworked(net, app.stats, currentInput, steps, scene, remoteMeshes, remoteBuffers);
       } else {
-        stepSinglePlayer(world, playerId, currentInput, steps, localSpawn);
+        stepSinglePlayer(world, playerId, currentInput, steps, localSpawn, () => {
+          playWeaponFireAudio(world, playerId, audio);
+          playVehicleFireAudio(world, audio);
+          for (const event of world.lastFireEvents) {
+            if (event.weaponId !== WeaponId.LaserRifle || !event.beamEnd) continue;
+            spawnLaserBeams(
+              scene,
+              effects,
+              [
+                {
+                  type: MessageType.Event,
+                  kind: EventKind.LaserFired,
+                  a: event.playerId,
+                  b: event.hitPlayerId,
+                  beam: { from: event.origin, to: event.beamEnd },
+                },
+              ],
+              () => null,
+              playerId,
+            );
+          }
+        });
       }
       app.stats.simMs = performance.now() - simStart;
 
       // Task 7 (audio): reacts to the world state this frame's simulation just produced --
       // see each helper's own comment for why weaponFire needs the `steps > 0` guard and the
       // others don't.
-      if (steps > 0) playWeaponFireAudio(world, playerId, audio);
+      if (steps > 0 && net) {
+        playWeaponFireAudio(world, playerId, audio);
+        playVehicleFireAudio(world, audio);
+      }
       // Codex review round 1 of the M7 PR: skipping updateMovementAudio entirely while free
       // cam is active meant a jet/ski loop already running at the moment free cam was toggled
       // on never got its own stop call -- setJetting/setSkiing are exactly what makes that

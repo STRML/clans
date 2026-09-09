@@ -983,7 +983,9 @@ describe('startNetServer', () => {
     const events = messages
       .filter((bytes) => bytes[0] === MessageType.Event)
       .map((bytes) => decodeEvent(bytes));
-    expect(events.some((event) => event.kind === EventKind.LaserFired)).toBe(true);
+    const laser = events.find((event) => event.kind === EventKind.LaserFired);
+    expect(laser?.beam).toBeDefined();
+    expect(laser?.beam?.to).not.toEqual(laser?.beam?.from);
     client.close();
   });
 

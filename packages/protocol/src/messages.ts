@@ -37,7 +37,7 @@ export enum OrderKind {
 // orders block, throwing on every single snapshot. Bumping the version instead makes
 // WelcomeStatus.VersionMismatch catch this exactly like it already catches every other
 // wire-format change, in both directions.
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 export enum WelcomeStatus {
   Ok = 0,
@@ -84,11 +84,17 @@ export enum EventKind {
   LaserFired = 3, // a = shooterId, b = hitPlayerId (-1 = miss)
   VoiceBindPlayed = 4, // a = playerId, b = lineId
 }
+export interface BeamSegment {
+  from: { x: number; y: number; z: number };
+  to: { x: number; y: number; z: number };
+}
 export interface EventMessage {
   type: MessageType.Event;
   kind: EventKind;
   a: number;
   b: number;
+  /** Authoritative laser endpoints, including terrain hits and misses. */
+  beam?: BeamSegment;
 }
 export interface GodMessage {
   type: MessageType.God;

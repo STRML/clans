@@ -701,6 +701,7 @@ function laserEvents(world: World): EventMessage[] {
       kind: EventKind.LaserFired,
       a: event.playerId,
       b: event.hitPlayerId,
+      beam: { from: event.origin, to: event.hitPoint ?? event.beamEnd ?? event.origin },
     }));
 }
 

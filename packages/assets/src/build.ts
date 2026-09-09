@@ -16,6 +16,7 @@ import { decodeTer } from './ter.js';
 import { convertVehicleShape, type VehicleShapeResult } from './vehicleShapes.js';
 import { AUDIO_SOURCES } from './audio-sources.js';
 import { GUI_SOURCE_FILES } from './gui-sources.js';
+import { PROJECTILE_SOURCE_FILES } from './projectile-sources.js';
 
 export interface TerrainManifest {
   gridSize: 256;
@@ -57,6 +58,11 @@ const guiOutput = resolve(output, 'gui');
 await mkdir(guiOutput, { recursive: true });
 for (const file of GUI_SOURCE_FILES) {
   await copyFile(resolve(cache, 'textures.vl2/textures/gui', file), resolve(guiOutput, file));
+}
+const projectileOutput = resolve(output, 'projectiles');
+await mkdir(projectileOutput, { recursive: true });
+for (const source of PROJECTILE_SOURCE_FILES) {
+  await copyFile(resolve(cache, source), resolve(projectileOutput, source.split('/').at(-1)!));
 }
 const heightBytes = new Uint8Array(terrain.heights.length * 2);
 const heightView = new DataView(heightBytes.buffer);

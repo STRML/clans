@@ -84,3 +84,23 @@ returns no deactivation sound; vehicle stations use `StationVehicleDeactivateSou
 
 Current limits: menu layout remains simplified; explosion/footstep variants, full
 directional acoustics, and continuous weapon-loop timing are not reproduced completely.
+
+## Projectile fidelity
+
+The same upstream script mirror supplies `weapons/disc.cs`, `weapons/blaster.cs`,
+`weapons/chaingun.cs`, `weapons/sniperRifle.cs`, and `vehicles/vehicle_air_scout.cs`.
+The Blaster's EnergyBolt uses muzzle velocity 90, velocity inheritance 0.5,
+0.05 drag, 0.998 bounce elasticity, and a three-second lifetime. It has no gravity.
+Shrike shots use their own laser tracer rather than the handheld Blaster bolt.
+The rifle beam is red, distinct from the green targeting-laser tool.
+
+`controlDefaults.cs` initializes zoom FOV to 45 degrees and uses hold A for zoom.
+Clans uses hold Z because A is strafe-left in its WASD layout; right mouse remains
+jet. No additional zoom levels are assumed.
+
+Projectile skins are recorded in `packages/assets/src/projectile-sources.ts`;
+impact and looping travel samples are in `audio-sources.ts`. Projectile meshes
+and explosion flashes remain approximations rather than original animated DTS
+models. Impact effects/sounds currently follow the last visible projectile
+position when it disappears; very short-lived shots between snapshots can be
+missed by this presentation path.

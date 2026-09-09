@@ -1,4 +1,4 @@
-import { WeaponId, type Vec3 } from '@clans/sim';
+import { ProjectileType, WeaponId, type Vec3 } from '@clans/sim';
 
 // T2 AudioProfile volume is 1.0. This only leaves mix headroom.
 export const AUDIO_MASTER_GAIN = 0.6;
@@ -38,10 +38,21 @@ type SoundId =
   | 'sniper-fire'
   | 'blaster-fire'
   | 'mortar-explode'
+  | 'spinfusor-impact'
+  | 'spinfusor-projectile'
+  | 'mortar-projectile'
+  | 'blaster-impact'
+  | 'blaster-projectile'
+  | 'chaingun-impact'
+  | 'chaingun-projectile'
+  | 'sniper-impact'
+  | 'shrike-blaster-projectile'
+  | 'vehicle-explosion'
   | 'flag-capture'
   | 'flag-snatch'
   | 'outrider-engine'
   | 'shrike-engine'
+  | 'shrike-blaster'
   | 'voice-target-destroyed'
   | 'voice-flag-take'
   | 'voice-thanks'
@@ -69,10 +80,21 @@ const SOUND_FILE: Record<SoundId, string> = {
   'sniper-fire': 'sniper-fire.m4a',
   'blaster-fire': 'blaster-fire.m4a',
   'mortar-explode': 'mortar-explode.m4a',
+  'spinfusor-impact': 'spinfusor-impact.m4a',
+  'spinfusor-projectile': 'spinfusor-projectile.m4a',
+  'mortar-projectile': 'mortar-projectile.m4a',
+  'blaster-impact': 'blaster-impact.m4a',
+  'blaster-projectile': 'blaster-projectile.m4a',
+  'chaingun-impact': 'chaingun-impact.m4a',
+  'chaingun-projectile': 'chaingun-projectile.m4a',
+  'sniper-impact': 'sniper-impact.m4a',
+  'shrike-blaster-projectile': 'shrike-blaster-projectile.m4a',
+  'vehicle-explosion': 'vehicle-explosion.m4a',
   'flag-capture': 'flag-capture.m4a',
   'flag-snatch': 'flag-snatch.m4a',
   'outrider-engine': 'outrider-engine.m4a',
   'shrike-engine': 'shrike-engine.m4a',
+  'shrike-blaster': 'shrike-blaster.m4a',
   'voice-target-destroyed': 'voice-target-destroyed.m4a',
   'voice-flag-take': 'voice-flag-take.m4a',
   'voice-thanks': 'voice-thanks.m4a',
@@ -99,14 +121,24 @@ interface Profile {
   maxDistance: number;
 }
 const CLOSE: Profile = { minDistance: 10, maxDistance: 50 };
+const CLOSEST: Profile = { minDistance: 5, maxDistance: 30 };
 const DEFAULT: Profile = { minDistance: 20, maxDistance: 100 };
 const EXPLOSION: Profile = { minDistance: 50, maxDistance: 250 };
+const WEAPON_EXPLOSION: Profile = { minDistance: 20, maxDistance: 150 };
+const PROJECTILE: Profile = { minDistance: 5, maxDistance: 20 };
 const WEAPON_PROFILE: Partial<Record<WeaponId, [SoundId, Profile]>> = {
   [WeaponId.Spinfusor]: ['spinfusor-fire', DEFAULT],
   [WeaponId.Chaingun]: ['chaingun-fire', DEFAULT],
   [WeaponId.Mortar]: ['mortar-fire', DEFAULT],
   [WeaponId.LaserRifle]: ['sniper-fire', CLOSE],
   [WeaponId.Blaster]: ['blaster-fire', DEFAULT],
+};
+const WEAPON_IMPACT: Partial<Record<WeaponId, [SoundId, Profile]>> = {
+  [WeaponId.Spinfusor]: ['spinfusor-impact', WEAPON_EXPLOSION],
+  [WeaponId.Chaingun]: ['chaingun-impact', CLOSEST],
+  [WeaponId.Mortar]: ['mortar-explode', EXPLOSION],
+  [WeaponId.LaserRifle]: ['sniper-impact', CLOSEST],
+  [WeaponId.Blaster]: ['blaster-impact', CLOSEST],
 };
 
 function levelAt(ear: Vec3 | undefined, position: Vec3 | undefined, profile: Profile): number {
@@ -120,6 +152,15 @@ function levelAt(ear: Vec3 | undefined, position: Vec3 | undefined, profile: Pro
 
 export interface AudioEngine {
   weaponFire(weaponId: WeaponId, position: Vec3): void;
+  weaponImpact(weaponId: WeaponId, position: Vec3): void;
+  setProjectileSound(
+    id: number,
+    weaponId: number,
+    type: number,
+    position: Vec3,
+    active: boolean,
+  ): void;
+  vehicleExplosion(position: Vec3): void;
   explosion(position: Vec3): void;
   flagCapture(): void;
   flagTouch(): void;
@@ -132,6 +173,7 @@ export interface AudioEngine {
   stationActivate(kind: 'inventory' | 'vehicle', position?: Vec3): void;
   stationDeactivate(position?: Vec3): void;
   stationDenied(position?: Vec3): void;
+  vehicleWeaponFire(kind: 'shrike', position: Vec3): void;
   voice(lineId: number): void;
   resume(): void;
   dispose(): void;
@@ -240,6 +282,26 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
       const sound = WEAPON_PROFILE[weapon];
       if (sound) play(sound[0], sound[1], position);
     },
+    weaponImpact: (weapon, position) => {
+      const sound = WEAPON_IMPACT[weapon];
+      if (sound) play(sound[0], sound[1], position);
+    },
+    setProjectileSound: (id, weaponId, type, position, active) => {
+      const sound =
+        type === ProjectileType.VehicleLaser
+          ? 'shrike-blaster-projectile'
+          : weaponId === WeaponId.Spinfusor
+            ? 'spinfusor-projectile'
+            : weaponId === WeaponId.Mortar
+              ? 'mortar-projectile'
+              : weaponId === WeaponId.Blaster
+                ? 'blaster-projectile'
+                : weaponId === WeaponId.Chaingun
+                  ? 'chaingun-projectile'
+                  : undefined;
+      if (sound) setSpatialLoop(`projectile:${String(id)}`, sound, PROJECTILE, position, active);
+    },
+    vehicleExplosion: (position) => play('vehicle-explosion', EXPLOSION, position),
     explosion: (position) => play('mortar-explode', EXPLOSION, position),
     flagCapture: () => play('flag-capture', DEFAULT),
     flagTouch: () => play('flag-snatch', DEFAULT),
@@ -269,6 +331,7 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
       play(kind === 'inventory' ? 'inventory-pad-on' : 'vehicle-screen-on', CLOSE, position),
     stationDeactivate: (position) => play('vehicle-screen-off', CLOSE, position),
     stationDenied: (position) => play('station-denied', CLOSE, position),
+    vehicleWeaponFire: (_kind, position) => play('shrike-blaster', DEFAULT, position),
     voice: (lineId) => {
       const sound = VOICE_SOUND[lineId];
       if (sound) play(sound, DEFAULT);

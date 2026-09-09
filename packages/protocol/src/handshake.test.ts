@@ -452,3 +452,24 @@ describe('VoiceBind codec (M7)', () => {
     expect(decodeVoiceBind(bytes)).toEqual({ type: MessageType.VoiceBind, lineId: 4 });
   });
 });
+
+describe('laser beam endpoints', () => {
+  it('round trips a beam for a shot that hit terrain instead of a player', () => {
+    const event = {
+      kind: EventKind.LaserFired,
+      a: 2,
+      b: -1,
+      beam: { from: { x: 1, y: 2, z: 3 }, to: { x: 100, y: 25, z: -50 } },
+    };
+    expect(decodeEvent(encodeEvent(event))).toEqual({ type: MessageType.Event, ...event });
+  });
+  it('rejects an incomplete beam payload', () => {
+    const event = encodeEvent({
+      kind: EventKind.LaserFired,
+      a: 2,
+      b: -1,
+      beam: { from: { x: 1, y: 2, z: 3 }, to: { x: 100, y: 25, z: -50 } },
+    });
+    expect(() => decodeEvent(event.subarray(0, 20))).toThrow();
+  });
+});

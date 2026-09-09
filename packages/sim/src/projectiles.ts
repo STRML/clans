@@ -701,13 +701,12 @@ function resolveImpact(
   free(world.projectiles, id);
 }
 
-function bounce(world: World, id: number, terrainNormal: Vec3): void {
+function bounce(world: World, id: number, terrainNormal: Vec3, elasticity: number): void {
   const store = world.projectiles;
   const base = id * 3;
   const velocity = readVec3(store.velocity, base);
   const along =
     velocity.x * terrainNormal.x + velocity.y * terrainNormal.y + velocity.z * terrainNormal.z;
-  const elasticity = GRENADE_DATA.elasticity;
   writeVec3(store.velocity, base, {
     x: (velocity.x - 2 * along * terrainNormal.x) * elasticity,
     y: (velocity.y - 2 * along * terrainNormal.y) * elasticity,
@@ -959,10 +958,50 @@ function stepGrenade(world: World, id: number, dt: number): void {
   }
   if (terrainHit) {
     writeVec3(store.position, id * 3, terrainHit.point);
-    bounce(world, id, bounceNormalFor(terrainHit));
+    bounce(world, id, bounceNormalFor(terrainHit), GRENADE_DATA.elasticity);
   }
   if (elapsed >= grenadeLifetimeTicks(isMortar))
     finalizeGrenadeLifetime(world, id, data, current, armed);
+}
+
+/** T2's EnergyBolt has zero gravity, 0.05 drag, and 0.998 grenade elasticity
+ * (weapons/blaster.cs:217-271). It damages actors/structures, but reflects from terrain and
+ * interiors so the renderer can show the characteristic bouncing bolt and trail. */
+function stepEnergy(world: World, id: number, dt: number): void {
+  const store = world.projectiles;
+  const base = id * 3;
+  const previous = readVec3(store.position, base);
+  const data = WEAPON_DATA[WeaponId.Blaster];
+  const velocity = readVec3(store.velocity, base);
+  const drag = Math.max(0, 1 - data.drag! * dt);
+  const current = {
+    x: previous.x + velocity.x * drag * dt,
+    y: previous.y + velocity.y * drag * dt,
+    z: previous.z + velocity.z * drag * dt,
+  };
+  writeVec3(store.velocity, base, {
+    x: velocity.x * drag,
+    y: velocity.y * drag,
+    z: velocity.z * drag,
+  });
+  writeVec3(store.position, base, current);
+  const worldHit = worldHitAlongSegment(world, previous, current, store.team[id] ?? 0);
+  const directHit = findDirectHit(world, id, previous, current);
+  const structureHit = nearestStructureHitFrom(
+    world,
+    previous,
+    current,
+    store.sourceTurretId[id] ?? -1,
+    store.sourceVehicleId[id] ?? -1,
+  );
+  const nearest = nearestOfThree(worldHit, directHit, structureHit);
+  if (nearest === worldHit && worldHit) {
+    writeVec3(store.position, base, worldHit.point);
+    bounce(world, id, bounceNormalFor(worldHit), data.elasticity!);
+  } else if (nearest) {
+    resolveLinearHit(world, id, data, previous, current, null, structureHit, directHit);
+  }
+  if (store.active[id] && expireOneTick(store, id, data.lifetime)) free(store, id);
 }
 
 /** Nearest player hit within maxRange, but not through terrain: a target behind a ridge or
@@ -999,7 +1038,21 @@ function resolveHitscan(world: World, event: FireEvent, data: WeaponData): void 
   // unconditionally, before the miss branch can return early. See FireEvent.resolved (Codex
   // review round 4, finding 3).
   event.resolved = true;
-  const nearest = nearestHitscanTarget(world, event, data.maxRange ?? 0);
+  const maxRange = data.maxRange ?? 0;
+  const worldHit = worldMarch(
+    world,
+    event.origin,
+    event.direction,
+    maxRange,
+    world.players.team[event.playerId] ?? 0,
+  );
+  const endpointDistance = worldHit?.distance ?? maxRange;
+  event.beamEnd = {
+    x: event.origin.x + event.direction.x * endpointDistance,
+    y: event.origin.y + event.direction.y * endpointDistance,
+    z: event.origin.z + event.direction.z * endpointDistance,
+  };
+  const nearest = nearestHitscanTarget(world, event, maxRange);
   if (!nearest) return;
   const hitbox = playerHitbox(world, nearest.playerId, armorFor(world, nearest.playerId));
   const hitPoint: Vec3 = {
@@ -1021,6 +1074,7 @@ function resolveHitscan(world: World, event: FireEvent, data: WeaponData): void 
   // broadcast (Codex review round 3, finding 4).
   event.hitPlayerId = nearest.playerId;
   event.hitPoint = hitPoint;
+  event.beamEnd = hitPoint;
 }
 
 /** `hitTestFireEvent`'s Laser Rifle case: identical search to `resolveHitscan`'s own, minus
@@ -1211,7 +1265,7 @@ function spawnVehicleShot(world: World, event: VehicleFireEvent, dt: number): vo
   const id = allocate(world.projectiles);
   if (id === null) return; // A vehicle has no ammo to refund — a full store just drops the shot.
   const store = world.projectiles;
-  store.type[id] = ProjectileType.Tracer;
+  store.type[id] = ProjectileType.VehicleLaser;
   store.weaponId[id] = VEHICLE_WEAPON_ID_OFFSET;
   store.ownerId[id] = -1; // No player identity; matches spawnTurretShot's own convention.
   store.team[id] = event.team;
@@ -1235,6 +1289,7 @@ function spawnVehicleShot(world: World, event: VehicleFireEvent, dt: number): vo
  *  tick, before `stepProjectiles`) into real projectiles, exactly parallel to
  *  `spawnPendingTurretShots`. */
 function spawnPendingVehicleShots(world: World, dt: number): void {
+  world.lastVehicleFireEvents = world.pendingVehicleFireEvents;
   for (const event of world.pendingVehicleFireEvents) spawnVehicleShot(world, event, dt);
   world.pendingVehicleFireEvents = [];
 }
@@ -1256,6 +1311,7 @@ export function stepProjectiles(world: World, dt: number): void {
   for (let id = 0; id < world.projectiles.count; id += 1) {
     if (!world.projectiles.active[id]) continue;
     if (world.projectiles.type[id] === ProjectileType.Grenade) stepGrenade(world, id, dt);
+    else if (world.projectiles.type[id] === ProjectileType.Energy) stepEnergy(world, id, dt);
     else stepLinearOrTracer(world, id, dt);
   }
   // Recorded before draining, into a field this function doesn't itself clear (unlike

@@ -24,6 +24,10 @@ export enum ProjectileType {
   Linear = 0,
   Tracer = 1,
   Grenade = 2,
+  /** T2 EnergyProjectileData(EnergyBolt): a bouncing Blaster bolt. */
+  Energy = 3,
+  /** Shrike's tracer is visually distinct from the player-held Blaster bolt. */
+  VehicleLaser = 4,
 }
 
 export interface WeaponData {
@@ -138,21 +142,23 @@ export const WEAPON_DATA: Record<WeaponId, WeaponData> = {
     energyPerShot: 6,
     minEnergy: 6,
   },
-  // Blaster: the spec gives no numbers for the player-carried Blaster, only the vehicle
-  // Shrike blaster (0.125 direct, 425 m/s). Every field below is ours.
+  // EnergyProjectileData(EnergyBolt), weapons/blaster.cs:217-271.
   [WeaponId.Blaster]: {
     id: WeaponId.Blaster,
-    projectile: ProjectileType.Linear,
-    speed: 300,
+    projectile: ProjectileType.Energy,
+    speed: 90,
     velInherit: 0.5,
-    directDamage: 0.1,
+    directDamage: 0.15,
     radiusDamage: 0,
     radius: 0,
     kickback: 0,
-    fireTime: 0.2,
+    fireTime: 0.3,
     reloadTime: 0.3,
-    lifetime: 2,
+    lifetime: 3,
     activateTime: 0,
+    drag: 0.05,
+    elasticity: 0.998,
+    armTime: 0.5,
   },
 };
 
@@ -199,6 +205,8 @@ export interface FireEvent {
    */
   hitPlayerId: number;
   hitPoint: Vec3 | null;
+  /** Laser Rifle visual endpoint. Unlike hitPoint, this is also set on a world-only miss. */
+  beamEnd?: Vec3;
   /**
    * The id of the projectile this event spawned in the projectile store (projectiles.ts's
    * spawnStored), or -1 for a shot that never got one -- a genuinely hitscan weapon (the

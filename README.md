@@ -27,6 +27,7 @@ Open http://127.0.0.1:5173, click to capture the mouse, and ski.
 | Space | jump, hold to ski |
 | Right mouse | jet |
 | Left mouse | fire the held weapon |
+| Hold Z | Zoom (45° field of view); release to return |
 | 1 2 3 4 5 | Spinfusor, Chaingun, Mortar, Laser Rifle, Blaster |
 | G | throw a hand grenade |
 | E | open the loadout menu at a powered inventory station, or open the vehicle spawn menu at a powered vehicle control station; mount an unoccupied vehicle within range, or dismount your own |
