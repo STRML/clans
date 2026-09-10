@@ -250,9 +250,14 @@ export function createStationMenu(
   }
 
   return {
-    // Resets the whole selection each open (the source station presents your current
-    // inventory afresh), so a rejected confirm can never leak into the next visit.
+    // Idempotent per visit: re-showing while VISIBLE must not re-prefill. app.ts's frame
+    // loop calls this every frame while the menu is open, and a per-frame re-prefill wiped
+    // the player's in-progress picks between their armor click and Confirm -- the loadout
+    // silently snapped back to the current one before the click could land
+    // (e2e/menus.spec.ts's real-click flow caught this). Every NEW visit still prefills
+    // from the current loadout because every close path goes through hide() first.
     show(choice: LoadoutChoice = LIGHT_DEFAULT): void {
+      if (!root.hidden) return;
       selection = new LoadoutSelection(choice);
       syncSelection();
       root.hidden = false;

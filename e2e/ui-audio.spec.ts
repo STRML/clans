@@ -7,17 +7,38 @@ test('original HUD artwork loads and all shipped recordings decode in Chromium',
 }, testInfo) => {
   await page.goto('/');
   await page.locator('#debug-stats[data-ready="1"]').waitFor({ state: 'attached' });
-  await expect
-    .poll(() =>
-      page
-        .locator('#hud-weapon-rack img')
-        .evaluateAll(
-          (images) =>
-            images.length === 5 &&
-            images.every((image) => (image as HTMLImageElement).naturalWidth > 0),
-        ),
-    )
-    .toBe(true);
+  // #55: the rack renders exactly the player's carried weapon set (armor-allowed defaults
+  // before any station visit), hides uncarried cells, and every rendered icon must load.
+  // Fresh spawn here is Light armor, so the Mortar cell is hidden and the other four show.
+  const rack = await page.evaluate(() => {
+    const app = (window as unknown as { __app: App }).__app;
+    const id = app.playerId;
+    const stored = app.world.players.carriedWeapons[id] ?? 0;
+    const armor = app.world.players.armor[id] ?? 0;
+    // Mirror of sim/baseObjects.ts's allowedWeaponMask, indexed by ArmorId.
+    const allowedByArmor: Record<number, number> = {
+      0: (1 << 0) | (1 << 1) | (1 << 3) | (1 << 4), // Light: Laser Rifle, no Mortar
+      1: (1 << 0) | (1 << 1) | (1 << 4), // Medium: neither
+      2: (1 << 0) | (1 << 1) | (1 << 2) | (1 << 4), // Heavy: Mortar, no Laser Rifle
+    };
+    const carried = stored === 0 ? (allowedByArmor[armor] ?? 0) : stored;
+    const slots = [...document.querySelectorAll<HTMLElement>('#hud-weapon-rack .hud-weapon-slot')];
+    return {
+      carried,
+      slots: slots.map((slot, index) => ({
+        index,
+        hidden: slot.hidden,
+        loads: ((slot.querySelector('img') as HTMLImageElement | null)?.naturalWidth ?? 0) > 0,
+      })),
+    };
+  });
+  expect(rack.carried).toBeGreaterThan(0);
+  for (const slot of rack.slots) {
+    expect(slot.hidden, `rack slot ${String(slot.index)} visibility`).toBe(
+      (rack.carried & (1 << slot.index)) === 0,
+    );
+    if (!slot.hidden) expect(slot.loads, `rack slot ${String(slot.index)} icon`).toBe(true);
+  }
   const recordings = await page.evaluate(async (files) => {
     const context = new AudioContext();
     try {
