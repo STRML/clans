@@ -3,13 +3,23 @@ import {
   BaseObjectKind,
   hasLineOfSight,
   playerHitbox,
+  TurretBarrelId,
+  turretHitbox,
   type BaseObjectStore,
+  type Vec3,
   type World,
 } from '@clans/sim';
 
 export const VISION_RANGE = 150; // Ours.
 export const LOW_HEALTH_FRACTION = 0.4; // Ours.
 export const LOW_ENERGY_FRACTION = 0.3; // Ours.
+/** Issue #32 carrier survival: how far a bot will reach to shoot an enemy BASE TURRET
+ *  that is not currently shooting a player target. The plasma barrel's real envelope is
+ *  the sensor radius (80 m) inside its 120 m attack radius (turrets.ts's engagementRange),
+ *  so engaging from ~110 m keeps the shooter outside every turret's own reach while
+ *  covering the approach to the enemy flag deck. Beyond ~110 m the disc's flight time
+ *  (90 m/s) and 4-degree aim tolerance waste ammo. */
+export const TURRET_ATTACK_RANGE_M = 110; // Ours, meters.
 const MUZZLE_HEIGHT = 1.6; // weapons.ts's own constant, restated here to avoid a circular
 // re-export dependency on weapons.ts internals -- the value is cited, not picked; see
 // weapons.ts:53.
@@ -69,9 +79,9 @@ function isUsableFriendlyStation(store: BaseObjectStore, team: number, id: numbe
 
 // Codex review round 2, finding (P2): this and maybeHeal's own in-range check (brain.ts)
 // both used X/Z-only distance, while the real gate a heal request is checked against --
-// baseObjects.ts's stationAt, which applyLoadoutRequest calls internally -- uses full 3D
+// baseObjects.ts's stationAt, which applyLoadoutSelection calls internally -- uses full 3D
 // distance. A bot could walk to the right horizontal spot on a raised or sunken platform,
-// read itself as "in range" here, and have applyLoadoutRequest silently reject every
+// read itself as "in range" here, and have applyLoadoutSelection silently reject every
 // request forever (stationAt's own real check fails), stuck at a heal goal that could
 // never resolve.
 function vec3At(arr: Float64Array, base: number): { x: number; y: number; z: number } {
@@ -136,4 +146,91 @@ export function findEnemyFlagCarrier(world: World, team: number): number | null 
     return carrierId;
   }
   return null;
+}
+
+/** True when this turret's barrel ever engages PLAYERS: the plasma barrel (120 m attack
+ *  radius, 0.8 s reload -- the single biggest chip-damage source on a carrier's exit from
+ *  the enemy base, measured in the #32 production-seed probes: ~70% of all carrier chip
+ *  damage landed inside an enemy plasma turret's 120 m envelope) and the sentry barrel
+ *  (60 m, 0.4 s reload, guarding each midfield tower). The AA barrel is deliberately NOT
+ *  attackable: vehiclesOnly targeting (turrets.ts's own field) means it can never shoot a
+ *  bot, and every disc spent on it is ammo a carrier's bodyguard will not have later. */
+function threatensPlayers(world: World, turretId: number): boolean {
+  const barrel = world.turrets.barrel[turretId] as TurretBarrelId;
+  return (
+    barrel === TurretBarrelId.PlasmaBarrelLarge || barrel === TurretBarrelId.SentryTurretBarrel
+  );
+}
+
+export interface AttackableTurret {
+  id: number;
+  position: Vec3;
+}
+
+/** Issue #32 carrier survival: the nearest enemy base turret that (a) threatens players,
+ *  (b) is standing and powered (an unpowered or wrecked turret shoots nobody, and ammo
+ *  spent re-killing it is wasted), (c) sits within TURRET_ATTACK_RANGE_M of the bot, and
+ *  (d) has line of sight -- a shot at a blocked structure is a wasted disc. Fired when no
+ *  player target is visible, so it never competes with a real engagement for the bot's
+ *  aim. Both bases' plasma turrets guard the flag approach, which every attacker walks on
+ *  the way to a take, so a handful of passing attackers strip the shield (3 damage at 50
+ *  energy per point) and health (2.25) over a few runs and the carrier's exit window
+ *  stops costing 40-95% health. */
+export function findAttackableTurret(world: World, botId: number): AttackableTurret | null {
+  const team = world.players.team[botId] ?? 0;
+  const eye = botEye(world, botId);
+  let best: AttackableTurret | null = null;
+  let bestDistance = Infinity;
+  for (let id = 0; id < world.turrets.count; id += 1) {
+    if (world.turrets.team[id] === team || world.turrets.destroyed[id]) continue;
+    if (!world.turrets.powered[id]) continue;
+    if (!threatensPlayers(world, id)) continue;
+    const hitbox = turretHitbox(world, id);
+    const d = Math.hypot(eye.x - hitbox.center.x, eye.y - hitbox.center.y, eye.z - hitbox.center.z);
+    if (d > TURRET_ATTACK_RANGE_M || d >= bestDistance) continue;
+    if (!hasLineOfSight(world, eye, hitbox.center)) continue;
+    best = { id, position: hitbox.center };
+    bestDistance = d;
+  }
+  return best;
+}
+
+/** Issue #32 carrier survival: the friendly station worth a detour on the way home,
+ *  judged by MARGINAL distance -- how many metres `bot -> station -> home` adds over the
+ *  straight `bot -> home` walk. The old test (nearest station within a flat 60 m radius)
+ *  never fired on real Katabatic: the bases' own stations sit 450-580 m from the route
+ *  and the midfield-tower stations are ~300 m off the direct diagonal, so a wounded
+ *  carrier (measured: 59% at the take, 5% thirty seconds later, dead to turret attrition
+ *  at 29% progress) had no heal option at all. Judged by marginal distance the towers are
+ *  cheap: measured 179-189 m extra along the first half of the return, a ~20 s detour for
+ *  a full health+energy reset. Scans every usable friendly station and returns the one
+ *  with the smallest marginal at or under `maxMarginalM` -- not merely the nearest one,
+ *  whose marginal can be far worse than a slightly-farther tower's. */
+export function findCarrierHealStation(
+  world: World,
+  botId: number,
+  homeStand: Vec3,
+  maxMarginalM: number,
+): number | null {
+  const store = world.baseObjects;
+  const me = vec3At(world.players.position, botId * 3);
+  const direct = Math.hypot(me.x - homeStand.x, me.y - homeStand.y, me.z - homeStand.z);
+  let best: number | null = null;
+  let bestMarginal = maxMarginalM;
+  for (let id = 0; id < store.count; id += 1) {
+    if (!isUsableFriendlyStation(store, world.players.team[botId] ?? 0, id)) continue;
+    const station = vec3At(store.position, id * 3);
+    const toStation = Math.hypot(me.x - station.x, me.y - station.y, me.z - station.z);
+    const toHome = Math.hypot(
+      station.x - homeStand.x,
+      station.y - homeStand.y,
+      station.z - homeStand.z,
+    );
+    const marginal = toStation + toHome - direct;
+    if (marginal < bestMarginal) {
+      bestMarginal = marginal;
+      best = id;
+    }
+  }
+  return best;
 }

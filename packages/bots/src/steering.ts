@@ -155,13 +155,45 @@ function avoidInteriors(
   return direction;
 }
 
-/** Ours, simple slope read rather than the spec's own "nav cost function rewards
+/** Issue #32: simple slope read rather than the spec's own "nav cost function rewards
  *  descent": samples terrain height a short probe distance ahead along the movement
  *  heading and compares it to the current height. Downhill beyond the armor's own
  *  runSurfaceAngle-adjacent slope -> ski (hold jump); steep uphill with energy to spare
  *  -> jet; otherwise neither. */
 const SLOPE_PROBE_DISTANCE = 3; // Ours, meters.
+/** Fraction of the energy pool slopeAssist refuses to spend on climbing. The production
+ *  #32 carrier traces show the kill chain: the ~190 m central-ridge climb drains the
+ *  pool (the old gate, `minJetEnergy * 2` = 2 of 60, is "always"), the carrier crests
+ *  with 2-8 energy, and the far-side descent then launches it at 60-90 m/s with too
+ *  little left for fallArrestWanted to matter -- measured deaths at 70% -> 0% health,
+ *  `attackerId -1`, mid-route at the ridge. Holding this reserve back costs a little
+ *  climb speed (the reserve portion is walked, not jetted) and buys a real arrest on
+ *  every convex descent: at the 0.35 floor a Light still carries 21 energy, ~26 ticks
+ *  of arrest jets, worth roughly 5 m/s of landing speed. */
+const CLIMB_ENERGY_RESERVE_FRACTION = 0.35; // Ours.
+/** The same floor for bots NOT carrying a flag. The carrier is the only bot whose
+ *  fall-arrest insurance is match-critical: a lone escort or attacker who crests the
+ *  ridge empty simply walks the descent and eats a survivable 0.1-0.2 landing hit,
+ *  while an escort that reaches the crest FAST stays with the carrier it is guarding --
+ *  measured: escorts pacing 7-11 m off their carrier at the enemy base fell 150-260 m
+ *  behind crossing the ridge, leaving the carrier alone against the chaser stream
+ *  through the whole midfield. Spending down to a token floor closes exactly that gap. */
+const NONCARRIER_CLIMB_ENERGY_FRACTION = 0.1; // Ours.
 
+/** True when this bot is carrying the enemy flag -- the walk home is the match's whole
+ *  objective and its fall arrest is the scarce resource, so only this bot pays the full
+ *  climb reserve. */
+function isCarryingFlag(world: World, botId: number): boolean {
+  for (let flagId = 0; flagId < world.flags.team.length; flagId += 1) {
+    if (world.flags.carrierId[flagId] === botId) return true;
+  }
+  return false;
+}
+
+/** `reserveFraction` is the caller's climb-energy floor: steerToward passes the full
+ *  carrier reserve for a flag carrier and the token non-carrier floor for everyone
+ *  else (see the constants above). Kept a parameter, not a world read inside, so the
+ *  function stays a pure slope/energy query. */
 export function slopeAssist(
   world: World,
   x: number,
@@ -169,6 +201,7 @@ export function slopeAssist(
   headingYaw: number,
   energy: number,
   armor: ArmorData,
+  reserveFraction: number,
 ): { jump: boolean; jet: boolean } {
   const here = sampleTerrain(world.terrain, x, z);
   const aheadX = x + Math.sin(headingYaw) * SLOPE_PROBE_DISTANCE;
@@ -177,7 +210,9 @@ export function slopeAssist(
   if (here.empty || ahead.empty) return { jump: false, jet: false };
   const drop = here.height - ahead.height; // positive = downhill ahead
   if (drop > 0.5) return { jump: true, jet: false };
-  if (drop < -1.5 && energy > armor.minJetEnergy * 2) return { jump: false, jet: true };
+  if (drop < -1.5 && energy > armor.maxEnergy * reserveFraction) {
+    return { jump: false, jet: true };
+  }
   return { jump: false, jet: false };
 }
 
@@ -594,7 +629,17 @@ export function steerToward(
   const direction = avoidInteriors(world, runtime, currentPosition, straight);
   pin.deflected = runtime.avoidDeflectionDeg !== 0;
   const headingYaw = Math.atan2(direction.x, direction.z);
-  const slope = slopeAssist(world, currentPosition.x, currentPosition.z, headingYaw, energy, armor);
+  const slope = slopeAssist(
+    world,
+    currentPosition.x,
+    currentPosition.z,
+    headingYaw,
+    energy,
+    armor,
+    isCarryingFlag(world, runtime.playerId)
+      ? CLIMB_ENERGY_RESERVE_FRACTION
+      : NONCARRIER_CLIMB_ENERGY_FRACTION,
+  );
   const fallArrest = fallArrestWanted(world, runtime.playerId, currentPosition, armor, energy);
   const { moveX, moveZ } = worldDirectionToLocalMove(direction, headingYaw);
   return {

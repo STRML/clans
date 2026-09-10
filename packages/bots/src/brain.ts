@@ -1,7 +1,8 @@
 import {
-  applyLoadoutRequest,
+  applyLoadoutSelection,
   armorFor,
   FlagState,
+  PackId,
   STATION_USE_RADIUS,
   type ArmorId,
   type PlayerInput,
@@ -10,8 +11,10 @@ import {
   type World,
 } from '@clans/sim';
 import { OrderKind, type TeamOrder } from '@clans/protocol';
-import { aimAndFire } from './combat.js';
+import { aimAndFire, aimAtPoint } from './combat.js';
 import {
+  findAttackableTurret,
+  findCarrierHealStation,
   findEnemyFlagCarrier,
   findEscortedCarrier,
   findNearestFriendlyStation,
@@ -63,13 +66,45 @@ function flagStandPosition(world: World, flagId: number): Vec3 {
     z: world.flags.standPosition[base + 2] ?? 0,
   };
 }
-/** Attacker: carrying the enemy flag -> head home; otherwise -> head to the enemy flag
- *  wherever it currently is (home, dropped, or being carried by a teammate you're about
- *  to catch up to and pass, which is fine -- there's nothing wrong with two teammates
- *  converging on the same flag). Defender: the team's own flag is dropped -> go recover
- *  it; an enemy is carrying it -> hunt them down (see decideDefenderGoal); a teammate is
- *  carrying the enemy flag -> escort them; otherwise -> hold near the team's own flag
- *  stand. */
+/** Issue #32 carrier survival, regroup: TRUE when the carrier should back off instead of
+ *  pressing the return walk -- a visible enemy this close (they will exchange fire the
+ *  whole way; duel completion needs every duel won and the measured carrier deaths were
+ *  duels lost at 6-51% health with friendlies nowhere near) while NO teammate is within
+ *  REGROUP_FRIENDLY_M. The point of backing off is not to outrun bullets -- nobody can --
+ *  it is to stop closing on fresh threats while the team's own attack wave (which trails
+ *  the carrier by 100-400 m, converging on the flag's current position) arrives and
+ *  turns the 1 v 1 into a 5 v 1. */
+export const REGROUP_ENEMY_M = 60; // Ours, meters.
+export const REGROUP_FRIENDLY_M = 40; // Ours, meters.
+/** How far toward home the hold point sits while regrouping -- close enough that the
+ *  carrier is still making return progress (the goal drifts home as the carrier walks,
+ *  exactly like the escort screen point drifts with its carrier), far enough that the
+ *  retreat itself buys the teammates real closing time. */
+export const REGROUP_HOLD_M = 80; // Ours, meters.
+
+function carrierShouldRegroup(world: World, runtime: BotRuntimeState): boolean {
+  const threatId = findNearestVisibleEnemy(world, runtime.playerId);
+  if (threatId === null) return false;
+  const me = playerPoint(world, runtime.playerId);
+  const threat = playerPoint(world, threatId);
+  if (Math.hypot(me.x - threat.x, me.y - threat.y, me.z - threat.z) > REGROUP_ENEMY_M) return false;
+  const team = world.players.team[runtime.playerId] ?? 0;
+  for (let id = 0; id < world.players.count; id += 1) {
+    if (id === runtime.playerId) continue;
+    if (!world.players.active[id] || !world.players.alive[id]) continue;
+    if (world.players.team[id] !== team) continue;
+    const mate = playerPoint(world, id);
+    if (Math.hypot(me.x - mate.x, me.y - mate.y, me.z - mate.z) <= REGROUP_FRIENDLY_M) return false;
+  }
+  return true;
+}
+
+/** Attacker: carrying the enemy flag -> head home (backing off to regroup when a close
+ *  threat has no friendly answer nearby -- carrierShouldRegroup above); otherwise -> head
+ *  to the enemy flag wherever it currently is (home, dropped, or being carried by a
+ *  teammate you're about to catch up to and pass, which is fine -- there's nothing wrong
+ *  with two teammates converging on the same flag). */
+
 function decideAttackerGoal(
   world: World,
   runtime: BotRuntimeState,
@@ -78,7 +113,25 @@ function decideAttackerGoal(
   const ownId = ownFlagId(world, team);
   const enemyId = enemyFlagId(world, team);
   if (world.flags.carrierId[enemyId] === runtime.playerId) {
-    return { position: flagStandPosition(world, ownId), key: `home:${String(ownId)}` };
+    const home = flagStandPosition(world, ownId);
+    if (carrierShouldRegroup(world, runtime)) {
+      // Regroup hold point: REGROUP_HOLD_M along the carrier -> home ray. Key stays
+      // `home:<id>` so steering treats it as the same task (drift repathing handles the
+      // moving point) and any escort formation keyed to the carrier keeps following.
+      const me = playerPoint(world, runtime.playerId);
+      const dx = home.x - me.x;
+      const dz = home.z - me.z;
+      const route = Math.hypot(dx, dz) || 1;
+      return {
+        position: {
+          x: me.x + (dx / route) * REGROUP_HOLD_M,
+          y: me.y,
+          z: me.z + (dz / route) * REGROUP_HOLD_M,
+        },
+        key: `home:${String(ownId)}`,
+      };
+    }
+    return { position: home, key: `home:${String(ownId)}` };
   }
   return { position: flagPosition(world, enemyId), key: `enemyFlag:${String(enemyId)}` };
 }
@@ -122,6 +175,61 @@ function escortPoint(world: World, runtime: BotRuntimeState, carrierId: number):
   };
 }
 
+/** Issue #32: how far the escort may stand from the carrier and still use the close
+ *  screen-ahead point. Measured on the production seeds: an escort with a live escort
+ *  GOAL 500-1000 m from its carrier at every sample -- both walk at run speed, so a
+ *  trailing escort chasing the carrier's heels never closes and arrives at each fight
+ *  one duel too late (the exact failure the screen-ahead design already predicted for
+ *  trailing escorts, one scale up). */
+export const ESCORT_CATCHUP_M = 60; // Ours, meters.
+/** How far ahead of the carrier, along its remaining route home, a distant escort aims:
+ *  the escort walks the route the carrier is ABOUT to walk, meeting midfield threats
+ *  first and falling into the close screen (ESCORT_CATCHUP_M) as the carrier catches up.
+ *  As the point retreats toward home at the carrier's own pace, an escort that starts on
+ *  the home side simply paces the return this far ahead of it -- a rolling picket, not a
+ *  chase it can never win. 100, not more: a pacing escort is the carrier's ONLY body
+ *  once the pursuer stream comes from BEHIND (the enemy attack wave chases the flag's
+ *  current position, i.e. the carrier, from the enemy-base side) -- measured id12's run
+ *  dying to a chaser with its escort parked 150 m ahead, out of the fight entirely. */
+export const ESCORT_AHEAD_M = 100; // Ours, meters.
+/** Carrier health below which the formation collapses onto the carrier: a wounded
+ *  carrier cannot afford a screened escort -- the screen exists to engage threats
+ *  before they reach a HEALTHY carrier, and a chaser trading shots with a wounded
+ *  carrier wins that trade unless the bodyguard closes the gap now. 30 m puts the
+ *  escort within one strafe of the duel, inside every weapon's useful envelope. 0.8,
+ *  not lower: the measured near-miss carrier crossed midfield at 71-74% health with its
+ *  escorts still pacing 96 m ahead -- a chaser trading shots with even that carrier
+ *  wins, so the pull-in must cover "merely chipped" carriers too. */
+export const CARRIER_CLOSE_HEALTH = 0.8; // Ours.
+export const ESCORT_CLOSE_M = 30; // Ours, meters.
+
+/** The escort's goal: the close screen-ahead hold point (escortPoint) once it is within
+ *  ESCORT_CATCHUP_M of the carrier, or -- while it is still far away -- the point ahead
+ *  of the carrier along the straight route to the home stand (clamped to the stand
+ *  itself on the final approach). A carrier below CARRIER_CLOSE_HEALTH pulls the point
+ *  in to ESCORT_CLOSE_M so the escort stops pacing and closes. Same `escort:<id>` goal
+ *  key either way, so steering's drift repathing keeps following the moving point
+ *  exactly as before. */
+function escortGoal(world: World, runtime: BotRuntimeState, carrierId: number): Vec3 {
+  const carrier = playerPoint(world, carrierId);
+  const me = playerPoint(world, runtime.playerId);
+  const gap = Math.hypot(me.x - carrier.x, me.z - carrier.z);
+  if (gap <= ESCORT_CATCHUP_M) return escortPoint(world, runtime, carrierId);
+  const carrierArmor = armorFor(world, carrierId);
+  const carrierHealth = 1 - (world.players.damage[carrierId] ?? 0) / carrierArmor.maxDamage;
+  const aheadM = carrierHealth < CARRIER_CLOSE_HEALTH ? ESCORT_CLOSE_M : ESCORT_AHEAD_M;
+  const team = world.players.team[runtime.playerId] ?? 0;
+  const home = flagStandPosition(world, ownFlagId(world, team));
+  const dx = home.x - carrier.x;
+  const dz = home.z - carrier.z;
+  const route = Math.hypot(dx, dz) || 1;
+  const ahead = Math.min(aheadM, route);
+  return {
+    x: carrier.x + (dx / route) * ahead,
+    y: carrier.y,
+    z: carrier.z + (dz / route) * ahead,
+  };
+}
 /** Issue #32 duty split: when the team has BOTH a thief to hunt and a carrier to
  *  bodyguard, all-defenders-intercept starves the carrier of protection (measured: a
  *  carrier died to the first enemy that met it in midfield while every defender was
@@ -167,7 +275,7 @@ function decideDefenderGoal(
     return { position: playerPoint(world, thief), key: `intercept:${String(thief)}` };
   }
   if (carrier !== null) {
-    return { position: escortPoint(world, runtime, carrier), key: `escort:${String(carrier)}` };
+    return { position: escortGoal(world, runtime, carrier), key: `escort:${String(carrier)}` };
   }
 
   // Fallback checked only when every CTF priority above comes up empty (Task 7): mount a
@@ -247,9 +355,20 @@ function nearStation(world: World, runtime: BotRuntimeState, station: Vec3): boo
  *  chases by tick ~1200 and no bot ever touched a flag again. After
  *  HEAL_CHASE_GIVEUP_TICKS of chasing (across nearest-station switches -- see the key
  *  comment in decideHealGoal) without getting within HEAL_CHASE_NEAR_M of a station,
- *  the bot commits to its CTF goal for HEAL_CHASE_COOLDOWN_TICKS. */
+ *  the bot commits to its CTF goal for HEAL_CHASE_COOLDOWN_TICKS -- and after that
+ *  cooldown, the next allowed check opens a FRESH chase window. (The -1 "no chase in
+ *  progress" sentinel must read as "start the clock now", never as an elapsed-time
+ *  figure: the original `world.tick - (-1) > HEAL_CHASE_GIVEUP_TICKS` treated every
+ *  post-give-up call as an already-expired chase, so one give-up re-armed the cooldown
+ *  every call forever -- measured as carriers showing an active cooldown for 6000+
+ *  straight ticks with no station attempt between re-arms.) */
 function healChaseAllowed(world: World, runtime: BotRuntimeState, station: Vec3): boolean {
   if (world.tick < runtime.healChaseCooldownUntilTick) return false;
+  if (runtime.healChaseSinceTick < 0) {
+    // No chase in progress: this call starts one.
+    runtime.healChaseSinceTick = world.tick;
+    return true;
+  }
   if (nearStation(world, runtime, station)) {
     // Genuine progress: the bot is basically at the station, so any remaining wedge is
     // worth more patience.
@@ -265,6 +384,20 @@ function healChaseAllowed(world: World, runtime: BotRuntimeState, station: Vec3)
   return true;
 }
 
+/** Issue #32: the cooldown's job is protecting the bot's CTF task from a wedging
+ *  chase, but WITH THE FLAG ABOARD the CTF task IS the walk home, and a wounded
+ *  carrier with no heal option is a dead carrier (measured: a carrier at 51% health
+ *  with an active cooldown and 500 m of no-man's-land died to the first
+ *  interceptor). Forgive the cooldown on pickup and start a fresh chase window: the
+ *  marginal-detour gate and the give-up state machine (healChaseAllowed) still bound
+ *  the chase. Split from decideHealGoal for the lint complexity cap. */
+function forgiveHealCooldown(world: World, runtime: BotRuntimeState): void {
+  if (world.tick >= runtime.healChaseCooldownUntilTick) return;
+  runtime.healChaseCooldownUntilTick = 0;
+  runtime.healChaseKey = null;
+  runtime.healChaseSinceTick = -1;
+}
+
 function decideHealGoal(
   world: World,
   runtime: BotRuntimeState,
@@ -276,10 +409,18 @@ function decideHealGoal(
     resetHealChase(runtime);
     return null;
   }
-  const stationId = findNearestFriendlyStation(world, runtime.playerId);
+  const team = world.players.team[runtime.playerId] ?? 0;
+  if (carrying) forgiveHealCooldown(world, runtime);
+  const stationId = carrying
+    ? findCarrierHealStation(
+        world,
+        runtime.playerId,
+        flagStandPosition(world, ownFlagId(world, team)),
+        CARRIER_HEAL_MAX_MARGINAL_M,
+      )
+    : findNearestFriendlyStation(world, runtime.playerId);
   if (stationId === null) return null;
   const station = stationPosition(world, stationId);
-  if (carrying && !healWorthDetour(world, runtime, station)) return null;
   if (!healChaseAllowed(world, runtime, station)) return null;
   const key = `heal:${String(stationId)}`;
   if (runtime.healChaseKey !== key) {
@@ -291,19 +432,17 @@ function decideHealGoal(
   }
   return { position: station, key };
 }
-
-/** Issue #32: a carrier detours to a station only when it is a real top-up, not a
- *  retreat. The blanket exclusion this replaces ("a carrier NEVER detours to a station")
- *  was measured both ways: a full heal-chase bounces the carrier backwards off its route,
- *  but NO heal at all means the carrier arrives home at half health and loses the last
- *  duel 100 m from the stand -- cumulative chip damage is what actually kills carriers
- *  now that fall arrest keeps the landings cheap. Katabatic's midfield towers both carry
- *  own-team stations that sit essentially ON the stone-route home, so a station within
- *  CARRIER_HEAL_DETOUR_M is a short hop off the path for a full health+energy reset
- *  (applyLoadoutRequest zeroes damage); anything farther stays a pure CTF walk. The 2.5 m
- *  stationAt gate means merely PASSING a station never triggers it -- the goal has to
- *  point at the station itself for the trip to be worth anything. */
-export const CARRIER_HEAL_DETOUR_M = 60; // Ours, meters.
+/** Issue #32: a carrier detours to a station when the MARGINAL walking distance --
+ *  `carrier -> station -> home stand` minus the straight walk home -- is at or under
+ *  CARRIER_HEAL_MAX_MARGINAL_M. The old nearest-station flat-radius gate
+ *  (CARRIER_HEAL_DETOUR_M = 60 m) never fired on real Katabatic at all: every own
+ *  station sits 450-580 m off the direct return diagonal, while the midfield-tower
+ *  stations cost only ~180-190 m of MARGINAL walking along the first half of the
+ *  return -- a ~20 s detour for a full health+energy reset (applyLoadoutSelection zeroes
+ *  damage). Scanning by marginal distance (perception.ts's findCarrierHealStation)
+ *  picks that tower; the healChase give-up state machine below still bounds a chase
+ *  that wedges. */
+export const CARRIER_HEAL_MAX_MARGINAL_M = 250; // Ours, meters.
 // Top up earlier than the bare LOW_HEALTH_FRACTION line: the carrier's job (survive to
 // the stand) dies to attrition, so the refill must happen while there is health to save.
 const CARRIER_HEAL_HEALTH_FRACTION = 0.6; // Ours.
@@ -312,10 +451,6 @@ function healGateFor(carrying: boolean): number {
   return carrying ? CARRIER_HEAL_HEALTH_FRACTION : LOW_HEALTH_FRACTION;
 }
 
-function healWorthDetour(world: World, runtime: BotRuntimeState, station: Vec3): boolean {
-  const me = playerPoint(world, runtime.playerId);
-  return Math.hypot(me.x - station.x, me.y - station.y, me.z - station.z) <= CARRIER_HEAL_DETOUR_M;
-}
 // Issue #32 heal-chase bound -- see decideHealGoal. Long enough that a genuine
 // cross-map retreat to the nearest friendly station comfortably completes (the map is
 // ~1 km corner to corner at a ~10 m/s run); short enough that a wedged bot rejoins the
@@ -360,7 +495,16 @@ function orderGoal(
   const key = order.kind === OrderKind.Attack ? 'order:attack' : 'order:defend';
   return { position: { x: order.x, y: 0, z: order.z }, key };
 }
-
+/** Issue #32 gear-up, REJECTED design (kept documented so nobody re-derives it): a
+ *  dedicated "walk to a station and grab an Energy Pack" goal deadlocked the whole bot
+ *  population on production Katabatic -- most stations sit inside base structures the
+ *  interior-blind 2D graph cannot actually enter, so bots orbited ~10 m from the
+ *  station point forever (measured: 31 of 32 bots still on `gear:<station>` goals at
+ *  tick 1800, zero kills and zero touches in the match), and an unbounded gear goal
+ *  had no give-up to rescue them. What survives is the REQUEST side: maybeHeal below
+ *  now treats "no pack at all" as a reason to request the loadout, so any bot that
+ *  legitimately reaches a station (a real heal chase, a post at the stand, a passing
+ *  2.5 m window) converts the visit into full bars plus the recharge pack. */
 export function decideGoal(
   world: World,
   runtime: BotRuntimeState,
@@ -374,7 +518,6 @@ export function decideGoal(
     ? decideAttackerGoal(world, runtime)
     : decideDefenderGoal(world, runtime);
 }
-
 /** Direct sim call, mirroring maybeHeal below -- a Repair order's "equip a Repair Pack"
  *  step is the same one-shot Loadout-request pattern maybeHeal already uses, just
  *  triggered by an order instead of low health/energy. */
@@ -389,7 +532,7 @@ export function maybeEquipRepairPack(world: World, botId: number): void {
   const dz =
     (world.players.position[base + 2] ?? 0) - (world.baseObjects.position[stationBase + 2] ?? 0);
   if (Math.hypot(dx, dy, dz) > STATION_USE_RADIUS) return;
-  applyLoadoutRequest(world, botId, world.players.armor[botId] as ArmorId, true);
+  applyLoadoutSelection(world, botId, world.players.armor[botId] as ArmorId, PackId.Repair, 0);
 }
 
 export function decideState(runtime: BotRuntimeState, engagedTargetId: number | null): BotState {
@@ -425,7 +568,17 @@ function isOutsideDefendLeash(world: World, runtime: BotRuntimeState, targetId: 
  *  a carrier to bodyguard -- it engages anywhere, like an Attacker (isOutsideDefendLeash /
  *  defenderPostGone above). Row 9: engagedTargetId is re-derived fresh
  *  every call from a live scan, never trusted across ticks, so a target that died or
- *  disconnected between calls simply doesn't come back from findNearestVisibleEnemy. */
+ *  disconnected between calls simply doesn't come back from findNearestVisibleEnemy.
+ *
+ *  Issue #32 carrier survival: with NO player target, the bot shoots the nearest
+ *  attackable enemy base turret (perception.ts's findAttackableTurret -- plasma/sentry
+ *  barrels only, standing, powered, in range, LOS) via combat.ts's aimAtPoint. The
+ *  probes that motivated the #32 capture work measured ~70% of all carrier chip damage
+ *  landing inside an enemy plasma turret's envelope -- the deck approach and the first
+ *  hundred metres of the return walk home, exactly where every carrier must survive.
+ *  `targetId` stays null (a turret is not a BotState target), so the caller keys the
+ *  aim decision off `aiming` instead: true whenever this tick has a real aim solution,
+ *  player OR structure. */
 export function decideCombat(
   world: World,
   runtime: BotRuntimeState,
@@ -435,14 +588,32 @@ export function decideCombat(
   fire: boolean;
   targetId: number | null;
   weaponId: WeaponId | null;
+  aiming: boolean;
 } {
   const targetId = findNearestVisibleEnemy(world, runtime.playerId);
-  if (targetId === null || isOutsideDefendLeash(world, runtime, targetId)) {
-    runtime.engagedTargetId = -1;
-    return { yaw: runtime.aimYaw, pitch: 0, fire: false, targetId: null, weaponId: null };
+  if (targetId !== null && !isOutsideDefendLeash(world, runtime, targetId)) {
+    const { yaw, pitch, fire, weaponId } = aimAndFire(world, runtime, runtime.playerId, targetId);
+    return { yaw, pitch, fire, targetId, weaponId, aiming: true };
   }
-  const { yaw, pitch, fire, weaponId } = aimAndFire(world, runtime, runtime.playerId, targetId);
-  return { yaw, pitch, fire, targetId, weaponId };
+  runtime.engagedTargetId = -1;
+  const turret = findAttackableTurret(world, runtime.playerId);
+  if (turret !== null) {
+    const { yaw, pitch, fire, weaponId } = aimAtPoint(
+      world,
+      runtime,
+      runtime.playerId,
+      turret.position,
+    );
+    return { yaw, pitch, fire, targetId: null, weaponId, aiming: true };
+  }
+  return {
+    yaw: runtime.aimYaw,
+    pitch: 0,
+    fire: false,
+    targetId: null,
+    weaponId: null,
+    aiming: false,
+  };
 }
 
 /** Direct sim call, not a queued wire message (Global Constraints) -- a bot server-side
@@ -450,12 +621,48 @@ export function decideCombat(
  *  human's own Loadout request, just triggered from here instead of a decoded message.
  *
  *  Codex review round 2, finding (P2): this range check used X/Z only, while the real
- *  gate (baseObjects.ts's stationAt, called internally by applyLoadoutRequest) checks
- *  full 3D distance -- see findNearestFriendlyStation's own comment (perception.ts). */
+ *  gate (baseObjects.ts's stationAt, called internally by applyLoadoutSelection) checks
+ *  full 3D distance -- see findNearestFriendlyStation's own comment (perception.ts).
+ *
+ *  Issue #32 carrier survival: the request is now the full #55 selection form and asks
+ *  for the ENERGY PACK (+0.15/tick recharge on top of the armor's own -- movement.ts's
+ *  ENERGY_PACK_RECHARGE_BONUS) whenever the bot is not carrying a Repair Pack. The sim
+ *  has no passive self-heal -- the repair beam explicitly skips the holder
+ *  (repair.ts's findDamagedPlayerCandidate) -- so the only health recovery between
+ *  stations is not taking damage, and sustained energy is what buys that: fall arrest,
+ *  climb jets on the deck approaches, and the jet-escape ladder all drain the pool a
+ *  pack-less carrier cannot refill. A bot on a Repair order keeps its pack (the
+ *  `hasRepairPack` passthrough below); everyone else converts every station visit --
+ *  opportunistic (walked past) or chased (decideHealGoal) -- into the recharge economy.
+ *
+ *  Issue #32 gear-up: the request condition is ALSO "no pack at all", not just the
+ *  health/energy floors -- a pack-less full-bar bot standing in radius previously
+ *  requested nothing (needsHealing false). A dedicated walk-to-a-station gear goal was
+ *  tried and REJECTED (see decideGoal's comment); what survives is this request side:
+ *  the selection is a pure upgrade for a pack-less bot, so any bot that legitimately
+ *  reaches a station converts the visit into full bars plus the recharge pack. */
 function maybeHeal(world: World, botId: number): void {
-  if (!needsHealing(world, botId)) return;
+  const hasPack =
+    world.players.hasRepairPack[botId] === 1 || world.players.hasEnergyPack[botId] === 1;
+  if (!needsHealing(world, botId) && hasPack) return;
+  if (friendlyStationInUseRange(world, botId) === null) return;
+  applyLoadoutSelection(
+    world,
+    botId,
+    world.players.armor[botId] as ArmorId,
+    world.players.hasRepairPack[botId] === 1 ? PackId.Repair : PackId.Energy,
+    0,
+  );
+}
+
+/** The id of the nearest usable friendly station actually within STATION_USE_RADIUS of
+ *  the bot (full 3D -- baseObjects.ts's stationAt gate), or null. The shared range gate
+ *  for both station requests: maybeHeal's opportunistic heal/gear-up and a Repair
+ *  order's equip (maybeEquipRepairPack). Split out so each caller stays under the lint
+ *  complexity cap -- the per-axis nullish reads alone are six branches. */
+function friendlyStationInUseRange(world: World, botId: number): number | null {
   const stationId = findNearestFriendlyStation(world, botId);
-  if (stationId === null) return;
+  if (stationId === null) return null;
   const base = botId * 3;
   const stationBase = stationId * 3;
   const dx = (world.players.position[base] ?? 0) - (world.baseObjects.position[stationBase] ?? 0);
@@ -463,13 +670,8 @@ function maybeHeal(world: World, botId: number): void {
     (world.players.position[base + 1] ?? 0) - (world.baseObjects.position[stationBase + 1] ?? 0);
   const dz =
     (world.players.position[base + 2] ?? 0) - (world.baseObjects.position[stationBase + 2] ?? 0);
-  if (Math.hypot(dx, dy, dz) > STATION_USE_RADIUS) return;
-  applyLoadoutRequest(
-    world,
-    botId,
-    world.players.armor[botId] as ArmorId,
-    world.players.hasRepairPack[botId] === 1,
-  );
+  if (Math.hypot(dx, dy, dz) > STATION_USE_RADIUS) return null;
+  return stationId;
 }
 
 /** Split out of stepBot to keep its own cyclomatic complexity under the lint cap -- both
@@ -527,7 +729,9 @@ export function stepBot(
     energy,
   );
   const combat = decideCombat(world, runtime);
-  const yaw = combat.targetId !== null ? combat.yaw : move.headingYaw;
+  // `aiming` (decideCombat) covers player AND structure aim solutions -- a turret target
+  // keeps targetId null for decideState, so the yaw must key off `aiming`, not targetId.
+  const yaw = combat.aiming ? combat.yaw : move.headingYaw;
   runtime.aimYaw = yaw;
   runtime.state = decideState(runtime, combat.targetId);
   return {

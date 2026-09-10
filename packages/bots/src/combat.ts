@@ -139,3 +139,47 @@ export function aimAndFire(
     weaponId,
   };
 }
+
+export interface AimSolution {
+  yaw: number;
+  pitch: number;
+  fire: boolean;
+  weaponId: WeaponId;
+}
+
+/** Issue #32 carrier survival: aim-and-fire at a STATIC world point -- an enemy base
+ *  turret -- instead of a led player target. Same fire gate as aimAndFire (only pull the
+ *  trigger once the previous tick's yaw is already on the point), same weapon choice by
+ *  range, but no lead solve and no aim jitter: the turret never moves, and the Spinfusor's
+ *  7.5 m splash radius around the impact point already absorbs the residual aim error, so
+ *  the jitter a dodging human target needs would only spread shots off the structure. */
+export function aimAtPoint(
+  world: World,
+  runtime: BotRuntimeState,
+  botId: number,
+  point: Vec3,
+): AimSolution {
+  const shooterBase = botId * 3;
+  const shooterEye: Vec3 = {
+    x: world.players.position[shooterBase] ?? 0,
+    y: (world.players.position[shooterBase + 1] ?? 0) + MUZZLE_HEIGHT,
+    z: world.players.position[shooterBase + 2] ?? 0,
+  };
+  const distance = Math.hypot(shooterEye.x - point.x, shooterEye.z - point.z);
+  const weaponId = chooseWeapon(world, botId, distance);
+  const dx = point.x - shooterEye.x,
+    dy = point.y - shooterEye.y,
+    dz = point.z - shooterEye.z;
+  const idealYaw = Math.atan2(dx, dz);
+  const idealPitch = Math.atan2(dy, Math.hypot(dx, dz));
+  const aimYaw = runtime.aimYaw;
+  const yawErrorDeg = Math.abs(
+    toDeg(Math.atan2(Math.sin(idealYaw - aimYaw), Math.cos(idealYaw - aimYaw))),
+  );
+  return {
+    yaw: idealYaw,
+    pitch: idealPitch,
+    fire: yawErrorDeg <= AIM_TOLERANCE_DEG,
+    weaponId,
+  };
+}
