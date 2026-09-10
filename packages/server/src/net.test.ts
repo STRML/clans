@@ -4,12 +4,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   addPlayer,
   BaseObjectKind,
+  buildInteriorCollider,
   createBaseObjects,
   createFlags,
   createWorld,
-  FlagState,
-  WeaponState,
   FIXED_DT,
+  FlagState,
   LIGHT_ARMOR,
   ProjectileImpactReason,
   ProjectileType,
@@ -17,6 +17,7 @@ import {
   stepPower,
   VehicleKind,
   WeaponId,
+  WeaponState,
   type Heightfield,
   type PlayerInput,
   type World,
@@ -43,13 +44,14 @@ import {
 import { buildWaypointGraph } from '@clans/bots';
 import { createBotManager, TARGET_TEAM_SIZE, type BotManager } from './bots.js';
 import { buildExtras, flagEvents, startNetServer, type NetServer } from './net.js';
+import { DISTANT_PLAYER_UPDATE_EVERY } from './snapshot-policy.js';
 import { createOrderBoard, currentOrder } from './orders.js';
 import { teamCount, type SceneSpawn } from './world.js';
 
 /** A bot manager with zero budget: every net.ts test in this file that doesn't care
  *  about bots gets one of these, so rebalanceTeams (called from handleJoin/handleClose)
  *  is a true no-op -- no bot ever added or removed -- without coupling every test's own
- *  world/spawns fixture to bots.ts. Bot-aware behavior itself is tested in bots.test.ts
+ *  world/spawns fixture to bots.ts. Bot-aware behavior itself is tested in bots.test.ts,
  *  and net.ts's own dedicated bot-wiring tests below. */
 function emptyBotManager(): BotManager {
   return {
@@ -879,6 +881,298 @@ describe('startNetServer', () => {
     expect(world.players.damage[targetId]).toBe(0);
     shooter.close();
     lagServer.close();
+  });
+
+  it('updates a player 500 m away only every 4th snapshot while never reading as removed (#5)', async () => {
+    const farWorld = createWorld(terrain, 1, 8);
+    const farServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world: farWorld,
+      spawns,
+      port: TEST_PORT + 30,
+      now: () => 0,
+    });
+    await farServer.ready;
+    const client = await connect(TEST_PORT + 30);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+    const farId = addPlayer(farWorld, { x: 500, y: 0, z: 500 }, 2);
+
+    const promise = receive(client);
+    farServer.tick(2);
+    let decoded = decodeSnapshot(await promise, null);
+    expect(decoded.players.find((player) => player.id === farId)?.x).toBe(500);
+    const baseline = { snapshotId: decoded.snapshotId, players: decoded.players };
+    client.send(encodeAck({ snapshotId: decoded.snapshotId }));
+    await wait(10);
+    // Wire snapshot ids start at 2 and the sparse phase is keyed off them, so derive the
+    // expectations from the id each decoded snapshot carries: sparse ticks re-send the
+    // last update's stale copy (diffing clean against the baseline -- omission is what the
+    // delta encoder reads as removal), update ticks carry the moved position.
+    let staleX = 500;
+    let moves = 0;
+    for (let n = 2; n <= 4; n += 1) {
+      moves += 1;
+      farWorld.players.position[farId * 3] = (farWorld.players.position[farId * 3] ?? 0) + 1;
+      const loopPromise = receive(client);
+      farServer.tick(2 * n);
+      decoded = decodeSnapshot(await loopPromise, baseline);
+      const far = decoded.players.find((player) => player.id === farId);
+      expect(far, 'distant player persists in every snapshot').toBeDefined();
+      const updateDue = decoded.snapshotId % DISTANT_PLAYER_UPDATE_EVERY === 0;
+      expect(far?.x).toBe(updateDue ? 500 + moves : staleX);
+      if (updateDue) staleX = 500 + moves;
+    }
+    client.close();
+    farServer.close();
+  });
+
+  it('never sends a far hidden interior base object until the viewer comes within the radius (#5)', async () => {
+    const hiddenWorld = createWorld(terrain, 1, 8);
+    // A building footprint at (500,500) with a generator inside it and a force field just
+    // outside -- the force field is the one base object meant to be seen from far away.
+    hiddenWorld.interiors.push(
+      buildInteriorCollider(
+        {
+          positions: new Float32Array([-5, 0, -5, 5, 0, -5, 5, 0, 5, -5, 0, -5, 5, 0, 5, -5, 0, 5]),
+        },
+        {
+          position: { x: 500, y: 0, z: 500 },
+          rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 },
+        },
+      ),
+    );
+    createBaseObjects(hiddenWorld, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 500, y: 0, z: 500 } },
+      { kind: BaseObjectKind.ForceField, team: 1, position: { x: 520, y: 0, z: 500 } },
+    ]);
+    const hiddenServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world: hiddenWorld,
+      spawns,
+      port: TEST_PORT + 31,
+    });
+    await hiddenServer.ready;
+    const client = await connect(TEST_PORT + 31);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+
+    const promise = receive(client);
+    hiddenServer.tick(2); // full snapshot (nothing acked yet)
+    const decoded = decodeSnapshot(await promise, null);
+    expect(decoded.baseObjects.map((object) => object.id)).toEqual([1]);
+
+    // Walk the viewer into the base: the hidden generator enters the relevance set.
+    hiddenWorld.players.position.set([490, 0, 490], welcome.playerId * 3);
+    const nearPromise = receive(client);
+    hiddenServer.tick(4);
+    const nearDecoded = decodeSnapshot(await nearPromise, null); // still unacked -> full
+    expect(nearDecoded.baseObjects.map((object) => object.id)).toEqual([0, 1]);
+    client.close();
+    hiddenServer.close();
+  });
+
+  it("rejects a live hit the shooter's rewound view never showed, instead of crediting it (issue #10)", async () => {
+    // The mirror image of the 150 ms test above: there, the target left the line after the
+    // shooter's view and lag comp granted the hit. Here the target steps ONTO the line only
+    // by server processing time -- the shooter's screen never showed them there -- and the
+    // validation must take the live hit back away, not just grant extra ones.
+    let clock = 0;
+    const unfairServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world,
+      spawns,
+      port: TEST_PORT + 32,
+      now: () => clock,
+    });
+    await unfairServer.ready;
+    const targetId = addPlayer(world, { x: 30, y: 0, z: 8 }, 2);
+    const shooter = await connect(TEST_PORT + 32);
+    const welcomePromise = receive(shooter);
+    shooter.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    world.players.position.set([0, 0, 0], welcome.playerId * 3);
+
+    // Establish a 150 ms ping (snapshot acked 150 ms of server-clock time later).
+    const firstPromise = receive(shooter);
+    unfairServer.tick(2);
+    const first = decodeSnapshot(await firstPromise, null);
+    clock = 150;
+    shooter.send(encodeAck({ snapshotId: first.snapshotId }));
+    await wait(20);
+
+    // History: the target stands 30 m OFF the shot line (+z from the origin) for every tick
+    // the shooter's half-RTT (75 ms) rewound view can reach, including the slot-switch tick.
+    for (let step = 0; step < 5; step += 1) {
+      world.players.position.set([30, 0, 8], targetId * 3);
+      unfairServer.tick(3 + step);
+    }
+    shooter.send(
+      encodeInput({
+        sequence: 1,
+        samples: [
+          { ...idleSample, slot: 4 },
+          { ...idleSample, slot: 4 },
+          { ...idleSample, slot: 4 },
+        ],
+      }),
+    );
+    await wait(20);
+    unfairServer.tick(20); // applies the Laser Rifle slot switch only, still no shot
+
+    // NOW the target appears on the line in server-truth, and the shot fires.
+    world.players.position.set([0, 0, 8], targetId * 3);
+    const fire: NetInputSample = { ...idleSample, slot: 4, fire: true };
+    shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
+    await wait(20);
+    unfairServer.tick(21);
+
+    // The live simulation scored the hit (the target really is on the ray server-side);
+    // the rewound recheck -- which is what the shooter's own view shows -- misses, so the
+    // damage is reverted, the target lives, and the broadcast reshapes into the miss.
+    expect(world.players.damage[targetId] ?? 0).toBe(0);
+    expect(world.players.alive[targetId]).toBe(1);
+    const event = decodeEvent(await receive(shooter));
+    expect(event.kind).toBe(EventKind.LaserFired);
+    expect(event.b).toBe(-1);
+    shooter.close();
+    unfairServer.close();
+  });
+
+  it('un-kills a victim a view-contradicted live hit killed, restoring flag, score and life (issue #10)', async () => {
+    // Same unfair setup, but the victim is one sliver below lethal damage and carrying the
+    // enemy flag: the live hit killed them inside stepWorld (death bookkeeping, flag drop,
+    // kill score all committed), and the rejection has to reverse every piece of it.
+    let clock = 0;
+    const flagWorld = createWorld(terrain, 1, 8);
+    createFlags(flagWorld, [
+      { team: 1, position: { x: 0, y: 0, z: 0 } },
+      { team: 2, position: { x: 8, y: 0, z: 0 } },
+    ]);
+    const unfairServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world: flagWorld,
+      spawns,
+      port: TEST_PORT + 33,
+      now: () => clock,
+    });
+    await unfairServer.ready;
+    const targetId = addPlayer(flagWorld, { x: 30, y: 0, z: 8 }, 2);
+    flagWorld.players.damage[targetId] = LIGHT_ARMOR.maxDamage - 0.01;
+    flagWorld.flags.state[1] = FlagState.Carried;
+    flagWorld.flags.carrierId[1] = targetId;
+    const shooter = await connect(TEST_PORT + 33);
+    const welcomePromise = receive(shooter);
+    shooter.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    flagWorld.players.position.set([0, 0, 0], welcome.playerId * 3);
+
+    const firstPromise = receive(shooter);
+    unfairServer.tick(2);
+    const first = decodeSnapshot(await firstPromise, null);
+    clock = 150;
+    shooter.send(encodeAck({ snapshotId: first.snapshotId }));
+    await wait(20);
+    for (let step = 0; step < 5; step += 1) {
+      flagWorld.players.position.set([30, 0, 8], targetId * 3);
+      unfairServer.tick(3 + step);
+    }
+    shooter.send(
+      encodeInput({
+        sequence: 1,
+        samples: [
+          { ...idleSample, slot: 4 },
+          { ...idleSample, slot: 4 },
+          { ...idleSample, slot: 4 },
+        ],
+      }),
+    );
+    await wait(20);
+    unfairServer.tick(20);
+    flagWorld.players.position.set([0, 0, 8], targetId * 3);
+    const fire: NetInputSample = { ...idleSample, slot: 4, fire: true };
+    shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
+    await wait(20);
+    unfairServer.tick(21);
+
+    // Alive again at their pre-tick health (the undo floors at the pre-tick damage level so
+    // a clamped killing blow cannot leave the victim healthier than they started), the flag
+    // back in their hands before any client ever saw it drop, no kill credited, and no
+    // PlayerKilled event on the wire -- the only event this tick produces is the reshaped
+    // LaserFired miss.
+    expect(flagWorld.players.alive[targetId]).toBe(1);
+    expect(flagWorld.players.damage[targetId]).toBe(LIGHT_ARMOR.maxDamage - 0.01);
+    expect(flagWorld.players.score[welcome.playerId] ?? 0).toBe(0);
+    expect(flagWorld.flags.state[1]).toBe(FlagState.Carried);
+    expect(flagWorld.flags.carrierId[1]).toBe(targetId);
+    expect(flagWorld.pendingDeaths).toHaveLength(0);
+    const event = decodeEvent(await receive(shooter));
+    expect(event.kind).toBe(EventKind.LaserFired);
+    expect(event.b).toBe(-1);
+    shooter.close();
+    unfairServer.close();
+  });
+
+  it("honors a live hit the shooter's rewound view confirms, applying it exactly once (issue #10)", async () => {
+    // Regression guard for the validation itself: when the rewound view reproduces the live
+    // hit on the same target, nothing is rejected and nothing is re-applied -- exactly one
+    // laser shot's damage, as before issue #10's fix existed.
+    let clock = 0;
+    const fairServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world,
+      spawns,
+      port: TEST_PORT + 34,
+      now: () => clock,
+    });
+    await fairServer.ready;
+    const targetId = addPlayer(world, { x: 0, y: 0, z: 8 }, 2);
+    const shooter = await connect(TEST_PORT + 34);
+    const welcomePromise = receive(shooter);
+    shooter.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    world.players.position.set([0, 0, 0], welcome.playerId * 3);
+
+    const firstPromise = receive(shooter);
+    fairServer.tick(2);
+    const first = decodeSnapshot(await firstPromise, null);
+    clock = 150;
+    shooter.send(encodeAck({ snapshotId: first.snapshotId }));
+    await wait(20);
+    for (let step = 0; step < 6; step += 1) {
+      world.players.position.set([0, 0, 8], targetId * 3);
+      fairServer.tick(3 + step);
+    }
+    shooter.send(
+      encodeInput({
+        sequence: 1,
+        samples: [
+          { ...idleSample, slot: 4 },
+          { ...idleSample, slot: 4 },
+          { ...idleSample, slot: 4 },
+        ],
+      }),
+    );
+    await wait(20);
+    fairServer.tick(20);
+    const fire: NetInputSample = { ...idleSample, slot: 4, fire: true };
+    shooter.send(encodeInput({ sequence: 2, samples: [fire, fire, fire] }));
+    await wait(20);
+    fairServer.tick(21);
+
+    // One laser shot on this fixture: 0.4 direct × 1.3 head multiplier (the horizontal ray
+    // meets the hit sphere in its top band). Exactly once -- never rejected, never re-applied.
+    expect(world.players.damage[targetId]).toBeCloseTo(0.52, 5);
+    expect(world.players.alive[targetId]).toBe(1);
+    shooter.close();
+    fairServer.close();
   });
 
   it('does not keep rewinding or re-hitting a target merely because fire is held through reload (Codex PR #9 round 3, P1 finding 3)', async () => {
@@ -1813,11 +2107,45 @@ describe('startNetServer', () => {
     client.send(encodeJoin());
     await welcomePromise;
 
-    client.send(encodeLoadout({ armor: 2, repairPack: true }));
+    client.send(encodeLoadout({ armor: 2, pack: 1, weapons: 0 }));
     await wait(10);
     loadoutServer.tick(1);
     expect(loadoutWorld.players.armor[0]).toBe(2);
     expect(loadoutWorld.players.hasRepairPack[0]).toBe(1);
+    client.close();
+    loadoutServer.close();
+  });
+
+  it('a Loadout message selects an energy pack and carried weapons when the player is at a powered station (#55)', async () => {
+    // Same fixture as the repair-pack test above; the new pack/weapons fields ride the same
+    // Loadout message -- the energy pack replaces the repair pack (mutually exclusive), and
+    // the weapons bitmask re-arms exactly the slots whose bits are set.
+    const loadoutWorld = createWorld(terrain, 1, 8);
+    createBaseObjects(loadoutWorld, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 1, y: 0, z: 0 } },
+    ]);
+    stepPower(loadoutWorld);
+    const loadoutSpawns: SceneSpawn[] = [{ name: null, team: 1, position: [1, 0, 0], radius: 5 }];
+    const loadoutServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world: loadoutWorld,
+      spawns: loadoutSpawns,
+      port: TEST_PORT + 16,
+    });
+    await loadoutServer.ready;
+    const client = await connect(TEST_PORT + 16);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    await welcomePromise;
+
+    client.send(encodeLoadout({ armor: 2, pack: 2, weapons: 0b00111 }));
+    await wait(10);
+    loadoutServer.tick(1);
+    expect(loadoutWorld.players.armor[0]).toBe(2);
+    expect(loadoutWorld.players.hasEnergyPack[0]).toBe(1);
+    expect(loadoutWorld.players.hasRepairPack[0]).toBe(0);
     client.close();
     loadoutServer.close();
   });

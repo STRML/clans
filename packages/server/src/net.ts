@@ -8,22 +8,26 @@ import {
   WeaponId,
   addPlayer,
   applyDamage,
-  applyLoadoutRequest,
+  applyLoadoutSelection,
+  armorFor,
   deactivateProjectile,
   dueForRespawn,
   hitTestFireEvent,
   playerHitbox,
   removePlayer,
   respawnPlayer,
+  resyncCarriedFlagPositions,
   serializeActivePlayers,
   serializeActiveVehicles,
   setGodMode,
   requestVehicleAtPad,
   stepWorld,
   VEHICLE_PAD_USE_RADIUS,
+  type ArmorData,
   type FireEvent,
   type HitResult,
   type PlayerInput,
+  type PlayerSnapshotData,
   type World,
 } from '@clans/sim';
 import {
@@ -65,7 +69,14 @@ import {
 } from './lagcomp.js';
 import { currentOrder, issueOrder, type OrderBoard } from './orders.js';
 import { applyInputMessage, createSession, recordAck, type Session } from './session.js';
-import { needsFullSnapshot } from './snapshot-policy.js';
+import {
+  createRelevanceCache,
+  needsFullSnapshot,
+  relevantSnapshotForViewer,
+  type BaseObjectPlacement,
+  type InteriorFootprint,
+  type RelevanceCache,
+} from './snapshot-policy.js';
 import { rebalanceTeams, stepBotManager, type BotManager } from './bots.js';
 import {
   dropFlagsCarriedBy,
@@ -119,6 +130,10 @@ interface ClientEntry {
   lastInput: PlayerInput;
   /** Round-trip time to this client, in ms, from its most recent ack. Drives lag comp. */
   pingMs: number;
+  /** Per-client sparse-entity memory for the #5 relevance policy -- the last data actually
+   *  sent for each distant player, so a player between its low-rate updates is re-sent
+   *  stale (diffing clean, persisting client-side) instead of being read as removed. */
+  relevance: RelevanceCache;
 }
 export interface FlagSnapshotForDiff {
   state: number;
@@ -211,6 +226,7 @@ function handleJoin(
     pendingInputs: [],
     lastInput: IDLE_INPUT,
     pingMs: 0,
+    relevance: createRelevanceCache(),
   });
   socket.send(
     encodeWelcome({
@@ -296,8 +312,13 @@ function handleLoadout(
 ): void {
   const entry = clients.get(socket);
   if (!entry) return;
-  const { armor, repairPack } = decodeLoadout(bytes);
-  applyLoadoutRequest(world, entry.session.playerId, armor, repairPack);
+  // #55: the loadout message now carries the full station selection -- armor, the chosen
+  // pack, and the carried-weapons bitmask -- not just armor + repair pack. decodeLoadout
+  // already rejects an out-of-range pack and masks the weapons byte; applyLoadoutSelection
+  // re-checks station presence/power server-side and sanitizes the mask against the armor,
+  // silently returning false on a refused request (same failure-matrix row 4 convention).
+  const { armor, pack, weapons } = decodeLoadout(bytes);
+  applyLoadoutSelection(world, entry.session.playerId, armor, pack, weapons);
 }
 
 /** A refused request (unpowered pad, team already at its pad-derived cap, bad pad id, or the
@@ -453,20 +474,21 @@ function handleClose(
   clients.delete(socket);
 }
 
+/**
+ * `full` is the needsFullSnapshot verdict for THIS client, computed by the caller: the
+ * relevance policy needs the same bit to decide whether distant players go out fresh
+ * (a resync always carries current state) or on the sparse cadence.
+ */
 function sendSnapshot(
   entry: ClientEntry,
   nextSnapshotId: number,
   tickNumber: number,
-  players: ReturnType<typeof serializeActivePlayers>,
+  full: boolean,
+  players: PlayerSnapshotData[],
   extras: WorldExtras,
   now: () => number,
 ): void {
-  const useFull = needsFullSnapshot(
-    entry.session.lastAckedSnapshotId,
-    entry.session.lastAckedAt,
-    now(),
-  );
-  const baseline = useFull ? null : ackedBaseline(entry);
+  const baseline = full ? null : ackedBaseline(entry);
   const bytes = encodeSnapshot(
     nextSnapshotId,
     tickNumber,
@@ -478,6 +500,23 @@ function sendSnapshot(
   entry.sent.push({ snapshotId: nextSnapshotId, players, sentAt: now() });
   if (entry.sent.length > SNAPSHOT_HISTORY_DEPTH) entry.sent.shift();
   entry.socket.send(bytes);
+}
+
+/** The per-base-object placement facts the #5 relevance policy needs but the wire format
+ * doesn't carry: BaseObjectSnapshotData is id/damage/destroyed/powered/energy only, so the
+ * "hidden interior item far away" test runs against these positions (read once per send
+ * from world.baseObjects, never per client). */
+function baseObjectPlacementsFor(world: World): BaseObjectPlacement[] {
+  const placements: BaseObjectPlacement[] = [];
+  for (let id = 0; id < world.baseObjects.count; id += 1) {
+    placements.push({
+      id,
+      x: world.baseObjects.position[id * 3] ?? 0,
+      z: world.baseObjects.position[id * 3 + 2] ?? 0,
+      kind: world.baseObjects.kind[id] ?? 0,
+    });
+  }
+  return placements;
 }
 
 /** One input per connected player for this tick: the next queued sample, or a hold of the last. */
@@ -740,17 +779,32 @@ function pingForPlayer(clients: Map<WebSocket, ClientEntry>, playerId: number): 
   return 0;
 }
 
-/** The damage a lag-compensated correction hit deals, computed while the target's position
- * is still substituted with its rewound value (the Laser Rifle's headshot check reads that
- * position's hitbox). Mirrors `resolveHitscan`'s own head-multiplier math for the Laser
- * Rifle; the Chaingun's live `resolveImpact` never applies one, so this doesn't either. */
-function correctionDamage(world: World, event: FireEvent, result: HitResult): number {
+/** The damage a lag-compensated hit deals, computed while the target's position is still
+ * substituted with its rewound value (the Laser Rifle's headshot check reads that position's
+ * hitbox). Mirrors `resolveHitscan`'s own head-multiplier math for the Laser Rifle; the
+ * Chaingun's live `resolveImpact` never applies one, so this doesn't either. `armor` feeds
+ * only the hitbox geometry: corrections standardize on LIGHT_ARMOR (the historical behavior
+ * every existing correction test pins), while the issue #10 undo passes the victim's real
+ * armor so the reverted amount is EXACTLY what `resolveHitscan` applied live. */
+function correctionDamage(
+  world: World,
+  event: FireEvent,
+  result: HitResult,
+  armor: ArmorData = LIGHT_ARMOR,
+): number {
   const data = WEAPON_DATA[event.weaponId];
   if (data.projectile !== null || result.hitPlayerId < 0) return data.directDamage;
-  const hitbox = playerHitbox(world, result.hitPlayerId, LIGHT_ARMOR);
+  const hitbox = playerHitbox(world, result.hitPlayerId, armor);
   const multiplier =
     result.hitPoint && result.hitPoint.y >= hitbox.headY ? (data.headMultiplier ?? 1) : 1;
   return data.directDamage * event.energyScale * multiplier;
+}
+
+/** The pre-stepWorld damage/respawnAt snapshot runOneTick captures for the issue #10
+ * live-hit rejection: the smallest state an un-kill has to restore without re-simulating. */
+interface PreTickPlayerState {
+  damage: Float64Array;
+  respawnAt: Float64Array;
 }
 
 /**
@@ -758,66 +812,191 @@ function correctionDamage(world: World, event: FireEvent, result: HitResult): nu
  * ran once, completely, against every player's TRUE position -- no rewind, so nothing it
  * touched (energy, ammo, velocity, fall damage, ...) was ever corrupted, and
  * `world.lastFireEvents` already carries the live, non-lag-compensated hit-test result for
- * every same-tick hitscan/tracer shot fired this tick. This function's only job is a narrow,
- * side-effect-free RECHECK of those specific events: for each one the live sim did NOT
- * register a hit on, and whose shooter has meaningful ping, substitute (position only --
- * nothing else) every other active player's position with their recorded value from
- * `rewindTicks` ago, redo just the hit-test via `@clans/sim`'s `hitTestFireEvent`, and
- * restore true positions immediately after. A hit this recheck finds that the live
- * simulation didn't is applied directly via `applyDamage` as a legitimate server-side
- * correction; a hit the live simulation already registered is never revisited or undone --
- * lag compensation is only ever generous to the shooter (P1 finding 3: eligibility here is
- * driven by `world.lastFireEvents`, i.e. a shot with real game effect, never raw
- * `input.fire`, which used to trigger a rewind on every held-trigger tick regardless of
- * reload/ammo/death state).
+ * every same-tick hitscan/tracer shot fired this tick. For each such event whose shooter has
+ * meaningful ping, this substitutes (position only -- nothing else) every other active
+ * player's position with their recorded value from `rewindTicks` ago, redoes just the
+ * hit-test via `@clans/sim`'s `hitTestFireEvent`, and restores true positions immediately
+ * after -- a narrow, side-effect-free recheck, never a substitution before or during
+ * `stepWorld` (eligibility is driven by `world.lastFireEvents`, i.e. a shot with real game
+ * effect, never raw `input.fire`, which used to trigger a rewind on every held-trigger tick
+ * regardless of reload/ammo/death state -- P1 finding 3).
  *
- * Codex round 4, finding 2: this correction runs entirely after `stepWorld` -- and therefore
- * after that tick's `stepFlags` -- so a kill it produces can never be seen by
- * `dropCarriedFlagsOnDeath`'s own `pendingDeaths` pass, and the *next* tick's `stepPlayers`
- * clears `pendingDeaths` before that next tick's `stepFlags` gets a chance either. A flag
- * carried by a player this correction kills would stay `Carried` by a corpse forever. This
- * calls `dropFlagsCarriedBy` -- the exact same synchronous mechanism `handleClose` already
- * uses for the identical disconnect-timing problem -- immediately once `applyDamage` leaves
- * the target dead.
+ * Issue #10: that recheck is no longer one-sided. The rewound result is the shooter's own
+ * view of the shot, and it now arbitrates LIVE hits too, not just misses:
+ *
+ * - a live miss the rewound view turns into a hit is granted (the historical correction
+ *   path, unchanged below);
+ * - a live hit the rewound view reproduces on the same target is honored untouched;
+ * - a live hit the rewound view does NOT reproduce -- the target walked onto the ray only
+ *   by server processing time, somewhere the shooter's screen never showed them -- is
+ *   rejected: `rejectLiveHit` removes exactly the damage that hit applied (un-killing the
+ *   victim if it was the killing blow), and the event is reshaped into the miss the
+ *   shooter's view actually shows, so every downstream consumer (LaserFired's target and
+ *   beam endpoint, kill broadcasts) sees the honest result.
+ *
+ * A hit the recheck retargets to a different player applies the correction path to the new
+ * target on top of the rejection -- the same generosity rule the miss path always had.
+ * The rejection never re-runs or rewinds the world itself: earlier designs that substituted
+ * positions before `stepWorld` corrupted everything else the tick simulated (Codex PR #9
+ * round 3, P1 finding 1), so this stays a post-hoc, position-only recheck whose only
+ * side effects are the deliberate bookkeeping reversals in `rejectLiveHit`.
+ *
+ * Codex round 4, finding 2: the correction path runs entirely after `stepWorld` -- and
+ * therefore after that tick's `stepFlags` -- so a kill it produces can never be seen by
+ * `dropCarriedFlagsOnDeath`'s own `pendingDeaths` pass. It calls `dropFlagsCarriedBy` --
+ * the exact synchronous mechanism `handleClose` uses for the identical disconnect-timing
+ * problem -- immediately once `applyDamage` leaves the target dead. A REJECTED live hit has
+ * the opposite timing: its victim died (if at all) inside `stepWorld`, so the flag drop and
+ * death bookkeeping already happened there, and `unkillPlayer` reverses each piece.
  */
 function applyLagCompensatedHits(
   world: World,
   clients: Map<WebSocket, ClientEntry>,
   history: PositionHistory,
+  flagsBefore: FlagSnapshotForDiff[],
+  preTick: PreTickPlayerState,
 ): void {
   for (const event of world.lastFireEvents) {
-    // Round 4: only recheck a genuine live miss. `resolved` is false when the shot never
-    // actually ran its hit-test at all (e.g. the 256-slot projectile store was full), which
-    // otherwise looks identical to a real miss (`hitPlayerId === -1`) and would let lag comp
-    // apply damage from a "shot" that structurally never existed.
-    if (!HITSCAN_WEAPONS.has(event.weaponId) || !event.resolved || event.hitPlayerId !== -1)
-      continue;
+    // Round 4: only recheck a shot that actually ran its hit-test. `resolved` is false when
+    // the shot never did (e.g. the 256-slot projectile store was full), which otherwise
+    // looks identical to a real miss (`hitPlayerId === -1`) and would let lag comp apply
+    // damage from a "shot" that structurally never existed.
+    if (!HITSCAN_WEAPONS.has(event.weaponId) || !event.resolved) continue;
     // Codex review round 16, finding 2: pingMs is measured snapshot-send to ack-receive, a
     // full round trip -- but what the shooter's screen actually shows is delayed by only the
     // one-way leg (server-to-client), so the rewind amount must be half the RTT, not the whole
     // thing. Rewinding by the full RTT overshoots the shooter's real view by ~2x, moving
     // targets further back than their screen ever showed and both granting hits that were
-    // never earned and (via REWIND_CAP_MS) capping out at half the intended reach.
+    // never earned and (via REWIND_CAP_MS) capping out at half the intended reach. A shooter
+    // with no measurable ping has no view/server gap to compensate in either direction, so
+    // their live result stands unvalidated -- exactly the pre-#10 behavior for misses too.
     const pingMs = pingForPlayer(clients, event.playerId) / 2;
     const rewindTicks = Math.round(Math.min(pingMs, REWIND_CAP_MS) / FIXED_TICK_MS);
     if (rewindTicks <= 0) continue;
     const handle = rewindOthers(world, history, [event.playerId], rewindTicks);
     const result = hitTestFireEvent(world, event, FIXED_DT);
-    const damage = correctionDamage(world, event, result);
     restorePositions(world, handle);
+    if (event.hitPlayerId !== -1) {
+      // Issue #10: a live hit stands only if the shooter's own rewound view reproduces it
+      // on the same target. Anything else -- the view misses, or shows a DIFFERENT player
+      // on the ray -- is rejected first; a different-view target then falls through to the
+      // correction path below and receives the hit the shooter's screen actually earned.
+      if (result.hitPlayerId === event.hitPlayerId) continue;
+      rejectLiveHit(world, event, preTick, flagsBefore);
+    }
     if (result.hitPlayerId < 0) continue;
     event.hitPlayerId = result.hitPlayerId;
     event.hitPoint = result.hitPoint;
+    const damage = correctionDamage(world, event, result);
     applyDamage(world, result.hitPlayerId, damage, event.playerId, LIGHT_ARMOR);
     // Consume the still-flying Tracer this event spawned so it can't score a second,
     // independent hit on a later tick -- see FireEvent.projectileId and
     // deactivateProjectile's own comments (Codex review round 5, finding 1). A no-op for
-    // the Laser Rifle, which never spawns a projectile at all (projectileId stays -1).
-    // #52: the rewound contact point rides along so the corrected hit also produces the
-    // same authoritative Direct impact record a live hit would have.
+    // the Laser Rifle, which never spawns a projectile at all (projectileId stays -1), and
+    // for a REJECTED live Chaingun hit, whose tracer already resolved and freed itself live
+    // inside stepWorld. That live resolution also left an authoritative Direct impact record
+    // at the true contact point (#52); it stands -- the tracer really did strike the target
+    // at server-time truth, only the credit is reversed -- and recordImpact's exactly-once
+    // shape is never touched here.
     deactivateProjectile(world, event.projectileId, result.hitPoint);
     if (!world.players.alive[result.hitPlayerId]) dropFlagsCarriedBy(world, result.hitPlayerId);
   }
+}
+
+/**
+ * Reverses one live hit the shooter's rewound view contradicted (issue #10): subtracts the
+ * exact damage the live hit applied, and, when that hit was what killed the victim, un-kills
+ * them (see `unkillPlayer`). The event itself is reshaped into a miss so the later event
+ * drains (`laserEvents`' target/beam endpoint) broadcast what the shooter's view showed.
+ */
+function rejectLiveHit(
+  world: World,
+  event: FireEvent,
+  preTick: PreTickPlayerState,
+  flagsBefore: FlagSnapshotForDiff[],
+): void {
+  const victimId = event.hitPlayerId;
+  // The exact amount the live path applied, recomputed from the same inputs
+  // `resolveHitscan`/`resolveImpact` used (the recorded hitPoint carries the live
+  // head-shot decision; the victim's real armor reproduces their live hitbox) -- read
+  // before the event is overwritten below. applyDamage is purely additive while the
+  // target lives, so subtracting the same amount is an exact undo; the maxDamage clamp
+  // only ever engages on the killing blow, which is the one case `unkillPlayer` handles.
+  const amount = correctionDamage(
+    world,
+    event,
+    { hitPlayerId: victimId, hitPoint: event.hitPoint },
+    armorFor(world, victimId),
+  );
+  event.hitPlayerId = -1;
+  event.hitPoint = null;
+  const players = world.players;
+  // Subtracting the requested amount is exact while the target lives (applyDamage is
+  // purely additive below maxDamage); on the killing blow the maxDamage clamp applied less
+  // than was requested, so the subtraction is floored at the pre-tick level -- the victim
+  // comes back exactly as healthy as they started the tick, never healthier.
+  players.damage[victimId] = Math.max(
+    preTick.damage[victimId] ?? 0,
+    Math.max(0, (players.damage[victimId] ?? 0) - amount),
+  );
+  if (players.alive[victimId]) return;
+  // Still dead even without this hit's damage: legitimate damage this tick killed them,
+  // and reversing the unfair shot must not resurrect them out of a fair death.
+  if ((players.damage[victimId] ?? 0) >= armorFor(world, victimId).maxDamage) return;
+  unkillPlayer(world, victimId, preTick, flagsBefore);
+}
+
+/** Reverses the death bookkeeping a rejected live hit caused: alive/respawnAt restored to
+ * their pre-tick values, the victim's pendingDeaths entry (and the kill score it credited)
+ * removed before the tick's event drain can broadcast it, and a carried flag the death
+ * dropped this same tick returned to the resurrected carrier. */
+function unkillPlayer(
+  world: World,
+  victimId: number,
+  preTick: PreTickPlayerState,
+  flagsBefore: FlagSnapshotForDiff[],
+): void {
+  const players = world.players;
+  players.alive[victimId] = 1;
+  players.respawnAt[victimId] = preTick.respawnAt[victimId] ?? 0;
+  // Exactly one entry per death exists here (applyDamage stops counting once `alive` is
+  // 0), and removing it before runOneTick's killEvents drain means no PlayerKilled event
+  // ever reaches a client for a hit that -- from the shooter's own view -- never landed.
+  world.pendingDeaths = world.pendingDeaths.filter(({ id, attackerId }) => {
+    if (id !== victimId) return true;
+    // Exact inverse of damage.ts's scoreForDeath for this entry.
+    if (attackerId >= 0) {
+      const sameTeam = players.team[attackerId] === players.team[victimId];
+      const delta = attackerId === victimId ? -10 : sameTeam ? -10 : 10;
+      players.score[attackerId] = (players.score[attackerId] ?? 0) - delta;
+    }
+    return false;
+  });
+  restoreCarriedFlagDroppedByDeath(world, victimId, flagsBefore);
+}
+
+/** Returns the flag the victim was carrying into this tick (per `flagsBefore`) if the death
+ * dropped it and nobody has picked it up in the same tick -- a dropped flag sitting at the
+ * death spot goes back to `Carried` by the resurrected carrier, and a flag an enemy already
+ * grabbed stays grabbed (the grab was real; only the death is reversed). */
+function restoreCarriedFlagDroppedByDeath(
+  world: World,
+  victimId: number,
+  flagsBefore: FlagSnapshotForDiff[],
+): void {
+  let restored = false;
+  for (let flagId = 0; flagId < world.flags.state.length; flagId += 1) {
+    if (flagsBefore[flagId]?.carrierId !== victimId) continue;
+    if ((world.flags.state[flagId] ?? 0) !== FlagState.Dropped) continue;
+    if ((world.flags.carrierId[flagId] ?? -1) !== -1) continue;
+    world.flags.state[flagId] = FlagState.Carried;
+    world.flags.carrierId[flagId] = victimId;
+    restored = true;
+  }
+  // Carried flag positions are synced from their carrier inside stepFlags; the reversal
+  // above happens after that pass, so the restored flag needs one explicit re-sync or it
+  // would render at the death spot while `Carried`.
+  if (restored) resyncCarriedFlagPositions(world);
 }
 
 function snapshotFlags(world: World): FlagSnapshotForDiff[] {
@@ -969,6 +1148,13 @@ export function startNetServer(options: NetServerOptions): NetServer {
   function sendAllSnapshots(): void {
     const players = serializeActivePlayers(options.world);
     const extras = buildExtras(options.world, options.botManager, options.board);
+    // Relevance inputs shared by every client this send (issue #5): interior footprints and
+    // base-object placements come from the same world state the snapshot was built from,
+    // so the per-client views below can never disagree about what exists.
+    const interiors: InteriorFootprint[] = options.world.interiors.map(
+      (instance) => instance.bounds,
+    );
+    const baseObjectPositions = baseObjectPlacementsFor(options.world);
     nextSnapshotId += 1;
     for (const entry of clients.values()) {
       // Codex round 14 (PR #4): sending unconditionally let a slow or unresponsive
@@ -987,15 +1173,41 @@ export function startNetServer(options: NetServerOptions): NetServer {
         entry.socket.terminate();
         continue;
       }
+      const full = needsFullSnapshot(
+        entry.session.lastAckedSnapshotId,
+        entry.session.lastAckedAt,
+        now(),
+      );
+      // Issue #5: the per-client relevance view replaces the old one-roster-fits-all send.
+      // sendSnapshot stores THIS view as the client's next delta baseline, so the stale
+      // distant-player copies the sparse cadence re-sends diff clean against what the
+      // client actually acked.
+      const view = relevantSnapshotForViewer({
+        snapshotId: nextSnapshotId,
+        full,
+        viewerId: entry.session.playerId,
+        players,
+        extras,
+        interiors,
+        baseObjectPositions,
+        cache: entry.relevance,
+      });
       // Report options.world.tick (the value stepWorld just produced), not the loop's own
       // tickNumber argument (the pre-step value): see issue #6.
-      sendSnapshot(entry, nextSnapshotId, options.world.tick, players, extras, now);
+      sendSnapshot(entry, nextSnapshotId, options.world.tick, full, view.players, view.extras, now);
     }
   }
 
   function runOneTick(inputs: Map<number, PlayerInput>): void {
     recordHistory(history, options.world);
     const flagsBefore = snapshotFlags(options.world);
+    // Per-player pre-tick damage/respawnAt, for the issue #10 live-hit validation below:
+    // reverting exactly the damage one live hit applied needs the damage level the target
+    // had BEFORE stepWorld ran, captured without rewinding or re-stepping anything.
+    const preTick = {
+      damage: Float64Array.from(options.world.players.damage),
+      respawnAt: Float64Array.from(options.world.players.respawnAt),
+    };
 
     // stepWorld always runs against every player's TRUE position now -- see
     // applyLagCompensatedHits's own comment for why. Its own hit-test result on
@@ -1012,7 +1224,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
     // own guard means neither of these ever has fresh sim state to react to again anyway.
     if (!options.world.gameOver) {
       respawnDuePlayers(options.world, options.spawns, history);
-      applyLagCompensatedHits(options.world, clients, history);
+      applyLagCompensatedHits(options.world, clients, history, flagsBefore, preTick);
     }
 
     for (const event of killEvents(options.world)) broadcastEvent(clients, event);
