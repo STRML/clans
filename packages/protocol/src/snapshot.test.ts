@@ -437,7 +437,7 @@ describe('snapshot codec', () => {
     // since Task 6, and the sim-side round trip is already covered directly -- but
     // writePlayerFull/readPlayerFull never actually put either field on the wire, so a
     // decoded/reconstructed player always came back Light/no-pack regardless of what a real
-    // station visit (applyLoadoutRequest) had set. Exercise Heavy specifically, not just any
+    // station visit (applyLoadoutSelection) had set. Exercise Heavy specifically, not just any
     // nonzero armor: it's the armor id furthest from the 0 default this bug always produced.
     const source = createWorld(terrain, 1);
     const id = addPlayer(source, { x: 0, y: 0, z: 0 }, 1, ArmorId.Heavy);

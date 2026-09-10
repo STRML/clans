@@ -366,7 +366,7 @@ export function applyBaseObjectSnapshot(
  * `armor` and `pack` decode straight off untrusted wire bytes (protocol/handshake.ts's
  * decodeLoadout), so both are validated here, before any state changes -- decodeLoadout
  * already RangeErrors on a pack byte above PackId.Energy, and this rejects a raw armor u8
- * outside ARMORS the same way the pre-#55 applyLoadoutRequest did (Codex round 1, finding
+ * outside ARMORS the same way the pre-#55 two-choice loadout request did (Codex round 1, finding
  * 3: reject BEFORE writing, or a thrown half-applied loadout poisons the player).
  * `weapons` is a `1 << WeaponId` bitmask, sanitized against `allowedWeaponMask` for the
  * chosen armor -- a hostile or stale client cannot talk a Light into a Mortar. A mask of 0
@@ -405,19 +405,4 @@ export function applyLoadoutSelection(
   players.hasEnergyPack[playerId] = pack === PackId.Energy ? 1 : 0;
   resetLoadout(world, playerId, data);
   return true;
-}
-
-/**
- * The pre-#55 two-choice shape (armor + Repair Pack), kept for callers that predate the
- * full loadout wire: an empty weapon mask expands to the armor's full ALLOWED set (see
- * applyLoadoutSelection), and the pack byte collapses to Repair-or-None exactly as it
- * always did. Body is applyLoadoutSelection.
- */
-export function applyLoadoutRequest(
-  world: World,
-  playerId: number,
-  armor: ArmorId,
-  repairPack: boolean,
-): boolean {
-  return applyLoadoutSelection(world, playerId, armor, repairPack ? PackId.Repair : PackId.None, 0);
 }

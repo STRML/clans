@@ -230,7 +230,7 @@ const HEADER_BYTES = 1 + 4 + 4 + 4 + 4 + 1; // type, snapshotId, baselineId, tic
 // carried these since serializePlayer/deserializePlayer were written, and the sim-side round
 // trip (snapshot.test.ts in packages/sim) already exercised them -- but writePlayerFull/
 // readPlayerFull never actually put them on the WIRE, so every decoded player came back
-// hardcoded to Light/no-pack regardless of what a station visit (applyLoadoutRequest) had
+// hardcoded to Light/no-pack regardless of what a station visit (applyLoadoutSelection) had
 // set. A networked client's HUD, prediction (armorFor drives energy/speed caps and fall-
 // damage scaling), and reconcile() all silently disagreed with the server's real loadout.
 // Codex round 1, finding 2.

@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   addPlayer,
-  applyDamage,
   createWorld,
   FIXED_DT,
   LIGHT_ARMOR,
@@ -14,7 +13,6 @@ import { raycastInteriors } from './interiors.js';
 import {
   activeForceFieldBlockers,
   applyBaseObjectDamage,
-  applyLoadoutRequest,
   applyLoadoutSelection,
   allowedWeaponMask,
   BASE_OBJECT_DATA,
@@ -248,64 +246,13 @@ describe('ForceField', () => {
   });
 });
 
-describe('applyLoadoutRequest', () => {
-  it('applies armor, full heal, full energy, and the repair pack choice at a powered station', () => {
-    const world = createWorld(flat, 1);
-    const { station } = twoGeneratorsOneStation(world);
-    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
-    applyDamage(world, player, 0.3, -1, LIGHT_ARMOR);
-    world.players.energy[player] = 0;
-    const applied = applyLoadoutRequest(world, player, ArmorId.Heavy, true);
-    expect(applied).toBe(true);
-    expect(world.players.armor[player]).toBe(ArmorId.Heavy);
-    expect(world.players.damage[player]).toBe(0);
-    expect(world.players.energy[player]).toBe(HEAVY_ARMOR.maxEnergy);
-    expect(world.players.hasRepairPack[player]).toBe(1);
-    void station;
-  });
-  it('failure matrix row 4: refuses when the station is not powered, player keeps their old loadout', () => {
-    const world = createWorld(flat, 1);
-    const { gen1, gen2 } = twoGeneratorsOneStation(world);
-    const overkill = BASE_OBJECT_DATA[BaseObjectKind.Generator].maxHealth * 10;
-    applyBaseObjectDamage(world, gen1, overkill);
-    applyBaseObjectDamage(world, gen2, overkill);
-    stepPower(world);
-    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
-    const applied = applyLoadoutRequest(world, player, ArmorId.Heavy, true);
-    expect(applied).toBe(false);
-    expect(world.players.armor[player]).toBe(ArmorId.Light);
-  });
-  it('refuses outside the use radius', () => {
-    const world = createWorld(flat, 1);
-    twoGeneratorsOneStation(world);
-    const player = addPlayer(world, { x: 10 + STATION_USE_RADIUS + 5, y: 0, z: 0 }, 1);
-    expect(applyLoadoutRequest(world, player, ArmorId.Medium, false)).toBe(false);
-  });
-  it('rejects an out-of-range armor byte and leaves the player untouched -- Codex round 1, finding 3', () => {
-    // decodeLoadout (protocol/handshake.ts) reads armor as a raw u8 off the wire, so a
-    // malicious or buggy client can send any value 0-255, not just a real ArmorId (0-2).
-    // Before this fix, ARMORS[armor] was undefined for anything out of range, and
-    // `players.armor[playerId] = armor` had already run by the time `data.maxEnergy` threw --
-    // poisoning the player's armor field with the invalid byte before the exception unwound
-    // into server/net.ts's handleLoadout, which has no catch of its own around applyLoadoutRequest.
-    const world = createWorld(flat, 1);
-    twoGeneratorsOneStation(world);
-    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
-    const invalidArmor = 99 as ArmorId;
-    expect(() => applyLoadoutRequest(world, player, invalidArmor, true)).not.toThrow();
-    expect(applyLoadoutRequest(world, player, invalidArmor, true)).toBe(false);
-    expect(world.players.armor[player]).toBe(ArmorId.Light);
-    expect(world.players.hasRepairPack[player]).toBe(0);
-  });
-});
-
 describe('applyLoadoutSelection (#55)', () => {
   it('applies an Energy Pack: mutually exclusive with the Repair Pack, full energy restore', () => {
     const world = createWorld(flat, 1);
     twoGeneratorsOneStation(world);
     const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
     // Arrive already wearing a Repair Pack: the station replaces the whole pack.
-    expect(applyLoadoutRequest(world, player, ArmorId.Light, true)).toBe(true);
+    expect(applyLoadoutSelection(world, player, ArmorId.Light, PackId.Repair, 0)).toBe(true);
     const applied = applyLoadoutSelection(world, player, ArmorId.Light, PackId.Energy, 0b01000);
     expect(applied).toBe(true);
     expect(world.players.hasEnergyPack[player]).toBe(1);
@@ -362,12 +309,12 @@ describe('applyLoadoutSelection (#55)', () => {
     expect(world.players.weaponSlot[player]).toBe(WeaponId.Spinfusor);
   });
 
-  it('the two-choice applyLoadoutRequest path lands on the armor full allowed set', () => {
+  it('an empty weapon mask lands on the armor full allowed set', () => {
     const world = createWorld(flat, 1);
     twoGeneratorsOneStation(world);
     const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
     applyLoadoutSelection(world, player, ArmorId.Light, PackId.None, 0b00001);
-    applyLoadoutRequest(world, player, ArmorId.Light, false);
+    applyLoadoutSelection(world, player, ArmorId.Light, PackId.None, 0);
     // An empty mask expands to the armor's full ALLOWED set (see applyLoadoutSelection),
     // so the Chaingun comes back with its armor ammo, explicitly carried.
     expect(world.players.carriedWeapons[player]).toBe(allowedWeaponMask(LIGHT_ARMOR));
