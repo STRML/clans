@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createWorld, LIGHT_ARMOR, type Heightfield } from '@clans/sim';
+import { addPlayer, createWorld, LIGHT_ARMOR, type Heightfield } from '@clans/sim';
 import {
   checkStuck,
   STUCK_CHECK_TICKS,
@@ -155,7 +155,9 @@ describe('steerToward goal-drift repath (closes #33)', () => {
       LIGHT_ARMOR,
       60,
     );
-    expect(runtime.path.at(-1)).toEqual({ x: 100, z: 0 });
+    // Waypoints now carry their y along (issue #32 pocket detection reads it); flat
+    // worlds snap every y to 0.
+    expect(runtime.path.at(-1)).toEqual({ x: 100, z: 0, y: 0 });
 
     // Same goalKey, goal moved 100 m -- far past GOAL_DRIFT_REPATH_M (6 m).
     steerToward(
@@ -170,6 +172,60 @@ describe('steerToward goal-drift repath (closes #33)', () => {
       LIGHT_ARMOR,
       60,
     );
-    expect(runtime.path.at(-1)).toEqual({ x: 0, z: 0 });
+    expect(runtime.path.at(-1)).toEqual({ x: 0, z: 0, y: 0 });
+  });
+});
+
+describe('steerToward fall arrest (issue #32)', () => {
+  /** Drops bot 1 at `height` above the flat ground with vertical velocity `vy` and runs
+   *  one steerToward toward (100, 0, 0). Fall damage is the measured #1 carrier killer on
+   *  real Katabatic (every carrier death in the traced seed-1 production match was
+   *  attackerId -1 at 30-90 m/s landing speeds), so an airborne bot whose predicted
+   *  landing speed clears the damage-free minJumpSpeed by a real margin must spend jets
+   *  on the fall. */
+  function steerFalling(height: number, vy: number, onGround: number) {
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: height, z: 0 }, 1);
+    world.players.velocity.set([0, vy, 0], bot * 3);
+    world.players.onGround[bot] = onGround;
+    const graph = buildWaypointGraph([
+      { position: { x: 0, y: 0, z: 0 }, label: 'a' },
+      { position: { x: 100, y: 0, z: 0 }, label: 'b' },
+    ]);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    return steerToward(
+      graph,
+      world,
+      1,
+      runtime,
+      bot,
+      { x: 100, y: 0, z: 0 },
+      'goal:far',
+      { x: 0, y: height, z: 0 },
+      LIGHT_ARMOR,
+      60,
+    );
+  }
+
+  it('jets a fast high fall instead of eating the landing', () => {
+    // 50 m up at vy -30: predicted impact sqrt(30^2 + 2*20*50) ~= 54 m/s -- nearly twice
+    // the damage-free landing speed. The arrest also suppresses the held-jump landing hop,
+    // which would re-launch the fall it just paid energy to soften.
+    const input = steerFalling(50, -30, 0);
+    expect(input.jet).toBe(true);
+    expect(input.jump).toBe(false);
+  });
+
+  it('never burns energy on a grounded bot', () => {
+    const input = steerFalling(0, 0, 1);
+    expect(input.jet).toBe(false);
+    expect(input.jump).toBe(false);
+  });
+
+  it('leaves short low-speed hops alone: predicted impact under the damage threshold', () => {
+    // 3 m up at vy -10: predicted impact ~= 14.8 m/s, UNDER LIGHT minJumpSpeed (20) --
+    // the landing is free, and the ski-hop that launched it is the point of skiing.
+    const input = steerFalling(3, -10, 0);
+    expect(input.jet).toBe(false);
   });
 });

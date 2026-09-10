@@ -1,4 +1,5 @@
 import {
+  GRAVITY,
   raycastInteriors,
   sampleTerrain,
   type ArmorData,
@@ -228,7 +229,10 @@ function ensurePath(
     drifted;
   if (!needsNewPath) return;
   const path = findPath(graph, world, team, from, goal);
-  runtime.path = (path ?? [goal]).map((p) => ({ x: p.x, z: p.z }));
+  // The waypoint y rides along (issue #32): the pocket detector needs to know when the
+  // current waypoint stands far overhead -- unreachable by walking -- which raw x/z threw
+  // away. Steering still moves on x/z only.
+  runtime.path = (path ?? [goal]).map((p) => ({ x: p.x, z: p.z, y: p.y }));
   runtime.pathIndex = 0;
   runtime.goalKey = goalKey;
   runtime.goalPosition = { x: goal.x, z: goal.z };
@@ -237,7 +241,7 @@ function ensurePath(
 function advancePastReachedWaypoints(
   runtime: BotRuntimeState,
   currentPosition: Vec3,
-): { x: number; z: number } | undefined {
+): { x: number; z: number; y?: number } | undefined {
   let target = runtime.path[runtime.pathIndex];
   while (
     target &&
@@ -248,7 +252,38 @@ function advancePastReachedWaypoints(
     runtime.pathIndex += 1;
     target = runtime.path[runtime.pathIndex];
   }
+
   return target;
+}
+
+/** Issue #32: the under-deck pocket detector. A waypoint standing far OVERHEAD is not
+ *  reachable by walking; give the bot POCKET_WINDOW_TICKS to close most of the 2D gap to
+ *  it, and when the gap barely moved, skip the waypoint (applyUnderFloorSkip advances the
+ *  path and arms the jet-escape after repeated skips, as before). This replaces the old
+ *  requirement that the bot be nearly motionless first: the measured pocket failure had
+ *  the carrier ORBITING its overhead waypoint -- displacement well above the crawl floor,
+ *  gap oscillating instead of closing -- so every existing ladder stayed silent for 4700
+ *  ticks. Legs that are legitimately steep climbs close the gap quickly and are never
+ *  skipped; gap closure, not raw movement, is the whole test. */
+const POCKET_WINDOW_TICKS = 90; // Ours, ticks (~3 s).
+const POCKET_MIN_CLOSURE_M = 4; // Ours, meters of gap closure per window.
+
+function updatePocketState(
+  runtime: BotRuntimeState,
+  target: { x: number; z: number; y?: number } | undefined,
+  targetDistance: number,
+  overhead: boolean,
+): boolean {
+  if (!target || !overhead || runtime.escapeJetTicks > 0) {
+    runtime.pocketTicks = 0;
+    return false;
+  }
+  if (runtime.pocketTicks === 0) runtime.pocketBaseGap = targetDistance;
+  runtime.pocketTicks += 1;
+  if (runtime.pocketTicks < POCKET_WINDOW_TICKS) return false;
+  const closed = runtime.pocketBaseGap - targetDistance;
+  runtime.pocketTicks = 0;
+  return closed < POCKET_MIN_CLOSURE_M;
 }
 
 /** Bypasses the graph entirely once stuck STUCK_SKIP_THRESHOLD times in a row against the
@@ -469,6 +504,49 @@ function climbJetWanted(
   );
 }
 
+/** Issue #32: fall damage is the single biggest carrier killer on real Katabatic -- in a
+ *  12k-tick seed-1 production match every carrier death was `attackerId -1`, and the
+ *  damage ledger shows the shape: cumulative landing hits of 0.05-0.29 at landing speeds
+ *  of 30-90 m/s as the route launches off convex ridge rolls and deck lips at ski speed.
+ *  No enemy ever landed the killing blow on a carrier in that trace. Landing speed is the
+ *  whole story (applyFallDamage: (landingSpeed - minJumpSpeed) * speedDamageScale), and a
+ *  jet is worth +jetForce/mass - GRAVITY ~= 6 m/s of impact-speed reduction per second,
+ *  so jetting the fall takes the 0.1-0.2 hits off the board even when it cannot fully
+ *  arrest a 90 m/s ridge drop. Predicts the landing speed from the current vertical
+ *  velocity plus the measured height above terrain, and only spends energy when that
+ *  prediction clears the damage-free landing speed by a real margin -- hops and short
+ *  skis (the ski hop's whole point) never trigger it, so energy stays available for
+ *  climbing and combat. Terrain-height based: over a base interior it reads the ground
+ *  UNDER the building, overestimating the fall -- the safe direction, and the base decks
+ *  are exactly where un-arrested drops hurt. */
+const FALL_ARREST_VY = -10; // Ours, m/s: rising or near-apex falls need no help.
+const FALL_ARREST_MIN_HEIGHT_M = 6; // Ours, meters: anything shorter lands before jets matter.
+// Predicted landings above minJumpSpeed * this get jets: minJumpSpeed is the exact
+// damage-free landing speed, so 1.3x tolerates cosmetic hop damage (0.02-0.04) while
+// catching the 0.1+ falls that actually kill carriers over a 1 km return.
+const FALL_ARREST_IMPACT_FACTOR = 1.3; // Ours.
+
+function fallArrestWanted(
+  world: World,
+  botId: number,
+  currentPosition: Vec3,
+  armor: ArmorData,
+  energy: number,
+): boolean {
+  if (world.players.onGround[botId] === 1) return false;
+  const vy = world.players.velocity[botId * 3 + 1] ?? 0;
+  if (vy > FALL_ARREST_VY) return false;
+  const ground = sampleTerrain(world.terrain, currentPosition.x, currentPosition.z);
+  if (ground.empty) return false;
+  const height = currentPosition.y - (ground.height ?? 0);
+  if (height < FALL_ARREST_MIN_HEIGHT_M) return false;
+  const predictedImpact = Math.sqrt(vy * vy + 2 * GRAVITY * Math.max(0, height));
+  return (
+    predictedImpact > armor.minJumpSpeed * FALL_ARREST_IMPACT_FACTOR &&
+    energy > armor.minJetEnergy * 2
+  );
+}
+
 /** Advances along the current path, repathing on a stale/exhausted path, a changed
  *  goal, or a detected stall (failure matrix row 17). Returns only movement fields --
  *  yaw is decided once, by brain.ts, shared with combat aim (Global Constraints). */
@@ -484,7 +562,8 @@ export function steerToward(
   armor: ArmorData,
   energy: number,
 ): Partial<PlayerInput> & { headingYaw: number } {
-  void botId; // The bot's own id doesn't change the path -- kept for interface symmetry with combat.ts/brain.ts.
+  // botId drives fall arrest (issue #32): the ground-contact and vertical-velocity reads
+  // it needs are per-bot world-store reads, not path inputs.
   ensurePath(graph, world, team, runtime, currentPosition, goalPosition, goalKey);
   // Resolve pathIndex to the real current target BEFORE handleStuck measures progress
   // against it -- otherwise handleStuck would read the stale, not-yet-collapsed index a
@@ -498,7 +577,13 @@ export function steerToward(
       ? Infinity
       : Math.hypot(currentPosition.x - target.x, currentPosition.z - target.z);
   const pin = updatePinState(runtime, currentPosition, targetDistance, goalPosition);
-  if (!target || pin.underFloorSkip) return holdInput(pin.escaping);
+  // Issue #32: a waypoint far overhead whose 2D gap stopped closing is an under-deck
+  // pocket -- skip it regardless of how much the bot is moving (the measured failure had
+  // the carrier orbiting, not frozen). Runs after the pin ladder, never mid-escape.
+  const overhead = (target?.y ?? 0) - currentPosition.y > UNDER_FLOOR_MIN_RISE_M;
+  const pocketSkip = updatePocketState(runtime, target, targetDistance, overhead && !pin.escaping);
+  if (pocketSkip) applyUnderFloorSkip(runtime);
+  if (!target || pocketSkip) return holdInput(pin.escaping);
   const dx = target.x - currentPosition.x,
     dz = target.z - currentPosition.z;
   const length = Math.hypot(dx, dz) || 1;
@@ -510,12 +595,13 @@ export function steerToward(
   pin.deflected = runtime.avoidDeflectionDeg !== 0;
   const headingYaw = Math.atan2(direction.x, direction.z);
   const slope = slopeAssist(world, currentPosition.x, currentPosition.z, headingYaw, energy, armor);
+  const fallArrest = fallArrestWanted(world, runtime.playerId, currentPosition, armor, energy);
   const { moveX, moveZ } = worldDirectionToLocalMove(direction, headingYaw);
   return {
     moveX,
     moveZ,
     headingYaw,
-    ...jumpJetFor(slope, pin, goalPosition, currentPosition, armor, energy),
+    ...jumpJetFor(slope, pin, fallArrest, goalPosition, currentPosition, armor, energy),
   };
 }
 
@@ -526,10 +612,15 @@ function holdInput(escaping: boolean): Partial<PlayerInput> & { headingYaw: numb
 }
 
 /** Vertical inputs for this tick: terrain slope assist plus the #32 ladder (hurdle
- *  jumps, open jet-escape windows, deck-parapet climb jets). */
+ *  jumps, open jet-escape windows, deck-parapet climb jets) plus fall arrest. An active
+ *  fall arrest owns the tick's vertical inputs: it forces jets (you cannot climb and
+ *  arrest a fall at once, and the arrest is the more urgent of the two) and suppresses
+ *  jump -- a held jump does nothing airborne except schedule the landing ski-hop, and
+ *  that hop re-launches the very fall the arrest just spent energy softening. */
 function jumpJetFor(
   slope: { jump: boolean; jet: boolean },
   pin: PinVerdict,
+  fallArrest: boolean,
   goalPosition: Vec3,
   currentPosition: Vec3,
   armor: ArmorData,
@@ -537,9 +628,13 @@ function jumpJetFor(
 ): { jump: boolean; jet: boolean } {
   const climbJet = climbJetWanted(pin, goalPosition, currentPosition, armor, energy);
   return {
-    jump: slope.jump || pin.hurdleJump || pin.escaping,
+    jump: fallArrest ? false : slope.jump || pin.hurdleJump || pin.escaping,
     jet:
-      slope.jet || climbJet || pin.escaping || (pin.hurdleJump && energy > armor.minJetEnergy * 2),
+      slope.jet ||
+      climbJet ||
+      pin.escaping ||
+      fallArrest ||
+      (pin.hurdleJump && energy > armor.minJetEnergy * 2),
   };
 }
 

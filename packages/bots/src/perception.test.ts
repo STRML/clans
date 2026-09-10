@@ -9,6 +9,7 @@ import {
   type Heightfield,
 } from '@clans/sim';
 import {
+  findEnemyFlagCarrier,
   findEscortedCarrier,
   findNearestFriendlyStation,
   findNearestVisibleEnemy,
@@ -168,5 +169,45 @@ describe('findEscortedCarrier', () => {
     const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
     world.flags.carrierId[1] = bot;
     expect(findEscortedCarrier(world, 1, bot)).toBeNull();
+  });
+});
+
+describe('findEnemyFlagCarrier (issue #32)', () => {
+  it('finds the enemy carrying OUR flag', () => {
+    const world = createWorld(flat, 1);
+    createFlags(world, [
+      { team: 1, position: { x: -10, y: 0, z: 0 } },
+      { team: 2, position: { x: 10, y: 0, z: 0 } },
+    ]);
+    addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const thief = addPlayer(world, { x: 5, y: 0, z: 0 }, 2);
+    world.flags.carrierId[0] = thief;
+    expect(findEnemyFlagCarrier(world, 1)).toBe(thief);
+  });
+
+  it('returns null when our flag sits home, dropped, or is carried by nobody alive', () => {
+    const world = createWorld(flat, 1);
+    createFlags(world, [
+      { team: 1, position: { x: -10, y: 0, z: 0 } },
+      { team: 2, position: { x: 10, y: 0, z: 0 } },
+    ]);
+    addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    expect(findEnemyFlagCarrier(world, 1)).toBeNull(); // flag home, carrierId -1
+    const dead = addPlayer(world, { x: 5, y: 0, z: 0 }, 2);
+    world.players.alive[dead] = 0;
+    world.flags.carrierId[0] = dead; // stale id from before the death cleared it
+    expect(findEnemyFlagCarrier(world, 1)).toBeNull();
+  });
+
+  it('never reports a teammate as the thief of our own flag', () => {
+    const world = createWorld(flat, 1);
+    createFlags(world, [
+      { team: 1, position: { x: -10, y: 0, z: 0 } },
+      { team: 2, position: { x: 10, y: 0, z: 0 } },
+    ]);
+    addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const mate = addPlayer(world, { x: 5, y: 0, z: 0 }, 1);
+    world.flags.carrierId[0] = mate;
+    expect(findEnemyFlagCarrier(world, 1)).toBeNull();
   });
 });

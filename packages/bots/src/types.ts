@@ -23,10 +23,13 @@ export interface BotRuntimeState {
   playerId: number;
   role: BotRole;
   state: BotState;
-  /** The current waypoint path, world-space x/z only (y is sampled fresh from terrain
-   *  each tick by steering.ts, since a stored y can go stale if a base object or a
-   *  destroyed structure changes the ground under a queued waypoint). */
-  path: Array<{ x: number; z: number }>;
+  /** The current waypoint path. Movement steers on x/z only; y rides along OPTIONAL so
+   *  steering.ts's pocket detector (#32) can tell when a waypoint stands far overhead --
+   *  unreachable by walking -- without trusting it for movement (a stored y can go stale
+   *  if a base object or a destroyed structure changes the ground under a queued
+   *  waypoint, so nothing but the overhead test may read it). Hand-built escape paths
+   *  (handleStuck) omit y, which simply disables the detector for those legs. */
+  path: Array<{ x: number; z: number; y?: number }>;
   pathIndex: number;
   /** A cheap key identifying what goal produced `path` (e.g. `flag:1` or `station:4`),
    *  so steering.ts/brain.ts can tell "still the same goal" apart from "goal changed,
@@ -108,6 +111,18 @@ export interface BotRuntimeState {
   /** The position steerToward was last called with, for the crawl measurement above.
    *  null until the first call. */
   lastSteerPosition: { x: number; z: number } | null;
+  /** Issue #32: consecutive steerToward calls whose current waypoint stands more than
+   *  UNDER_FLOOR_MIN_RISE_M overhead (the waypoint y rides along in the path now) while
+   *  the 2D gap to it failed to close over a full pocket window. This is the under-deck
+   *  pocket signature measured on the production map: a carrier holding the flag sat at
+   *  y 74 under team-2's deck for 4700 straight ticks, orbiting 12-17 m from a deck-edge
+   *  waypoint at y 88.5 -- raw displacement stayed above the pin detector's crawl floor
+   *  (the orbit itself moved), so neither the crawl ladder nor the stuck streak ever
+   *  fired, and the capture sat in a basement for a third of the match. */
+  pocketTicks: number;
+  /** The gap to the current waypoint when the pocket window opened, for the closure
+   *  test above. */
+  pocketBaseGap: number;
   /** Issue #32: which side (-1 left / +1 right) the last stuck-skip fallback offset its
    *  escape goal to. Consecutive skips alternate sides -- re-ramming the same wall from the
    *  same side on every skip is exactly the "repath recomputes the identical unreachable
@@ -144,6 +159,8 @@ export function createBotRuntimeState(
     healChaseCooldownUntilTick: 0,
     underFloorSkips: 0,
     escapeJetTicks: 0,
+    pocketTicks: 0,
+    pocketBaseGap: 0,
     lastSteerPosition: null,
     stuckSkipSide: 1,
     random: { value: seed || 1 },

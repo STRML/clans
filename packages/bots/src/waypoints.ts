@@ -297,6 +297,103 @@ function closestClearComponentPair(
   return pairs[0] as ClosestPair;
 }
 
+// Issue #32 stepping stones. The production landmark set has nothing in the midfield --
+// every landmark sits at a base, a tower, or a pad -- so inter-base routes cross the map
+// on mergeComponents bridges of 440-470 m (measured on Katabatic: tower-to-tower 442 m,
+// team-2 deck relay to team-1 tower relay 469 m). A single straight bearing that long is
+// unfollowable on foot: local avoidance slides a bot along whatever wall it meets with no
+// sense of the route 400 m away, and the stuck ladder's skips are useless because the
+// "next waypoint" is half a kilometre off. Walking each long edge and dropping standable
+// stepping stones every EDGE_STONE_STEP_M turns one impossible leg into a chain of
+// ordinary ones -- same geometry, same total cost, but each hop is short enough that
+// wall-slide, ski and slope-assist make real progress node to node. This reuses the same
+// clearance-validated graph machinery; it is not a second pathfinder.
+const EDGE_SUBDIVIDE_MIN_M = 120; // Ours, meters: shorter legs are already followable.
+const EDGE_STONE_STEP_M = 80; // Ours, meters: two bot-visibilities per hop.
+
+/** Removes one undirected edge. */
+function removeEdge(edges: Map<number, number[]>, a: number, b: number): void {
+  edges.set(
+    a,
+    (edges.get(a) ?? []).filter((id) => id !== b),
+  );
+  edges.set(
+    b,
+    (edges.get(b) ?? []).filter((id) => id !== a),
+  );
+}
+
+/** Snap one stone to the standable surface under the parent edge's line (plus headroom),
+ *  mirroring relayCandidates' snap -- -Infinity when nothing standable is below. */
+function stonePosition(world: World, a: Vec3, b: Vec3, t: number): Vec3 {
+  const ceiling = a.y + (b.y - a.y) * t + 2;
+  const x = a.x + (b.x - a.x) * t;
+  const z = a.z + (b.z - a.z) * t;
+  const y = standableYAt(world, x, z, ceiling);
+  return { x, y, z };
+}
+
+/** Replaces edge a-b with a chain of stone nodes when every stone lands on something
+ *  standable and every sub-segment stays interior-clear; otherwise leaves the edge
+ *  untouched (a partially followable edge is worse than a connected one -- the chain must
+ *  never be a regression). Interior-less worlds are rejected by the caller. */
+function insertStoneChain(
+  world: World,
+  nodes: WaypointNode[],
+  edges: Map<number, number[]>,
+  aId: number,
+  bId: number,
+): void {
+  const a = (nodes[aId] as WaypointNode).position;
+  const b = (nodes[bId] as WaypointNode).position;
+  const length = distance(a, b);
+  const interiorCount = Math.ceil(length / EDGE_STONE_STEP_M) - 1;
+  const chain: Vec3[] = [];
+  for (let i = 1; i <= interiorCount; i += 1) {
+    const stone = stonePosition(world, a, b, i / (interiorCount + 1));
+    if (stone.y === -Infinity) return;
+    chain.push(stone);
+  }
+  const points = [a, ...chain, b];
+  for (let i = 0; i + 1 < points.length; i += 1) {
+    if (!segmentClearOfInteriors(world.interiors, points[i] as Vec3, points[i + 1] as Vec3)) return;
+  }
+  // The chain commits only as a whole: drop the parent edge (equal total cost would let
+  // Dijkstra keep routing over the unfollowable straight leg) and link stone to stone.
+  removeEdge(edges, aId, bId);
+  let previous = aId;
+  for (const stone of chain) {
+    nodes.push({ id: nodes.length, position: stone, label: 'relay' });
+    addEdge(edges, previous, nodes.length - 1);
+    previous = nodes.length - 1;
+  }
+  addEdge(edges, previous, bId);
+}
+
+/** Splits every edge longer than EDGE_SUBDIVIDE_MIN_M into stepping stones. Runs after
+ *  mergeComponents so the bridges it invents (the longest edges on any real map) are the
+ *  first ones subdivided; connectivity is preserved by construction, so no re-merge is
+ *  needed. Interior-less test worlds keep their exact historical graphs. */
+function subdivideLongEdges(
+  world: World,
+  nodes: WaypointNode[],
+  edges: Map<number, number[]>,
+): void {
+  if (world.interiors.length === 0) return;
+  const long: Array<[number, number]> = [];
+  for (const [aId, list] of edges) {
+    for (const bId of list) {
+      if (aId > bId) continue; // each undirected edge once
+      const d = distance(
+        (nodes[aId] as WaypointNode).position,
+        (nodes[bId] as WaypointNode).position,
+      );
+      if (d > EDGE_SUBDIVIDE_MIN_M) long.push([aId, bId]);
+    }
+  }
+  for (const [aId, bId] of long) insertStoneChain(world, nodes, edges, aId, bId);
+}
+
 /** `world` is optional so existing interior-less callers (unit tests, spawn-only graphs
  *  on flat test terrain) keep their exact historical graphs; with a real world, edges are
  *  interior-validated and clearance-verified relay nodes are appended after the landmark
@@ -332,6 +429,7 @@ export function buildWaypointGraph(
     }
   }
   mergeComponents(nodes, edges, interiors);
+  if (world) subdivideLongEdges(world, nodes, edges);
   return { nodes, edges };
 }
 

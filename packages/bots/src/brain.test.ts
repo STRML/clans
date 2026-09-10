@@ -5,12 +5,20 @@ import {
   createBaseObjects,
   createFlags,
   createWorld,
+  FlagState,
   stepPower,
   stepWorld,
   type Heightfield,
 } from '@clans/sim';
 import { OrderKind, type TeamOrder } from '@clans/protocol';
-import { decideCombat, decideGoal, decideState, stepBot, stepBots } from './brain.js';
+import {
+  decideCombat,
+  decideGoal,
+  decideState,
+  ESCORT_STANDOFF_M,
+  stepBot,
+  stepBots,
+} from './brain.js';
 import { buildWaypointGraph } from './waypoints.js';
 import { BotRole, BotState, createBotRuntimeState } from './types.js';
 
@@ -63,7 +71,7 @@ describe('decideGoal', () => {
     expect(goal.key).toBe('home:0');
   });
 
-  it('a Defender with a living teammate carrying the enemy flag escorts them', () => {
+  it('a Defender with a living teammate carrying the enemy flag escorts them, holding ESCORT_STANDOFF_M off the carrier', () => {
     const world = createWorld(flat, 1);
     setupFlags(world);
     const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
@@ -71,8 +79,50 @@ describe('decideGoal', () => {
     world.flags.carrierId[1] = carrier;
     const runtime = createBotRuntimeState(bot, BotRole.Defender, 1);
     const goal = decideGoal(world, runtime, null);
-    expect(goal.position).toEqual({ x: 20, y: 0, z: 30 });
+    // The hold point sits on the ray from the carrier toward the escort, exactly
+    // ESCORT_STANDOFF_M out: pressing onto the carrier itself shoves it off its route
+    // (players collide), so a bodyguard parks a body-width back on its own side.
+    const from = { x: 20, y: 0, z: 30 };
+    const toward = Math.hypot(0 - from.x, 0 - from.z);
+    const expected = {
+      x: from.x + ((0 - from.x) / toward) * ESCORT_STANDOFF_M,
+      y: 0,
+      z: from.z + ((0 - from.z) / toward) * ESCORT_STANDOFF_M,
+    };
+    expect(goal.position.x).toBeCloseTo(expected.x, 5);
+    expect(goal.position.y).toBeCloseTo(expected.y, 5);
+    expect(goal.position.z).toBeCloseTo(expected.z, 5);
     expect(goal.key).toBe(`escort:${String(carrier)}`);
+  });
+
+  it('a Defender whose own flag is carried by an enemy hunts that carrier (issue #32)', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const thief = addPlayer(world, { x: 55, y: 0, z: -12 }, 2);
+    world.flags.carrierId[0] = thief;
+    world.flags.state[0] = FlagState.Carried;
+    const runtime = createBotRuntimeState(bot, BotRole.Defender, 1);
+    const goal = decideGoal(world, runtime, null);
+    expect(goal.position).toEqual({ x: 55, y: 0, z: -12 });
+    expect(goal.key).toBe(`intercept:${String(thief)}`);
+  });
+
+  it('intercepting a thief outranks escorting a teammate carrier (issue #32)', () => {
+    // Without our own flag home, a capture is refused outright (flags.ts's ownFlagHome),
+    // so the thief is the more valuable target even with a teammate carrier to escort.
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const thief = addPlayer(world, { x: 55, y: 0, z: -12 }, 2);
+    const mate = addPlayer(world, { x: 20, y: 0, z: 30 }, 1);
+    world.flags.carrierId[0] = thief;
+    world.flags.state[0] = FlagState.Carried;
+    world.flags.carrierId[1] = mate;
+    world.flags.state[1] = FlagState.Carried;
+    const runtime = createBotRuntimeState(bot, BotRole.Defender, 1);
+    const goal = decideGoal(world, runtime, null);
+    expect(goal.key).toBe(`intercept:${String(thief)}`);
   });
 
   it('a bot below LOW_HEALTH_FRACTION heads to its nearest friendly station ahead of any CTF goal (Codex review round 1, P1)', () => {
@@ -246,6 +296,47 @@ describe('decideCombat (failure matrix row 9)', () => {
     world.players.alive[carrier] = 0;
     const goal = decideGoal(world, runtime, null);
     expect(goal.key).toBe('home:0');
+  });
+});
+
+describe('defender leash (issue #32)', () => {
+  it('a Defender whose post is gone engages beyond DEFEND_ENGAGE_RADIUS: own flag away', () => {
+    // The previous code leashed every Defender to DEFEND_ENGAGE_RADIUS around the home
+    // stand regardless of the game state -- an interceptor 500 m out chasing the enemy
+    // carrier never fired a shot. With the own flag away there IS no post to hold.
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    // Home stand (flag 0) at (-100, 0, 0): a target 500 m west of it is far outside the
+    // 120 m leash but inside VISION_RANGE (150 m) of the defender standing with it.
+    const bot = addPlayer(world, { x: -120, y: 0, z: 0 }, 1);
+    const thief = addPlayer(world, { x: -135, y: 0, z: 0 }, 2);
+    world.flags.carrierId[0] = thief;
+    world.flags.state[0] = FlagState.Carried;
+    const runtime = createBotRuntimeState(bot, BotRole.Defender, 1);
+    expect(decideCombat(world, runtime).targetId).toBe(thief);
+  });
+
+  it('a Defender escorting a carrier engages beyond DEFEND_ENGAGE_RADIUS', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: -120, y: 0, z: 0 }, 1);
+    const carrier = addPlayer(world, { x: -118, y: 0, z: 0 }, 1);
+    const enemy = addPlayer(world, { x: -135, y: 0, z: 0 }, 2);
+    world.flags.carrierId[1] = carrier;
+    world.flags.state[1] = FlagState.Carried;
+    const runtime = createBotRuntimeState(bot, BotRole.Defender, 1);
+    expect(decideCombat(world, runtime).targetId).toBe(enemy);
+  });
+
+  it('a Defender still holding a post keeps the DEFEND_ENGAGE_RADIUS leash', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    // Defender 100 m from the home stand (-100, 0, 0); enemy 140 m from the stand --
+    // outside the 120 m leash but inside the defender's 150 m vision range.
+    const bot = addPlayer(world, { x: -200, y: 0, z: 0 }, 1);
+    addPlayer(world, { x: -240, y: 0, z: 0 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Defender, 1);
+    expect(decideCombat(world, runtime).targetId).toBeNull();
   });
 });
 

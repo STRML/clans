@@ -114,3 +114,26 @@ export function findEscortedCarrier(world: World, team: number, selfId: number):
   }
   return null;
 }
+
+/** Issue #32: the enemy player currently carrying OUR flag, if any. The mirror of
+ *  findEscortedCarrier: an escort wants the friendly carrier of the ENEMY flag, an
+ *  interceptor wants the hostile carrier of the OWN flag. Same liveness rules -- a dead,
+ *  inactive, or same-team carrier id is not a target (flags.ts clears carrierId on drop
+ *  and on death, but the store is only as fresh as the last stepFlags). */
+export function findEnemyFlagCarrier(world: World, team: number): number | null {
+  for (let flagId = 0; flagId < world.flags.team.length; flagId += 1) {
+    if (world.flags.team[flagId] !== team) continue; // only the OWN flag has an enemy carrier to hunt
+    const carrierId = world.flags.carrierId[flagId];
+    if (
+      carrierId === undefined ||
+      carrierId < 0 ||
+      !world.players.active[carrierId] ||
+      !world.players.alive[carrierId] ||
+      world.players.team[carrierId] === team
+    ) {
+      continue;
+    }
+    return carrierId;
+  }
+  return null;
+}

@@ -12,6 +12,7 @@ import {
 import { OrderKind, type TeamOrder } from '@clans/protocol';
 import { aimAndFire } from './combat.js';
 import {
+  findEnemyFlagCarrier,
   findEscortedCarrier,
   findNearestFriendlyStation,
   findNearestVisibleEnemy,
@@ -62,13 +63,13 @@ function flagStandPosition(world: World, flagId: number): Vec3 {
     z: world.flags.standPosition[base + 2] ?? 0,
   };
 }
-
 /** Attacker: carrying the enemy flag -> head home; otherwise -> head to the enemy flag
  *  wherever it currently is (home, dropped, or being carried by a teammate you're about
  *  to catch up to and pass, which is fine -- there's nothing wrong with two teammates
  *  converging on the same flag). Defender: the team's own flag is dropped -> go recover
- *  it; a teammate is carrying the enemy flag -> escort them; otherwise -> hold near the
- *  team's own flag stand. */
+ *  it; an enemy is carrying it -> hunt them down (see decideDefenderGoal); a teammate is
+ *  carrying the enemy flag -> escort them; otherwise -> hold near the team's own flag
+ *  stand. */
 function decideAttackerGoal(
   world: World,
   runtime: BotRuntimeState,
@@ -82,6 +83,68 @@ function decideAttackerGoal(
   return { position: flagPosition(world, enemyId), key: `enemyFlag:${String(enemyId)}` };
 }
 
+/** Issue #32: how far an escort holds off its carrier. Exactly ON the carrier is worse
+ *  than useless -- players collide, so a bodyguard pressed against the carrier's back
+ *  shoves it off its own route (observed as carriers bouncing off their own escorts on
+ *  the return walk). A standoff lets the escort walk the same route one body-width off,
+ *  close enough that findNearestVisibleEnemy sees every threat the carrier sees. */
+export const ESCORT_STANDOFF_M = 8; // Ours, meters.
+
+/** The escort's hold point, issue #32 screen-ahead: ESCORT_STANDOFF_M from the carrier
+ *  TOWARD THE CARRIER'S OWN TRAVEL DIRECTION (its horizontal velocity, falling back to
+ *  the ray toward the escort when the carrier is slow) -- a bodyguard walks POINT, not
+ *  trail. Threats met on the walk home come from ahead (the enemy attack wave funnels
+ *  through the midfield between the carrier and home), and an escort ahead of the
+ *  carrier engages them before the carrier ever does; a trailing escort arrives at each
+ *  fight one duel too late (measured: carriers died to single interceptors while their
+ *  escorts trailed 40+ m back). GOAL_DRIFT_REPATH_M already repaths as the carrier drags
+ *  the screen point along. The screen point is also deliberately OFF the carrier by the
+ *  standoff even at rest -- players collide, so a bodyguard pressed against the
+ *  carrier's back shoves it off its own route. */
+function escortPoint(world: World, runtime: BotRuntimeState, carrierId: number): Vec3 {
+  const carrier = playerPoint(world, carrierId);
+  const base = carrierId * 3;
+  const vx = world.players.velocity[base] ?? 0;
+  const vz = world.players.velocity[base + 2] ?? 0;
+  let dx = vx;
+  let dz = vz;
+  const speed = Math.hypot(dx, dz);
+  if (speed < 1) {
+    const me = playerPoint(world, runtime.playerId);
+    dx = me.x - carrier.x;
+    dz = me.z - carrier.z;
+  }
+  const distance = Math.hypot(dx, dz) || 1;
+  return {
+    x: carrier.x + (dx / distance) * ESCORT_STANDOFF_M,
+    y: carrier.y,
+    z: carrier.z + (dz / distance) * ESCORT_STANDOFF_M,
+  };
+}
+
+/** Issue #32 duty split: when the team has BOTH a thief to hunt and a carrier to
+ *  bodyguard, all-defenders-intercept starves the carrier of protection (measured: a
+ *  carrier died to the first enemy that met it in midfield while every defender was
+ *  halfway across the map chasing a thief) and all-defenders-escort lets the thief walk
+ *  our flag home unopposed. The squad splits by parity of the defender's join-order
+ *  index within its own team (active same-team players with a lower id). Plain id parity
+ *  was tried first and failed spectacularly: bots join alternating teams, so parity is
+ *  just team membership in disguise -- one team's whole defender squad came out even
+ *  (intercept-only), the other's odd (escort-only). The within-team index is immune to
+ *  how ids interleave across teams. */
+function squadIndex(world: World, runtime: BotRuntimeState): number {
+  const team = world.players.team[runtime.playerId] ?? 0;
+  let index = 0;
+  for (let id = 0; id < runtime.playerId; id += 1) {
+    if (world.players.active[id] && world.players.team[id] === team) index += 1;
+  }
+  return index;
+}
+
+function defenderTakesIntercept(world: World, runtime: BotRuntimeState): boolean {
+  return squadIndex(world, runtime) % 2 === 0;
+}
+
 function decideDefenderGoal(
   world: World,
   runtime: BotRuntimeState,
@@ -91,10 +154,22 @@ function decideDefenderGoal(
   if (world.flags.state[ownId] === FlagState.Dropped) {
     return { position: flagPosition(world, ownId), key: `recoverOwn:${String(ownId)}` };
   }
+  // Issue #32: an enemy carrying OUR flag is the highest-value target on the map -- a
+  // capture is REFUSED while our own flag is away (flags.ts's ownFlagHome check), so
+  // every second the thief lives is a second our own carrier's return leg is worth
+  // nothing. Killing the thief drops the flag (then any touch returns it home, or the
+  // 45 s timer does), which re-arms every one of our carriers at once. Sits between
+  // "recover the dropped flag" (the flag is already down; picking it up is urgent and
+  // one touch finishes it) and "escort" below.
+  const thief = findEnemyFlagCarrier(world, team);
   const carrier = findEscortedCarrier(world, team, runtime.playerId);
-  if (carrier !== null) {
-    return { position: playerPoint(world, carrier), key: `escort:${String(carrier)}` };
+  if (thief !== null && (carrier === null || defenderTakesIntercept(world, runtime))) {
+    return { position: playerPoint(world, thief), key: `intercept:${String(thief)}` };
   }
+  if (carrier !== null) {
+    return { position: escortPoint(world, runtime, carrier), key: `escort:${String(carrier)}` };
+  }
+
   // Fallback checked only when every CTF priority above comes up empty (Task 7): mount a
   // nearby own-team vehicle if one is reachable, otherwise hold at the flag stand as before.
   const vehicleGoal = decideVehicleGoal(world, runtime);
@@ -129,12 +204,13 @@ function resetHealChase(runtime: BotRuntimeState): void {
   runtime.healChaseCooldownUntilTick = 0;
 }
 
-/** Issue #32: a carrier NEVER detours to a station. The carry is time-critical (the
- *  moment it dies the flag drops and a return timer starts), and a wounded carrier
- *  chasing a 500 m-away station walks backwards off its return route -- observed
- *  carriers bouncing mid-map for 10k+ ticks between heal goals at under half the
- *  distance home they had already covered. maybeHeal below still tops a carrier up
- *  the moment its route passes a station. */
+/** True when the bot is the enemy-flag carrier. The carry is time-critical (the moment
+ *  it dies the flag drops and a return timer starts), so a carrier's heal behavior is
+ *  deliberately different from everyone else's: full cross-map heal chases walked
+ *  carriers backwards off their return route (observed carriers bouncing mid-map for
+ *  10k+ ticks between heal goals at under half the distance home they had already
+ *  covered), but NO heal at all let attrition kill them 100 m from home -- see
+ *  decideHealGoal's bounded carrier detour. */
 function isCarryingEnemyFlag(world: World, runtime: BotRuntimeState): boolean {
   const team = world.players.team[runtime.playerId] ?? 0;
   return world.flags.carrierId[enemyFlagId(world, team)] === runtime.playerId;
@@ -195,14 +271,15 @@ function decideHealGoal(
 ): { position: Vec3; key: string } | null {
   const armor = armorFor(world, runtime.playerId);
   const health = 1 - (world.players.damage[runtime.playerId] ?? 0) / armor.maxDamage;
-  if (health >= LOW_HEALTH_FRACTION) {
+  const carrying = isCarryingEnemyFlag(world, runtime);
+  if (health >= healGateFor(carrying)) {
     resetHealChase(runtime);
     return null;
   }
-  if (isCarryingEnemyFlag(world, runtime)) return null;
   const stationId = findNearestFriendlyStation(world, runtime.playerId);
   if (stationId === null) return null;
   const station = stationPosition(world, stationId);
+  if (carrying && !healWorthDetour(world, runtime, station)) return null;
   if (!healChaseAllowed(world, runtime, station)) return null;
   const key = `heal:${String(stationId)}`;
   if (runtime.healChaseKey !== key) {
@@ -213,6 +290,31 @@ function decideHealGoal(
     if (runtime.healChaseSinceTick < 0) runtime.healChaseSinceTick = world.tick;
   }
   return { position: station, key };
+}
+
+/** Issue #32: a carrier detours to a station only when it is a real top-up, not a
+ *  retreat. The blanket exclusion this replaces ("a carrier NEVER detours to a station")
+ *  was measured both ways: a full heal-chase bounces the carrier backwards off its route,
+ *  but NO heal at all means the carrier arrives home at half health and loses the last
+ *  duel 100 m from the stand -- cumulative chip damage is what actually kills carriers
+ *  now that fall arrest keeps the landings cheap. Katabatic's midfield towers both carry
+ *  own-team stations that sit essentially ON the stone-route home, so a station within
+ *  CARRIER_HEAL_DETOUR_M is a short hop off the path for a full health+energy reset
+ *  (applyLoadoutRequest zeroes damage); anything farther stays a pure CTF walk. The 2.5 m
+ *  stationAt gate means merely PASSING a station never triggers it -- the goal has to
+ *  point at the station itself for the trip to be worth anything. */
+export const CARRIER_HEAL_DETOUR_M = 60; // Ours, meters.
+// Top up earlier than the bare LOW_HEALTH_FRACTION line: the carrier's job (survive to
+// the stand) dies to attrition, so the refill must happen while there is health to save.
+const CARRIER_HEAL_HEALTH_FRACTION = 0.6; // Ours.
+
+function healGateFor(carrying: boolean): number {
+  return carrying ? CARRIER_HEAL_HEALTH_FRACTION : LOW_HEALTH_FRACTION;
+}
+
+function healWorthDetour(world: World, runtime: BotRuntimeState, station: Vec3): boolean {
+  const me = playerPoint(world, runtime.playerId);
+  return Math.hypot(me.x - station.x, me.y - station.y, me.z - station.z) <= CARRIER_HEAL_DETOUR_M;
 }
 // Issue #32 heal-chase bound -- see decideHealGoal. Long enough that a genuine
 // cross-map retreat to the nearest friendly station comfortably completes (the map is
@@ -295,17 +397,33 @@ export function decideState(runtime: BotRuntimeState, engagedTargetId: number | 
   return runtime.role === BotRole.Defender ? BotState.Defend : BotState.Attack;
 }
 
+/** True when the defender's post no longer exists and the leash must not apply: the own
+ *  flag is away (nothing to hold -- the defender's job is now recovery/interception out
+ *  in the field) or a teammate is running the enemy flag home (the defender's job is now
+ *  bodyguard). Issue #32: the previous code leashed EVERY defender to DEFEND_ENGAGE_RADIUS
+ *  around the home stand even while its doc comment claimed escorts were exempt, so an
+ *  escort 200 m out trailed its carrier in total silence -- it would not fire on the very
+ *  enemies it was walking beside -- and an interceptor never fired at all. A post you
+ *  cannot defend from 150 m away with a flag gone is not a post. */
+function defenderPostGone(world: World, runtime: BotRuntimeState): boolean {
+  const team = world.players.team[runtime.playerId] ?? 0;
+  if (world.flags.state[ownFlagId(world, team)] !== FlagState.Home) return true;
+  return findEscortedCarrier(world, team, runtime.playerId) !== null;
+}
+
 function isOutsideDefendLeash(world: World, runtime: BotRuntimeState, targetId: number): boolean {
   if (runtime.role !== BotRole.Defender) return false;
+  if (defenderPostGone(world, runtime)) return false;
   const team = world.players.team[runtime.playerId] ?? 0;
   const home = flagStandPosition(world, ownFlagId(world, team));
   const target = playerPoint(world, targetId);
   return Math.hypot(home.x - target.x, home.z - target.z) > DEFEND_ENGAGE_RADIUS;
 }
 
-/** A Defender only engages within DEFEND_ENGAGE_RADIUS of its own flag stand; an
- *  Attacker (and a Defender escorting a carrier already away from home) engages any
- *  visible enemy in range with no leash. Row 9: engagedTargetId is re-derived fresh
+/** A Defender engages within DEFEND_ENGAGE_RADIUS of its own flag stand while it still
+ *  HAS a post (own flag home, nothing to escort); once the post is gone -- flag away or
+ *  a carrier to bodyguard -- it engages anywhere, like an Attacker (isOutsideDefendLeash /
+ *  defenderPostGone above). Row 9: engagedTargetId is re-derived fresh
  *  every call from a live scan, never trusted across ticks, so a target that died or
  *  disconnected between calls simply doesn't come back from findNearestVisibleEnemy. */
 export function decideCombat(
