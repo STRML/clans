@@ -20,6 +20,7 @@ import {
   encodeVehicleSpawn,
   encodeVoiceBind,
   encodeWelcome,
+  IMPACT_EVENT_BYTES,
 } from './handshake.js';
 import {
   EventKind,
@@ -471,5 +472,36 @@ describe('laser beam endpoints', () => {
       beam: { from: { x: 1, y: 2, z: 3 }, to: { x: 100, y: 25, z: -50 } },
     });
     expect(() => decodeEvent(event.subarray(0, 20))).toThrow();
+  });
+});
+
+describe('ProjectileImpact event codec (#52)', () => {
+  const impact = {
+    x: 1.5,
+    y: 2.5,
+    z: -3.5,
+    weaponId: 0,
+    type: 0,
+    reason: 0,
+    seq: 42,
+  };
+
+  it('round-trips the full authoritative impact record at the exact wire length', () => {
+    const bytes = encodeEvent({ kind: EventKind.ProjectileImpact, a: 0, b: -1, impact });
+    // Byte-count contract: 6-byte Event header + 3 f32 contact coordinates + u8 weaponId +
+    // u8 type + u8 reason + u32 sequence. The length alone discriminates the event shapes.
+    expect(bytes.length).toBe(IMPACT_EVENT_BYTES);
+    expect(decodeEvent(bytes)).toEqual({
+      type: MessageType.Event,
+      kind: EventKind.ProjectileImpact,
+      a: 0,
+      b: -1,
+      impact,
+    });
+  });
+
+  it('rejects a truncated impact payload instead of decoding a partial record', () => {
+    const bytes = encodeEvent({ kind: EventKind.ProjectileImpact, a: 0, b: -1, impact });
+    expect(() => decodeEvent(bytes.subarray(0, 24))).toThrow(RangeError);
   });
 });

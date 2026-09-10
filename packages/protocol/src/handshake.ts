@@ -32,6 +32,12 @@ import {
 } from './messages.js';
 
 const SAMPLE_BYTES = 18; // moveX, moveZ, yaw, pitch (f32 each), flags (u8), slot (u8)
+/** Total frame bytes of a ProjectileImpact event (#52): the 6-byte Event header (type, kind,
+ *  a, b) plus the impact payload -- 3 f32 contact coordinates, u8 weaponId, u8 projectile type,
+ *  u8 ProjectileImpactReason, u32 sequence. The length alone discriminates the three event
+ *  shapes on the wire (6 = bare, 25 = impact, 30 = laser beam). */
+export const IMPACT_EVENT_BYTES = 25;
+
 export const INPUT_MESSAGE_BYTES = 1 + 4 + SAMPLE_BYTES * 3;
 
 function expectType(cursor: Cursor, expected: MessageType): void {
@@ -170,7 +176,10 @@ export function decodeAck(bytes: Uint8Array): AckMessage {
 }
 
 export function encodeEvent(message: Omit<EventMessage, 'type'>): Uint8Array {
-  const cursor = createWriter(message.beam ? 30 : 6);
+  // #52: a ProjectileImpact event grows the frame by the impact payload -- 3 f32 contact
+  // coordinates, weaponId/type/reason as three u8s, and the sim's monotonic sequence as a u32
+  // (wide enough that even sustained 32-player Chaingun fire never wraps it mid-match).
+  const cursor = createWriter(message.impact ? IMPACT_EVENT_BYTES : message.beam ? 30 : 6);
   writeU8(cursor, MessageType.Event);
   writeU8(cursor, message.kind);
   writeI16(cursor, message.a);
@@ -181,6 +190,15 @@ export function encodeEvent(message: Omit<EventMessage, 'type'>): Uint8Array {
       writeF32(cursor, point.y);
       writeF32(cursor, point.z);
     }
+  }
+  if (message.impact) {
+    writeF32(cursor, message.impact.x);
+    writeF32(cursor, message.impact.y);
+    writeF32(cursor, message.impact.z);
+    writeU8(cursor, message.impact.weaponId);
+    writeU8(cursor, message.impact.type);
+    writeU8(cursor, message.impact.reason);
+    writeU32(cursor, message.impact.seq);
   }
   return bytesOf(cursor);
 }
@@ -193,12 +211,25 @@ export function decodeEvent(bytes: Uint8Array): EventMessage {
     a: readI16(cursor),
     b: readI16(cursor),
   };
-  if (bytes.length !== 6 && bytes.length !== 30)
+  if (bytes.length !== 6 && bytes.length !== 30 && bytes.length !== IMPACT_EVENT_BYTES)
     throw new RangeError('Invalid event payload length');
   if (bytes.length === 30) {
     event.beam = {
       from: { x: readF32(cursor), y: readF32(cursor), z: readF32(cursor) },
       to: { x: readF32(cursor), y: readF32(cursor), z: readF32(cursor) },
+    };
+  }
+  // The frame length IS the discriminator: only a ProjectileImpact event is 25 bytes, so a
+  // decoder reading a fresh server's events can never mistake an impact payload for a beam.
+  if (bytes.length === IMPACT_EVENT_BYTES) {
+    event.impact = {
+      x: readF32(cursor),
+      y: readF32(cursor),
+      z: readF32(cursor),
+      weaponId: readU8(cursor),
+      type: readU8(cursor),
+      reason: readU8(cursor),
+      seq: readU32(cursor),
     };
   }
   return event;

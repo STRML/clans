@@ -12,12 +12,16 @@ import {
   FlagState,
   GameOverReason,
   LIGHT_ARMOR,
+  ProjectileImpactReason,
+  ProjectileType,
+  WeaponId,
   RESPAWN_TICKS,
   stepPower,
   VehicleKind,
   type Heightfield,
   type PlayerInput,
   type PlayerSnapshotData,
+  type ProjectileImpact,
   type VehicleSnapshotData,
   type World,
 } from '@clans/sim';
@@ -52,13 +56,13 @@ import {
 import { flagsFromWorld } from './flag-view.js';
 import { RemoteBuffer } from './remote.js';
 import { VehicleBuffer } from './vehicle-view.js';
+import { spawnProjectileImpacts, type Effect } from './weapons-view.js';
 import type {
   NetClient,
   RemoteSnapshot,
   RemoteVehicleSnapshot,
   TimestampedEvent,
 } from './netclient.js';
-import type { Effect } from './weapons-view.js';
 import { speakVoiceLine } from './voicebinds.js';
 
 // speakVoiceLine ultimately starts a recorded audio clip in the browser --
@@ -634,6 +638,90 @@ describe('syncWorldView (Codex review round 6, finding P2)', () => {
     expect(audio.flagDrop).toHaveBeenCalledTimes(1);
     expect(audio.flagCapture).toHaveBeenNthCalledWith(1, false);
     expect(audio.flagCapture).toHaveBeenNthCalledWith(2, true);
+  });
+
+  it('renders each networked impact exactly once, agreeing with the solo record path (#52)', () => {
+    const world = createWorld(flat, 1);
+    const localId = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const scene = new THREE.Scene();
+    const hud = { update: () => {} };
+    const effects: Effect[] = [];
+    const impact: ProjectileImpact = {
+      x: 3,
+      y: 1,
+      z: 4,
+      weaponId: WeaponId.Spinfusor,
+      type: ProjectileType.Linear,
+      reason: ProjectileImpactReason.Direct,
+      seq: 1,
+    };
+    const fakeNet: Pick<
+      NetClient,
+      | 'playerId'
+      | 'team'
+      | 'remotePlayers'
+      | 'projectiles'
+      | 'flags'
+      | 'teamScores'
+      | 'gameOver'
+      | 'winnerTeam'
+      | 'timeRemainingS'
+      | 'gameOverReason'
+      | 'recentEvents'
+    > & { connected: boolean } = {
+      playerId: localId,
+      team: 1,
+      remotePlayers: new Map(),
+      projectiles: [],
+      flags: [],
+      teamScores: [0, 0],
+      gameOver: false,
+      winnerTeam: 0,
+      timeRemainingS: 0,
+      gameOverReason: 0,
+      recentEvents: [
+        { type: MessageType.Event, kind: EventKind.ProjectileImpact, a: 0, b: -1, impact, seq: 1 },
+      ],
+      connected: true,
+    };
+
+    // Networked: the record arrives once in the event stream; a second drain over the same
+    // rolling buffer (the usual frame loop) must not duplicate the effect.
+    const cursor = { seq: 0 };
+    syncWorldView(
+      world,
+      localId,
+      fakeNet,
+      scene,
+      hud,
+      effects,
+      new Map(),
+      new Map(),
+      new Map(),
+      cursor,
+      1 / 60,
+    );
+    syncWorldView(
+      world,
+      localId,
+      fakeNet,
+      scene,
+      hud,
+      effects,
+      new Map(),
+      new Map(),
+      new Map(),
+      cursor,
+      1 / 60,
+    );
+
+    // Solo: the same record drained straight from the sim's store renders identically.
+    const soloEffects: Effect[] = [];
+    const soloScene = new THREE.Scene();
+    spawnProjectileImpacts(soloScene, soloEffects, [impact]);
+    expect(soloEffects).toHaveLength(1);
+    expect(soloEffects[0]?.mesh.position.x).toBe(effects[0]?.mesh.position.x);
+    expect(soloEffects[0]?.mesh.position.z).toBe(effects[0]?.mesh.position.z);
   });
 });
 

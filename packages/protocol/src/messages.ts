@@ -1,4 +1,4 @@
-import type { PlayerInput } from '@clans/sim';
+import type { PlayerInput, ProjectileImpact } from '@clans/sim';
 
 export enum MessageType {
   Join = 1,
@@ -48,7 +48,13 @@ export enum OrderKind {
 // wire instead of decoding as a phantom player 65535. Same frame size (PROJECTILE_BYTES is
 // unchanged), different meaning. WelcomeStatus.VersionMismatch catches all of this in both
 // directions, exactly as the M7 bump below already reasoned.
-export const PROTOCOL_VERSION = 9;
+//
+// #52 bump 9 -> 10: a new EventKind (ProjectileImpact) whose Event frame grows an optional
+// 19-byte impact payload (contact position, weaponId, projectile type, reason, sim sequence).
+// A 9.x peer's decodeEvent only accepts 6- and 30-byte event frames, so it would throw on the
+// new length on every impact; the handshake check must reject the mismatch in both directions
+// exactly like every bump before it.
+export const PROTOCOL_VERSION = 10;
 
 export enum WelcomeStatus {
   Ok = 0,
@@ -96,6 +102,12 @@ export enum EventKind {
   VoiceBindPlayed = 4, // a = playerId, b = lineId
   FlagDropped = 5, // a = previous carrierId, b = flagId
   FlagReturned = 6, // a = playerId (-1 = timer), b = flagId
+  /** #52: one authoritative projectile impact. `a` mirrors the record's ProjectileImpactReason
+   *  (b is an unused -1 sentinel); the full record -- contact position, weaponId, projectile
+   *  type, reason, and the sim's monotonic sequence number -- rides the optional `impact`
+   *  payload below, so a consumer dedupes on the record's own seq rather than on this event's
+   *  receipt order. */
+  ProjectileImpact = 7,
 }
 export interface BeamSegment {
   from: { x: number; y: number; z: number };
@@ -105,9 +117,21 @@ export interface EventMessage {
   type: MessageType.Event;
   kind: EventKind;
   a: number;
+  /** Second event operand, still on the wire for every kind that has one (VoiceBindPlayed's
+   *  line id, FlagDropped's flag id, FlagReturned's flag id, PlayerKilled's killer id) and for
+   *  LaserFired's beam target, which is -1 for a miss. #52's ProjectileImpact events carry
+   *  -1 here: the authoritative impact record rides the optional `impact` payload below. */
   b: number;
   /** Authoritative laser endpoints, including terrain hits and misses. */
   beam?: BeamSegment;
+  /**
+   * #52: the authoritative projectile impact this Event carries, present only for
+   * EventKind.ProjectileImpact. Reuses @clans/sim's own ProjectileImpact shape (the same way
+   * WorldExtras reuses the sim's snapshot types) so the sim-side emitter and the wire cannot
+   * drift. Optional so every pre-existing EventMessage literal keeps compiling; encodeEvent
+   * writes it and decodeEvent always populates it when the frame length says it is there.
+   */
+  impact?: ProjectileImpact;
 }
 export interface GodMessage {
   type: MessageType.God;

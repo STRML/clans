@@ -711,6 +711,24 @@ function laserEvents(world: World): EventMessage[] {
     }));
 }
 
+/** This tick's authoritative projectile impacts (#52) as broadcastable events. The records
+ *  live in world.projectiles.lastImpacts, which stepProjectiles overwrites every call -- the
+ *  same one-tick-only shape killEvents' pendingDeaths and laserEvents' lastFireEvents already
+ *  broadcast from -- so each impact is sent to every client exactly once, on the tick it
+ *  happened, whether or not this tick also sends a snapshot: a shot that lives and dies
+ *  entirely between two snapshots still reaches every client. applyLagCompensatedHits may
+ *  append a corrected Direct record AFTER stepWorld, which is why this reads lastImpacts
+ *  here, last of the event drains, rather than inside stepWorld. */
+function impactEvents(world: World): EventMessage[] {
+  return world.projectiles.lastImpacts.map((impact) => ({
+    type: MessageType.Event as const,
+    kind: EventKind.ProjectileImpact,
+    a: impact.reason,
+    b: -1,
+    impact,
+  }));
+}
+
 /** This tick's ping for `playerId`, or 0 if they're not currently connected (a shot credited
  * to an id whose socket just closed gets no lag compensation, same as any other unconnected
  * id). Linear over `clients` rather than a dedicated by-id index: a tick has at most a
@@ -795,7 +813,9 @@ function applyLagCompensatedHits(
     // independent hit on a later tick -- see FireEvent.projectileId and
     // deactivateProjectile's own comments (Codex review round 5, finding 1). A no-op for
     // the Laser Rifle, which never spawns a projectile at all (projectileId stays -1).
-    deactivateProjectile(world, event.projectileId);
+    // #52: the rewound contact point rides along so the corrected hit also produces the
+    // same authoritative Direct impact record a live hit would have.
+    deactivateProjectile(world, event.projectileId, result.hitPoint);
     if (!world.players.alive[result.hitPlayerId]) dropFlagsCarriedBy(world, result.hitPlayerId);
   }
 }
@@ -998,6 +1018,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
     for (const event of killEvents(options.world)) broadcastEvent(clients, event);
     for (const event of flagEvents(options.world, flagsBefore)) broadcastEvent(clients, event);
     for (const event of laserEvents(options.world)) broadcastEvent(clients, event);
+    for (const event of impactEvents(options.world)) broadcastEvent(clients, event);
   }
 
   // Game over freezes the sim: no more stepWorld, no more respawns or events, but snapshots

@@ -13,7 +13,7 @@ import {
   type InteriorPlacement,
   type InteriorTriangles,
 } from './interiors.js';
-import { addPlayer, createWorld, type Heightfield } from './index.js';
+import { ProjectileImpactReason, addPlayer, createWorld, type Heightfield } from './index.js';
 import {
   createTurrets,
   stepTurretPower,
@@ -24,7 +24,7 @@ import {
 } from './turrets.js';
 import { SHRIKE_BLASTER_DATA, VehicleKind, type VehicleFireEvent } from './vehicles.js';
 import { ProjectileType, WeaponId, type FireEvent } from './weapons.js';
-import { hitTestFireEvent, stepProjectiles } from './projectiles.js';
+import { deactivateProjectile, hitTestFireEvent, stepProjectiles } from './projectiles.js';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -1179,5 +1179,158 @@ describe('force fields block enemy projectiles and pass friendly ones (failure m
     expect(world.baseObjects.energy[1]).toBeLessThan(
       BASE_OBJECT_DATA[BaseObjectKind.Generator].maxEnergy,
     );
+  });
+});
+
+describe('authoritative impact records (#52)', () => {
+  it('emits exactly one Direct record when a disc hits a player, with contact point, weapon and sequence', () => {
+    const world = createWorld(flat, 1);
+    const target = addPlayer(world, { x: 0, y: 0, z: 10 });
+    fire(world, {
+      playerId: -1,
+      origin: { x: 0, y: 10, z: 9 },
+      direction: { x: 0, y: -1, z: 0.1 },
+    });
+    for (let tick = 0; tick < 5 && world.projectiles.lastImpacts.length === 0; tick += 1) {
+      stepProjectiles(world, FIXED_DT);
+    }
+    expect(world.projectiles.lastImpacts).toHaveLength(1);
+    // Non-null assertion keeps the assertion block's own complexity under the lint cap.
+    const impact = world.projectiles.lastImpacts[0]!;
+    expect(impact.reason).toBe(ProjectileImpactReason.Direct);
+    expect(impact.weaponId).toBe(WeaponId.Spinfusor);
+    expect(impact.type).toBe(ProjectileType.Linear);
+    expect(impact.seq).toBe(1);
+    // The record's position is the swept-segment CONTACT point near the target's centre, not
+    // the raw segment endpoint the shot reached this tick -- the stale-position half of #52.
+    expect(Math.hypot(impact.x, impact.z - 10)).toBeLessThan(1.5);
+    expect(impact.y).toBeLessThan(10);
+    // The damage path is unchanged, and the next tick's list is empty: one record, once.
+    expect(world.players.damage[target] ?? 0).toBeGreaterThan(0);
+    stepProjectiles(world, FIXED_DT);
+    expect(world.projectiles.lastImpacts).toEqual([]);
+  });
+
+  it('emits a World record at the terrain contact point when a disc strikes the ground', () => {
+    const world = createWorld(flat, 1);
+    fire(world, { origin: { x: 0, y: 1, z: 0 }, direction: { x: 0, y: -1, z: 0 } });
+    stepProjectiles(world, FIXED_DT); // spawn tick (one-tick latency)
+    stepProjectiles(world, FIXED_DT); // the tick the swept segment crosses the ground
+    expect(world.projectiles.lastImpacts).toHaveLength(1);
+    const impact = world.projectiles.lastImpacts[0];
+    expect(impact?.reason).toBe(ProjectileImpactReason.World);
+    // 90 m/s x 32 ms carries the segment endpoint ~1.9 m BELOW the surface; the record must
+    // sit at the surface, which is the whole point of recording the contact point (#52).
+    expect(impact?.y).toBeGreaterThanOrEqual(-0.5);
+    expect(impact?.y).toBeLessThanOrEqual(1);
+  });
+
+  it('emits a Bounce record for a blaster bolt reflecting from terrain and keeps it flying', () => {
+    const world = createWorld(flat, 1);
+    fire(world, {
+      weaponId: WeaponId.Blaster,
+      origin: { x: 0, y: 1, z: 0 },
+      direction: { x: 0, y: -1, z: 0 },
+    });
+    stepProjectiles(world, FIXED_DT);
+    const id = firstProjectile(world);
+    stepProjectiles(world, FIXED_DT);
+    expect(world.projectiles.lastImpacts).toHaveLength(1);
+    const impact = world.projectiles.lastImpacts[0];
+    expect(impact?.reason).toBe(ProjectileImpactReason.Bounce);
+    expect(impact?.weaponId).toBe(WeaponId.Blaster);
+    // A bounce is a reflection: the projectile survives, so the client must not detonate it.
+    expect(world.projectiles.active[id]).toBe(1);
+    expect(world.projectiles.velocity[id * 3 + 1]).toBeGreaterThan(0);
+  });
+
+  it('emits exactly one Timeout record when a disc expires, distinguishable from an impact', () => {
+    const world = createWorld(flat, 1);
+    fire(world, { origin: { x: 0, y: 500, z: 0 }, direction: { x: 0, y: 0, z: 1 } });
+    stepProjectiles(world, FIXED_DT);
+    const id = firstProjectile(world);
+    // Step one tick at a time and stop at the record: lastImpacts is overwritten by the NEXT
+    // stepProjectiles call, so stepping past the expiry tick would read the cleared list.
+    for (let tick = 0; tick < Math.ceil(5 / FIXED_DT) + 1; tick += 1) {
+      stepProjectiles(world, FIXED_DT);
+      if (world.projectiles.lastImpacts.length > 0) break;
+    }
+    expect(world.projectiles.active[id]).toBe(0);
+    expect(world.projectiles.lastImpacts).toHaveLength(1);
+    // #52's core fix: lifetime removal is a Timeout, not an impact -- the client suppresses
+    // detonation FX for this reason instead of flashing like a real strike did.
+    expect(world.projectiles.lastImpacts[0]?.reason).toBe(ProjectileImpactReason.Timeout);
+    expect(world.projectiles.lastImpacts[0]?.seq).toBe(1);
+  });
+
+  it('records a Tracer born and resolved inside one stepProjectiles call, invisible to any snapshot', () => {
+    const world = createWorld(flat, 1);
+    addPlayer(world, { x: 0, y: 0, z: 10 });
+    fire(world, {
+      playerId: -1,
+      weaponId: WeaponId.Chaingun,
+      origin: { x: 0, y: 10, z: 9 },
+      direction: { x: 0, y: -1, z: 0.1 },
+    });
+    stepProjectiles(world, FIXED_DT);
+    // The Chaingun's same-tick resolution means the shot was born, hit, and freed within this
+    // single call: it never appears in any snapshot list, so only the record can carry its
+    // impact to a client (#52's born-and-destroyed-between-snapshots case).
+    expect(world.projectiles.lastImpacts).toHaveLength(1);
+    expect(world.projectiles.lastImpacts[0]?.reason).toBe(ProjectileImpactReason.Direct);
+    expect(world.projectiles.lastImpacts[0]?.weaponId).toBe(WeaponId.Chaingun);
+  });
+
+  it('keeps sequence numbers monotonic across separate impacts', () => {
+    const world = createWorld(flat, 1);
+    fire(world, { origin: { x: 0, y: 1, z: 0 }, direction: { x: 0, y: -1, z: 0 } });
+    for (let tick = 0; tick < 3; tick += 1) {
+      stepProjectiles(world, FIXED_DT);
+      if (world.projectiles.lastImpacts.length > 0) break;
+    }
+    expect(world.projectiles.lastImpacts[0]?.seq).toBe(1);
+    fire(world, { origin: { x: 0, y: 1, z: 0 }, direction: { x: 0, y: -1, z: 0 } });
+    for (let tick = 0; tick < 3; tick += 1) {
+      stepProjectiles(world, FIXED_DT);
+      if (world.projectiles.lastImpacts.length > 0) break;
+    }
+    expect(world.projectiles.lastImpacts).toHaveLength(1);
+    expect(world.projectiles.lastImpacts[0]?.seq).toBe(2);
+  });
+
+  it('an armed grenade expiring at lifetime records a Timeout and still detonates', () => {
+    const world = createWorld(flat, 1);
+    fire(world, {
+      isAltFire: true, // throws a grenade (GRENADE_DATA physics, armed after 0.5 s)
+      origin: { x: 0, y: 500, z: 0 },
+      direction: { x: 0, y: 0, z: 1 },
+    });
+    stepProjectiles(world, FIXED_DT);
+    const id = firstProjectile(world);
+    for (let tick = 0; tick < Math.ceil(3 / FIXED_DT) + 1; tick += 1) {
+      stepProjectiles(world, FIXED_DT);
+      if (world.projectiles.lastImpacts.length > 0) break;
+    }
+    // Freed by the armed branch of finalizeGrenadeLifetime (lifetime 3 s > arm 0.5 s, so
+    // the grenade was armed): gone from the store, with its Timeout detonation record.
+    expect(world.projectiles.active[id]).toBe(0);
+    expect(world.projectiles.lastImpacts).toHaveLength(1);
+    expect(world.projectiles.lastImpacts[0]?.reason).toBe(ProjectileImpactReason.Timeout);
+    expect(world.projectiles.lastImpacts[0]?.type).toBe(ProjectileType.Grenade);
+  });
+
+  it('a lag-compensated correction (deactivateProjectile with a point) records a Direct hit', () => {
+    const world = createWorld(flat, 1);
+    fire(world, { weaponId: WeaponId.Chaingun, origin: { x: 0, y: 500, z: 0 } });
+    stepProjectiles(world, FIXED_DT);
+    const id = firstProjectile(world);
+    expect(world.projectiles.active[id]).toBe(1);
+    deactivateProjectile(world, id, { x: 1, y: 2, z: 3 });
+    expect(world.projectiles.active[id]).toBe(0);
+    expect(world.projectiles.lastImpacts).toHaveLength(1);
+    expect(world.projectiles.lastImpacts[0]?.reason).toBe(ProjectileImpactReason.Direct);
+    expect(world.projectiles.lastImpacts[0]?.x).toBe(1);
+    expect(world.projectiles.lastImpacts[0]?.y).toBe(2);
+    expect(world.projectiles.lastImpacts[0]?.z).toBe(3);
   });
 });

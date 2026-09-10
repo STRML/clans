@@ -2,14 +2,31 @@ import * as THREE from 'three';
 import { describe, expect, it, vi } from 'vitest';
 import { EventKind, type EventMessage, type ProjectileSnapshotData } from '@clans/protocol';
 import {
+  ProjectileImpactReason,
+  ProjectileType,
+  WeaponId,
+  type ProjectileImpact,
+} from '@clans/sim';
+import {
   createLaserBeam,
   createProjectileMesh,
-  spawnExplosionsForExpired,
   spawnLaserBeams,
+  spawnProjectileImpacts,
   syncProjectileMeshes,
   updateEffects,
   type Effect,
 } from './weapons-view.js';
+
+const discImpact = (over: Partial<ProjectileImpact>): ProjectileImpact => ({
+  x: 5,
+  y: 1,
+  z: 0,
+  weaponId: WeaponId.Spinfusor,
+  type: ProjectileType.Linear,
+  reason: ProjectileImpactReason.Direct,
+  seq: 1,
+  ...over,
+});
 
 const disc = (id: number, x: number): ProjectileSnapshotData => ({
   id,
@@ -246,35 +263,60 @@ describe('syncProjectileMeshes', () => {
   });
 });
 
-describe('spawnExplosionsForExpired', () => {
-  it('spawns one flash per projectile id that vanished between frames', () => {
+describe('spawnProjectileImpacts (#52)', () => {
+  it('spawns exactly one effect per authoritative record, at the recorded contact point', () => {
     const scene = new THREE.Scene();
     const effects: Effect[] = [];
-    const previous = new Map([[1, disc(1, 5)]]);
-    spawnExplosionsForExpired(scene, effects, previous, []);
+    spawnProjectileImpacts(scene, effects, [discImpact({ x: 7, y: 2, z: 1 })]);
     expect(effects).toHaveLength(1);
     expect(scene.children).toHaveLength(1);
+    expect(effects[0]?.mesh.position.x).toBe(7);
+    // Consuming the drained records again must not re-render them: one record, one effect.
+    spawnProjectileImpacts(scene, effects, []);
+    expect(effects).toHaveLength(1);
   });
 
-  it('spawns nothing for a projectile that is still present', () => {
+  it('renders no effect for a non-explosive lifetime timeout -- removal is not an impact', () => {
+    // #52's core fix: a disc or tracer expiring at end of lifetime used to flash exactly
+    // like a real strike, at whatever position the last snapshot reported.
     const scene = new THREE.Scene();
     const effects: Effect[] = [];
-    const previous = new Map([[1, disc(1, 5)]]);
-    spawnExplosionsForExpired(scene, effects, previous, [disc(1, 6)]);
+    spawnProjectileImpacts(scene, effects, [
+      discImpact({ reason: ProjectileImpactReason.Timeout }),
+    ]);
     expect(effects).toHaveLength(0);
   });
 
-  it('still flashes a died projectile whose id was immediately reused by a different type', () => {
-    // Codex review round 2 (PR #9), finding 8: matching on id alone treated a recycled id
-    // as "still present", so the old projectile's death never got its flash even though it
-    // genuinely died -- a different projectile just happened to land on the same id in the
-    // same snapshot interval.
+  it('renders the detonation for an armed grenade expiring at lifetime', () => {
     const scene = new THREE.Scene();
     const effects: Effect[] = [];
-    const previous = new Map([[1, disc(1, 5)]]);
-    spawnExplosionsForExpired(scene, effects, previous, [mortarShell(1, 8)]);
+    spawnProjectileImpacts(scene, effects, [
+      discImpact({
+        reason: ProjectileImpactReason.Timeout,
+        type: ProjectileType.Grenade,
+        weaponId: WeaponId.Mortar,
+      }),
+    ]);
     expect(effects).toHaveLength(1);
-    expect(scene.children).toHaveLength(1);
+  });
+
+  it('renders a bounce as a puff while the projectile keeps flying', () => {
+    const scene = new THREE.Scene();
+    const effects: Effect[] = [];
+    spawnProjectileImpacts(scene, effects, [discImpact({ reason: ProjectileImpactReason.Bounce })]);
+    expect(effects).toHaveLength(1);
+  });
+
+  it('does not duplicate the effect when the projectile is also seen disappearing', () => {
+    // The impact record is the only effect source: the mesh sync's removal of the projectile
+    // mesh must not add a second flash for the same shot (#52).
+    const scene = new THREE.Scene();
+    const effects: Effect[] = [];
+    const meshes = new Map<number, THREE.Mesh>();
+    syncProjectileMeshes(scene, meshes, [{ ...disc(1, 5), weaponId: WeaponId.Spinfusor }]);
+    spawnProjectileImpacts(scene, effects, [discImpact({ x: 5 })]);
+    syncProjectileMeshes(scene, meshes, []); // projectile seen disappearing
+    expect(effects).toHaveLength(1);
   });
 });
 
@@ -362,8 +404,7 @@ describe('updateEffects', () => {
   it('disposes an expired explosion-flash effect instead of leaking its geometry and material', () => {
     const scene = new THREE.Scene();
     const effects: Effect[] = [];
-    const previous = new Map([[1, disc(1, 5)]]);
-    spawnExplosionsForExpired(scene, effects, previous, []);
+    spawnProjectileImpacts(scene, effects, [discImpact({ x: 5 })]);
     const flash = effects[0];
     if (!flash || !(flash.mesh instanceof THREE.Mesh) || Array.isArray(flash.mesh.material)) {
       throw new Error('expected a single-material flash mesh');

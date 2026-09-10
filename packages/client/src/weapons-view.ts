@@ -1,6 +1,12 @@
 import { createDiscExplosion } from './disc-explosion.js';
 import * as THREE from 'three';
-import { ProjectileType, WeaponId, type World } from '@clans/sim';
+import {
+  ProjectileImpactReason,
+  ProjectileType,
+  WeaponId,
+  type ProjectileImpact,
+  type World,
+} from '@clans/sim';
 import { EventKind, type EventMessage, type ProjectileSnapshotData } from '@clans/protocol';
 import { assetUrl } from './assets.js';
 
@@ -54,19 +60,19 @@ function projectileGeometry(
   // x/z ±0.408 with y ±0.031 -- a 0.816 m plate 0.062 m thick. The old 0.18 m plate was
   // under half the authored size and read as a speck at range.
   if (p.weaponId === WeaponId.Spinfusor) return new THREE.CylinderGeometry(0.408, 0.408, 0.062, 24);
-  if (isTracer(p)) return tracerGeometry(p, tail);
+  if (isTracerType(p.type)) return tracerGeometry(p, tail);
   if (p.weaponId === WeaponId.Mortar || p.type === ProjectileType.Grenade) {
     return new THREE.SphereGeometry(p.type === ProjectileType.Grenade ? 0.25 : 0.19, 10, 7);
   }
   return new THREE.SphereGeometry(p.type === ProjectileType.Energy ? 0.11 : 0.07, 8, 6);
 }
 
-function projectileColor(p: ProjectileSnapshotData): number {
-  if (p.weaponId === WeaponId.Spinfusor) return 0x4da5ff;
-  if (p.type === ProjectileType.VehicleLaser) return 0xffffff;
-  if (p.type === ProjectileType.Tracer) return 0xd3d778;
-  if (p.weaponId === WeaponId.Mortar || p.type === ProjectileType.Grenade) return GRENADE_COLOR;
-  return WEAPON_COLOR[p.weaponId] ?? 0xffffff;
+function projectileColor(weaponId: number, type: number): number {
+  if (weaponId === WeaponId.Spinfusor) return 0x4da5ff;
+  if (type === ProjectileType.VehicleLaser) return 0xffffff;
+  if (type === ProjectileType.Tracer) return 0xd3d778;
+  if (weaponId === WeaponId.Mortar || type === ProjectileType.Grenade) return GRENADE_COLOR;
+  return WEAPON_COLOR[weaponId] ?? 0xffffff;
 }
 
 function projectileTexture(p: ProjectileSnapshotData): THREE.Texture | null {
@@ -101,8 +107,8 @@ function addProjectileTrail(mesh: THREE.Mesh, p: ProjectileSnapshotData, color: 
   mesh.add(trail);
 }
 
-function isTracer(p: ProjectileSnapshotData): boolean {
-  return p.type === ProjectileType.VehicleLaser || p.type === ProjectileType.Tracer;
+function isTracerType(type: number): boolean {
+  return type === ProjectileType.VehicleLaser || type === ProjectileType.Tracer;
 }
 
 function tracerLength(p: ProjectileSnapshotData): number {
@@ -152,7 +158,7 @@ function addTracerCross(
   p: ProjectileSnapshotData,
   tail?: { x: number; y: number },
 ): void {
-  if (!isTracer(p)) return;
+  if (!isTracerType(p.type)) return;
   const ribbon = new THREE.Mesh(
     tracerGeometry(p, tail && { x: tail.y, y: -tail.x }),
     mesh.material,
@@ -165,7 +171,7 @@ function addTracerCross(
     new THREE.PlaneGeometry(size, size),
     new THREE.MeshBasicMaterial({
       map: p.type === ProjectileType.VehicleLaser ? SHRIKE_CROSS : TRACER_CROSS,
-      color: projectileColor(p),
+      color: projectileColor(p.weaponId, p.type),
       transparent: true,
       blending: THREE.AdditiveBlending,
       fog: false,
@@ -178,7 +184,9 @@ function addTracerCross(
 }
 
 function glowProjectile(p: ProjectileSnapshotData): boolean {
-  return isTracer(p) || p.type === ProjectileType.Energy || p.weaponId === WeaponId.Spinfusor;
+  return (
+    isTracerType(p.type) || p.type === ProjectileType.Energy || p.weaponId === WeaponId.Spinfusor
+  );
 }
 
 function projectileOrientation(mesh: THREE.Mesh, p: ProjectileSnapshotData): void {
@@ -221,7 +229,7 @@ export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.
   // green shells, not recoloured copies of the same generic sphere. Only the Shrike's
   // bolt carries the twin-muzzle tail: its alternating wing origins come from the source
   // image-pair offsets, while the handheld Chaingun has the one barrel.
-  const color = projectileColor(projectile);
+  const color = projectileColor(projectile.weaponId, projectile.type);
   const tail = projectile.type === ProjectileType.VehicleLaser ? nextShrikeMuzzleTail() : undefined;
   const mesh = new THREE.Mesh(
     projectileGeometry(projectile, tail),
@@ -356,7 +364,7 @@ function syncOneProjectile(
     // and broke the plate-level flight frame within a couple of frames.
     mesh.rotateY(dt * 30);
   }
-  if (isTracer(p)) {
+  if (isTracerType(p.type)) {
     const travelled =
       ((mesh.userData.travelled as number | undefined) ?? 0) + Math.hypot(p.vx, p.vy, p.vz) * dt;
     mesh.userData.travelled = travelled;
@@ -428,30 +436,50 @@ function createFlash(position: { x: number; y: number; z: number }, color: numbe
   return mesh;
 }
 
-function createProjectileImpact(p: ProjectileSnapshotData): THREE.Mesh {
-  if (!isTracer(p)) return createFlash(p, WEAPON_COLOR[p.weaponId] ?? 0xffffff);
+/** The flash one authoritative impact record renders, keyed on the record's own projectile
+ *  type (#52) rather than on a disappearing snapshot entry: tracers make compact cross
+ *  flashes, everything else the weapon-colored fireball at the sim's exact contact point. */
+function impactFlash(impact: ProjectileImpact): THREE.Mesh {
+  if (!isTracerType(impact.type)) {
+    return createFlash(impact, WEAPON_COLOR[impact.weaponId] ?? 0xffffff);
+  }
   // Bullets make compact impact flashes, not the explosive weapons' metre-wide fireballs.
   const mesh = new THREE.Mesh(
     new THREE.SphereGeometry(1, 8, 6),
     new THREE.MeshBasicMaterial({
-      map: p.type === ProjectileType.VehicleLaser ? SHRIKE_CROSS : TRACER_CROSS,
-      color: projectileColor(p),
+      map: impact.type === ProjectileType.VehicleLaser ? SHRIKE_CROSS : TRACER_CROSS,
+      color: projectileColor(impact.weaponId, impact.type),
       transparent: true,
       blending: THREE.AdditiveBlending,
       fog: false,
       depthWrite: false,
     }),
   );
-  mesh.position.set(p.x, p.y, p.z);
-  mesh.scale.setScalar(p.type === ProjectileType.VehicleLaser ? 0.5 : 0.12);
+  mesh.position.set(impact.x, impact.y, impact.z);
+  mesh.scale.setScalar(impact.type === ProjectileType.VehicleLaser ? 0.5 : 0.12);
   return mesh;
 }
 
-function projectileImpactEffect(p: ProjectileSnapshotData): Effect {
-  if (p.weaponId === WeaponId.Spinfusor) {
-    const original = createDiscExplosion(p);
+/** The one-shot effect one impact record (#52) deserves, or null for the removals that must
+ *  NOT look like an impact: a Linear/Tracer/Energy projectile expiring at end of lifetime
+ *  used to fire the exact same disappearance flash a real strike did, at whatever position
+ *  the last snapshot reported. Only an armed grenade's timeout really detonates
+ *  (finalizeGrenadeLifetime), so only a Grenade-type Timeout gets explosion FX. */
+function impactEffectFor(impact: ProjectileImpact): Effect | null {
+  if (impact.reason === ProjectileImpactReason.Timeout) {
+    if (impact.type !== ProjectileType.Grenade) return null;
+    const mesh = createFlash(impact, projectileColor(impact.weaponId, impact.type));
+    return { mesh, ttl: EXPLOSION_LIFETIME_S, expanding: true };
+  }
+  // A bounce is a reflection, not a detonation: the projectile keeps flying, so the record
+  // renders a brief compact puff at the contact point instead of a full fireball.
+  if (impact.reason === ProjectileImpactReason.Bounce) {
+    return { mesh: impactFlash(impact), ttl: EXPLOSION_LIFETIME_S / 2 };
+  }
+  if (impact.weaponId === WeaponId.Spinfusor) {
+    const original = createDiscExplosion(impact);
     if (original) return original;
-    const mesh = createFlash(p, 0x66bbff);
+    const mesh = createFlash(impact, 0x66bbff);
     mesh.scale.setScalar(3);
     const material = mesh.material as THREE.MeshBasicMaterial;
     material.blending = THREE.AdditiveBlending;
@@ -459,30 +487,22 @@ function projectileImpactEffect(p: ProjectileSnapshotData): Effect {
     material.fog = false;
     return { mesh, ttl: 0.6, expanding: true };
   }
-  return { mesh: createProjectileImpact(p), ttl: EXPLOSION_LIFETIME_S };
+  return { mesh: impactFlash(impact), ttl: EXPLOSION_LIFETIME_S };
 }
 
-/** Projectiles present last frame and gone this frame get a one-shot flash at their last known
- * position — there is no explicit "projectile expired" wire message, so the caller diffs. */
-export function spawnExplosionsForExpired(
+/** Spawns the FX for every authoritative impact record (#52). The caller passes each record
+ *  exactly once -- networked clients extract them from their drained event stream, the solo
+ *  app drains world.projectiles.lastImpacts per tick -- and nothing here or upstream infers
+ *  an effect from a projectile leaving the snapshot list anymore, so a shot that is also seen
+ *  disappearing can never produce a duplicate effect. */
+export function spawnProjectileImpacts(
   scene: THREE.Scene,
   effects: Effect[],
-  previous: Map<number, ProjectileSnapshotData>,
-  current: ProjectileSnapshotData[],
+  impacts: readonly ProjectileImpact[],
 ): void {
-  const currentById = new Map(current.map((p) => [p.id, p]));
-  for (const [id, last] of previous) {
-    // Codex review round 2 (PR #9), finding 8: an id present in `current` is not proof the
-    // same projectile is still alive -- the sim can free an id and hand it to a brand-new
-    // projectile (different type/weaponId) within one snapshot interval. Matching on id
-    // alone silently ate the old projectile's death flash because, from this diff's point
-    // of view, "that id still exists". Only treat it as still alive when the type/weaponId
-    // also match; otherwise the old one died and gets its flash same as any other expiry.
-    const stillAlive = currentById.get(id);
-    if (stillAlive && stillAlive.type === last.type && stillAlive.weaponId === last.weaponId) {
-      continue;
-    }
-    const effect = projectileImpactEffect(last);
+  for (const impact of impacts) {
+    const effect = impactEffectFor(impact);
+    if (!effect) continue;
     scene.add(effect.mesh);
     effects.push(effect);
   }

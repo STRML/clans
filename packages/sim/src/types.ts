@@ -85,6 +85,49 @@ export interface PlayerStore {
   /** Bit 0: use held; bit 1: wait for contact exit before automatic boarding. */
   wasUseHeld: Uint8Array;
 }
+/** Why the sim recorded a projectile impact -- issue #52's authoritative four-way reason.
+ *  Torque's Projectile had no such record (effects were inferred from deletion order, the exact
+ *  trap #52 describes), so the four values are ours, enumerated from what stepProjectiles can
+ *  actually distinguish at the moment a projectile stops or reflects:
+ *  - Direct: struck a valid player target (isValidTarget) along the swept segment.
+ *  - Bounce: a grenade/EnergyBolt reflected from terrain/interior and KEEPS FLYING -- the
+ *    projectile is not freed; the client renders a puff, not a detonation.
+ *  - Timeout: outlived its weapon's lifetime. An ARMED grenade's timeout still detonates
+ *    (finalizeGrenadeLifetime); a Tracer/Linear/Energy timeout is a silent removal -- the client
+ *    suppresses explosion FX for the latter, which is precisely #52's "lifetime removal that
+ *    used to look like an impact" half.
+ *  - World: struck terrain, an interior/force field, or a base object/turret/vehicle --
+ *    anything solid that is not a player.
+ */
+export enum ProjectileImpactReason {
+  Direct = 0,
+  Bounce = 1,
+  Timeout = 2,
+  World = 3,
+}
+/** One authoritative projectile impact, emitted exactly once by stepProjectiles into
+ *  ProjectileStore.lastImpacts and carried to clients verbatim (protocol
+ *  EventKind.ProjectileImpact -- issue #52). The position is the swept-segment CONTACT point
+ *  (pointAlongSegment), never the segment's raw endpoint, so networked FX land where the
+ *  collision geometrically happened even when a fast disc travels several meters past it within
+ *  one 32 ms tick. `weaponId` is the raw ProjectileStore.weaponId value, which shares its byte
+ *  range with turret barrels (+100) and the Shrike blaster (+150) -- see
+ *  TURRET_WEAPON_ID_OFFSET in projectiles.ts. `type` mirrors ProjectileType so the client can
+ *  keep distinguishing tracer cross-flashes from explosive detonations for turret/vehicle shots
+ *  whose weaponId has no WEAPON_DATA row. */
+export interface ProjectileImpact {
+  x: number;
+  y: number;
+  z: number;
+  weaponId: number;
+  type: number;
+  reason: ProjectileImpactReason;
+  /** Monotonic per-world counter, incremented once per emitted record. Exists so a consumer can
+   *  prove exactly-once consumption (#52: "sequence delivered exactly once") and so a shot born,
+   *  impacting, and freed entirely between two snapshots still reaches the client: it never
+   *  appeared in any snapshot, so no absence-diff could ever have fired for it. */
+  seq: number;
+}
 /** One id freed by `free()`, held out of `freeIds` until it has sat unallocated for at
  *  least PROJECTILE_ID_REUSE_DELAY_TICKS calls to `stepProjectiles` -- see that constant
  *  and ProjectileStore.pendingFreeIds for why. `ticksRemaining` counts down by one on every
@@ -145,6 +188,17 @@ export interface ProjectileStore {
    *  the only thing that behaves the same under both call paths. */
   expiresAtTick: Float64Array;
   armed: Uint8Array;
+  /** Monotonic source of ProjectileImpact.seq values -- see that interface. Kept on the store
+   *  (not World) because createProjectileStore owns the store literal, and World's own literal
+   *  lives in world.ts; stepProjectiles is the only writer. */
+  impactSequence: number;
+  /** The authoritative impact records THIS stepProjectiles call produced (#52), emptied at the
+   *  top of every call and rebuilt -- the same one-tick-only overwrite shape World.lastFireEvents
+   *  uses, and for the same reason: server/net.ts reads it after stepWorld has already returned,
+   *  to broadcast EventKind.ProjectileImpact. Single-player reads it from the client app's own
+   *  per-tick afterStep callback, which is why the reset must happen per call and not per frame:
+   *  a multi-step frame would otherwise lose every impact but the last tick's. */
+  lastImpacts: ProjectileImpact[];
 }
 export interface FlagStore {
   team: Uint8Array;

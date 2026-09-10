@@ -13,7 +13,13 @@ import { raycastInteriors } from './interiors.js';
 import { interiorFieldColliders } from './occlusion.js';
 import { GRAVITY } from './movement.js';
 import { sampleTerrain, type Heightfield, type TerrainSample } from './terrain.js';
-import type { PendingFreeId, ProjectileStore, Vec3, World } from './types.js';
+import {
+  ProjectileImpactReason,
+  type PendingFreeId,
+  type ProjectileStore,
+  type Vec3,
+  type World,
+} from './types.js';
 import {
   applyTurretDamage,
   TURRET_BARREL_DATA,
@@ -219,6 +225,8 @@ export function createProjectileStore(capacity = PROJECTILE_CAPACITY): Projectil
     velocity: new Float64Array(capacity * 3),
     expiresAtTick: new Float64Array(capacity),
     armed: new Uint8Array(capacity),
+    impactSequence: 0,
+    lastImpacts: [],
   };
 }
 
@@ -239,6 +247,27 @@ function allocate(store: ProjectileStore): number | null {
 function free(store: ProjectileStore, id: number): void {
   store.active[id] = 0;
   store.pendingFreeIds.push({ id, ticksRemaining: PROJECTILE_ID_REUSE_DELAY_TICKS });
+}
+
+/** Emits one authoritative ProjectileImpact (#52) into the store's per-tick record list:
+ *  contact position, weapon, projectile type, reason, and the next monotonic sequence number.
+ *  Every stopping or reflecting path in this file funnels through here -- resolveImpact for
+ *  detonations and direct hits, the lifetime-expiry branches, the two bounce branches, and
+ *  deactivateProjectile's lag-comp correction -- so a client never has to infer an impact from
+ *  a projectile's disappearance from a snapshot again, which mis-fired for shots born and
+ *  freed between snapshots, reported stale positions, and read lifetime removals as impacts. */
+function recordImpact(world: World, id: number, point: Vec3, reason: ProjectileImpactReason): void {
+  const store = world.projectiles;
+  store.impactSequence += 1;
+  store.lastImpacts.push({
+    x: point.x,
+    y: point.y,
+    z: point.z,
+    weaponId: store.weaponId[id] ?? 0,
+    type: store.type[id] ?? 0,
+    reason,
+    seq: store.impactSequence,
+  });
 }
 
 /** Counts down every pending id's remaining delay by one call, moving any that have now
@@ -681,6 +710,7 @@ function resolveImpact(
   data: ImpactData,
   point: Vec3,
   hitPlayerId: number | null,
+  reason: ProjectileImpactReason,
   hitStructure: StructureHit | null = null,
 ): void {
   const owner = world.projectiles.ownerId[id] ?? -1;
@@ -692,6 +722,10 @@ function resolveImpact(
   } else if (hitPlayerId !== null) {
     applyDamage(world, hitPlayerId, data.directDamage ?? 0, owner, armorFor(world, hitPlayerId));
   }
+  // The record is emitted before the slot is freed, from the exact contact point the damage
+  // was resolved against (#52) -- never the segment endpoint the shot happened to reach this
+  // tick, which is the stale position the old disappearance-diff FX reported.
+  recordImpact(world, id, point, reason);
   free(world.projectiles, id);
 }
 
@@ -798,12 +832,12 @@ function resolveLinearHit(
 ): HitResult | null {
   const nearest = nearestOfThree(worldHit, directHit, structureHit);
   if (nearest === worldHit && worldHit) {
-    resolveImpact(world, id, data, worldHit.point, null);
+    resolveImpact(world, id, data, worldHit.point, null, ProjectileImpactReason.World);
     return NO_HIT;
   }
   if (nearest === structureHit && structureHit) {
     const hitPoint = pointAlongSegment(previous, current, structureHit.distance);
-    resolveImpact(world, id, data, hitPoint, null, structureHit);
+    resolveImpact(world, id, data, hitPoint, null, ProjectileImpactReason.World, structureHit);
     return NO_HIT;
   }
   if (nearest === directHit && directHit) {
@@ -813,7 +847,7 @@ function resolveLinearHit(
     // falloff and kickback several meters from where the collision geometrically happened
     // (Codex review round 3, finding 3).
     const hitPoint = pointAlongSegment(previous, current, directHit.distance);
-    resolveImpact(world, id, data, hitPoint, directHit.playerId);
+    resolveImpact(world, id, data, hitPoint, directHit.playerId, ProjectileImpactReason.Direct);
     return { hitPlayerId: directHit.playerId, hitPoint };
   }
   return null;
@@ -851,7 +885,14 @@ function stepLinearOrTracer(world: World, id: number, dt: number): HitResult {
     directHit,
   );
   if (resolved) return resolved;
-  if (expireOneTick(store, id, data.lifetime)) free(store, id);
+  if (expireOneTick(store, id, data.lifetime)) {
+    // #52: a lifetime expiry is a REMOVAL, not an impact. Recording it as a Timeout lets the
+    // client skip detonation FX for it -- previously a Tracer or disc silently expiring mid-air
+    // fired the same disappearance flash a real terrain strike did, at whatever position the
+    // last snapshot happened to report.
+    recordImpact(world, id, current, ProjectileImpactReason.Timeout);
+    free(store, id);
+  }
   return NO_HIT;
 }
 
@@ -898,7 +939,13 @@ function armGrenadeIfDue(
 }
 
 /** Detonates an armed grenade whose lifetime just ran out with nothing else triggering it,
- *  or simply frees an unarmed one -- the tail of stepGrenade's lifetime-expiry branch. */
+ *  or simply frees an unarmed one -- the tail of stepGrenade's lifetime-expiry branch. Both
+ *  outcomes are authoritative Timeout records (#52): the armed case is a real detonation the
+ *  client must render as one, the unarmed case (unreachable with the current GRENADE_DATA
+ *  armTime < lifetime, kept for safety) is a silent removal the detonation-FX rule must not
+ *  fire for -- it is a Grenade-type Timeout only in the armed branch's spirit; the record's
+ *  type field says Grenade either way, so the client's timeout rule treats a Grenade-type
+ *  Timeout as a detonation, which the unreachable unarmed case slightly over-renders. */
 function finalizeGrenadeLifetime(
   world: World,
   id: number,
@@ -906,8 +953,11 @@ function finalizeGrenadeLifetime(
   current: Vec3,
   armed: boolean,
 ): void {
-  if (armed) resolveImpact(world, id, data, current, null);
-  else free(world.projectiles, id);
+  if (armed) resolveImpact(world, id, data, current, null, ProjectileImpactReason.Timeout);
+  else {
+    recordImpact(world, id, current, ProjectileImpactReason.Timeout);
+    free(world.projectiles, id);
+  }
 }
 
 /** A terrain hit carries its normal on `sample`; an interior/force-field hit (from
@@ -947,10 +997,18 @@ function stepGrenade(world: World, id: number, dt: number): void {
   const data: ImpactData = isMortar ? WEAPON_DATA[WeaponId.Mortar] : GRENADE_DATA;
   const contact = grenadeContactThisTick(world, id, previous, current, armed, terrainHit);
   if (contact) {
-    resolveImpact(world, id, data, contact.point, contact.playerId);
+    // An armed grenade's contact resolution: Direct when the nearer contact was a player,
+    // World when terrain/interior won the same segment -- the same two-way reason split
+    // resolveLinearHit's own branches make (issue #52).
+    const reason =
+      contact.playerId === null ? ProjectileImpactReason.World : ProjectileImpactReason.Direct;
+    resolveImpact(world, id, data, contact.point, contact.playerId, reason);
     return;
   }
   if (terrainHit) {
+    // A bounce is a reflection, not a removal: the record (#52) tells the client to render a
+    // puff at the contact point while the projectile keeps flying under its new velocity.
+    recordImpact(world, id, terrainHit.point, ProjectileImpactReason.Bounce);
     writeVec3(store.position, id * 3, terrainHit.point);
     bounce(world, id, bounceNormalFor(terrainHit), GRENADE_DATA.elasticity);
   }
@@ -990,12 +1048,19 @@ function stepEnergy(world: World, id: number, dt: number): void {
   );
   const nearest = nearestOfThree(worldHit, directHit, structureHit);
   if (nearest === worldHit && worldHit) {
+    // Same bounce record as stepGrenade's (#52): reflection puff, projectile keeps flying.
+    recordImpact(world, id, worldHit.point, ProjectileImpactReason.Bounce);
     writeVec3(store.position, base, worldHit.point);
     bounce(world, id, bounceNormalFor(worldHit), data.elasticity!);
   } else if (nearest) {
     resolveLinearHit(world, id, data, previous, current, null, structureHit, directHit);
   }
-  if (store.active[id] && expireOneTick(store, id, data.lifetime)) free(store, id);
+  // The active check matters: a bolt that just detonated above was already freed (and its
+  // impact recorded) inside resolveLinearHit, and must not also gain a Timeout record.
+  if (store.active[id] && expireOneTick(store, id, data.lifetime)) {
+    recordImpact(world, id, current, ProjectileImpactReason.Timeout);
+    free(store, id);
+  }
 }
 
 /** The farthest distance along a Laser Rifle ray that anything solid still lets the beam
@@ -1191,8 +1256,13 @@ export function hitTestFireEvent(world: World, event: FireEvent, dt: number): Hi
  * hit or terrain contact, expired, or simply never spawned -- FireEvent.projectileId defaults
  * to -1), so a caller never needs to check that first.
  */
-export function deactivateProjectile(world: World, id: number): void {
+export function deactivateProjectile(world: World, id: number, impactPoint?: Vec3 | null): void {
   if (id < 0 || id >= world.projectiles.active.length || !world.projectiles.active[id]) return;
+  // #52: a lag-compensated correction consumed a shot that really did hit a player -- record
+  // the Direct impact at the rewound contact point so the corrected hit renders exactly like a
+  // live one. Without this, the deactivation deleted the shot with no record at all and the
+  // corrected hit produced no client-side effect (round 5, finding 1's deactivation path).
+  if (impactPoint) recordImpact(world, id, impactPoint, ProjectileImpactReason.Direct);
   free(world.projectiles, id);
 }
 
@@ -1326,6 +1396,10 @@ function spawnPendingVehicleShots(world: World, dt: number): void {
  */
 export function stepProjectiles(world: World, dt: number): void {
   flushPendingFreeIds(world.projectiles);
+  // The per-tick impact record list is OVERWRITTEN every call, exactly like lastFireEvents is
+  // reassigned: a consumer reading it after this call sees exactly this call's impacts (#52),
+  // and nothing from an earlier call can ever be delivered twice.
+  world.projectiles.lastImpacts = [];
   for (let id = 0; id < world.projectiles.count; id += 1) {
     if (!world.projectiles.active[id]) continue;
     if (world.projectiles.type[id] === ProjectileType.Grenade) stepGrenade(world, id, dt);

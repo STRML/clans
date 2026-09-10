@@ -33,6 +33,7 @@ import {
   type Heightfield,
   type PlayerInput,
   type PlayerSnapshotData,
+  type ProjectileImpact,
   type Vec3,
   type World,
 } from '@clans/sim';
@@ -102,7 +103,7 @@ import {
 import { createVoiceMenu, speakVoiceLine, type VoiceMenu } from './voicebinds.js';
 import {
   projectilesFromWorld,
-  spawnExplosionsForExpired,
+  spawnProjectileImpacts,
   spawnVehicleExplosion,
   spawnLaserBeams,
   syncProjectileMeshes,
@@ -918,6 +919,20 @@ function syncEventAudio(
   playVoiceBindAudio(audio, events);
 }
 
+/** The authoritative impact records (#52) among this frame's newly received events, in
+ *  arrival order. drainNewEvents already guarantees each TimestampedEvent is handed out
+ *  exactly once (cursor advanced per receipt sequence), which is what makes the networked
+ *  impact path exactly-once end to end: the sim emits one record, the server broadcasts one
+ *  Event, the client renders one effect. */
+function impactRecordsFromEvents(events: readonly TimestampedEvent[]): ProjectileImpact[] {
+  const impacts: ProjectileImpact[] = [];
+  for (const event of events) {
+    if (event.kind !== EventKind.ProjectileImpact || !event.impact) continue;
+    impacts.push(event.impact);
+  }
+  return impacts;
+}
+
 export function syncWorldView(
   world: World,
   playerId: number,
@@ -948,7 +963,10 @@ export function syncWorldView(
 ): void {
   const connected = net ? net.connected : true;
   const projectiles = net ? (connected ? net.projectiles : []) : projectilesFromWorld(world);
-  spawnExplosionsForExpired(scene, effects, previousProjectiles, projectiles);
+  // Issue #52: projectile FX come from the sim's authoritative impact records now -- a
+  // projectile vanishing from this snapshot list is no longer evidence of an impact (it may
+  // have expired silently, or never appeared in any snapshot at all), so no disappearance
+  // diff runs here and the same shot can never produce a duplicate effect.
   if (audio) syncProjectileAudio(audio, previousProjectiles, projectiles);
   syncProjectileMeshes(scene, projectileMeshes, projectiles, dtSeconds);
   previousProjectiles.clear();
@@ -966,6 +984,7 @@ export function syncWorldView(
     (id) => positionOfPlayer(world, net, id),
     localNetworkId(net, playerId),
   );
+  spawnProjectileImpacts(scene, effects, impactRecordsFromEvents(newEvents));
 
   hud.update(hudSourceFrom(world, playerId, net));
 }
@@ -1845,6 +1864,12 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
               playerId,
             );
           }
+          // #52 (solo): there is no server to broadcast impact events, so drain this tick's
+          // authoritative records straight out of the projectile store -- here inside
+          // afterStep, per simulated tick exactly like the laser beams above, because
+          // lastImpacts is overwritten on every stepProjectiles call and a multi-step frame
+          // would otherwise lose every impact but the final tick's.
+          spawnProjectileImpacts(scene, effects, world.projectiles.lastImpacts);
         });
       }
       app.stats.simMs = performance.now() - simStart;

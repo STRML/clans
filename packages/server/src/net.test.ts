@@ -11,9 +11,12 @@ import {
   WeaponState,
   FIXED_DT,
   LIGHT_ARMOR,
+  ProjectileImpactReason,
+  ProjectileType,
   spawnVehicleAtPad,
   stepPower,
   VehicleKind,
+  WeaponId,
   type Heightfield,
   type PlayerInput,
   type World,
@@ -1106,6 +1109,129 @@ describe('startNetServer', () => {
     client.close();
   });
 
+  // #52 tests fire through REAL inputs -- stepWeapons clears world.pendingFireEvents on
+  // every stepWorld call, so the sim tests' direct-push trick cannot work through server.tick.
+  const fireInput = (slot: number, overrides: Partial<NetInputSample> = {}): NetInputSample => ({
+    moveX: 0,
+    moveZ: 0,
+    yaw: 0,
+    pitch: 0,
+    jump: false,
+    jet: false,
+    fire: false,
+    altFire: false,
+    slot,
+    packActive: false,
+    use: false,
+    ...overrides,
+  });
+
+  it('broadcasts exactly one ProjectileImpact event carrying the authoritative record (#52)', async () => {
+    // #52: the impact must reach the client as a full record -- position, weapon, reason,
+    // sequence -- exactly once, not inferred from a projectile vanishing from a snapshot.
+    const client = await connect(TEST_PORT);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    await wait(10);
+
+    const messages: Uint8Array[] = [];
+    client.on('message', (data) => messages.push(new Uint8Array(data as Uint8Array)));
+    const targetId = addPlayer(world, { x: 0, y: 0, z: 8 }, 2);
+    world.players.position.set([0, 0, 0], welcome.playerId * 3);
+    client.send(
+      encodeInput({
+        sequence: 1,
+        samples: [
+          fireInput(1, { fire: true }),
+          fireInput(1, { fire: true }),
+          fireInput(1, { fire: true }),
+        ],
+      }),
+    );
+    await wait(20);
+    for (let tick = 1; tick < 30; tick += 1) {
+      // Keep the target planted on the shot line against gravity, the same convention the
+      // lag-compensation tests below use.
+      world.players.position.set([0, 0, 8], targetId * 3);
+      server.tick(tick);
+    }
+    await wait(20);
+
+    const impacts = messages
+      .filter((bytes) => bytes[0] === MessageType.Event)
+      .map((bytes) => decodeEvent(bytes))
+      .filter((event) => event.kind === EventKind.ProjectileImpact);
+    expect(impacts).toHaveLength(1);
+    const impact = impacts[0]?.impact;
+    expect(impact).toMatchObject({
+      weaponId: WeaponId.Spinfusor,
+      type: ProjectileType.Linear,
+      reason: ProjectileImpactReason.Direct,
+      seq: 1,
+    });
+    // The record's position is the sim's contact point beside the planted target -- a stale
+    // "last seen" position would be metres back along the shot line.
+    expect(Math.hypot(impact?.x ?? 99, (impact?.z ?? 99) - 8)).toBeLessThan(2);
+    // The damage path is untouched: a direct disc hit hurts the target it hit.
+    expect(world.players.damage[targetId] ?? 0).toBeGreaterThan(0);
+    client.close();
+  });
+
+  it('delivers an impact that happens entirely between snapshots (#52)', async () => {
+    // A disc fired straight down whose impact lands on an ODD tick: no snapshot is sent on
+    // odd ticks at all, so the old disappearance-diff presentation could never have shown
+    // anything for this shot -- the impact event must carry it instead (issue #52).
+    const client = await connect(TEST_PORT);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    await wait(10);
+    const shooter = welcome.playerId;
+
+    const messages: Uint8Array[] = [];
+    client.on('message', (data) => messages.push(new Uint8Array(data as Uint8Array)));
+
+    // Keep the shooter pinned where the downward shot is over open ground.
+    world.players.position.set([0, 0, 0], shooter * 3);
+
+    // Message cadence mirrors the proven LaserFired test above, shifted one tick: the slot
+    // switch rides its own message and is applied by tick 3, the fire message is applied by
+    // tick 4 -- an EVEN tick, so the spawn snapshot goes out -- and the disc first
+    // integrates on tick 5, an ODD tick where no snapshot is sent at all. That impact tick
+    // is exactly what the old disappearance-diff presentation could never represent (#52).
+    client.send(encodeInput({ sequence: 1, samples: [fireInput(1), fireInput(1), fireInput(1)] }));
+    await wait(20);
+    server.tick(3); // odd: applies the Spinfusor slot switch, sends no snapshot
+    client.send(
+      encodeInput({
+        sequence: 2,
+        samples: [
+          fireInput(1, { fire: true, pitch: -Math.PI / 2 }),
+          fireInput(1, { fire: true, pitch: -Math.PI / 2 }),
+          fireInput(1, { fire: true, pitch: -Math.PI / 2 }),
+        ],
+      }),
+    );
+    await wait(20);
+    server.tick(4); // even: fires the disc straight down; the spawn snapshot goes out
+    await wait(20);
+    messages.length = 0; // only care about what the odd tick delivers
+
+    server.tick(5); // odd: the disc crosses the terrain; NO snapshot is sent this tick
+    await wait(20);
+
+    expect(messages.some((bytes) => bytes[0] === MessageType.Snapshot)).toBe(false);
+    const impacts = messages
+      .filter((bytes) => bytes[0] === MessageType.Event)
+      .map((bytes) => decodeEvent(bytes))
+      .filter((event) => event.kind === EventKind.ProjectileImpact);
+    expect(impacts).toHaveLength(1);
+    expect(impacts[0]?.impact?.reason).toBe(ProjectileImpactReason.World);
+    expect(impacts[0]?.impact?.weaponId).toBe(WeaponId.Spinfusor);
+    client.close();
+  });
+
   it('drops a flag when a lag-compensated correction kills its carrier (Codex round 4, finding 2)', async () => {
     // applyLagCompensatedHits runs after stepWorld has already returned -- and therefore
     // after this tick's stepFlags already ran -- so a kill it produces can never be seen by
@@ -1298,6 +1424,9 @@ describe('startNetServer', () => {
     const welcome = decodeWelcome(await welcomePromise);
     world.players.position.set([0, 0, 0], welcome.playerId * 3);
 
+    const lagMessages: Uint8Array[] = [];
+    shooter.on('message', (data) => lagMessages.push(new Uint8Array(data as Uint8Array)));
+
     // Establish a 150ms ping: send a snapshot, ack it 150ms of server-clock time later.
     const firstPromise = receive(shooter);
     lagServer.tick(2);
@@ -1359,6 +1488,21 @@ describe('startNetServer', () => {
     lagServer.tick(22); // the tracer would travel its second 13.6 m here if still alive
 
     expect(world.players.damage[targetB]).toBe(0); // consumed: no second hit
+
+    // #52: the corrected hit ALSO produces the authoritative Direct impact record -- the
+    // correction consumes the tracer with the rewound contact point, so the client renders
+    // the corrected hit exactly like a live one, once.
+    await wait(20);
+    const impacts = lagMessages
+      .filter((bytes) => bytes[0] === MessageType.Event)
+      .map((bytes) => decodeEvent(bytes))
+      .filter((event) => event.kind === EventKind.ProjectileImpact);
+    expect(impacts).toHaveLength(1);
+    expect(impacts[0]?.impact).toMatchObject({
+      weaponId: WeaponId.Chaingun,
+      type: ProjectileType.Tracer,
+      reason: ProjectileImpactReason.Direct,
+    });
     shooter.close();
     lagServer.close();
   });
@@ -1372,7 +1516,7 @@ describe('startNetServer', () => {
     // frozen game.
     const deadId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
     world.players.alive[deadId] = 0;
-    world.players.respawnAt[deadId] = 0;
+    world.players.respawnAt[deadId] = 0; // already due
     // Makes checkTimeLimit fire on this tick's stepWorld call: it compares world.tick + 1
     // (pre-increment) against timeLimitTicks, so this is the earliest value that trips it.
     world.timeLimitTicks = world.tick + 1;
