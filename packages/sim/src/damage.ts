@@ -91,6 +91,24 @@ function scoreForDeath(world: World, victimId: number, attackerId: number): void
   players.score[attackerId] = (players.score[attackerId] ?? 0) + (sameTeam ? -10 : 10);
 }
 
+/** Issue #57 vehicle-kill scoring: destroying an enemy vehicle credits the attacker at half
+ *  a player kill (5 against scoreForDeath's 10). The number is ours, not sourced -- the M5
+ *  plan's Spec gaps (docs/superpowers/plans/2026-09-06-m5-vehicles.md) record that the
+ *  spec's own CTF numbers table names player-kill/capture/touch scoring but is silent on
+ *  vehicle destruction and explicitly hands the decision to the implementer; half weight
+ *  keeps a vehicle kill worth real score without rivaling an actual player kill. Destroying
+ *  your own side's vehicle costs the same half weight, mirroring scoreForDeath's -10
+ *  teamkill penalty. `attackerId` is -1 for crash damage and turret/barrel shots
+ *  (projectiles.ts's ownerId=-1 convention), which credit nobody -- the same environmental
+ *  rule scoreForDeath applies to fall damage. */
+export function applyVehicleKillScore(world: World, attackerId: number, vehicleTeam: number): void {
+  if (attackerId < 0) return; // Crash, turret shot, or any other unattributed cause.
+  const players = world.players;
+  if (!players.active[attackerId]) return; // A since-removed attacker has no score to change.
+  const sameTeam = players.team[attackerId] === vehicleTeam;
+  players.score[attackerId] = (players.score[attackerId] ?? 0) + (sameTeam ? -5 : 5);
+}
+
 /** `attackerId` is -1 for fall damage or any other non-player cause. */
 export function applyDamage(
   world: World,

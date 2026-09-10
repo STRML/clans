@@ -1,6 +1,6 @@
 import { armorFor } from './armor.js';
 import { BaseObjectKind, teamHasPower, type BaseObjectStore } from './baseObjects.js';
-import { applyDamage } from './damage.js';
+import { applyDamage, applyKickback, applyVehicleKillScore, playerHitbox } from './damage.js';
 import { raycastInteriors, resolveSphereAgainstInteriors } from './interiors.js';
 import { GRAVITY } from './movement.js';
 import { nextRandom } from './random.js';
@@ -96,6 +96,16 @@ export interface VehicleStore {
   // jumpEdge pattern, one tick simpler (no wasGrounded-based bunny-hop chaining needed for a
   // vehicle jump).
   wasJumpHeld: Uint8Array;
+  /** The last player to land player-attributed damage on this vehicle (issue #57). Recorded
+   *  by applyVehicleDamage and credited as a vehicle kill on destruction via damage.ts's
+   *  applyVehicleKillScore; -1 when nothing player-sourced ever hurt it. Last-damager rather
+   *  than killing-blow, because a vehicle's fatal blow is very often its own crash
+   *  (applyCollisionDamage's attackerId -1) or an unattributed turret shot -- either would
+   *  erase the credited attacker entirely under a strict killing-blow rule, while a
+   *  player-sourced hit is the only way this field is ever set. Reset to -1 on every
+   *  spawnVehicleAtPad: a reused id must not inherit the previous occupant's attacker, the
+   *  same reused-id hygiene addPlayer applies to score/godMode. */
+  lastAttackerId: Int16Array;
 }
 
 export const MOUNT_RANGE = 4; // real, both kinds; see VEHICLE_DATA.minMountDist per-kind above
@@ -127,6 +137,7 @@ export function createVehicleStore(capacity = VEHICLE_CAPACITY): VehicleStore {
     reservedPilotId: new Int16Array(capacity).fill(-1),
     weaponTimer: new Float64Array(capacity),
     onGround: new Uint8Array(capacity),
+    lastAttackerId: new Int16Array(capacity).fill(-1),
     wasJumpHeld: new Uint8Array(capacity),
   };
 }
@@ -269,6 +280,7 @@ export function spawnVehicleAtPad(world: World, padId: number, kind: VehicleKind
   vehicles.energy[id] = VEHICLE_DATA[kind].maxEnergy;
   vehicles.damage[id] = 0;
   vehicles.destroyed[id] = 0;
+  vehicles.lastAttackerId[id] = -1;
   vehicles.driverId[id] = -1;
   vehicles.padId[id] = padId;
   vehicles.spawnTime[id] = 0;
@@ -772,16 +784,21 @@ function ejectPilot(world: World, vehicleId: number): void {
  *  against `energy` first, the remainder against `damage`, clamped at `maxDamage` and
  *  destroying exactly once (failure matrix row 16) -- never a repeat `pendingVehicleDestroyed`
  *  push or a repeat ejection for an already-destroyed vehicle (failure matrix row 17).
- *  `attackerId` is accepted for signature symmetry with applyDamage/applyBaseObjectDamage and
- *  a future kill-feed line; this milestone does not score a vehicle kill off it (Spec gaps). */
+ *  `attackerId` credits the kill: the last player to hurt the vehicle is recorded on
+ *  `lastAttackerId` and destruction scores it via damage.ts's applyVehicleKillScore
+ *  (issue #57; the M5 plan's Spec gaps left the number to the implementer). */
 export function applyVehicleDamage(
   world: World,
   id: number,
   amount: number,
-  _attackerId: number,
+  attackerId: number,
 ): void {
   const vehicles = world.vehicles;
   if (amount <= 0 || !vehicles.active[id] || vehicles.destroyed[id]) return;
+  // Issue #57 kill attribution: remember the last player who hurt this vehicle (see
+  // lastAttackerId's own comment for the last-damager rule); -1 sources -- the vehicle's
+  // own crash damage and turret shots -- leave any earlier credit intact.
+  if (attackerId >= 0) vehicles.lastAttackerId[id] = attackerId;
   const data = VEHICLE_DATA[vehicles.kind[id] as VehicleKind];
   const energy = at(vehicles.energy, id);
   const perPoint = data.energyPerDamagePoint;
@@ -803,6 +820,7 @@ export function applyVehicleDamage(
     },
     team: at(vehicles.team, id),
   });
+  applyVehicleKillScore(world, vehicles.lastAttackerId[id] ?? -1, at(vehicles.team, id));
   ejectPilot(world, id);
 }
 
@@ -924,7 +942,119 @@ export function resolveVehicleCollision(
   };
   const groundImpact = resolveVehicleGround(world, id, current, motion);
   const interiorImpact = resolveVehicleInteriors(world, id, previousPosition, current, motion);
-  applyCollisionDamage(world, id, Math.max(groundImpact, interiorImpact));
+  const playerImpact = resolveVehiclePlayerContacts(world, id, current, motion);
+  applyCollisionDamage(world, id, Math.max(groundImpact, interiorImpact, playerImpact));
+}
+
+// --- Vehicle-versus-player collision (issue #57) ------------------------------------------
+
+/** The contact normal and closing speed of one vehicle/player overlap. */
+interface PlayerContact {
+  normal: Vec3;
+  closing: number;
+}
+
+/** Overlap test plus closing speed for one pedestrian player against `vId`'s hit sphere, or
+ *  null when there is no contact. The two spheres are the ones the rest of the sim already
+ *  uses for exactly this pair: the vehicle's own `checkRadius` (what resolveVehicleInteriors
+ *  resolves against and what projectiles.ts's vehicle hit-test sweeps) and the player's
+ *  bounding-sphere (`playerHitbox`, projectiles.ts's direct-hit test). Null for a dead,
+ *  inactive, or MOUNTED player -- a mounted player rides inside their own vehicle's hit
+ *  sphere (seatDriver locks them to seatPosition, the exact point resolveVehicleInteriors
+ *  resolves against), so without the mounted skip every piloted vehicle would roadkill its
+ *  own driver every tick, and contact with the vehicle a player is riding is vehicle-vs-
+ *  vehicle territory (an explicit M5 Spec-gap non-goal, not added here). The normal points
+ *  from the vehicle toward the player; `closing` is the vehicle-minus-player relative
+ *  velocity along it, floored at 0 -- a contact only fires while the two still move INTO
+ *  each other, so a player already riding along at the vehicle's speed is not re-shoved. */
+function vehiclePlayerContact(
+  world: World,
+  vId: number,
+  center: Vec3,
+  motion: Vec3,
+  playerId: number,
+): PlayerContact | null {
+  const players = world.players;
+  if (!players.active[playerId] || !players.alive[playerId]) return null;
+  if ((players.mountedVehicleId[playerId] ?? -1) !== -1) return null;
+  const data = VEHICLE_DATA[world.vehicles.kind[vId] as VehicleKind];
+  const armor = armorFor(world, playerId);
+  const box = playerHitbox(world, playerId, armor);
+  const dx = box.center.x - center.x;
+  const dy = box.center.y - center.y;
+  const dz = box.center.z - center.z;
+  const dist = Math.hypot(dx, dy, dz);
+  if (dist >= data.checkRadius + box.radius) return null;
+  const normal = dist > 0 ? { x: dx / dist, y: dy / dist, z: dz / dist } : { x: 0, y: 1, z: 0 };
+  const base = playerId * 3;
+  const closing = Math.max(
+    0,
+    (motion.x - at(players.velocity, base)) * normal.x +
+      (motion.y - at(players.velocity, base + 1)) * normal.y +
+      (motion.z - at(players.velocity, base + 2)) * normal.z,
+  );
+  return { normal, closing };
+}
+
+/** One contact's effects, in Torque's order (the engine resolves contact response, then
+ *  runs VehicleData's damage rules on whatever it collided with):
+ *  - Impulse: no script constant exists for an engine-side collision impulse (the M5
+ *    numbers table's ejection entry is the one place a script writes one by hand), so this
+ *    is the standard two-body elastic contact impulse, 2 * mV * mP / (mV + mP) *
+ *    closingSpeed kg·m/s along the contact normal, applied through applyKickback -- whose
+ *    divide-by-the-receiver's-mass scale IS Torque's applyImpulse convention per the same
+ *    numbers table. Its mass weighting reproduces the familiar asymmetry: a 150 kg Shrike
+ *    launches a 90 kg Light hard, a 400 kg Wildcat harder.
+ *  - Damage: (closingSpeed - collDamageThresholdVel) * collDamageMultiplier, the same
+ *    per-kind rule applyCollisionDamage already applies to the VEHICLE for its terrain and
+ *    interior impacts -- Torque's collision pass does not special-case Player contacts when
+ *    it decides impact damage, and resolveVehicleCollision feeds the same closing speed
+ *    into the vehicle's own damage below.
+ *  Attribution: the vehicle's current driver is the attacker, so a roadkill scores like any
+ *  other kill through applyDamage -> scoreForDeath; an unpiloted vehicle rolling into
+ *  somebody attributes to -1, matching fall damage's environmental convention. */
+function applyVehicleStrike(
+  world: World,
+  vId: number,
+  playerId: number,
+  contact: PlayerContact,
+): void {
+  const data = VEHICLE_DATA[world.vehicles.kind[vId] as VehicleKind];
+  const armor = armorFor(world, playerId);
+  const impulse = ((2 * data.mass * armor.mass) / (data.mass + armor.mass)) * contact.closing;
+  applyKickback(world, playerId, contact.normal, impulse, 1, armor);
+  if (contact.closing <= data.collDamageThresholdVel) return;
+  applyDamage(
+    world,
+    playerId,
+    (contact.closing - data.collDamageThresholdVel) * data.collDamageMultiplier,
+    world.vehicles.driverId[vId] ?? -1,
+    armor,
+  );
+}
+
+/** Struck-player half of issue #57's "a Shrike currently does not collide with or damage a
+ *  player it flies through" (the M5 plan deferred it because movement.ts's player collision
+ *  pass was already a full task; this is the vehicle-side form of the same fix and needs
+ *  nothing from movement.ts -- the shove lands on the player's velocity, which
+ *  stepPlayers integrates on the NEXT tick, after stepVehicles has run in stepWorld's
+ *  order). Returns the largest closing speed among struck players so the caller can feed
+ *  it into the vehicle's own applyCollisionDamage. */
+function resolveVehiclePlayerContacts(
+  world: World,
+  vId: number,
+  current: Vec3,
+  motion: Vec3,
+): number {
+  const players = world.players;
+  let impact = 0;
+  for (let playerId = 0; playerId < players.count; playerId += 1) {
+    const contact = vehiclePlayerContact(world, vId, current, motion, playerId);
+    if (!contact) continue;
+    applyVehicleStrike(world, vId, playerId, contact);
+    impact = Math.max(impact, contact.closing);
+  }
+  return impact;
 }
 
 // --- Mount/dismount, seat position, weapon takeover (Task 5) ----------------------------
@@ -1066,8 +1196,14 @@ export interface VehicleFireEvent {
   origin: Vec3;
   direction: Vec3;
   velocity: Vec3;
+  /** The driving player credited when this shot destroys something (issue #57 kill
+   *  attribution): tryFireShrikeBlaster always sets it, since it only fires piloted.
+   *  Optional so partial/older event shapes stay valid -- projectiles.ts's
+   *  spawnVehicleShot materializes a missing ownerId as -1, the same unattributed
+   *  convention turret shots already use, and destruction scoring (applyVehicleKillScore)
+   *  credits nobody for -1. */
+  ownerId?: number;
 }
-
 export const SHRIKE_BLASTER_DATA = {
   directDamage: 0.125, // weapons/chaingun.cs:503
   speed: 425, // weapons/chaingun.cs:512
@@ -1109,6 +1245,9 @@ function tryFireShrikeBlaster(world: World, vId: number, input: PlayerInput, dt:
       origin,
       direction,
       velocity,
+      // StepOneVehicle only calls this for a seated, live driver, so driverId is the
+      // roadkill/kill-credit attacker for anything this shot destroys (issue #57).
+      ownerId: at(vehicles.driverId, vId),
     });
   }
   vehicles.weaponTimer[vId] = Math.max(0, remaining);

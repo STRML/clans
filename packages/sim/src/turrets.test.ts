@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { addPlayer, applyDamage, createWorld, LIGHT_ARMOR, type Heightfield } from './index.js';
+import {
+  addPlayer,
+  applyDamage,
+  createWorld,
+  LIGHT_ARMOR,
+  ProjectileImpactReason,
+  stepProjectiles,
+  stepWorld,
+  type Heightfield,
+  type PlayerInput,
+  type World,
+} from './index.js';
 import { BaseObjectKind, createBaseObjects, stepPower } from './baseObjects.js';
 import {
   applyTurretDamage,
@@ -16,7 +27,7 @@ import {
   type InteriorPlacement,
   type InteriorTriangles,
 } from './interiors.js';
-import { VehicleKind } from './vehicles.js';
+import { VEHICLE_DATA, VehicleKind } from './vehicles.js';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -518,5 +529,122 @@ describe('AA barrel vehicle targeting (M5, failure matrix row 15)', () => {
     world.vehicles.destroyed[0] = 1;
     stepTurrets(world, FIXED_DT);
     expect(world.turrets.targetId[turret]).toBe(-1);
+  });
+});
+
+// --- AA seeker flight (issue #57) -----------------------------------------------------------
+
+/** The seeker tests' generator sits 30 m from its turret on purpose: the missile spawns at
+ *  the turret's own position, and a generator co-located there would put every shot's
+ *  origin inside the generator's own 1.5 m hit sphere (raySphereDistance's "origin already
+ *  inside the sphere" case) -- each shot would detonate at distance 0 against its own base
+ *  instead of ever reaching the Shrike. */
+function poweredAATurret(world: World): number {
+  createBaseObjects(world, [
+    { kind: BaseObjectKind.Generator, team: 1, position: { x: -30, y: 0, z: 0 } },
+  ]);
+  createTurrets(world, [
+    { barrel: TurretBarrelId.AABarrelLarge, team: 1, position: { x: 0, y: 0, z: 0 } },
+  ]);
+  stepPower(world);
+  return 0;
+}
+
+/** An enemy Shrike coasting at 15 m altitude with a -z velocity. Unpiloted: stepVehicles
+ *  runs it on idle input, whose only effect is the Shrike's own horizontal drag decaying
+ *  the coast -- a target that keeps moving the whole engagement, like a real flyby. */
+function coastingShrike(world: World, z: number, vz: number): void {
+  world.vehicles.active[0] = 1;
+  world.vehicles.count = 1;
+  world.vehicles.kind[0] = VehicleKind.Shrike;
+  world.vehicles.team[0] = 2;
+  world.vehicles.spawnTime[0] = 0;
+  world.vehicles.position.set([40, 15, z], 0);
+  world.vehicles.velocity.set([0, 0, vz], 0);
+  world.vehicles.energy[0] = VEHICLE_DATA[VehicleKind.Shrike].maxEnergy;
+}
+
+describe('AA seeker flight (issue #57)', () => {
+  it('an AA missile runs down a crossing Shrike in a full stepWorld engagement', () => {
+    const world = createWorld(flat, 1);
+    poweredAATurret(world);
+    coastingShrike(world, 30, -30);
+    // The Shrike's full 280 energy absorbs each 0.25 direct hit as 40 shield points (160
+    // energyPerDamagePoint) and vehicle recharge adds at most 0.8 a tick, so the FIRST
+    // connection shows up as a one-tick energy drop -- not as hull damage. The shot's
+    // straight fly-out misses this crossing target by meters; only a homing hit connects.
+    let prevEnergy = world.vehicles.energy[0] ?? 0;
+    let impactTick = -1;
+    for (let tick = 0; tick < ticksFor(4.5); tick += 1) {
+      stepWorld(world, new Map<number, PlayerInput>());
+      const energy = world.vehicles.energy[0] ?? 0;
+      if (energy < prevEnergy - 10) {
+        impactTick = tick;
+        break;
+      }
+      prevEnergy = energy;
+    }
+    expect(impactTick).toBeGreaterThanOrEqual(0);
+    // ...and that drop is an authoritative impact record against the vehicle...
+    expect(
+      world.projectiles.lastImpacts.some(
+        (impact) => impact.reason === ProjectileImpactReason.World,
+      ),
+    ).toBe(true);
+    // ...from an AA barrel still steering at its locked vehicle target.
+    expect(world.turrets.targetId[0]).toBe(0);
+    expect(world.turrets.targetKind[0]).toBe(1);
+  });
+
+  it('the shot flies straight through the 1 s seekTime, then bends toward the locked Shrike', () => {
+    const world = createWorld(flat, 1);
+    const turret = poweredAATurret(world);
+    coastingShrike(world, 0, -20); // dead +x of the turret, so the launch has no z velocity
+    stepTurrets(world, FIXED_DT); // a fresh turret starts Ready: acquire + fire same tick
+    stepProjectiles(world, FIXED_DT); // materialize + the tracer's own first step
+    expect(world.turrets.targetId[turret]).toBe(0);
+    expect(world.projectiles.active[0]).toBe(1);
+    const id = 0;
+    const base = id * 3;
+    expect(world.projectiles.velocity[base + 2]).toBe(0); // aimed dead at the Shrike
+    // Pull the Shrike 40 m off the shot's line mid-flight, the way a crossing target moves.
+    world.vehicles.position.set([40, 15, 40], 0);
+    const seekTicks = Math.round(1.0 / FIXED_DT);
+    for (let tick = 1; tick < seekTicks - 2; tick += 1) {
+      stepTurrets(world, FIXED_DT);
+      stepProjectiles(world, FIXED_DT);
+      // Still inside the seekTime straight fly-out: z velocity remains exactly launch's 0.
+      expect(world.projectiles.velocity[base + 2]).toBe(0);
+    }
+    for (let tick = 0; tick < 20; tick += 1) {
+      stepTurrets(world, FIXED_DT);
+      stepProjectiles(world, FIXED_DT);
+    }
+    // Homing: the velocity bends toward the displaced target, with speed preserved.
+    const speed = Math.hypot(
+      world.projectiles.velocity[base] ?? 0,
+      world.projectiles.velocity[base + 1] ?? 0,
+      world.projectiles.velocity[base + 2] ?? 0,
+    );
+    expect(speed).toBeCloseTo(TURRET_BARREL_DATA[TurretBarrelId.AABarrelLarge].speed, 6);
+  });
+
+  it('a seeker whose turret lost the lock flies straight (the barrel is the lock, no re-scan)', () => {
+    const world = createWorld(flat, 1);
+    const turret = poweredAATurret(world);
+    coastingShrike(world, 0, -20);
+    stepTurrets(world, FIXED_DT);
+    stepProjectiles(world, FIXED_DT);
+    const base = 0 * 3;
+    world.vehicles.position.set([40, 15, 40], 0);
+    world.vehicles.destroyed[0] = 1; // a destroyed wreck drops out of acquisition AND hit-tests
+    const seekTicks = Math.round(1.0 / FIXED_DT);
+    for (let tick = 0; tick < seekTicks + 20; tick += 1) {
+      stepTurrets(world, FIXED_DT);
+      stepProjectiles(world, FIXED_DT);
+      expect(world.turrets.targetId[turret]).toBe(-1); // never re-acquires the wreck
+    }
+    // Past seekTime with no lock: the missile flies dead straight, z velocity untouched.
+    expect(world.projectiles.velocity[base + 2]).toBe(0);
   });
 });

@@ -8,6 +8,7 @@ import {
   GRAVITY,
   respawnPlayer as respawnPlayerWithArmor, // the barrel export -- weapons.ts's respawnPlayer, not damage.ts's own
   setGodMode,
+  removePlayer,
   stepWorld,
   type Heightfield,
   type PlayerInput,
@@ -16,6 +17,7 @@ import {
   applyDamage,
   applyFallDamage,
   applyKickback,
+  applyVehicleKillScore,
   dueForRespawn,
   playerHitbox,
   radiusFalloff,
@@ -105,6 +107,28 @@ describe('applyDamage and death', () => {
     const damageBefore = world.players.damage[id];
     applyDamage(world, id, 0.5, -1, LIGHT_ARMOR);
     expect(world.players.damage[id]).toBe(damageBefore);
+  });
+});
+
+describe('applyVehicleKillScore (issue #57: vehicle-kill scoring and attribution)', () => {
+  it('credits 5 for an enemy vehicle and -5 for a friendly one', () => {
+    const world = createWorld(flat, 1);
+    const attacker = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    applyVehicleKillScore(world, attacker, 2);
+    expect(world.players.score[attacker]).toBe(5);
+    applyVehicleKillScore(world, attacker, 1);
+    expect(world.players.score[attacker]).toBe(0);
+  });
+
+  it('an unattributed (-1) or removed attacker changes nothing', () => {
+    const world = createWorld(flat, 1);
+    const attacker = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    applyVehicleKillScore(world, -1, 2);
+    expect(world.players.score[attacker]).toBe(0);
+    applyVehicleKillScore(world, attacker, 2);
+    removePlayer(world, attacker);
+    applyVehicleKillScore(world, attacker, 1); // since-removed id: no further scoring
+    expect(world.players.score[attacker]).toBe(5);
   });
 });
 

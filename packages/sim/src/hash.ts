@@ -245,6 +245,10 @@ function mixVehicle(hash: number, vehicles: World['vehicles'], id: number): numb
   // tick's jump behavior, same class movement.ts's own wasJumpHeld already earns a slot in
   // mixPlayer for.
   h = mix(h, num(vehicles.wasJumpHeld, id));
+  // Issue #57: score-affecting state, the same class as driverId -- two worlds identical
+  // except for who will be credited when this vehicle dies MUST hash differently, since
+  // applyVehicleKillScore diverges their players.score the tick the vehicle is destroyed.
+  h = mix(h, num(vehicles.lastAttackerId, id));
   return h;
 }
 

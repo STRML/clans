@@ -392,4 +392,22 @@ describe('hashWorld', () => {
     targetKindChanged.turrets.targetKind[0] = 1;
     expect(hashWorld(targetKindChanged)).not.toBe(before);
   });
+
+  it("changes when a vehicle's credited attacker (lastAttackerId) differs (issue #57)", () => {
+    // mixVehicle's own "deliberately exhaustive" invariant: lastAttackerId decides whose
+    // score moves the tick this vehicle is destroyed (applyVehicleKillScore), so two
+    // worlds identical except for it may only hash the same if the field went unmixed.
+    const baseline = (): World => {
+      const world = createWorld(terrain, 1);
+      world.vehicles.active[0] = 1;
+      world.vehicles.count = 1;
+      world.vehicles.kind[0] = 0;
+      world.vehicles.position.set([1, 2, 3], 0);
+      return world;
+    };
+    const before = hashWorld(baseline());
+    const attackerChanged = baseline();
+    attackerChanged.vehicles.lastAttackerId[0] = 3;
+    expect(hashWorld(attackerChanged)).not.toBe(before);
+  });
 });

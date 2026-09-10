@@ -1344,8 +1344,11 @@ function spawnPendingTurretShots(world: World, dt: number): void {
 }
 
 /** Materializes one Shrike-blaster shot (Task 6's `stepVehicles`/`tryFireShrikeBlaster`) as a
- *  real projectile — the vehicle-fired sibling of `spawnTurretShot`, same no-ammo/no-player-
- *  identity shape: `ownerId` is -1 and `team` comes straight from the event. Velocity
+ *  real projectile — the vehicle-fired sibling of `spawnTurretShot`, same no-ammo shape.
+ *  `ownerId` comes straight from the event — the driving player, so a blaster-destroyed
+ *  vehicle credits its killer through applyVehicleKillScore (issue #57); older/partial
+ *  event shapes without one materialize as -1, matching spawnTurretShot's own unattributed
+ *  convention. `team` also comes from the event, not a player lookup. Velocity
  *  inherits the firing vehicle's own velocity at full strength (`velInheritFactor = 1.0`,
  *  `weapons/chaingun.cs:514`), unlike the player Chaingun's own lower inheritance. A Tracer
  *  shot resolves same-tick, exactly like spawnTurretShot's own AA-barrel case. */
@@ -1353,9 +1356,10 @@ function spawnVehicleShot(world: World, event: VehicleFireEvent, dt: number): vo
   const id = allocate(world.projectiles);
   if (id === null) return; // A vehicle has no ammo to refund — a full store just drops the shot.
   const store = world.projectiles;
+  // The firing driver, for kill attribution -- see VehicleFireEvent.ownerId's own comment.
+  store.ownerId[id] = event.ownerId ?? -1;
   store.type[id] = ProjectileType.VehicleLaser;
   store.weaponId[id] = VEHICLE_WEAPON_ID_OFFSET;
-  store.ownerId[id] = -1; // No player identity; matches spawnTurretShot's own convention.
   store.team[id] = event.team;
   store.sourceTurretId[id] = -1;
   // Excludes the firing vehicle from its own shot's structure hit-test — same reason

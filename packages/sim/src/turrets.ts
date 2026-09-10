@@ -511,10 +511,131 @@ function stepOneTurret(world: World, id: number, dt: number): void {
   else advanceFireCycle(world, id, dt);
 }
 
+// --- AA seeker guidance (issue #57) ---------------------------------------------------------
+
+const SEEKER_FIXED_DT = 32 / 1000; // matches damage.ts/projectiles.ts's own tick constant
+/** Real (turrets/aaBarrelLarge.cs:181-184): `isSeeker = true` with `seekTime = 1.0` -- a
+ *  launched missile flies straight this long while the seeker locks on, then homes. */
+const AA_SEEK_TIME = 1.0;
+const AA_SEEK_TICKS = Math.round(AA_SEEK_TIME / SEEKER_FIXED_DT);
+/** Ours, rad/s: the homing turn rate. The script's remaining seeker fields are
+ *  acquisition-side and already satisfied by this sim's shape -- seekRadius 200 is the
+ *  barrel's own attackRadius (the gate nearestVehicleTarget applies), maxSeekAngle
+ *  6 degrees holds at launch by construction (fireAt aims the shot exactly at the locked
+ *  target), and minSeekHeat 0.6 stands in as the barrel's vehiclesOnly targeting (vehicles
+ *  are the only hot targets it ever acquires). The engine's homing turn rate itself is not
+ *  in the script; 4.5 rad/s turns a 150 m/s shot inside a ~33 m radius -- tight enough to
+ *  run down a crossing Shrike at the Large base's 80 m sensor range, loose enough that a
+ *  point-blank crossing target still draws a visible pursuit arc instead of snapping onto
+ *  it (the WILDCAT_STEERING_FORCE precedent: an untuned value is either flaccid or twitchy). */
+const AA_SEEK_TURN_RATE = 4.5;
+
+/** True while this projectile is one of this turret store's own AA missiles: any live shot
+ *  whose sourceTurretId still names an AABarrelLarge. Matching on the firing turret's own
+ *  barrel (instead of projectiles.ts's weaponId offset arithmetic) keeps seeker
+ *  identification inside the turret data that defines the barrel. */
+function isAASeeker(world: World, id: number): boolean {
+  const store = world.projectiles;
+  if (!store.active[id]) return false;
+  const turretId = store.sourceTurretId[id] ?? -1;
+  return turretId >= 0 && world.turrets.barrel[turretId] === TurretBarrelId.AABarrelLarge;
+}
+
+/** The locked vehicle target this seeker's own turret currently holds, or null once that
+ *  lock is gone (killed / out of range / occluded / turret destroyed or unpowered --
+ *  stepOneTurret clears targetId the same tick it invalidates, and runs before
+ *  stepAASeekers on every call). A seeker whose lock is gone flies straight, like a real
+ *  heat-seeker that lost the signature; the missile does NOT re-scan for a new target on
+ *  its own -- the barrel's acquisition IS the lock, which is what targetStillValid already
+ *  re-checks every tick. */
+function seekerTargetPoint(world: World, turretId: number): Vec3 | null {
+  const store = world.turrets;
+  if ((store.targetId[turretId] ?? -1) < 0 || store.targetKind[turretId] !== 1) return null;
+  return vehiclePoint(world, store.targetId[turretId]!);
+}
+
+/** Rotates `velocity` toward `target` by at most AA_SEEK_TURN_RATE * dt, preserving speed --
+ *  a seeker re-aims, it does not accelerate. Returns the steered velocity rather than
+ *  writing the store, so stepOneSeeker owns the write. */
+function steerToward(velocity: Vec3, position: Vec3, target: Vec3, dt: number): Vec3 {
+  const speed = Math.hypot(velocity.x, velocity.y, velocity.z);
+  const dx = target.x - position.x;
+  const dy = target.y - position.y;
+  const dz = target.z - position.z;
+  const dist = Math.hypot(dx, dy, dz);
+  if (speed <= 0 || dist <= 0) return velocity;
+  const desired = { x: dx / dist, y: dy / dist, z: dz / dist };
+  const current = { x: velocity.x / speed, y: velocity.y / speed, z: velocity.z / speed };
+  const axis = {
+    x: current.y * desired.z - current.z * desired.y,
+    y: current.z * desired.x - current.x * desired.z,
+    z: current.x * desired.y - current.y * desired.x,
+  };
+  const sin = Math.hypot(axis.x, axis.y, axis.z);
+  const cos = current.x * desired.x + current.y * desired.y + current.z * desired.z;
+  if (sin <= 0) return velocity; // aligned (done), or exactly anti-parallel with no axis
+  const turn = Math.min(Math.atan2(sin, cos), AA_SEEK_TURN_RATE * dt);
+  const k = { x: axis.x / sin, y: axis.y / sin, z: axis.z / sin };
+  // Rodrigues rotation of the unit heading around `k` by `turn`, scaled back to `speed`.
+  const c = Math.cos(turn);
+  const s = Math.sin(turn);
+  const cross = {
+    x: k.y * current.z - k.z * current.y,
+    y: k.z * current.x - k.x * current.z,
+    z: k.x * current.y - k.y * current.x,
+  };
+  const dot = k.x * current.x + k.y * current.y + k.z * current.z;
+  return {
+    x: (current.x * c + cross.x * s + k.x * dot * (1 - c)) * speed,
+    y: (current.y * c + cross.y * s + k.y * dot * (1 - c)) * speed,
+    z: (current.z * c + cross.z * s + k.z * dot * (1 - c)) * speed,
+  };
+}
+
+/** Steers one AA missile toward its turret's lock, once its seekTime straight fly-out has
+ *  elapsed. Reads stepProjectiles's own per-projectile ticks-alive counter (see
+ *  ProjectileStore.expiresAtTick's field comment -- the name is historical) rather than
+ *  world.tick, so guidance behaves identically whether the caller is stepWorld or a test
+/** `arr[base + i] ?? 0` as one call instead of six inline operators -- the same reason
+ *  vehicles.ts's own `at()` exists: each inline `?? 0` is a separate branch against this
+ *  file's ESLint complexity budget, and a seeker step reads two full Vec3s per tick. */
+function vecAt(arr: Float64Array, base: number): Vec3 {
+  return { x: arr[base] ?? 0, y: arr[base + 1] ?? 0, z: arr[base + 2] ?? 0 };
+}
+
+/** Steers one AA missile toward its turret's lock, once its seekTime straight fly-out has
+ *  elapsed. Reads stepProjectiles's own per-projectile ticks-alive counter (see
+ *  ProjectileStore.expiresAtTick's field comment -- the name is historical) rather than
+ *  world.tick, so guidance behaves identically whether the caller is stepWorld or a test
+ *  stepping stepProjectiles directly. */
+function stepOneSeeker(world: World, id: number, dt: number): void {
+  const store = world.projectiles;
+  if ((store.expiresAtTick[id] ?? 0) < AA_SEEK_TICKS) return;
+  const target = seekerTargetPoint(world, store.sourceTurretId[id] ?? -1);
+  if (!target) return;
+  const base = id * 3;
+  const steered = steerToward(vecAt(store.velocity, base), vecAt(store.position, base), target, dt);
+  store.velocity[base] = steered.x;
+  store.velocity[base + 1] = steered.y;
+  store.velocity[base + 2] = steered.z;
+}
+
+/** Runs after this tick's own acquisition/firing pass (stepOneTurret per turret) and
+ *  before stepProjectiles -- stepWorld calls stepTurrets there, so the steered velocity is
+ *  what this same tick's tracer integration actually flies, with no guidance latency. */
+function stepAASeekers(world: World, dt: number): void {
+  const store = world.projectiles;
+  for (let id = 0; id < store.count; id += 1) {
+    if (!isAASeeker(world, id)) continue;
+    stepOneSeeker(world, id, dt);
+  }
+}
+
 export function stepTurrets(world: World, dt: number): void {
   stepTurretPower(world);
   world.pendingTurretFireEvents = [];
   for (let id = 0; id < world.turrets.count; id += 1) stepOneTurret(world, id, dt);
+  stepAASeekers(world, dt);
 }
 
 /** Shared collision/repair target around the visible turret, above its placement origin.

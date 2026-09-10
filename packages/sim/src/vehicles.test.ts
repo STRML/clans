@@ -4,10 +4,13 @@ import {
   addPlayer,
   buildInteriorCollider,
   createWorld,
+  LIGHT_ARMOR,
   removePlayer,
   serializeActiveVehicles,
+  stepProjectiles,
   type Heightfield,
   type PlayerInput,
+  type World,
 } from './index.js';
 import {
   activeVehicleCountForTeam,
@@ -26,6 +29,7 @@ import {
   VehicleKind,
   vehicleCapForTeam,
 } from './vehicles.js';
+import { playerHitbox } from './damage.js';
 
 function vehiclePos(
   world: ReturnType<typeof createWorld>,
@@ -437,6 +441,174 @@ describe('resolveVehicleCollision', () => {
   });
 });
 
+describe('vehicle-versus-player collision (issue #57)', () => {
+  const dt = 1 / 32;
+
+  /** A piloted Shrike at (0,100,0) and a pedestrian victim `victimZ` meters along +z, with
+   *  the vehicle closing at `speed` m/s. The driver sits at the vehicle's own center --
+   *  exactly where seatDriver locks a real driver -- so the mounted-player skip is what
+   *  keeps every test's own pilot unscathed. */
+  function ramWorld(victimZ: number, speed: number) {
+    const world = createWorld(flat, 1);
+    world.vehicles = createVehicleStore();
+    const driver = addPlayer(world, { x: 0, y: 100, z: 0 }, 1);
+    const victim = addPlayer(world, { x: 0, y: 100, z: victimZ }, 2);
+    world.vehicles.active[0] = 1;
+    world.vehicles.count = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.team[0] = 1;
+    world.vehicles.position.set([0, 100, 0], 0);
+    world.vehicles.velocity.set([0, 0, speed], 0);
+    world.vehicles.energy[0] = VEHICLE_DATA[VehicleKind.Shrike].maxEnergy;
+    world.vehicles.driverId[0] = driver;
+    world.players.mountedVehicleId[driver] = 0;
+    return { world, driver, victim };
+  }
+
+  /** The victim's contact geometry for the ramWorld layout: a unit normal from the vehicle
+   *  center to the victim's hit-sphere center, and the closing speed along it. */
+  function contactOf(world: World, victim: number, speed: number) {
+    const box = playerHitbox(world, victim, LIGHT_ARMOR);
+    const len = Math.hypot(box.center.y - 100, box.center.z);
+    const ny = (box.center.y - 100) / len;
+    const nz = box.center.z / len;
+    return { ny, nz, closing: speed * nz };
+  }
+
+  it('a strike applies the collDamage rule and the two-body impulse to the victim', () => {
+    const { world, victim } = ramWorld(5, 30);
+    const { ny, nz, closing } = contactOf(world, victim, 30);
+    resolveVehicleCollision(world, 0, { x: 0, y: 100, z: -30 * dt }, dt);
+    // (closing - collDamageThresholdVel) * collDamageMultiplier -- the same per-kind rule
+    // applyCollisionDamage already applies to the VEHICLE for terrain/interior impacts,
+    // now landing on the struck player. 30 m/s is past the 23 m/s threshold but nowhere
+    // near a Light's 0.66 maxDamage: wounded, not killed.
+    const data = VEHICLE_DATA[VehicleKind.Shrike];
+    const damage = (closing - data.collDamageThresholdVel) * data.collDamageMultiplier;
+    expect(world.players.damage[victim]).toBeCloseTo(damage, 6);
+    expect(world.players.alive[victim]).toBe(1);
+    // Two-body elastic impulse 2*mV*mP/(mV+mP)*closing, expressed as a velocity change by
+    // dividing by the victim's own mass (applyKickback's Torque applyImpulse convention).
+    const dv =
+      (((2 * data.mass * LIGHT_ARMOR.mass) / (data.mass + LIGHT_ARMOR.mass)) * closing) /
+      LIGHT_ARMOR.mass;
+    expect(world.players.velocity[victim * 3 + 1]).toBeCloseTo(dv * ny, 6);
+    expect(world.players.velocity[victim * 3 + 2]).toBeCloseTo(dv * nz, 6);
+    // The vehicle's own collision pass consumes shield off the same closing speed: 280
+    // energy at 160 per point absorbs this entirely, so hull damage stays 0.
+    expect(world.vehicles.damage[0]).toBe(0);
+    expect(world.vehicles.energy[0]).toBeCloseTo(
+      data.maxEnergy - data.energyPerDamagePoint * damage,
+      6,
+    );
+    expect(world.pendingDeaths).toEqual([]);
+  });
+
+  it('a lethal roadkill attributes to the driver and scores a kill', () => {
+    const { world, driver, victim } = ramWorld(5, 60);
+    resolveVehicleCollision(world, 0, { x: 0, y: 100, z: -60 * dt }, dt);
+    expect(world.players.alive[victim]).toBe(0);
+    expect(world.pendingDeaths).toEqual([{ id: victim, attackerId: driver }]);
+    expect(world.players.score[driver]).toBe(10);
+    // The mounted skip, under the most hostile possible geometry: the driver sits at the
+    // vehicle's own center, deep inside checkRadius. Without the skip every strike would
+    // roadkill the pilot too.
+    expect(world.players.alive[driver]).toBe(1);
+    expect(world.players.damage[driver]).toBe(0);
+  });
+
+  it('a slow vehicle shoves a pedestrian without damaging (below collDamageThresholdVel)', () => {
+    const { world, victim } = ramWorld(5, 10);
+    const { nz, closing } = contactOf(world, victim, 10);
+    resolveVehicleCollision(world, 0, { x: 0, y: 100, z: -10 * dt }, dt);
+    expect(world.players.damage[victim]).toBe(0);
+    expect(world.players.alive[victim]).toBe(1);
+    // Impulse still fires below the damage threshold -- contact response, not damage.
+    const dv =
+      ((2 * VEHICLE_DATA[VehicleKind.Shrike].mass) /
+        (VEHICLE_DATA[VehicleKind.Shrike].mass + LIGHT_ARMOR.mass)) *
+      closing;
+    expect(world.players.velocity[victim * 3 + 2]).toBeCloseTo(dv * nz, 6);
+  });
+
+  it('an unpiloted vehicle rolling into someone attributes to nobody (-1)', () => {
+    const { world, victim } = ramWorld(5, 60);
+    world.vehicles.driverId[0] = -1;
+    resolveVehicleCollision(world, 0, { x: 0, y: 100, z: -60 * dt }, dt);
+    expect(world.players.alive[victim]).toBe(0);
+    expect(world.pendingDeaths).toEqual([{ id: victim, attackerId: -1 }]);
+    for (let id = 0; id < world.players.count; id += 1) {
+      expect(world.players.score[id]).toBe(0);
+    }
+  });
+});
+
+describe('vehicle-kill scoring and attribution (issue #57)', () => {
+  it('a player-sourced destroying hit credits 5 for an enemy vehicle', () => {
+    const { world, id } = shrikeWorld();
+    const attacker = addPlayer(world, { x: 50, y: 0, z: 0 }, 2);
+    world.vehicles.team[id] = 1;
+    world.vehicles.energy[id] = 0; // no shield left to absorb the hit first
+    applyVehicleDamage(world, id, VEHICLE_DATA[VehicleKind.Shrike].maxDamage, attacker);
+    expect(world.vehicles.destroyed[id]).toBe(1);
+    expect(world.pendingVehicleDestroyed).toHaveLength(1);
+    expect(world.players.score[attacker]).toBe(5);
+  });
+
+  it('a crash-finishing blow still credits the last player who damaged the vehicle', () => {
+    const { world, id } = shrikeWorld();
+    const attacker = addPlayer(world, { x: 50, y: 0, z: 0 }, 2);
+    world.vehicles.team[id] = 1;
+    world.vehicles.energy[id] = 0; // no shield left to absorb the hit first
+    applyVehicleDamage(world, id, 1.0, attacker); // 1.0 of the 1.4 maxDamage
+    applyVehicleDamage(world, id, 10, -1); // the tree finishes it, unattributed
+    expect(world.vehicles.destroyed[id]).toBe(1);
+    expect(world.players.score[attacker]).toBe(5);
+  });
+
+  it("destroying your own team's vehicle costs 5", () => {
+    const { world, id } = shrikeWorld();
+    const attacker = addPlayer(world, { x: 50, y: 0, z: 0 }, 1);
+    world.vehicles.team[id] = 1;
+    world.vehicles.energy[id] = 0; // no shield left to absorb the hit first
+    applyVehicleDamage(world, id, VEHICLE_DATA[VehicleKind.Shrike].maxDamage, attacker);
+    expect(world.players.score[attacker]).toBe(-5);
+  });
+
+  it('crash/turret-only destruction (attackerId -1) credits nobody', () => {
+    const { world, id } = shrikeWorld();
+    const bystander = addPlayer(world, { x: 50, y: 0, z: 0 }, 2);
+    world.vehicles.energy[id] = 0; // no shield left to absorb the hit first
+    applyVehicleDamage(world, id, VEHICLE_DATA[VehicleKind.Shrike].maxDamage, -1);
+    expect(world.vehicles.destroyed[id]).toBe(1);
+    expect(world.players.score[bystander]).toBe(0);
+  });
+
+  it("a respawned pad vehicle does not inherit the previous occupant's attacker", () => {
+    const world = createWorld(flat, 1);
+    const pad = poweredPad(world, 1);
+    const attacker = addPlayer(world, { x: 50, y: 0, z: 0 }, 2);
+    const first = spawnVehicleAtPad(world, pad, VehicleKind.Shrike) as number;
+    world.vehicles.energy[first] = 0; // no shield left to absorb the hit first
+    applyVehicleDamage(world, first, 1.0, attacker); // the attacker leaves their mark on id N
+    applyVehicleDamage(world, first, 10, -1); // a crash finishes it (last-damager credit: +5)
+    expect(world.players.score[attacker]).toBe(5);
+    // Cycle stepVehicles past VEHICLE_ID_REUSE_DELAY_TICKS so the destroyed id falls back
+    // into freeIds, then re-spawn the same pad: allocate MUST hand back that same numeric
+    // id -- slot reuse is exactly the hazard, a fresh id would make this test vacuous.
+    for (let tick = 0; tick < 5; tick += 1) stepVehicles(world, new Map(), 1 / 32);
+    const second = spawnVehicleAtPad(world, pad, VehicleKind.Shrike) as number;
+    expect(second).toBe(first);
+    world.vehicles.energy[second] = 0; // no shield left to absorb the hit first
+    applyVehicleDamage(world, second, VEHICLE_DATA[VehicleKind.Shrike].maxDamage, -1);
+    expect(world.vehicles.destroyed[second]).toBe(1);
+    // The reused id must not carry the previous occupant's attacker: this crash-only
+    // destruction credits nobody, so the score stays at exactly the first vehicle's kill.
+    expect(world.vehicles.lastAttackerId[second]).toBe(-1);
+    expect(world.players.score[attacker]).toBe(5);
+  });
+});
+
 describe('crash ejection is not overwritten by seat locking (Codex review round 1, finding 2)', () => {
   it('a driver ejected by a mid-tick collision destruction keeps the ejection impulse, is not re-seated', () => {
     const world = createWorld(flat, 1);
@@ -652,6 +824,41 @@ describe('Shrike blaster', () => {
     stepVehicles(world, new Map([[playerId, { ...idleInput, fire: true }]]), 1 / 32);
     expect(world.pendingVehicleFireEvents.length).toBeGreaterThan(0);
     expect(world.pendingVehicleFireEvents[0]?.vehicleId).toBe(vId);
+  });
+
+  it('a blaster shot that destroys an enemy vehicle credits the driver through the kill-scoring path', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const vId = spawnVehicleAtPad(world, padId, VehicleKind.Shrike) as number;
+    const driver = addPlayer(world, vehiclePos(world, vId), 1);
+    // The target: an unpiloted enemy Shrike 10 m along +x, shields gone and hull already
+    // chewed to 0.1 below the killing blow -- one attributed blaster hit finishes it.
+    const target = 1;
+    world.vehicles.active[target] = 1;
+    world.vehicles.count = 2;
+    world.vehicles.kind[target] = VehicleKind.Shrike;
+    world.vehicles.team[target] = 2;
+    world.vehicles.position.set([vehiclePos(world, vId).x + 10, 2, 0], target * 3);
+    world.vehicles.energy[target] = 0;
+    world.vehicles.damage[target] = VEHICLE_DATA[VehicleKind.Shrike].maxDamage - 0.1;
+    stepVehicles(world, new Map([[driver, useInput(true)]]), 1 / 32); // mount
+    // Aim the blaster along +x: headingOf(pi/2, 0) = (1, 0, 0). Both the vehicle's own yaw
+    // and the driver's steering target agree, so the shot's heading is exactly +x.
+    world.vehicles.yaw[vId] = Math.PI / 2;
+    world.pendingVehicleFireEvents.length = 0;
+    stepVehicles(
+      world,
+      new Map([[driver, { ...idleInput, fire: true, yaw: Math.PI / 2 }]]),
+      1 / 32,
+    );
+    expect(world.pendingVehicleFireEvents).toHaveLength(1);
+    expect(world.pendingVehicleFireEvents[0]?.ownerId).toBe(driver);
+    stepProjectiles(world, 1 / 32); // materialize + the same-tick tracer step into the target
+    expect(world.vehicles.destroyed[target]).toBe(1);
+    expect(world.pendingVehicleDestroyed).toHaveLength(1);
+    // The 0.125 direct hit lands on a hull 0.1 from maxDamage: destroyed, and the kill is
+    // credited through applyVehicleDamage -> applyVehicleKillScore via the shot's ownerId.
+    expect(world.players.score[driver]).toBe(5);
   });
 
   it('fires immediately then every requested 0.2 s without accumulating 32 ms tick rounding', () => {
