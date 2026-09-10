@@ -948,11 +948,24 @@ export function resolveVehicleCollision(
 
 // --- Vehicle-versus-player collision (issue #57) ------------------------------------------
 
-/** The contact normal and closing speed of one vehicle/player overlap. */
+/** The contact normal and closing speeds of one vehicle/player overlap: `closing` is the
+ *  vehicle-MINUS-player relative velocity along the normal (what the impulse and damage
+ *  consume); the vehicle's own motion into the contact is checked inline. */
 interface PlayerContact {
   normal: Vec3;
   closing: number;
 }
+
+/** Ours: below half a metre per second of the vehicle's own motion into the contact there
+ *  is no collision event at all -- the overlap is parking/resting contact. Without this
+ *  gate a dismounted driver standing where seatDriver left them (the vehicle's own center)
+ *  re-fires the strike every tick they fall back into the sphere: shoved out, pulled down
+ *  by gravity, their velocity opposes the normal again, and the relative-closing rule
+ *  reads that as a fresh collision -- a perpetual micro-bounce that never settles (caught
+ *  by e2e/vehicles.spec.ts's three-identical-position poll). A pad-idle vehicle in Torque
+ *  likewise produces no collision response against an overlapping player; only the
+ *  vehicle's own motion generates one. */
+const VEHICLE_STRIKE_MIN_CLOSING = 0.5;
 
 /** Overlap test plus closing speed for one pedestrian player against `vId`'s hit sphere, or
  *  null when there is no contact. The two spheres are the ones the rest of the sim already
@@ -966,7 +979,11 @@ interface PlayerContact {
  *  vehicle territory (an explicit M5 Spec-gap non-goal, not added here). The normal points
  *  from the vehicle toward the player; `closing` is the vehicle-minus-player relative
  *  velocity along it, floored at 0 -- a contact only fires while the two still move INTO
- *  each other, so a player already riding along at the vehicle's speed is not re-shoved. */
+ *  each other, so a player already riding along at the vehicle's speed is not re-shoved.
+ *  Null as well unless the VEHICLE itself is moving into the contact faster than
+ *  VEHICLE_STRIKE_MIN_CLOSING: the collision event belongs to the vehicle, and an idle
+ *  or parked vehicle overlapping a pedestrian (dismount leftovers, someone standing under
+ *  a pad hover) must stay inert rather than shoving them around. */
 function vehiclePlayerContact(
   world: World,
   vId: number,
@@ -993,6 +1010,8 @@ function vehiclePlayerContact(
       (motion.y - at(players.velocity, base + 1)) * normal.y +
       (motion.z - at(players.velocity, base + 2)) * normal.z,
   );
+  const vehicleClosing = motion.x * normal.x + motion.y * normal.y + motion.z * normal.z;
+  if (vehicleClosing <= VEHICLE_STRIKE_MIN_CLOSING) return null;
   return { normal, closing };
 }
 

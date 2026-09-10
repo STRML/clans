@@ -541,6 +541,23 @@ describe('vehicle-versus-player collision (issue #57)', () => {
       expect(world.players.score[id]).toBe(0);
     }
   });
+
+  it('a parked vehicle overlapping players stays inert: no strike without vehicle motion', () => {
+    // The dismount scenario: seatDriver left the player at the vehicle's own center, the
+    // Wildcat idles on its pad, and the player even falls back INTO the sphere (downward
+    // velocity along the contact normal). Relative closing alone would re-fire the strike
+    // every tick and the player would never come to rest (e2e vehicles.spec.ts's
+    // three-identical-position poll caught exactly that) -- the collision event belongs
+    // to the vehicle's own motion, so zero vehicle motion means zero interaction.
+    const { world, victim } = ramWorld(0.5, 0);
+    world.players.velocity[victim * 3 + 1] = -8; // falling back into the sphere
+    resolveVehicleCollision(world, 0, { x: 0, y: 100, z: 0 }, dt);
+    expect(world.players.damage[victim]).toBe(0);
+    expect(world.players.velocity[victim * 3 + 1]).toBe(-8);
+    expect(world.players.velocity[victim * 3 + 2]).toBe(0);
+    expect(world.vehicles.damage[0]).toBe(0);
+    expect(world.pendingDeaths).toEqual([]);
+  });
 });
 
 describe('vehicle-kill scoring and attribution (issue #57)', () => {
