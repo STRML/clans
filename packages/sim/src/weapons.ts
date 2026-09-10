@@ -9,6 +9,15 @@ export enum WeaponId {
   LaserRifle = 3,
   Blaster = 4,
 }
+// A plain array, not Object.values(WeaponId): numeric enums also carry reverse-mapping
+// string keys, which would type this loop as (WeaponId | string)[] for no reason.
+const ALL_WEAPONS: readonly WeaponId[] = [
+  WeaponId.Spinfusor,
+  WeaponId.Chaingun,
+  WeaponId.Mortar,
+  WeaponId.LaserRifle,
+  WeaponId.Blaster,
+];
 export const WEAPON_COUNT = 5;
 
 export enum WeaponState {
@@ -565,6 +574,15 @@ export function stepWeapons(
   }
 }
 
+/**
+ * The loadout a (re)spawn grants, from the armor's own ammo table. #55: if the player has
+ * a station-selected weapon set (`carriedWeapons`, written by baseObjects.ts's
+ * applyLoadoutSelection), that choice PERSISTS -- the source's inventory station remembers
+ * a loadout until the player changes it, so a respawn must not resurrect weapons the
+ * player did not select. The mask is sanitized at selection time (only armor-allowed bits
+ * can ever be set), so this is a plain subset check, not a re-validation. 0 = armor
+ * defaults, exactly the pre-#55 full loadout.
+ */
 export function resetLoadout(world: World, id: number, armor: ArmorData): void {
   const players = world.players;
   players.weaponSlot[id] = WeaponId.Blaster; // Ours: Blaster is the starting/fallback weapon.
@@ -578,6 +596,20 @@ export function resetLoadout(world: World, id: number, armor: ArmorData): void {
   players.ammo[ammoIndex(id, WeaponId.LaserRifle)] = -1; // -1 = infinite, gated by energy only.
   players.ammo[ammoIndex(id, WeaponId.Blaster)] = -1;
   players.grenades[id] = armor.grenadeCount;
+  const carried = players.carriedWeapons[id] ?? 0;
+  if (carried === 0) return;
+  for (const weapon of ALL_WEAPONS) {
+    if ((carried & (1 << weapon)) === 0) players.ammo[ammoIndex(id, weapon)] = 0;
+  }
+  // Firing from an empty-handed slot is a DryFire click; point the spawn at a weapon the
+  if ((carried & (1 << WeaponId.Blaster)) === 0) {
+    for (const weapon of ALL_WEAPONS) {
+      if ((carried & (1 << weapon)) !== 0) {
+        players.weaponSlot[id] = weapon;
+        break;
+      }
+    }
+  }
 }
 
 export function respawnPlayer(world: World, id: number, spawn: Vec3, armor?: ArmorId): void {

@@ -8,6 +8,7 @@ import {
   deserializeVehicle,
   FIXED_DT,
   LIGHT_ARMOR,
+  PackId,
   resetLoadout,
   resetPlayerToSpawn,
   RESPAWN_TICKS,
@@ -303,10 +304,12 @@ export class NetClient {
   }
 
   /** Mirrors setGodMode's own shape: send-only, no local prediction of the loadout itself --
-   *  a station visit's own applyLoadoutRequest result reaches this client back through the
-   *  next snapshot, the same way every other player's own authoritative state does. */
-  sendLoadout(armor: ArmorId, repairPack: boolean): void {
-    this.transport.send(encodeLoadout({ armor, repairPack }));
+   *  a station visit's own applyLoadoutSelection result reaches this client back through the
+   *  next snapshot, the same way every other player's own authoritative state does. #55:
+   *  the full station loadout (armor, PackId, carried-weapons bitmask) rides the 4-byte
+   *  LoadoutMessage; `weapons` 0 = armor defaults. */
+  sendLoadout(armor: ArmorId, pack: PackId, weapons: number): void {
+    this.transport.send(encodeLoadout({ armor, pack, weapons }));
   }
 
   /** Send-only, same shape as sendLoadout: the pad menu's own choice is a one-shot request,

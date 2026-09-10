@@ -1,19 +1,32 @@
 import { describe, expect, it } from 'vitest';
-import { addPlayer, applyDamage, createWorld, LIGHT_ARMOR, type Heightfield } from './index.js';
-import { ArmorId, HEAVY_ARMOR } from './armor.js';
+import {
+  addPlayer,
+  applyDamage,
+  createWorld,
+  FIXED_DT,
+  LIGHT_ARMOR,
+  stepWorld,
+  type Heightfield,
+} from './index.js';
+import { ArmorId, HEAVY_ARMOR, MEDIUM_ARMOR } from './armor.js';
+import { WeaponId, ammoIndex, respawnPlayer } from './weapons.js';
+import { raycastInteriors } from './interiors.js';
 import {
   activeForceFieldBlockers,
   applyBaseObjectDamage,
   applyLoadoutRequest,
+  applyLoadoutSelection,
+  allowedWeaponMask,
   BASE_OBJECT_DATA,
   BaseObjectKind,
   createBaseObjects,
+  ENERGY_PACK_RECHARGE_BONUS,
+  PackId,
   STATION_USE_RADIUS,
   stationAt,
   stepPower,
   teamHasPower,
 } from './baseObjects.js';
-import { raycastInteriors } from './interiors.js';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -283,5 +296,109 @@ describe('applyLoadoutRequest', () => {
     expect(applyLoadoutRequest(world, player, invalidArmor, true)).toBe(false);
     expect(world.players.armor[player]).toBe(ArmorId.Light);
     expect(world.players.hasRepairPack[player]).toBe(0);
+  });
+});
+
+describe('applyLoadoutSelection (#55)', () => {
+  it('applies an Energy Pack: mutually exclusive with the Repair Pack, full energy restore', () => {
+    const world = createWorld(flat, 1);
+    twoGeneratorsOneStation(world);
+    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
+    // Arrive already wearing a Repair Pack: the station replaces the whole pack.
+    expect(applyLoadoutRequest(world, player, ArmorId.Light, true)).toBe(true);
+    const applied = applyLoadoutSelection(world, player, ArmorId.Light, PackId.Energy, 0b01000);
+    expect(applied).toBe(true);
+    expect(world.players.hasEnergyPack[player]).toBe(1);
+    expect(world.players.hasRepairPack[player]).toBe(0);
+    expect(world.players.damage[player]).toBe(0);
+    expect(world.players.energy[player]).toBe(LIGHT_ARMOR.maxEnergy);
+  });
+
+  it('the Energy Pack recharge bonus reaches the tick loop (+0.15/tick, committed spec value)', () => {
+    // docs/superpowers/specs/2026-09-05-clans-tribes2-browser-demo-design.md, "Movement"
+    // step 3: energypack.cs adds 0.15 recharge per tick ON TOP of the armor's own rate.
+    const world = createWorld(flat, 1);
+    twoGeneratorsOneStation(world);
+    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
+    applyLoadoutSelection(world, player, ArmorId.Light, PackId.Energy, 0);
+    world.players.energy[player] = 10;
+    stepWorld(world, new Map(), FIXED_DT);
+    expect(world.players.energy[player]).toBeCloseTo(
+      10 + LIGHT_ARMOR.rechargeRate + ENERGY_PACK_RECHARGE_BONUS,
+      10,
+    );
+    // Same tick without the pack must NOT include the bonus.
+    const world2 = createWorld(flat, 1);
+    twoGeneratorsOneStation(world2);
+    const plain = addPlayer(world2, { x: 10, y: 0, z: 0 }, 1);
+    world2.players.energy[plain] = 10;
+    stepWorld(world2, new Map(), FIXED_DT);
+    expect(world2.players.energy[plain]).toBeCloseTo(10 + LIGHT_ARMOR.rechargeRate, 10);
+  });
+
+  it('sanitizes the weapon mask against the armor: a Light can never talk a Mortar into the loadout', () => {
+    const world = createWorld(flat, 1);
+    twoGeneratorsOneStation(world);
+    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
+    const lightMask = 0b11111;
+    expect(applyLoadoutSelection(world, player, ArmorId.Light, PackId.None, lightMask)).toBe(true);
+    // Mortar bit (1 << 2) sanitized away; everything Light allows survives.
+    expect(world.players.carriedWeapons[player]).toBe(lightMask & allowedWeaponMask(LIGHT_ARMOR));
+    expect(world.players.ammo[ammoIndex(player, WeaponId.Mortar)]).toBe(0);
+    expect(world.players.ammo[ammoIndex(player, WeaponId.Spinfusor)]).toBe(LIGHT_ARMOR.discAmmo);
+  });
+
+  it('a narrowed selection persists through respawn and selects a carried weapon slot', () => {
+    const world = createWorld(flat, 1);
+    twoGeneratorsOneStation(world);
+    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
+    // Spinfusor + Chaingun, Blaster NOT carried.
+    applyLoadoutSelection(world, player, ArmorId.Light, PackId.None, 0b00011);
+    respawnPlayer(world, player, { x: 10, y: 0, z: 0 });
+    // The pre-#55 resetLoadout resurrected every weapon here; the station choice survives.
+    expect(world.players.ammo[ammoIndex(player, WeaponId.Blaster)]).toBe(0);
+    expect(world.players.ammo[ammoIndex(player, WeaponId.Spinfusor)]).toBe(LIGHT_ARMOR.discAmmo);
+    // Blaster is not carried, so the slot points at the first carried weapon (lowest id).
+    expect(world.players.weaponSlot[player]).toBe(WeaponId.Spinfusor);
+  });
+
+  it('the two-choice applyLoadoutRequest path lands on the armor full allowed set', () => {
+    const world = createWorld(flat, 1);
+    twoGeneratorsOneStation(world);
+    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
+    applyLoadoutSelection(world, player, ArmorId.Light, PackId.None, 0b00001);
+    applyLoadoutRequest(world, player, ArmorId.Light, false);
+    // An empty mask expands to the armor's full ALLOWED set (see applyLoadoutSelection),
+    // so the Chaingun comes back with its armor ammo, explicitly carried.
+    expect(world.players.carriedWeapons[player]).toBe(allowedWeaponMask(LIGHT_ARMOR));
+    expect(world.players.ammo[ammoIndex(player, WeaponId.Chaingun)]).toBe(LIGHT_ARMOR.chaingunAmmo);
+  });
+
+  it('refuses an unknown pack id, an out-of-range armor byte, and keeps the loadout untouched', () => {
+    const world = createWorld(flat, 1);
+    twoGeneratorsOneStation(world);
+    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
+    expect(applyLoadoutSelection(world, player, ArmorId.Light, 3, 0)).toBe(false);
+    expect(applyLoadoutSelection(world, player, 99 as ArmorId, PackId.None, 0)).toBe(false);
+    expect(world.players.hasEnergyPack[player]).toBe(0);
+    expect(world.players.hasRepairPack[player]).toBe(0);
+    expect(world.players.armor[player]).toBe(ArmorId.Light);
+  });
+
+  it('armor defaults gate the Laser Rifle to light armor and the Mortar to heavy armor', () => {
+    // The ArmorData allowance flags finally get a consumer: mask 0 (defaults) on a Heavy
+    // must NOT grant the light-only Laser Rifle's infinite ammo it used to hand out.
+    const world = createWorld(flat, 1);
+    twoGeneratorsOneStation(world);
+    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
+    expect(applyLoadoutSelection(world, player, ArmorId.Heavy, PackId.None, 0)).toBe(true);
+    expect(world.players.ammo[ammoIndex(player, WeaponId.LaserRifle)]).toBe(0);
+    expect(world.players.ammo[ammoIndex(player, WeaponId.Mortar)]).toBe(HEAVY_ARMOR.mortarAmmo);
+    const world2 = createWorld(flat, 1);
+    twoGeneratorsOneStation(world2);
+    const medium = addPlayer(world2, { x: 10, y: 0, z: 0 }, 1);
+    expect(applyLoadoutSelection(world2, medium, ArmorId.Medium, PackId.None, 0)).toBe(true);
+    expect(world2.players.ammo[ammoIndex(medium, WeaponId.LaserRifle)]).toBe(0);
+    expect(world2.players.ammo[ammoIndex(medium, WeaponId.Mortar)]).toBe(MEDIUM_ARMOR.mortarAmmo);
   });
 });

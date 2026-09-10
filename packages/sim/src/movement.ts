@@ -1,5 +1,5 @@
 import { armorFor, type ArmorData } from './armor.js';
-import { activeForceFieldBlockers } from './baseObjects.js';
+import { activeForceFieldBlockers, ENERGY_PACK_RECHARGE_BONUS } from './baseObjects.js';
 import { applyDamage, applyFallDamage } from './damage.js';
 import {
   raycastInteriors,
@@ -266,8 +266,16 @@ function applyJet(
   armor: ArmorData,
   dt: number,
 ): boolean {
-  // ShapeBase-style recharge runs every tick, before movement consumes energy.
-  const energy = Math.min(armor.maxEnergy, (players.energy[id] ?? 0) + armor.rechargeRate);
+  // ShapeBase-style recharge runs every tick, before movement consumes energy. #55: the
+  // Energy Pack adds its bonus to the same per-tick recharge (never to the jet drain or
+  // the cap) -- docs/superpowers/specs/2026-09-05-clans-tribes2-browser-demo-design.md,
+  // "Movement" step 3: "Original `energypack.cs` adds 0.15 recharge per tick".
+  const energy = Math.min(
+    armor.maxEnergy,
+    (players.energy[id] ?? 0) +
+      armor.rechargeRate +
+      (players.hasEnergyPack[id] ? ENERGY_PACK_RECHARGE_BONUS : 0),
+  );
   players.energy[id] = energy;
   if (input.jet && energy > armor.minJetEnergy) {
     body.vy += (armor.jetForce / armor.mass) * dt;

@@ -54,7 +54,15 @@ export enum OrderKind {
 // A 9.x peer's decodeEvent only accepts 6- and 30-byte event frames, so it would throw on the
 // new length on every impact; the handshake check must reject the mismatch in both directions
 // exactly like every bump before it.
-export const PROTOCOL_VERSION = 10;
+//
+// #55 bump 10 -> 11: the Loadout message grows from 3 to 4 bytes. The Repair Pack boolean
+// byte becomes a PackId (None/Repair/Energy, sim/baseObjects.ts) and a new trailing u8
+// carries the carried-weapons bitmask -- a full T2 station loadout, not just armor + Repair
+// Pack. A 10.x peer's decodeLoadout reads the pack byte as a Repair Pack boolean (Energy
+// would silently decode as "Repair Pack") and never reads the weapons byte at all, so the
+// handshake check must reject the mismatch in both directions exactly like every bump
+// before it.
+export const PROTOCOL_VERSION = 11;
 
 export enum WelcomeStatus {
   Ok = 0,
@@ -140,7 +148,14 @@ export interface GodMessage {
 export interface LoadoutMessage {
   type: MessageType.Loadout;
   armor: number; // ArmorId from @clans/sim
-  repairPack: boolean;
+  /** PackId from @clans/sim (baseObjects.ts): None = 0, Repair = 1, Energy = 2. Grew out of
+   *  the pre-#55 `repairPack: boolean` byte, which was the only pack the wire could name. */
+  pack: number;
+  /** Bitmask of carried weapons: bit (1 << WeaponId) set = that weapon is part of the
+   *  station loadout. Only the five WeaponId bits (0x1F) are defined; decodeLoadout masks
+   *  the raw u8 so an out-of-range bit can never reach the sim. 0 = "armor defaults", the
+   *  same full loadout a pre-#55 client got. */
+  weapons: number;
 }
 export interface VehicleSpawnMessage {
   type: MessageType.VehicleSpawn;

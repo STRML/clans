@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   addPlayer,
+  allowedWeaponMask,
+  armorFor,
   createWorld,
   GameOverReason,
   LIGHT_ARMOR,
@@ -9,8 +11,8 @@ import {
   WeaponId,
   type Heightfield,
 } from '@clans/sim';
+import { carriedWeaponSlots, describeHud, describeKillFeed, type HudSource } from './hud.js';
 import { EventKind, type EventMessage, type FlagSnapshotData } from '@clans/protocol';
-import { describeHud, describeKillFeed, type HudSource } from './hud.js';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -185,6 +187,35 @@ describe('describeHud', () => {
     world.players.mountedVehicleId[source.playerId] = 0;
     const rows = rowsOf(source);
     expect(rows['hud-vehicle']).toBe('Hull 50% · Shield 0% — 5.0 m/s');
+  });
+
+  describe('station loadout HUD (#55)', () => {
+    it('names the carried pack and shows nothing without one', () => {
+      const source = baseSource();
+      expect(rowsOf(source)['hud-pack']).toBe('');
+      source.world.players.hasEnergyPack[source.playerId] = 1;
+      expect(rowsOf(source)['hud-pack']).toBe('Energy Pack');
+      // Mutually exclusive by construction; the row shows whichever pack is set.
+      source.world.players.hasEnergyPack[source.playerId] = 0;
+      source.world.players.hasRepairPack[source.playerId] = 1;
+      expect(rowsOf(source)['hud-pack']).toBe('Repair Pack');
+    });
+
+    it('expands a zero carriedWeapons mask (no station visit) to the full armor-allowed set', () => {
+      const source = baseSource();
+      expect(carriedWeaponSlots(source.world, source.playerId)).toBe(
+        allowedWeaponMask(armorFor(source.world, source.playerId)),
+      );
+    });
+
+    it('reports an explicit station selection as-is', () => {
+      const source = baseSource();
+      source.world.players.carriedWeapons[source.playerId] =
+        (1 << WeaponId.Spinfusor) | (1 << WeaponId.Blaster);
+      expect(carriedWeaponSlots(source.world, source.playerId)).toBe(
+        (1 << WeaponId.Spinfusor) | (1 << WeaponId.Blaster),
+      );
+    });
   });
 });
 

@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ArmorId,
   FIXED_DT,
   FIXED_TICK_MS,
   LIGHT_ARMOR,
+  PackId,
   RESPAWN_TICKS,
   TIME_LIMIT_TICKS,
   WeaponId,
@@ -29,11 +31,13 @@ import {
   decodeCommandOrder,
   decodeGod,
   decodeInput,
+  decodeLoadout,
   decodeVoiceBind,
   emptyExtras,
   encodeEvent,
   encodeSnapshot,
   encodeWelcome,
+  LOADOUT_MESSAGE_BYTES,
   type WorldExtras,
 } from '@clans/protocol';
 import { NetClient } from './netclient.js';
@@ -246,6 +250,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     const state1 = { ...base, x: 1, z: 0 };
     const state2 = { ...base, x: 2, z: 0 };
@@ -441,6 +447,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     const delta = encodeSnapshot(
       7,
@@ -507,6 +515,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(() =>
@@ -572,6 +582,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
 
@@ -679,6 +691,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
     expect(client.world.players.wasGrounded[0]).toBe(0);
@@ -748,6 +762,8 @@ describe('NetClient', () => {
       wasJumpHeld: 1 as const, // the server also saw this as a continued hold, not a fresh press
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     // lastInputSequence 0: the server has not acked sequence 1 yet, so reconcile() replays it.
     transport.pump([encodeSnapshot(1, 0, 0, [serverState], null, emptyExtras())]);
@@ -979,6 +995,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     const extras: WorldExtras = {
       projectiles: [],
@@ -1054,6 +1072,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     const extras: WorldExtras = {
       projectiles: [],
@@ -1129,6 +1149,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     transport.pump([encodeSnapshot(1, 0, 0, [state], null, emptyExtras())]);
     expect(client.localHealth).toBeCloseTo(0.4);
@@ -1252,6 +1274,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -1320,6 +1344,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [alive], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -1393,6 +1419,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [fullHealth], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(1);
@@ -1483,6 +1511,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     transport.pump([encodeSnapshot(1, 5, 2, [serverState], null, emptyExtras())]);
 
@@ -1560,6 +1590,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
 
@@ -1652,6 +1684,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     transport.pump([encodeSnapshot(1, 5, 1, [serverState], null, emptyExtras())]);
 
@@ -1709,6 +1743,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
     expect(client.world.players.alive[0]).toBe(0);
@@ -1816,6 +1852,8 @@ describe('NetClient', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     const dead = { ...alive, health: 0 };
     transport.pump([encodeSnapshot(1, 10, 0, [dead], null, emptyExtras())]);
@@ -1873,6 +1911,30 @@ describe('NetClient', () => {
     client.sendVoiceBind(3);
     const bind = sent.find((bytes) => bytes[0] === MessageType.VoiceBind);
     expect(bind && decodeVoiceBind(bind)).toEqual({ type: MessageType.VoiceBind, lineId: 3 });
+  });
+
+  it('sendLoadout writes the full 4-byte #55 Loadout frame to the transport', () => {
+    clock.ms = 0;
+    const link = makeLink({ value: 25 });
+    const sent: Uint8Array[] = [];
+    const rawSend = link.send.bind(link);
+    link.send = (bytes) => {
+      sent.push(bytes);
+      rawSend(bytes);
+    };
+    const transport = makeTransport(link);
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    // Energy Pack + a two-weapon loadout: exactly the shape the pre-#55 3-byte frame
+    // could not express (the pack byte was a Repair Pack boolean and weapons did not exist).
+    client.sendLoadout(ArmorId.Heavy, PackId.Energy, 0b10011);
+    const loadout = sent.find((bytes) => bytes[0] === MessageType.Loadout);
+    expect(loadout && decodeLoadout(loadout)).toEqual({
+      type: MessageType.Loadout,
+      armor: ArmorId.Heavy,
+      pack: PackId.Energy,
+      weapons: 0b10011,
+    });
+    expect(loadout?.length).toBe(LOADOUT_MESSAGE_BYTES);
   });
 
   it('applies god mode to local prediction immediately, not just over the wire (Codex review round 14, PR #9, finding 2)', () => {
@@ -1992,6 +2054,8 @@ describe('NetClient', () => {
         wasJumpHeld: 0 as const,
         armor: 0,
         hasRepairPack: 0 as const,
+        hasEnergyPack: 0 as const,
+        carriedWeapons: 0,
         ...overrides,
       };
     }

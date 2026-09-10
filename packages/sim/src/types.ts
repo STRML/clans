@@ -73,6 +73,21 @@ export interface PlayerStore {
   armor: Uint8Array; // ArmorId
   /** 0/1. Set by a Loadout request (Task 6); the only pack modeled this milestone. */
   hasRepairPack: Uint8Array;
+  /** 0/1 Energy Pack (baseObjects.ts PackId.Energy, issue #55). Set only by
+   *  applyLoadoutSelection, which keeps this and hasRepairPack mutually exclusive -- a
+   *  station visit replaces the whole pack, exactly like the source's inventory station.
+   *  movement.ts's recharge step reads it for ENERGY_PACK_RECHARGE_BONUS; repair.ts keeps
+   *  reading hasRepairPack and must never see this field. Not yet on the snapshot wire
+   *  (protocol carries the pack only on the Loadout request), so it lives in the same
+   *  "server-authoritative, client-predicted" class as armor itself. */
+  hasEnergyPack: Uint8Array;
+  /** Bitmask of the weapon set a station visit granted (bit `1 << WeaponId`), 0 = "no
+   *  explicit selection: armor defaults" (every armor-allowed weapon, the pre-#55
+   *  behavior). Written by applyLoadoutSelection and read by resetLoadout so the choice
+   *  PERSISTS across respawns -- the source's inventory station remembers your loadout
+   *  until you change it; without this, weapons.ts's respawn-time resetLoadout would
+   *  silently resurrect every weapon the player did not select. */
+  carriedWeapons: Uint8Array;
   /** -1 = not mounted, else the VehicleStore id this player is riding. movement.ts's
    *  stepPlayer and weapons.ts's stepOnePlayer both no-op for a mounted id -- stepVehicles is
    *  the only system that writes a mounted player's position/velocity (M5 plan, Global

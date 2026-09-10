@@ -63,6 +63,8 @@ describe('player snapshots', () => {
       wasJumpHeld: 0,
       armor: ArmorId.Light,
       hasRepairPack: 0,
+      hasEnergyPack: 0,
+      carriedWeapons: 0,
     });
   });
 
@@ -105,6 +107,8 @@ describe('player snapshots', () => {
       wasJumpHeld: 1,
       armor: ArmorId.Light,
       hasRepairPack: 0,
+      hasEnergyPack: 0,
+      carriedWeapons: 0,
     });
     expect(world.players.count).toBe(4);
     expect(world.players.active[3]).toBe(1);
@@ -137,6 +141,8 @@ describe('player snapshots', () => {
       wasJumpHeld: 1,
       armor: ArmorId.Light,
       hasRepairPack: 0,
+      hasEnergyPack: 0,
+      carriedWeapons: 0,
     });
   });
 

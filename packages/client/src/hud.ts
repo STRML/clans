@@ -4,6 +4,7 @@ import {
   GameOverReason,
   VEHICLE_DATA,
   WeaponId,
+  allowedWeaponMask,
   ammoIndex,
   sampleTerrain,
   armorFor,
@@ -69,6 +70,15 @@ function energyRow(source: HudSource): HudRow {
   const armor = armorFor(source.world, source.playerId);
   const energy = source.world.players.energy[source.playerId] ?? 0;
   return { id: 'hud-energy', text: `${String(percent(energy, armor.maxEnergy))}%` };
+}
+
+function packRow(source: HudSource): HudRow {
+  const players = source.world.players;
+  // Mutually exclusive by construction (baseObjects.ts's applyLoadoutSelection replaces the
+  // whole pack on every station visit), so first match wins is enough.
+  if (players.hasEnergyPack[source.playerId]) return { id: 'hud-pack', text: 'Energy Pack' };
+  if (players.hasRepairPack[source.playerId]) return { id: 'hud-pack', text: 'Repair Pack' };
+  return { id: 'hud-pack', text: '' };
 }
 
 function weaponAmmoRows(source: HudSource): HudRow[] {
@@ -169,6 +179,7 @@ export function describeHud(source: HudSource): HudRow[] {
     healthRow(source),
     energyRow(source),
     ...weaponAmmoRows(source),
+    packRow(source),
     teamScoresRow(source),
     flagStatusRow(source),
     respawnRow(source),
@@ -184,6 +195,66 @@ function killFeedLine(event: EventMessage): string | null {
   return event.a < 0
     ? `P${String(event.b)} died`
     : `P${String(event.a)} eliminated P${String(event.b)}`;
+}
+
+/** The weapon slots this player can actually reach: an explicit station selection
+ *  (PlayerStore.carriedWeapons, #55) or, when no station visit has ever narrowed it, the
+ *  armor's full allowed set -- the same expansion the sim's own resetLoadout applies. */
+export function carriedWeaponSlots(world: World, playerId: number): number {
+  const stored = world.players.carriedWeapons[playerId] ?? 0;
+  return stored === 0 ? allowedWeaponMask(armorFor(world, playerId)) : stored;
+}
+
+function updateRack(items: HTMLElement[], source: HudSource, packCell: HTMLElement): void {
+  const carried = carriedWeaponSlots(source.world, source.playerId);
+  for (const [slot, item] of items.entries()) {
+    const ammo = source.world.players.ammo[ammoIndex(source.playerId, slot)] ?? 0;
+    item.lastElementChild!.textContent = ammo < 0 ? '∞' : String(ammo);
+    item.dataset['selected'] = String(source.world.players.weaponSlot[source.playerId] === slot);
+    // A weapon outside the station loadout is not on the player: hide the cell rather than
+    // show a full-ammo slot for a gun they cannot select (the source equipment rack shows
+    // only carried items).
+    item.hidden = (carried & (1 << slot)) === 0;
+  }
+  syncPackCell(packCell, source);
+  const vehicleId = source.world.players.mountedVehicleId[source.playerId] ?? -1;
+  const weapon = source.world.players.weaponSlot[source.playerId] ?? WeaponId.Blaster;
+  const crosshair = document.getElementById('crosshair');
+  if (crosshair) {
+    const reticle =
+      vehicleId !== -1 && source.world.vehicles.kind[vehicleId] === VehicleKind.Shrike
+        ? 'hud_ret_shrike.png'
+        : (WEAPON_RETICLE[weapon] ?? 'RET_blaster.png');
+    crosshair.style.backgroundImage = `url(${assetUrl(`gui/${reticle}`)})`;
+  }
+}
+
+/** The rack's pack cell (#55): the original Energy Pack bitmap for Energy, a text cell for
+ *  Repair (hud_new_packrepair.png exists in the source mirror but is NOT in the committed
+ *  gui-sources set, so there is no fetched bitmap to ground an <img> on), and hidden when
+ *  no pack is carried. */
+function createPackCell(rack: HTMLElement): HTMLElement {
+  const item = document.createElement('div');
+  item.className = 'hud-weapon-slot hud-pack-slot';
+  item.title = 'Pack';
+  const icon = document.createElement('img');
+  icon.className = 'pack-icon';
+  icon.src = assetUrl('gui/hud_new_packenergy.png');
+  icon.alt = '';
+  const label = document.createElement('span');
+  item.append(icon, label);
+  rack.append(item);
+  return item;
+}
+
+function syncPackCell(cell: HTMLElement, source: HudSource): void {
+  const players = source.world.players;
+  const energy = players.hasEnergyPack[source.playerId] !== 0;
+  const repair = players.hasRepairPack[source.playerId] !== 0;
+  cell.hidden = !energy && !repair;
+  (cell.querySelector('.pack-icon') as HTMLImageElement).style.display = energy ? '' : 'none';
+  cell.lastElementChild!.textContent = repair ? 'R' : '';
+  cell.setAttribute('aria-label', energy ? 'Energy Pack' : repair ? 'Repair Pack' : 'No pack');
 }
 
 export function describeKillFeed(source: HudSource): string[] {
@@ -210,11 +281,14 @@ const WEAPON_RETICLE = [
   'RET_blaster.png',
 ];
 
-function createWeaponRack(hud: HTMLElement): HTMLElement[] {
+function createWeaponRack(hud: HTMLElement): {
+  slots: HTMLElement[];
+  packCell: HTMLElement;
+} {
   const rack = document.createElement('div');
   rack.id = 'hud-weapon-rack';
   hud.append(rack);
-  return WEAPON_ICON.map((image, slot) => {
+  const slots = WEAPON_ICON.map((image, slot) => {
     const item = document.createElement('div');
     item.className = 'hud-weapon-slot';
     item.title = `${String(slot + 1)}: ${WEAPON_NAME[slot] ?? ''}`;
@@ -226,24 +300,10 @@ function createWeaponRack(hud: HTMLElement): HTMLElement[] {
     rack.append(item);
     return item;
   });
-}
-
-function updateRack(items: HTMLElement[], source: HudSource): void {
-  for (const [slot, item] of items.entries()) {
-    const ammo = source.world.players.ammo[ammoIndex(source.playerId, slot)] ?? 0;
-    item.lastElementChild!.textContent = ammo < 0 ? '∞' : String(ammo);
-    item.dataset['selected'] = String(source.world.players.weaponSlot[source.playerId] === slot);
-  }
-  const vehicleId = source.world.players.mountedVehicleId[source.playerId] ?? -1;
-  const weapon = source.world.players.weaponSlot[source.playerId] ?? WeaponId.Blaster;
-  const crosshair = document.getElementById('crosshair');
-  if (crosshair) {
-    const reticle =
-      vehicleId !== -1 && source.world.vehicles.kind[vehicleId] === VehicleKind.Shrike
-        ? 'hud_ret_shrike.png'
-        : (WEAPON_RETICLE[weapon] ?? 'RET_blaster.png');
-    crosshair.style.backgroundImage = `url(${assetUrl(`gui/${reticle}`)})`;
-  }
+  // The pack rides the same rack, after the weapon cells (#55) -- the source HUD groups
+  // equipment as one right-edge item strip.
+  const packCell = createPackCell(rack);
+  return { slots, packCell };
 }
 
 function updateVehicleInstruments(el: HTMLElement, source: HudSource): void {
@@ -316,7 +376,7 @@ export function createHud(
     hud.appendChild(el);
     rows.set(row.id, el);
   }
-  const rack = createWeaponRack(hud);
+  const { slots, packCell } = createWeaponRack(hud);
   const killFeed = document.createElement('div');
   killFeed.id = 'hud-kill-feed';
   hud.appendChild(killFeed);
@@ -353,7 +413,7 @@ export function createHud(
         return `Team ${String(i + 1)}   ${String(score)}   FLAG  ${status}`;
       })
       .join('\n');
-    updateRack(rack, source);
+    updateRack(slots, source, packCell);
     const messages = describeKillFeed(source);
     killFeed.textContent = messages.length ? messages.join('\n') : 'Clans · Capture the Flag';
     hud.dataset['ready'] = '1';

@@ -234,14 +234,16 @@ const HEADER_BYTES = 1 + 4 + 4 + 4 + 4 + 1; // type, snapshotId, baselineId, tic
 // set. A networked client's HUD, prediction (armorFor drives energy/speed caps and fall-
 // damage scaling), and reconcile() all silently disagreed with the server's real loadout.
 // Codex round 1, finding 2.
-const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 4 + 1 + 4 + 2 + 1 + 1 + 1;
 // id, type, weaponId, 6 f32 (pos+vel), ownerId i16, armed (round 15, PR #9, finding 2).
 // ownerId is I16 since the #15 fix: a u16 write turned the turret-shot "no owner" sentinel
 // -1 into 65535 on the wire (see ProjectileSnapshotData.ownerId's own comment); the width
 // and therefore this total are unchanged.
 const PROJECTILE_BYTES = 2 + 1 + 1 + 4 * 6 + 2 + 1;
-const FLAG_BYTES = 1 + 1 + 1 + 4 * 3 + 2 + 4; // id, team, state, 3 f32 (pos), carrierId i16, returnInS f32
-// id, damage f32, destroyed, powered, energy f32 (#14).
+// id, team, state, 3 f32 (pos), carrierId i16, returnInS f32.
+const FLAG_BYTES = 1 + 1 + 1 + 4 * 3 + 2 + 4;
+// #55 adds hasEnergyPack (u8) + carriedWeapons (u8) after hasRepairPack: 17 -> 19 fixed
+// fields, riding the same PROTOCOL_VERSION 11 bump as the Loadout message's own growth.
+const PLAYER_FULL_BYTES = 2 + 1 + 4 * 7 + 4 + 1 + 4 + 1 + 1 + 4 + 1 + 4 + 1 + 4 + 2 + 1 + 1 + 1 + 2;
 const BASE_OBJECT_BYTES = 2 + 4 + 1 + 1 + 4;
 // id, damage f32, destroyed, powered, targetId i16, state, energy f32 (#14), targetKind u8 (#24).
 const TURRET_BYTES = 2 + 4 + 1 + 1 + 2 + 1 + 4 + 1;
@@ -350,6 +352,10 @@ function writePlayerFull(cursor: Cursor, data: PlayerSnapshotData): void {
   writeU8(cursor, data.godMode);
   writeU8(cursor, data.armor);
   writeU8(cursor, data.hasRepairPack);
+  // #55: the full station loadout result rides the snapshot so the networked client's own
+  // predicted world (and therefore its HUD) renders the pack and carried weapon set.
+  writeU8(cursor, data.hasEnergyPack);
+  writeU8(cursor, data.carriedWeapons);
 }
 function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const id = readU16(cursor);
@@ -378,6 +384,11 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
   const godMode = readU8(cursor) ? 1 : 0;
   const armor = readU8(cursor);
   const hasRepairPack = readU8(cursor) ? 1 : 0;
+  const hasEnergyPack = readU8(cursor) ? 1 : 0;
+  const carriedWeapons = readU8(cursor);
+  // A NaN or Infinity in any of these would otherwise reach client-side prediction (or the
+  // server's own authoritative state, for a delta the server decodes) and poison it,
+  // exactly as an unvalidated input axis would (see handshake.ts's readSample).
   assertFinite([x, y, z, vx, vy, vz, yaw, energy, health, weaponTimer, grenadeCooldown]);
   return {
     id,
@@ -409,6 +420,8 @@ function readPlayerFull(cursor: Cursor): PlayerSnapshotData {
     godMode,
     armor,
     hasRepairPack,
+    hasEnergyPack,
+    carriedWeapons,
   };
 }
 
@@ -841,8 +854,17 @@ function statusChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
 // station visit, not every tick the way transform/energy do. Exact equality for both, like
 // respawnSeqChanged/ammoChanged above: armor is a small integer id and hasRepairPack a 0/1
 // flag, neither a float that needs EPSILON tolerance.
+// #55: the pack and carried-weapons fields join the same coarse-change mask -- a station
+// visit is exactly as infrequent as a team/armor change, and each new field is a small
+// integer, never a float needing EPSILON tolerance.
 function identityChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
-  return a.team !== b.team || a.armor !== b.armor || a.hasRepairPack !== b.hasRepairPack;
+  return (
+    a.team !== b.team ||
+    a.armor !== b.armor ||
+    a.hasRepairPack !== b.hasRepairPack ||
+    a.hasEnergyPack !== b.hasEnergyPack ||
+    a.carriedWeapons !== b.carriedWeapons
+  );
 }
 function healthChanged(a: PlayerSnapshotData, b: PlayerSnapshotData): boolean {
   return Math.abs(a.health - b.health) > EPSILON;
@@ -933,7 +955,7 @@ function changedRecordBytes(mask: number): number {
   if (mask & DIRTY_TRANSFORM) bytes += 28;
   if (mask & DIRTY_ENERGY) bytes += 4;
   if (mask & DIRTY_STATUS) bytes += 1;
-  if (mask & DIRTY_TEAM) bytes += 3; // team(1) + armor(1) + hasRepairPack(1) -- see identityChanged.
+  if (mask & DIRTY_TEAM) bytes += 5; // team(1) + armor(1) + repair(1) + energy(1) + weapons(1) -- see identityChanged.
   if (mask & DIRTY_HEALTH) bytes += 4;
   if (mask & DIRTY_WEAPON) bytes += 1;
   if (mask & DIRTY_RESPAWN) bytes += 1;
@@ -977,6 +999,8 @@ function writeChangedPlayer(cursor: Cursor, data: PlayerSnapshotData, mask: numb
     writeU8(cursor, data.team);
     writeU8(cursor, data.armor);
     writeU8(cursor, data.hasRepairPack);
+    writeU8(cursor, data.hasEnergyPack);
+    writeU8(cursor, data.carriedWeapons);
   }
   if (mask & DIRTY_HEALTH) writeF32(cursor, data.health);
   if (mask & DIRTY_WEAPON) writeU8(cursor, data.weaponSlot);
@@ -987,7 +1011,6 @@ function writeChangedPlayer(cursor: Cursor, data: PlayerSnapshotData, mask: numb
     writeChangedScoreGodMode(cursor, data);
   }
 }
-
 function encodeDeltaSnapshot(
   snapshotId: number,
   tick: number,
@@ -1122,6 +1145,8 @@ function readChangedIdentity(cursor: Cursor, next: PlayerSnapshotData): void {
   next.team = readU8(cursor);
   next.armor = readU8(cursor);
   next.hasRepairPack = readU8(cursor) ? 1 : 0;
+  next.hasEnergyPack = readU8(cursor) ? 1 : 0;
+  next.carriedWeapons = readU8(cursor);
 }
 function applyChangedPlayer(cursor: Cursor, byId: Map<number, PlayerSnapshotData>): void {
   const id = readU16(cursor);

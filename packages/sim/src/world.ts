@@ -83,6 +83,9 @@ export function createWorld(terrain: Heightfield, seed: number, capacity = 32): 
       respawnSeq: new Uint16Array(capacity),
       armor: new Uint8Array(capacity),
       hasRepairPack: new Uint8Array(capacity),
+      // #55 station loadout state -- see each field's own comment in types.ts.
+      hasEnergyPack: new Uint8Array(capacity),
+      carriedWeapons: new Uint8Array(capacity),
       mountedVehicleId: new Int16Array(capacity).fill(-1),
       wasUseHeld: new Uint8Array(capacity),
     },
@@ -136,6 +139,10 @@ export function addPlayer(world: World, spawn: Vec3, team = 0, armor = ArmorId.L
   if (id >= players.energy.length) throw new RangeError('Player capacity exceeded');
   if (id === players.count) players.count += 1;
   players.active[id] = 1;
+  // A reused id must not inherit the previous occupant's station loadout (#55): a fresh
+  // player starts on armor defaults with no pack, exactly like the old fresh-player shape.
+  players.hasEnergyPack[id] = 0;
+  players.carriedWeapons[id] = 0;
   players.team[id] = team;
   players.armor[id] = armor;
   players.hasRepairPack[id] = 0;

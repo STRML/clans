@@ -74,8 +74,15 @@ export interface PlayerSnapshotData {
   /** PlayerStore.armor (ArmorId) -- see armor.ts's armorFor for why every per-player
    *  calculation reads this instead of a hardcoded constant. */
   armor: number;
-  /** PlayerStore.hasRepairPack -- the only pack modeled this milestone (Task 6). */
+  /** PlayerStore.hasRepairPack (#55) and PlayerStore.hasEnergyPack (#55): the pack a
+   *  station visit granted. The Loadout REQUEST only travels client->server; without these
+   *  on the snapshot, the authoritative result never reached the client's own predicted
+   *  world and its HUD could not render the pack. */
   hasRepairPack: 0 | 1;
+  hasEnergyPack: 0 | 1;
+  /** PlayerStore.carriedWeapons (#55): the `1 << WeaponId` station weapon set, 0 = "no
+   *  station visit yet" (armor-defaults legacy table). */
+  carriedWeapons: number;
   /**
    * PlayerStore.wasJumpHeld -- movement.ts's jumpEdge check
    * (`input.jump && (!players.wasJumpHeld[id] || !players.wasGrounded[id])`) reads this to
@@ -132,6 +139,8 @@ export function serializePlayer(world: World, id: number): PlayerSnapshotData {
     godMode: bit(p.godMode, id),
     armor: num(p.armor, id),
     hasRepairPack: bit(p.hasRepairPack, id),
+    hasEnergyPack: bit(p.hasEnergyPack, id),
+    carriedWeapons: num(p.carriedWeapons, id),
     wasJumpHeld: bit(p.wasJumpHeld, id),
     ...(p.wasUseHeld[id] ? { wasUseHeld: p.wasUseHeld[id] as 1 | 2 | 3 } : {}),
   };
@@ -166,6 +175,10 @@ export function deserializePlayer(world: World, data: PlayerSnapshotData): void 
   players.energy[data.id] = data.energy;
   players.armor[data.id] = data.armor;
   players.hasRepairPack[data.id] = data.hasRepairPack;
+  players.hasEnergyPack[data.id] = data.hasEnergyPack;
+  players.carriedWeapons[data.id] = data.carriedWeapons;
+  // Health travels derived (maxDamage - damage); damage itself is restored here so weapon/
+  // fall damage state survives the snapshot exactly as it did before the #55 field insert.
   players.damage[data.id] = ARMORS[data.armor as ArmorId].maxDamage - data.health;
   players.alive[data.id] = data.health > 0 ? 1 : 0;
   // A live decoded player is never due for a respawn. `respawnAt` isn't itself on the wire

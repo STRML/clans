@@ -1,7 +1,7 @@
 import { ARMORS, ArmorId, type ArmorData } from './armor.js';
 import { buildInteriorCollider, type InteriorInstance } from './interiors.js';
 import type { Vec3, World } from './types.js';
-import { resetLoadout } from './weapons.js';
+import { resetLoadout, WeaponId } from './weapons.js';
 
 export enum BaseObjectKind {
   Generator = 0,
@@ -294,16 +294,38 @@ export function stationAt(world: World, playerId: number): number | null {
   return null;
 }
 
+/** PackId on the wire (protocol LoadoutMessage.pack, #55) and in PlayerStore. The source
+ *  inventory station replaces the whole pack on every visit, so None/Repair/Energy are the
+ *  only states and Repair and Energy can never be held together -- applyLoadoutSelection
+ *  enforces that. */
+export enum PackId {
+  None = 0,
+  Repair = 1,
+  Energy = 2,
+}
+
 /**
- * The one place a player's armor and Repair Pack choice actually change -- called directly by
- * server/net.ts's Loadout handler and by the client's single-player equivalent, never
- * threaded through PlayerInput/stepWorld (this is a one-shot request, not per-tick state,
- * matching how `setGodMode` already works). Re-checks `stationAt` at call time rather than
- * trusting an earlier "in range" result, which is what makes failure matrix row 4 true for
- * free: a request that arrives the same tick power drops (or after the player already walked
- * away) simply finds no station and returns false, leaving every field of the player's
- * current loadout untouched.
+ * Per-tick energy recharge granted by the Energy Pack, added to the armor's own
+ * rechargeRate inside movement.ts's applyJet (never to the jet drain or the maxEnergy
+ * cap). Committed evidence: docs/superpowers/specs/2026-09-05-clans-tribes2-browser-demo-
+ * design.md, "Movement" step 3 -- "Original `energypack.cs` adds 0.15 recharge per tick".
+ * Per tick, not per second, exactly like ArmorData.rechargeRate itself (shapeBase.cc:1011).
  */
+export const ENERGY_PACK_RECHARGE_BONUS = 0.15;
+
+/** Bit `1 << WeaponId` for every weapon the armor may carry at all -- the two ArmorData
+ *  allowance flags finally get their consumer here (they were data without a reader before
+ *  #55): Laser Rifle is light-armor-only, Mortar heavy-only, Spinfusor/Chaingun/Blaster
+ *  universal. Deliberately NOT capped by maxWeapons: the committed armor table gives no
+ *  rule for how that number would reduce a chosen weapon set (the station lists every
+ *  allowed weapon), so enforcing it here would be an invented constraint. */
+export function allowedWeaponMask(armor: ArmorData): number {
+  let mask = (1 << WeaponId.Spinfusor) | (1 << WeaponId.Chaingun) | (1 << WeaponId.Blaster);
+  if (armor.laserRifleAllowed) mask |= 1 << WeaponId.LaserRifle;
+  if (armor.mortarAllowed) mask |= 1 << WeaponId.Mortar;
+  return mask;
+}
+
 /**
  * Codex round 1, finding 1: writes a decoded snapshot's DYNAMIC base-object fields
  * (damage/destroyed/powered) onto the store by id, growing `store.count` to fit an id that's
@@ -331,27 +353,71 @@ export function applyBaseObjectSnapshot(
   if (data.energy !== undefined) store.energy[data.id] = data.energy;
 }
 
-export function applyLoadoutRequest(
+/**
+ * The one place a player's full station loadout changes (#55): armor, pack and carried
+ * weapons. Called by the client's single-player path and (through server/net.ts's
+ * handleLoadout) by the networked one, never threaded through PlayerInput/stepWorld -- this
+ * is a one-shot request, not per-tick state, matching how `setGodMode` already works.
+ * Re-checks `stationAt` at call time rather than trusting an earlier "in range" result,
+ * which is what makes failure matrix row 4 true for free: a request that arrives the same
+ * tick power drops (or after the player already walked away) simply finds no station and
+ * returns false, leaving every field of the player's current loadout untouched.
+ *
+ * `armor` and `pack` decode straight off untrusted wire bytes (protocol/handshake.ts's
+ * decodeLoadout), so both are validated here, before any state changes -- decodeLoadout
+ * already RangeErrors on a pack byte above PackId.Energy, and this rejects a raw armor u8
+ * outside ARMORS the same way the pre-#55 applyLoadoutRequest did (Codex round 1, finding
+ * 3: reject BEFORE writing, or a thrown half-applied loadout poisons the player).
+ * `weapons` is a `1 << WeaponId` bitmask, sanitized against `allowedWeaponMask` for the
+ * chosen armor -- a hostile or stale client cannot talk a Light into a Mortar. A mask of 0
+ * selects the armor defaults (every allowed weapon, the pre-#55 loadout).
+ */
+export function applyLoadoutSelection(
   world: World,
   playerId: number,
   armor: ArmorId,
-  repairPack: boolean,
+  pack: number,
+  weapons: number,
 ): boolean {
-  // decodeLoadout (protocol/handshake.ts) reads this straight off an untrusted wire byte, so
-  // it can carry any u8 (0-255), not just a real ArmorId (0-2). ARMORS[armor] below is undefined
-  // for anything out of range, and the caller (server/net.ts's handleLoadout) has no catch of
-  // its own -- an invalid byte used to throw straight past applyLoadoutRequest's ability to
-  // return false, poisoning the player's armor field with the raw invalid value before the
-  // throw (players.armor[playerId] = armor ran first) and getting silently swallowed by the
-  // server's own message-handler try/catch. Reject it here, before any state changes.
   if (!(armor in ARMORS)) return false;
+  // Enum membership by VALUE: a numeric enum object's keys are the names ('None'...), so
+  // `pack in PackId` would test the name '0' and reject every real pack id -- compare
+  // against the three values, the same check stationMenu's LoadoutSelection.setPack makes.
+  const validPack = pack === PackId.None || pack === PackId.Repair || pack === PackId.Energy;
+  if (!validPack) return false;
   if (stationAt(world, playerId) === null) return false;
   const players = world.players;
   const data: ArmorData = ARMORS[armor];
   players.armor[playerId] = armor;
   players.damage[playerId] = 0;
   players.energy[playerId] = data.maxEnergy;
-  players.hasRepairPack[playerId] = repairPack ? 1 : 0;
+  // A station visit always lands on an EXPLICIT allowed set: requesting nothing (or only
+  // bits this armor disallows) grants the armor's full allowed set, never an unarmed
+  // loadout and never the pre-#55 legacy table -- whose -1 "infinite" Laser Rifle ammo for
+  // every armor (weapons.ts's resetLoadout defaults) ignored laserRifleAllowed entirely.
+  // Fresh players who never visited a station keep that legacy table; the mask-0
+  // sentinel in carriedWeapons means exactly that state.
+  const carried = weapons & allowedWeaponMask(data);
+  players.carriedWeapons[playerId] = carried === 0 ? allowedWeaponMask(data) : carried;
+  // The station replaces the whole pack (source semantics): exactly one of the two pack
+  // bits is ever set, and picking one clears the other.
+  players.hasRepairPack[playerId] = pack === PackId.Repair ? 1 : 0;
+  players.hasEnergyPack[playerId] = pack === PackId.Energy ? 1 : 0;
   resetLoadout(world, playerId, data);
   return true;
+}
+
+/**
+ * The pre-#55 two-choice shape (armor + Repair Pack), kept for callers that predate the
+ * full loadout wire: an empty weapon mask expands to the armor's full ALLOWED set (see
+ * applyLoadoutSelection), and the pack byte collapses to Repair-or-None exactly as it
+ * always did. Body is applyLoadoutSelection.
+ */
+export function applyLoadoutRequest(
+  world: World,
+  playerId: number,
+  armor: ArmorId,
+  repairPack: boolean,
+): boolean {
+  return applyLoadoutSelection(world, playerId, armor, repairPack ? PackId.Repair : PackId.None, 0);
 }

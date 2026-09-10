@@ -21,6 +21,7 @@ import {
   encodeVoiceBind,
   encodeWelcome,
   IMPACT_EVENT_BYTES,
+  LOADOUT_MESSAGE_BYTES,
 } from './handshake.js';
 import {
   EventKind,
@@ -35,6 +36,15 @@ import {
 describe('handshake codec', () => {
   it('round-trips a Join message carrying the protocol version', () => {
     expect(decodeJoin(encodeJoin())).toEqual({ type: MessageType.Join, version: PROTOCOL_VERSION });
+  });
+
+  it('is version 11, so a #55-era v10 peer fails the Join equality check in both directions', () => {
+    // #55 changed the Loadout frame (3 -> 4 bytes, pack byte + weapons bitmask). Both the
+    // server's join.version !== PROTOCOL_VERSION check and the client's Welcome status
+    // reject a 10.x peer -- this pins the actual number so the bump cannot silently
+    // regress to a value a stale peer happens to share.
+    expect(PROTOCOL_VERSION).toBe(11);
+    expect(decodeJoin(encodeJoin()).version).not.toBe(10);
   });
 
   it('round-trips an accepted Welcome message, including the spawn point', () => {
@@ -340,13 +350,43 @@ describe('handshake codec', () => {
 });
 
 describe('Loadout round trip', () => {
-  it('encodes and decodes armor and repairPack exactly', () => {
-    const bytes = encodeLoadout({ armor: 2, repairPack: true });
-    expect(decodeLoadout(bytes)).toEqual({ type: MessageType.Loadout, armor: 2, repairPack: true });
+  it('encodes and decodes armor, pack and the weapons bitmask exactly (#55)', () => {
+    const bytes = encodeLoadout({ armor: 2, pack: 1, weapons: 0b10111 });
+    expect(decodeLoadout(bytes)).toEqual({
+      type: MessageType.Loadout,
+      armor: 2,
+      pack: 1,
+      weapons: 0b10111,
+    });
   });
-  it('round-trips repairPack: false', () => {
-    const bytes = encodeLoadout({ armor: 0, repairPack: false });
-    expect(decodeLoadout(bytes).repairPack).toBe(false);
+  it('round-trips an Energy Pack loadout with armor-default weapons (weapons mask 0)', () => {
+    const bytes = encodeLoadout({ armor: 0, pack: 2, weapons: 0 });
+    expect(decodeLoadout(bytes)).toEqual({
+      type: MessageType.Loadout,
+      armor: 0,
+      pack: 2,
+      weapons: 0,
+    });
+  });
+  it('keeps the exact 4-byte frame a pre-#11 peer cannot decode (#55)', () => {
+    // Byte-count contract: type + armor + pack + weapons bitmask. The 10.x decoder read
+    // only 3 bytes and mapped the pack byte onto a Repair Pack boolean, so an Energy Pack
+    // silently became "Repair Pack" and the weapons byte vanished; the frame length and
+    // the PROTOCOL_VERSION bump are both load-bearing.
+    expect(encodeLoadout({ armor: 1, pack: 0, weapons: 0 }).length).toBe(LOADOUT_MESSAGE_BYTES);
+    expect(() => decodeLoadout(new Uint8Array([MessageType.Loadout, 1, 0]))).toThrow(RangeError);
+  });
+  it('masks weapon bits above the five WeaponId bits and rejects an out-of-range pack', () => {
+    const masked = decodeLoadout(encodeLoadout({ armor: 0, pack: 0, weapons: 0xff }));
+    expect(masked.weapons).toBe(0x1f);
+    expect(() => decodeLoadout(new Uint8Array([MessageType.Loadout, 0, 3, 0]))).toThrow(RangeError);
+  });
+  it('no longer round-trips the pre-#11 repairPack boolean shape', () => {
+    // Pins the breaking change: a v10 client's 3-byte frame must fail, and the message
+    // shape has pack/weapons where repairPack used to be.
+    const decoded = decodeLoadout(encodeLoadout({ armor: 2, pack: 2, weapons: 0 }));
+    expect(decoded).not.toHaveProperty('repairPack');
+    expect(decoded.pack).toBe(2);
   });
 });
 

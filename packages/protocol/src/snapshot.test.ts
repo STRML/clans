@@ -442,11 +442,23 @@ describe('snapshot codec', () => {
     const source = createWorld(terrain, 1);
     const id = addPlayer(source, { x: 0, y: 0, z: 0 }, 1, ArmorId.Heavy);
     source.players.hasRepairPack[id] = 1;
+    source.players.hasEnergyPack[id] = 1;
+    source.players.carriedWeapons[id] = 0b10001;
     const players = serializeActivePlayers(source);
-    expect(players[0]).toMatchObject({ armor: ArmorId.Heavy, hasRepairPack: 1 });
+    expect(players[0]).toMatchObject({
+      armor: ArmorId.Heavy,
+      hasRepairPack: 1,
+      hasEnergyPack: 1,
+      carriedWeapons: 0b10001,
+    });
     const bytes = encodeSnapshot(1, source.tick, 0, players, null, emptyExtras());
     const decoded = decodeSnapshot(bytes, null);
-    expect(decoded.players[0]).toMatchObject({ armor: ArmorId.Heavy, hasRepairPack: 1 });
+    expect(decoded.players[0]).toMatchObject({
+      armor: ArmorId.Heavy,
+      hasRepairPack: 1,
+      hasEnergyPack: 1,
+      carriedWeapons: 0b10001,
+    });
   });
 
   it('marks armor/hasRepairPack dirty in a delta (sharing DIRTY_TEAM with team) and round-trips them', () => {

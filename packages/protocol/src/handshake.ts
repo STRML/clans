@@ -247,19 +247,29 @@ export function decodeGod(bytes: Uint8Array): GodMessage {
   return { type: MessageType.God, enabled: readU8(cursor) !== 0 };
 }
 
+/** #55: type + armor + pack + weapons bitmask. The length alone is the stale-peer tripwire
+ *  -- a pre-#11 3-byte Loadout frame reads as a truncated message and throws, and the
+ *  PROTOCOL_VERSION bump keeps that peer from ever sending one. */
+export const LOADOUT_MESSAGE_BYTES = 4;
+
 export function encodeLoadout(message: Omit<LoadoutMessage, 'type'>): Uint8Array {
-  const cursor = createWriter(3);
+  const cursor = createWriter(LOADOUT_MESSAGE_BYTES);
   writeU8(cursor, MessageType.Loadout);
   writeU8(cursor, message.armor);
-  writeU8(cursor, message.repairPack ? 1 : 0);
+  writeU8(cursor, message.pack);
+  writeU8(cursor, message.weapons);
   return bytesOf(cursor);
 }
 export function decodeLoadout(bytes: Uint8Array): LoadoutMessage {
   const cursor = createReader(bytes);
   expectType(cursor, MessageType.Loadout);
   const armor = readU8(cursor);
-  const repairPack = readU8(cursor) !== 0;
-  return { type: MessageType.Loadout, armor, repairPack };
+  const pack = readU8(cursor);
+  const weapons = readU8(cursor) & 0x1f; // WeaponId bits 0..4 only -- see LoadoutMessage.
+  // Same defensive style as readSample's finite check: an adversarial pack byte would
+  // otherwise flow into the sim's pack fields as a value no PackId defines.
+  if (pack > 2) throw new RangeError(`Loadout pack id out of range: ${String(pack)}`);
+  return { type: MessageType.Loadout, armor, pack, weapons };
 }
 
 export function encodeVehicleSpawn(message: Omit<VehicleSpawnMessage, 'type'>): Uint8Array {

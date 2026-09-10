@@ -2,8 +2,10 @@ import * as THREE from 'three';
 import { describe, expect, it, vi, type Mock } from 'vitest';
 import {
   addPlayer,
+  ArmorId,
   applyBaseObjectDamage,
   applyDamage,
+  applyLoadoutSelection,
   BaseObjectKind,
   createBaseObjects,
   createFlags,
@@ -12,9 +14,11 @@ import {
   FlagState,
   GameOverReason,
   LIGHT_ARMOR,
+  PackId,
   ProjectileImpactReason,
   ProjectileType,
   WeaponId,
+  ammoIndex,
   RESPAWN_TICKS,
   stepPower,
   VehicleKind,
@@ -63,6 +67,7 @@ import type {
   RemoteVehicleSnapshot,
   TimestampedEvent,
 } from './netclient.js';
+import { carriedWeaponSlots, describeHud } from './hud.js';
 import { speakVoiceLine } from './voicebinds.js';
 
 // speakVoiceLine ultimately starts a recorded audio clip in the browser --
@@ -181,6 +186,8 @@ const snapshot: PlayerSnapshotData = {
   wasJumpHeld: 0 as const,
   armor: 0,
   hasRepairPack: 0 as const,
+  hasEnergyPack: 0 as const,
+  carriedWeapons: 0,
 };
 
 describe('commanderMapPlayers (Codex round 2 review of PR #11)', () => {
@@ -998,6 +1005,8 @@ describe('positionOfPlayer', () => {
       wasJumpHeld: 0 as const,
       armor: 0,
       hasRepairPack: 0 as const,
+      hasEnergyPack: 0 as const,
+      carriedWeapons: 0,
     };
     const net: Pick<NetClient, 'playerId' | 'remotePlayers'> = {
       playerId: localId,
@@ -1281,5 +1290,58 @@ describe('syncRepairBeamView', () => {
     expect(h.view.sync).toHaveBeenLastCalledWith(null);
     expect(h.audio.setRepairBeam).toHaveBeenLastCalledWith(h.healer, false);
     expect(h.feedback.hidden).toBe(true);
+  });
+});
+
+describe('station loadout round trip (#55): request -> sim state -> HUD', () => {
+  function stationHarness(): { world: World; player: number } {
+    const world = createWorld(flat, 1);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 10, y: 0, z: 0 } },
+    ]);
+    stepPower(world);
+    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
+    return { world, player };
+  }
+
+  it('an Energy Pack + narrowed weapons request lands in the sim and reads back on the HUD', () => {
+    // Single-player path: app.ts's station menu Confirm calls applyLoadoutSelection
+    // directly (no wire); hudSourceFrom is the same HUD feed the frame loop consumes.
+    const { world, player } = stationHarness();
+    const applied = applyLoadoutSelection(
+      world,
+      player,
+      ArmorId.Light,
+      PackId.Energy,
+      (1 << WeaponId.Spinfusor) | (1 << WeaponId.Blaster),
+    );
+    expect(applied).toBe(true);
+    expect(world.players.hasEnergyPack[player]).toBe(1);
+    expect(world.players.hasRepairPack[player]).toBe(0);
+
+    const rows = Object.fromEntries(
+      describeHud(hudSourceFrom(world, player, null)).map((row) => [row.id, row.text]),
+    );
+    expect(rows['hud-pack']).toBe('Energy Pack');
+    // The rack narrows to exactly the carried set.
+    expect(carriedWeaponSlots(world, player)).toBe(
+      (1 << WeaponId.Spinfusor) | (1 << WeaponId.Blaster),
+    );
+    // An uncarried weapon cannot fire: dry ammo, and the Laser Rifle is gone from the
+    // legacy everyone-gets-infinite-ammo table.
+    expect(world.players.ammo[ammoIndex(player, WeaponId.LaserRifle)]).toBe(0);
+  });
+
+  it('a Repair Pack request replaces the Energy Pack and the HUD row follows', () => {
+    const { world, player } = stationHarness();
+    applyLoadoutSelection(world, player, ArmorId.Heavy, PackId.Energy, 0);
+    applyLoadoutSelection(world, player, ArmorId.Heavy, PackId.Repair, 0);
+    expect(world.players.hasEnergyPack[player]).toBe(0);
+    expect(world.players.hasRepairPack[player]).toBe(1);
+    const rows = Object.fromEntries(
+      describeHud(hudSourceFrom(world, player, null)).map((row) => [row.id, row.text]),
+    );
+    expect(rows['hud-pack']).toBe('Repair Pack');
   });
 });

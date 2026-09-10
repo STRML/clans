@@ -3,7 +3,7 @@ import { createWeaponModel } from './weapon-model.js';
 import * as THREE from 'three';
 import {
   applyBaseObjectDamage,
-  applyLoadoutRequest,
+  applyLoadoutSelection,
   armorFor,
   BASE_OBJECT_DATA,
   BaseObjectKind,
@@ -29,7 +29,6 @@ import {
   stepPower,
   stepWorld,
   vehiclePadAt,
-  type ArmorId,
   type Heightfield,
   type PlayerInput,
   type PlayerSnapshotData,
@@ -81,8 +80,10 @@ import {
 } from './repair-beam.js';
 import {
   createStationMenu,
+  currentLoadoutChoice,
   inventoryStationTriggerAt,
   stationMenuVisible,
+  type LoadoutChoice,
   type StationMenu,
 } from './stationMenu.js';
 import { addEnvironment, createTerrain } from './terrain.js';
@@ -602,9 +603,15 @@ function confirmPendingOrder(state: BaseAssetsViewState, digit: number): boolean
 }
 
 function confirmVoiceLine(state: BaseAssetsViewState, digit: number): void {
-  if (!state.voiceMenu.visible || digit < 1) return;
-  if (state.net) state.net.sendVoiceBind(digit - 1);
-  else speakVoiceLine(digit - 1, state.audio);
+  if (!state.voiceMenu.visible) return;
+  // A digit either drills into a category (menu stays open on its line list) or picks a
+  // line; the returned id is the flat protocol VoiceBind id, exactly what the pre-#55
+  // single-level menu sent, so the wire and the receiving clients' audio mapping are
+  // unchanged (#55).
+  const lineId = state.voiceMenu.pick(digit);
+  if (lineId === null) return;
+  if (state.net) state.net.sendVoiceBind(lineId);
+  else speakVoiceLine(lineId, state.audio);
   state.voiceMenu.hide();
 }
 
@@ -645,7 +652,9 @@ function syncMenus(state: BaseAssetsViewState, pressed: boolean): void {
   state.stationMenuState.open =
     stationMenuVisible(world, playerId, state.stationMenuState.open) &&
     !!world.players.alive[playerId];
-  if (state.stationMenuState.open) state.stationMenu.show();
+  // #55: every open re-prefills from the loadout the player currently carries -- the source
+  // station shows your existing inventory, not whatever the last visit left in the DOM.
+  if (state.stationMenuState.open) state.stationMenu.show(currentLoadoutChoice(world, playerId));
   else state.stationMenu.hide();
   syncVehicleStationMenu(state);
 }
@@ -1693,9 +1702,9 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const stationMenuState = { open: false, triggerStation: null as number | null };
   const stationMenu: StationMenu = createStationMenu(
     document.body,
-    (armor: ArmorId, repairPack) => {
-      if (net) net.sendLoadout(armor, repairPack);
-      else applyLoadoutRequest(world, playerId, armor, repairPack);
+    (choice: LoadoutChoice) => {
+      if (net) net.sendLoadout(choice.armor, choice.pack, choice.weapons);
+      else applyLoadoutSelection(world, playerId, choice.armor, choice.pack, choice.weapons);
       stationMenuState.open = false;
       input.setUiOpen(false);
     },
