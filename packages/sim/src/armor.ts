@@ -38,10 +38,22 @@ export interface ArmorData {
   repairRate: number;
 }
 
+/**
+ * Provenance (issue #3): every number in these three datablocks is the vanilla value from
+ * Tribes 2's shipped scripts (`GameData/base/scripts/player.cs`, LightMaleHumanArmor /
+ * MediumMaleHumanArmor / HeavyMaleHumanArmor datablocks; community mirror
+ * github.com/jdknight/t2ds), cross-checked against the leaked engine's own PlayerData
+ * defaults in `game/player.cc` of github.com/tribes2/engine (the 2001 V12-engine drop T2
+ * shipped from). Where a value is *not* vanilla it is called out at the field. The
+ * integration that consumes these fields is `Player::updateMove`/`updatePos` in that same
+ * engine drop; movement.ts carries the matching citations per function.
+ */
 export const LIGHT_ARMOR: ArmorData = {
   mass: 90,
   maxDamage: 0.66,
   maxEnergy: 60,
+  // Per-tick energy recharge, not per second: ShapeBase::updateEnergy does
+  // `mEnergy += mRechargeRate` once per 32 ms tick (shapeBase.cc:1011), capped at maxEnergy.
   rechargeRate: 0.256,
   jetForce: 26.21 * 90,
   jetEnergyDrain: 0.8,
@@ -50,20 +62,44 @@ export const LIGHT_ARMOR: ArmorData = {
   maxForwardSpeed: 15,
   maxBackwardSpeed: 13,
   maxSideSpeed: 13,
+  // Vanilla jumpForce/jumpDelay/minJumpSpeed/maxJumpSpeed (player.cs LightMaleHumanArmor).
+  // jumpDelay 0 means no engine-side cooldown (Player::canJump's !mJumpDelay passes every
+  // tick), so holding jump re-fires on each ground contact -- the ski hop. minJumpEnergy and
+  // jumpEnergyDrain are 0 in the script, so Player::canJump's energy gate is trivially true
+  // and jumps are free; the sim mirrors that by never gating a jump on energy.
   jumpForce: 8.3 * 90,
   jumpDelay: 0,
   minJumpSpeed: 20,
   maxJumpSpeed: 30,
+  // Air resistance acts on velocity, not force: Player::updateMove's "apply horizontal air
+  // resistance" block caps hvel at horizMaxSpeed, then converges the excess above
+  // horizResistSpeed by `factor * TickSec` per tick (up to upMaxSpeed for vz). The formula
+  // in movement.ts's applyResistance is that block verbatim. Resistance also runs while
+  // grounded, and only upward: falling has no terminal velocity in the engine.
   horizMaxSpeed: 68,
   horizResistSpeed: 33,
   horizResistFactor: 0.35,
   upMaxSpeed: 80,
   upResistSpeed: 25,
   upResistFactor: 0.3,
+  // Vanilla `drag = 0.275` (player.cs), but the engine multiplies it into water coverage
+  // only -- shapeBase.cc sets `mDrag = 0` every tick and re-derives it as
+  // `mDataBlock->drag * sWaterViscosity * mWaterCoverage` (shapeBase.cc:1724/1735). On
+  // land and in air mDrag is 0 and updateMove's `mVelocity -= mVelocity * mDrag * TickSec`
+  // is a no-op, so a water-less map must NOT apply this field per tick; the sim keeps the
+  // vanilla number for fidelity and (correctly) never consumes it.
   drag: 0.275,
   boundingBox: [1.2, 1.2, 2.3],
+  // findContact compares the flattest contact normal against cos(runSurfaceAngle) /
+  // cos(jumpSurfaceAngle) (player.cc, engine defaults 80/78; T2 scripts set 70/80 for
+  // Light and Medium -- Medium's script sets 75 and then overrides to 80 on its next
+  // line, so 80 wins). Heavy is the one armor whose script value differs: 75.
   runSurfaceAngle: 70,
   jumpSurfaceAngle: 80,
+  // Vanilla 0.004 (player.cs). T2's own fall-impact threshold is minImpactSpeed = 45 for
+  // every armor; this sim's ArmorData has no minImpactSpeed and damage.ts's applyFallDamage
+  // currently substitutes minJumpSpeed (20/15/20) as the threshold -- a known deviation
+  // owned by damage.ts, recorded here so nobody reads this field as covering it.
   speedDamageScale: 0.004,
   discAmmo: 15,
   chaingunAmmo: 100,
@@ -143,8 +179,15 @@ export const HEAVY_ARMOR: ArmorData = {
   drag: 0.33,
   boundingBox: [1.63, 1.63, 2.6],
   runSurfaceAngle: 70,
-  jumpSurfaceAngle: 80,
-  speedDamageScale: 0.004,
+  // Issue #3 fix: was 80, but the vanilla HeavyMaleHumanArmor datablock is the one armor
+  // that differs from the others here -- `jumpSurfaceAngle = 75` (player.cs, no later
+  // override, unlike Medium's 75-then-80). A Heavy on slopes between 75 and 80 degrees
+  // now refuses to jump (canJump's surface test), exactly as the retail Heavy does.
+  jumpSurfaceAngle: 75,
+  // Issue #3 fix: was 0.004 (copied from Light/Medium), but the vanilla Heavy datablock
+  // is `speedDamageScale = 0.006` (player.cs HeavyMaleHumanArmor) -- Heavies take more
+  // speed-scaled fall damage, not the Light rate.
+  speedDamageScale: 0.006,
   discAmmo: 15,
   chaingunAmmo: 200,
   mortarAmmo: 200,

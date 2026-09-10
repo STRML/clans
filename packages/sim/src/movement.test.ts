@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { ArmorId, HEAVY_ARMOR } from './armor.js';
+import { ArmorId, HEAVY_ARMOR, LIGHT_ARMOR } from './armor.js';
 import { BaseObjectKind, createBaseObjects, stepPower } from './baseObjects.js';
 import {
   FIXED_DT,
+  GRAVITY,
   addPlayer,
   createWorld,
   dueForRespawn,
@@ -11,6 +12,7 @@ import {
   stepWorld,
   type Heightfield,
   type PlayerInput,
+  type World,
 } from './index.js';
 import {
   buildInteriorCollider,
@@ -808,4 +810,202 @@ it('sustains light jets for about 3.5 seconds from full energy', () => {
   }
   expect(thrustTicks * FIXED_DT).toBeGreaterThan(3.4);
   expect(thrustTicks * FIXED_DT).toBeLessThan(3.6);
+});
+
+describe('engine-faithful integration (issue #3: Player::updateMove / updatePos)', () => {
+  it('converges speed above horizMaxSpeed by cap-then-resist, never a hard clamp', () => {
+    // updateMove's "apply horizontal air resistance" block: speedCap = min(hvel,
+    // horizMaxSpeed), speedCap -= horizResistFactor * TickSec * (speedCap -
+    // horizResistSpeed), and both axes scale by speedCap / hvel. From exactly 80 m/s one
+    // tick must land at 68 minus one tick of excess decay (67.608) -- a hard clamp at the
+    // cap would land at exactly 68, and force-based resistance would land somewhere else
+    // entirely. Direction must survive untouched because both axes share one scale.
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+    world.players.velocity.set([48, 0, 64], id * 3); // hvel = 80, direction 3:4
+    const afterTick = (n: number): number => {
+      while (n-- > 0) stepWorld(world, inputMap(id, { jet: true }));
+      return Math.hypot(world.players.velocity[id * 3]!, world.players.velocity[id * 3 + 2]!);
+    };
+    expect(afterTick(1)).toBeCloseTo(68 - 0.35 * FIXED_DT * (68 - 33), 6);
+    expect(world.players.velocity[id * 3]! / world.players.velocity[id * 3 + 2]!).toBeCloseTo(
+      48 / 64,
+      9,
+    );
+    expect(afterTick(1)).toBeCloseTo(67.608 - 0.35 * FIXED_DT * (67.608 - 33), 6);
+    // The decay is asymptotic toward horizResistSpeed: 48 more ticks get close but never
+    // cross 33, and no tick ever rebounds upward.
+    let previous = Number.POSITIVE_INFINITY;
+    for (let tick = 0; tick < 48; tick += 1) {
+      const hvel = afterTick(1);
+      expect(hvel).toBeLessThan(previous);
+      expect(hvel).toBeGreaterThan(33);
+      previous = hvel;
+    }
+  });
+
+  it('falls with no terminal velocity: gravity alone, tick after tick', () => {
+    // updateMove's resistance is upward-only (`if (mVelocity.z > upResistSpeed)`), and its
+    // drag term is dead in air (mDrag is 0 on land). Nothing in the engine caps fall speed,
+    // so each airborne tick must add exactly g*dt, forever.
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+    world.players.velocity[id * 3 + 1] = -30;
+    for (let tick = 1; tick <= 20; tick += 1) {
+      stepWorld(world, inputMap(id, {}));
+      expect(world.players.velocity[id * 3 + 1]).toBeCloseTo(-30 - tick * GRAVITY * FIXED_DT, 6);
+      expect(world.players.onGround[id]).toBe(0);
+    }
+  });
+
+  it('glues a skier to a gentle descending ramp but not one falling away faster than the snap budget', () => {
+    // GROUND_SNAP (1.0 m/tick) is the sim's own stand-in for the engine's continuous
+    // collision: contact holds only while the surface falls away slower than the budget.
+    // A 7 degree ramp at 30 m/s drops 0.12 m per tick -- glued. A 56 degree ramp at the
+    // same speed drops 1.44 m per tick -- airborne, no matter that the absolute drop to
+    // the flat below is large enough for many snaps.
+    const ramp = (bottom: number): Heightfield => ({
+      gridSize: 3,
+      squareSize: 8,
+      originX: 0,
+      originY: 0,
+      originZ: 16,
+      heightScale: 1,
+      heights: Uint16Array.from([12, 12, bottom, 12, 12, bottom, 12, 12, bottom]),
+    });
+    const skiFrom = (terrain: Heightfield): { world: World; id: number } => {
+      const world = createWorld(terrain, 1);
+      const id = addPlayer(world, { x: 9, y: sampleTerrain(terrain, 9, 4).height, z: 4 });
+      world.players.wasGrounded[id] = 1;
+      world.players.wasJumpHeld[id] = 1;
+      world.players.velocity.set([30, 0, 0], id * 3);
+      return { world, id };
+    };
+
+    const gentle = ramp(11);
+    const gentleRun = skiFrom(gentle);
+    for (let tick = 0; tick < 20; tick += 1) {
+      gentleRun.world.players.energy[gentleRun.id] = 0; // no jet thrust: held jump = ski only
+      stepWorld(gentleRun.world, inputMap(gentleRun.id, { jump: true }));
+      expect(gentleRun.world.players.onGround[gentleRun.id]).toBe(1);
+    }
+    const gentleX = gentleRun.world.players.position[gentleRun.id * 3]!;
+    expect(gentleRun.world.players.position[gentleRun.id * 3 + 1]).toBeCloseTo(
+      sampleTerrain(gentle, gentleX, 4).height,
+      6,
+    );
+    // Skiing down the ramp gained speed (tangential slope gravity); crossing the seam
+    // deleted nothing -- speed never dropped below the 30 m/s it started with.
+    expect(
+      Math.hypot(
+        gentleRun.world.players.velocity[gentleRun.id * 3]!,
+        gentleRun.world.players.velocity[gentleRun.id * 3 + 1]!,
+        gentleRun.world.players.velocity[gentleRun.id * 3 + 2]!,
+      ),
+    ).toBeGreaterThanOrEqual(30);
+
+    const steep = ramp(0);
+    const steepRun = skiFrom(steep);
+    steepRun.world.players.energy[steepRun.id] = 0;
+    stepWorld(steepRun.world, inputMap(steepRun.id, { jump: true }));
+    expect(steepRun.world.players.onGround[steepRun.id]).toBe(0);
+    expect(steepRun.world.players.position[steepRun.id * 3 + 1]!).toBeGreaterThan(
+      sampleTerrain(steep, steepRun.world.players.position[steepRun.id * 3]!, 4).height,
+    );
+    // The ballistic arc lands on the flat 0-height shelf ahead of the ramp.
+    for (let tick = 0; tick < 60 && steepRun.world.players.onGround[steepRun.id] === 0; tick += 1) {
+      steepRun.world.players.energy[steepRun.id] = 0;
+      stepWorld(steepRun.world, inputMap(steepRun.id, { jump: true }));
+    }
+    expect(steepRun.world.players.onGround[steepRun.id]).toBe(1);
+    expect(steepRun.world.players.position[steepRun.id * 3 + 1]).toBeCloseTo(0, 6);
+  });
+
+  it('traces exact slope kinematics: skiing a 20 degree slope gains g*sin(theta) per tick', () => {
+    // With the run force suppressed (skiing) and resistance still out of range, the only
+    // force is updateMove's along-slope gravity: gravity minus its into-surface component,
+    // which is exactly g*sin(theta) pointing down the fall line. Starting the skier already
+    // tangent to the slope (velocity on the fall line) makes that acceleration parallel to
+    // velocity, so the SPEED must trace the textbook line g*sin(theta)*dt per tick, not
+    // approximately. (A horizontal start would carry a constant away-from-surface
+    // component and the magnitude would lag the line for a few ticks.)
+    const rise = Math.round(Math.tan((20 * Math.PI) / 180) * 1000);
+    const slopeAngle = Math.atan(rise / 1000);
+    const slope: Heightfield = {
+      gridSize: 2,
+      squareSize: 1000,
+      originX: 0,
+      originY: 0,
+      originZ: 1000,
+      heightScale: 1,
+      heights: Uint16Array.from([rise, rise, 0, 0]),
+    };
+    const world = createWorld(slope, 1);
+    const id = addPlayer(world, { x: 500, y: rise / 2, z: 500 });
+    world.players.onGround[id] = 1;
+    world.players.wasGrounded[id] = 1;
+    world.players.wasJumpHeld[id] = 1;
+    // Fall-line tangent for this terrain: downhill is -z, and the surface descends by
+    // sin(slopeAngle) per unit of travel along it.
+    world.players.velocity.set([0, -25 * Math.sin(slopeAngle), -25 * Math.cos(slopeAngle)], id * 3);
+    const ticks = 30;
+    for (let tick = 0; tick < ticks; tick += 1) {
+      world.players.energy[id] = 0; // held jump must not jet: keep the force budget pure
+      stepWorld(world, inputMap(id, { jump: true }));
+    }
+    expect(world.players.ski[id]).toBe(1);
+    const speed = Math.hypot(
+      world.players.velocity[id * 3]!,
+      world.players.velocity[id * 3 + 1]!,
+      world.players.velocity[id * 3 + 2]!,
+    );
+    expect(speed).toBeCloseTo(25 + ticks * GRAVITY * Math.sin(slopeAngle) * FIXED_DT, 6);
+    expect(speed).toBeLessThan(LIGHT_ARMOR.horizResistSpeed);
+  });
+
+  it('balances jet thrust against up-resistance at 45.5 m/s, never reaching the 80 m/s cap', () => {
+    // Sustained jetting has a fixed point: each tick adds (jetForce/mass - g) and
+    // up-resistance then removes factor*dt*(v - upResistSpeed) of it. Solving gives
+    // v* = upResistSpeed + (jet accel)/factor - (jet accel)*dt = 45.50 m/s for Light --
+    // far below upMaxSpeed, proving the cap is not what limits a jet climb.
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 100, y: 100, z: 100 });
+    const thrust = LIGHT_ARMOR.jetForce / LIGHT_ARMOR.mass - GRAVITY;
+    const equilibrium =
+      LIGHT_ARMOR.upResistSpeed + thrust / LIGHT_ARMOR.upResistFactor - thrust * FIXED_DT;
+    let peak = Number.NEGATIVE_INFINITY;
+    for (let tick = 0; tick < 800; tick += 1) {
+      world.players.energy[id] = LIGHT_ARMOR.maxEnergy; // infinite fuel: isolate the balance
+      stepWorld(world, inputMap(id, { jet: true }));
+      peak = Math.max(peak, world.players.velocity[id * 3 + 1]!);
+      expect(peak).toBeLessThan(LIGHT_ARMOR.upMaxSpeed);
+    }
+    expect(world.players.velocity[id * 3 + 1]).toBeCloseTo(equilibrium, 1);
+  });
+
+  it('lets Light jump off a 78 degree slope but refuses Heavy, whose vanilla limit is 75', () => {
+    // findContact compares the contact normal against cos(jumpSurfaceAngle). Retail T2
+    // gives Light 80 degrees but Heavy only 75 (player.cs HeavyMaleHumanArmor) -- issue #3
+    // corrected the Heavy datablock from a copied 80, and the gate must follow it.
+    const rise = Math.round(Math.tan((78 * Math.PI) / 180) * 1000);
+    const steep: Heightfield = {
+      gridSize: 2,
+      squareSize: 1000,
+      originX: 0,
+      originY: 0,
+      originZ: 1000,
+      heightScale: 1,
+      heights: Uint16Array.from([rise, rise, 0, 0]),
+    };
+    const vyAfterJump = (armor: ArmorId): number => {
+      const world = createWorld(steep, 1);
+      const id = addPlayer(world, { x: 500, y: rise / 2, z: 500 }, 1, armor);
+      world.players.onGround[id] = 1;
+      world.players.wasGrounded[id] = 1;
+      stepWorld(world, inputMap(id, { jump: true }));
+      return world.players.velocity[id * 3 + 1]!;
+    };
+    expect(vyAfterJump(ArmorId.Light)).toBeGreaterThan(5);
+    expect(vyAfterJump(ArmorId.Heavy)).toBeLessThanOrEqual(0);
+  });
 });

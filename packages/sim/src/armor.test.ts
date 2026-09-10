@@ -42,6 +42,59 @@ describe('MEDIUM_ARMOR and HEAVY_ARMOR', () => {
   });
 });
 
+describe('vanilla movement datablock parity (issue #3)', () => {
+  it('matches the T2 player.cs movement block for all three armors', () => {
+    // Source: GameData/base/scripts/player.cs, LightMaleHumanArmor /
+    // MediumMaleHumanArmor / HeavyMaleHumanArmor (community mirror jdknight/t2ds). The
+    // mass-multiplied forces are written as the scripts write them. drag is retained
+    // vanilla data that the engine only applies underwater (see armor.ts); the surface
+    // angles gate Player::findContact's run/jump tests.
+    expect(LIGHT_ARMOR.runForce).toBe(55.2 * 90);
+    expect(LIGHT_ARMOR.jetForce).toBe(26.21 * 90);
+    expect(LIGHT_ARMOR.jumpForce).toBe(8.3 * 90);
+    expect(LIGHT_ARMOR.horizMaxSpeed).toBe(68);
+    expect(LIGHT_ARMOR.horizResistSpeed).toBe(33);
+    expect(LIGHT_ARMOR.horizResistFactor).toBe(0.35);
+    expect(LIGHT_ARMOR.upMaxSpeed).toBe(80);
+    expect(LIGHT_ARMOR.upResistSpeed).toBe(25);
+    expect(LIGHT_ARMOR.upResistFactor).toBe(0.3);
+    expect(LIGHT_ARMOR.drag).toBe(0.275);
+    expect(LIGHT_ARMOR.runSurfaceAngle).toBe(70);
+    expect(LIGHT_ARMOR.jumpSurfaceAngle).toBe(80);
+
+    expect(MEDIUM_ARMOR.runForce).toBe(46 * 130);
+    expect(MEDIUM_ARMOR.jetForce).toBe(25.22 * 130);
+    expect(MEDIUM_ARMOR.jumpForce).toBe(8.3 * 130);
+    expect(MEDIUM_ARMOR.horizMaxSpeed).toBe(60);
+    expect(MEDIUM_ARMOR.horizResistSpeed).toBe(28);
+    expect(MEDIUM_ARMOR.horizResistFactor).toBe(0.32);
+    expect(MEDIUM_ARMOR.upMaxSpeed).toBe(70);
+    expect(MEDIUM_ARMOR.upResistSpeed).toBe(30);
+    expect(MEDIUM_ARMOR.upResistFactor).toBe(0.23);
+    expect(MEDIUM_ARMOR.drag).toBe(0.3);
+    expect(MEDIUM_ARMOR.runSurfaceAngle).toBe(70);
+    // The script sets 75 and then overrides to 80 on its next line, so 80 is vanilla.
+    expect(MEDIUM_ARMOR.jumpSurfaceAngle).toBe(80);
+
+    expect(HEAVY_ARMOR.runForce).toBe(40.25 * 180);
+    expect(HEAVY_ARMOR.jetForce).toBe(22.47 * 180);
+    expect(HEAVY_ARMOR.jumpForce).toBe(8.3 * 180);
+    expect(HEAVY_ARMOR.horizMaxSpeed).toBe(52);
+    expect(HEAVY_ARMOR.horizResistSpeed).toBe(23);
+    expect(HEAVY_ARMOR.horizResistFactor).toBe(0.29);
+    expect(HEAVY_ARMOR.upMaxSpeed).toBe(60);
+    expect(HEAVY_ARMOR.upResistSpeed).toBe(35);
+    expect(HEAVY_ARMOR.upResistFactor).toBe(0.18);
+    expect(HEAVY_ARMOR.drag).toBe(0.33);
+    expect(HEAVY_ARMOR.runSurfaceAngle).toBe(70);
+    // The two values issue #3 corrected: the Heavy datablock is the only one with 75 here,
+    // and its speedDamageScale is 0.006, not the Light/Medium 0.004.
+    expect(HEAVY_ARMOR.jumpSurfaceAngle).toBe(75);
+    expect(HEAVY_ARMOR.speedDamageScale).toBe(0.006);
+    expect(MEDIUM_ARMOR.speedDamageScale).toBe(0.004);
+  });
+});
+
 describe('armorFor', () => {
   it('reads back the armor addPlayer assigned', () => {
     const world = createWorld(flat, 1);

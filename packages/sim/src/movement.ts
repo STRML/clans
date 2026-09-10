@@ -9,11 +9,21 @@ import {
 import { sampleTerrain, type TerrainSample } from './terrain.js';
 import type { PlayerInput, PlayerStore, World } from './types.js';
 
+// Vanilla T2 mission gravity. The engine applies it as acc.z += mGravity * mGravityMod *
+// TickSec (Player::updateMove, game/player.cc in github.com/tribes2/engine).
 export const GRAVITY = 20;
 // Contact tolerance for "is the player standing on the surface".
 const GROUND_EPSILON = 0.001;
-// A grounded player who did not jump or jet may drop this far in one tick and stay
-// grounded. Without it a skier leaves the surface every tick the slope falls away.
+// Ours, deliberately. The engine has NO snap-down: ground contact comes from findContact's
+// 3 cm traction probe below the feet (sTractionDistance = 0.03, player.cc) plus the swept
+// collision in updatePos, and a fast skier over a crest genuinely leaves the ground there.
+// This sim samples a heightfield once per 32 ms tick, so with no snap a skier on any convex
+// slope would detach every single tick and slope gravity would never act -- floatier than
+// the engine's continuous collision, not more faithful. GROUND_SNAP is how far below the
+// feet the surface may fall in one tick and still count as ground. At the Light armor's
+// 68 m/s cap that means slopes falling away steeper than ~25 degrees detach -- crest air
+// survives, rolling hills stay glued. (The engine's maxStepHeight = 1 is the analogous
+// step-UP budget in updatePos, not a snap-down; the numeric match is coincidence.)
 const GROUND_SNAP = 1.0;
 const IDLE: PlayerInput = {
   moveX: 0,
@@ -63,7 +73,10 @@ interface Vec3 {
   z: number;
 }
 
-/** Torque picks one speed for the move: the larger of the per-axis caps, each scaled by its key. */
+/** Torque picks one speed for the move: the larger of the per-axis caps, each scaled by its
+ * key -- updateMove's `getMax(maxForwardSpeed * move->y, maxSideSpeed * mFabs(move->x))`
+ * (backward branch uses maxBackwardSpeed). The underwater variants of these caps exist in
+ * the datablock and updateMove, but the sim has no water volume, so they are unmodeled. */
 function desiredSpeed(input: PlayerInput, armor: ArmorData): number {
   const forwardCap = input.moveZ < 0 ? armor.maxBackwardSpeed : armor.maxForwardSpeed;
   return Math.max(Math.abs(input.moveX) * armor.maxSideSpeed, Math.abs(input.moveZ) * forwardCap);
@@ -72,12 +85,15 @@ function desiredSpeed(input: PlayerInput, armor: ArmorData): number {
 /**
  * Tilt a horizontal heading onto the surface without turning it: drop the part of the
  * surface normal that points sideways from the heading, then remove that (properly
- * normalized) from the heading. This is Torque's construction in Player::updateMove.
+ * normalized) from the heading. This is updateMove's construction, transposed from its
+ * cross-product form (`nn = pv x (0,0,1); cv = n - nn * mDot(nn, n); pv -= cv *
+ * mDot(pv, cv)`): `side` here is nn, `sideShare` is mDot(nn, n), and cv matches.
  * cv is not a unit vector once the surface slopes sideways from the heading too (a
  * diagonal slope), so the removal has to divide by cv's own length squared -- skipping
  * that division left the result short of the surface tangent on a diagonal slope, and
  * the ground contact in applyGround then bled off the shortfall as into-surface velocity,
- * so a runner never reached the nominal run speed.
+ * so a runner never reached the nominal run speed. Like the engine, the tilted direction
+ * is then scaled to moveSpeed to become the run target `pv`.
  */
 function tiltOntoSurface(heading: Vec3, normal: Vec3): Vec3 {
   const sideLength = Math.hypot(heading.z, heading.x);
@@ -116,6 +132,13 @@ function desiredVelocity(input: PlayerInput, normal: Vec3, armor: ArmorData): Ve
  * per second. With no move key the desired velocity is zero, and that pull is what stops a
  * runner; there is no separate ground friction. It runs after slope gravity, so a runner
  * holds the cap downhill and an idle player settles on any slope below runSurfaceAngle.
+ * updateMove builds the same thing as `runAcc = pv - (mVelocity + acc)`, where `acc` is
+ * this tick's along-slope gravity, then clamps runAcc to `(runForce / mMass) * TickSec`.
+ * Adding gravity before steering (the sim's split across applyGround/applyRun) is algebraic
+ * reordering of that single expression, not a different model. The "groundFriction = 40"
+ * this file once carried is gone for good: no such field exists in the engine. The engine's
+ * recover-state boost (recoverRunForceScale, 1.2 in T2's scripts) is unmodeled because the
+ * sim has no knockdown state.
  */
 function applyRun(
   body: Body,
@@ -141,7 +164,16 @@ function applyRun(
   body.vz += az;
 }
 
-/** Remove any velocity into the surface, then add the slope component of gravity. */
+/**
+ * Two updateMove/updatePos behaviors folded into one call. (1) The run-surface projection:
+ * updateMove removes the into-surface part of gravity (`vd = -mDot(acc, n); if (vd > 0)
+ * acc += n * (vd + 0.002)`) so only the along-slope component remains -- the g*ny*n
+ * terms below are exactly `gravity - (gravity·n)n`. (2) The collision solver's velocity
+ * response: updatePos computes `bd = -mDot(mVelocity, n)` and adds `n * (bd +
+ * sNormalElasticity)` with sNormalElasticity = 0.01, i.e. into-surface velocity is deleted
+ * (with a sub-percept 0.01 m/s pushout the sim omits). Doing the removal here, before
+ * slope gravity is added, matches the engine's per-tick net effect for a grounded body.
+ */
 function applyGround(body: Body, sample: TerrainSample, dt: number): void {
   const { x: nx, y: ny, z: nz } = sample.normal;
   const along = body.vx * nx + body.vy * ny + body.vz * nz;
@@ -157,16 +189,29 @@ function applyGround(body: Body, sample: TerrainSample, dt: number): void {
 
 function applyAir(body: Body, dt: number): void {
   body.vy -= GRAVITY * dt;
-  // Preserve horizontal momentum during ski hops and jetting. Speed-dependent
-  // resistance belongs to applyResistance, not unconditional airborne braking.
+  // Engine-faithful: airborne, gravity is the ONLY force. updateMove's drag line
+  // (`mVelocity -= mVelocity * mDrag * TickSec`) is dead in air because shapeBase.cc keeps
+  // mDrag at 0 on land (it is re-derived as datablock->drag * waterViscosity * coverage
+  // only in water). Horizontal momentum persists unconditionally, which is why ski hops
+  // and jetting carry speed; excess-speed decay belongs to applyResistance alone. There is
+  // no terminal fall velocity in the engine -- up-resistance is upward-only.
 }
 
 /**
  * Torque's jump impulse: jumpForce/mass upward, scaled down linearly once the body already
- * rises faster than minJumpSpeed, and refused above maxJumpSpeed. The scale and refusal read
- * the vertical speed from the start of the tick (startVy), not the speed after this tick's
- * gravity and run steering already ran, so a jump on the edge of the refusal threshold isn't
- * decided by an accel this same tick applied before the jump. Returns true when it fired.
+ * rises faster than minJumpSpeed, and refused above maxJumpSpeed (updateMove's jump block:
+ * `zSpeedScale = mVelocity.z; if (zSpeedScale <= maxJumpSpeed) { ... }` -- scale 1 at or
+ * below minJumpSpeed, then `1 - (v - min)/(max - min)`). The engine reads mVelocity.z at
+ * the START of the tick (acc is not applied until after), so the scale/refusal here reading
+ * startVy -- captured before this tick's gravity and run steering -- is the same rule, and
+ * a jump on the refusal edge isn't decided by an accel this same tick applied before it.
+ * Engine's canJump also requires mEnergy >= minJumpEnergy and no jumpDelay; T2's scripts set
+ * minJumpEnergy = 0 / jumpEnergyDrain = 0 / jumpDelay = 0, so both gates are vacuous and the
+ * sim (which checks neither) matches retail behavior. One deliberate deviation: the engine
+ * applies the impulse along the jump-surface normal's z (plus a horizontal component when
+ * the move direction points away from the face), so slope jumps are weaker and directional;
+ * this sim hops straight up at full strength on any jumpable slope -- part of the approved
+ * ski-hop feel, kept. Returns true when it fired.
  */
 function applyJump(body: Body, armor: ArmorData, startVy: number): boolean {
   if (startVy > armor.maxJumpSpeed) return false;
@@ -176,7 +221,14 @@ function applyJump(body: Body, armor: ArmorData, startVy: number): boolean {
   return true;
 }
 
-// Demo tuning: responsive directional thrust, not a claimed original T2 engine constant.
+// Deliberate demo tuning for the jet's horizontal authority -- but no longer invented
+// wholesale: T2's own scripts carry jet-steering knobs this datablock predates --
+// `maxJetHorizontalPercentage = 0.8` (all three armors, player.cs) matches this fraction,
+// and `maxJetForwardSpeed = 30/22/16` (Light/Medium/Heavy) is the script's cap for the
+// speed jet steering may push toward. The leaked engine's Player has no jet code at all
+// (it is the 2001 V12 drop; updateMove only mentions jetting in a comment), so the exact
+// retail application is unverifiable -- this function's model (thrust toward
+// desiredSpeed, doubled for pure strafing) is the approved feel and stays.
 const JET_STEERING_FRACTION = 0.8;
 
 function applyJetSteering(body: Body, input: PlayerInput, armor: ArmorData, dt: number): void {
@@ -199,7 +251,13 @@ function applyJetSteering(body: Body, input: PlayerInput, armor: ArmorData, dt: 
   body.vz += z * acceleration;
 }
 
-/** Recharge each tick, then return whether enough energy was available to fire the jet. */
+/** Recharge each tick, then return whether enough energy was available to fire the jet.
+ * The recharge-then-consume order and per-tick amounts are ShapeBase::updateEnergy's
+ * (`mEnergy += mRechargeRate`, capped at maxEnergy, shapeBase.cc:1011) followed by the jet's
+ * own drain. T2 uses ONE trigger for jump and jet: holding it on the ground hops, and the
+ * same held key jets -- thrust applies grounded too, which this models by not gating the
+ * jet on airborne state (the engine leak has no jet code to copy; this is the behavioral
+ * model). */
 function applyJet(
   players: PlayerStore,
   id: number,
@@ -221,7 +279,13 @@ function applyJet(
 
 function applyResistance(body: Body, armor: ArmorData, dt: number): void {
   const horizontal = Math.hypot(body.vx, body.vz);
-  // Torque-style resistance acts on the excess above the threshold, after capping.
+  // Verbatim port of updateMove's "apply horizontal air resistance" block (game/player.cc,
+  // tribes2/engine): cap hvel at horizMaxSpeed, then converge the portion above
+  // horizResistSpeed by `horizResistFactor * TickSec` per tick, scaling BOTH axes by
+  // resisted/hvel so the direction never changes. Applied grounded and airborne alike,
+  // always after this tick's gravity/run/jump/jet acceleration -- same placement as the
+  // engine. It converges toward horizResistSpeed; it is NOT a hard clamp (a body at
+  // 80 m/s lands at 68 - factor*dt*(68-33) after one tick, not 68).
   if (horizontal > armor.horizResistSpeed) {
     const capped = Math.min(horizontal, armor.horizMaxSpeed);
     const resisted = capped - armor.horizResistFactor * dt * (capped - armor.horizResistSpeed);
@@ -240,7 +304,12 @@ interface Contact {
   landingSpeed: number;
 }
 
-/** Integrate, then resolve terrain contact: land, snap down, or stay airborne. */
+/** Integrate, then resolve terrain contact: land, snap down, or stay airborne. The
+ * gap <= 0 branch is updatePos's collision response (position clamped to the surface,
+ * into-surface velocity removed via applyGround's dt=0 pass); the GROUND_SNAP branch below
+ * is the sim's own stand-in for the engine's continuous collision keeping a runner/skier
+ * glued over convex slopes -- see the comment at GROUND_SNAP for why it exists and what it
+ * costs in fidelity. */
 function integrate(
   world: World,
   body: Body,
