@@ -23,19 +23,22 @@ rerun in this audit. GitHub issue numbers below refer to
    Evidence caveat: the harness result is byte-identical across world seeds because the
    world seed does not reach bot RNG (`manager.nextSeed` does), so cross-seed variance is
    inherently low — do not read three identical seeds as three independent samples.
-2. **#53 remaining art.** The IFL playback driver and frame table are in and tested, but
+2. **Wildcat bugs (user report, 2026-09-10).** Spawns below its own pad, handles awkwardly,
+   and drives in a third-person chase camera. Filed with evidence and a reproduce-first
+   instruction in the P1 entry under Still open.
+3. **#53 remaining art.** The IFL playback driver and frame table are in and tested, but
    only frame-0 PNGs are committed, so real sequence playback needs the frame images copied
    from the cached `skins.vl2` archive under the manifest keys. Blaster ball/trail and
    Chaingun crossed-ribbon tracers remain approximations. Per-side Shrike muzzle origins
    need `VehicleFireEvent` side data in the sim (the client already alternates visually).
-3. **#51 remaining.** The repair beam, HUD feedback and lifecycle are wired, but no
+4. **#51 remaining.** The repair beam, HUD feedback and lifecycle are wired, but no
    original repair-beam sample exists in the cached T2 audio, so the loop is silent until a
    source sample is added to the manifest and the asset build. Player-candidate repair also
    still ignores terrain occlusion in the sim (base objects and turrets check it).
-4. **#2 terrain texture scale.** Cannot be established from committed evidence; `terrain.ts`
+5. **#2 terrain texture scale.** Cannot be established from committed evidence; `terrain.ts`
    keeps 64 repeats over 2048 m with the uncertainty documented. Closing it needs the
    original renderer/material data, not another guess.
-5. **Fidelity backlog:** #54's conservative turret collision sphere, the #5/#10 residuals
+6. **Fidelity backlog:** #54's conservative turret collision sphere, the #5/#10 residuals
    below, #56's missing recordings, #55's unconsumed `maxWeapons` and absent Repair Pack
    icon, then #57's remaining vehicle scope.
 
@@ -187,6 +190,28 @@ own sphere as a fresh collision, producing a perpetual micro-bounce.
 
 ## Still open
 
+### P1: Wildcat spawns under its pad, handles poorly, drives in third person (2026-09-10)
+
+User-reported, three symptoms, each with the evidence a fix needs so nobody re-derives it:
+
+- **Spawns below the pad.** `spawnVehicleAtPad` writes the vehicle at the pad's own position,
+  so the Wildcat starts inside the pad's geometry and the hover spring has to push it out.
+  Reproduce headless first: spawn at a powered pad and record `world.vehicles.position` on
+  the y axis for the first 60 ticks. The fix belongs in the spawn placement, not in a
+  damping tweak that hides the pop.
+- **Handles awkwardly.** The Wildcat's steering and thrust constants are the script's values
+  treated as accelerations (`vehicles.ts` `applyWildcatSteering` / `applyWildcatThrust`; the
+  plan's numbers table records which of them are ours), and its top speed is a flat
+  `WILDCAT_MAX_SPEED` cap standing in for the script's drag term. Those are the levers;
+  a handling change must name which one moved and what it fixed.
+- **Third person.** Deliberate code, not an accident: `client/src/app.ts`
+  `placeVehicleCamera` gives the Shrike its authored `Eye` node and falls back for the
+  Wildcat to a trailing chase camera. Note the conflict with the repo's own reference
+  material: `docs/ui-audio-reference.md` describes the source Wildcat frame as a third-person
+  view on a pad, so "make it first person" is a product decision rather than a proven
+  fidelity fix. The Wildcat dashboard art already exists in the manifest
+  (`hud_veh_new_dash.png` and the `hud_veh_*` set) if a cockpit view is wanted.
+
 ### P1: bots take the flag but never capture — #32
 
 See Start here. All the mechanical blockers are gone; the remainder is combat economics on
@@ -237,9 +262,13 @@ the return leg.
 
 ### P2: vehicle and bot scope residuals — #57
 
-- Only Shrike and Wildcat exist; other T2 vehicles, passengers and their weapons are feature
-  gaps. Vehicle-versus-player collision, AA seekers and vehicle-kill scoring are now
-  implemented; re-confirm nothing else from the M5 deferred list is missing.
+- Only Shrike and Wildcat exist. The four remaining T2 base vehicles, per `jdknight/t2ds`'s
+  `GameData/base/scripts/vehicles/`: **Bomber** (`vehicle_bomber.cs`), **Havoc**
+  (`vehicle_havoc.cs`), **Tank** (`vehicle_tank.cs`) and the **Mobile Point Base**
+  (`vehicle_mpb.cs`) — each with its own weapons, mount rules and passenger seats.
+  `vehicle.cs` (the shared base) and `serverVehicleHud.cs` are the shared plumbing they need,
+  and the AA barrel's vehicle targeting, vehicle shields, ejection and collision damage
+  already exist, having been built against the two implemented kinds.
 - Bot carrier survival is unfinished (#32), and complete vehicle piloting, strategic
   loadouts, and a full match with captures remain unproven.
 
