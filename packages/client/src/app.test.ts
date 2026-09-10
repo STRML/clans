@@ -35,6 +35,7 @@ import {
   type FlagSnapshotData,
   type ProjectileSnapshotData,
 } from '@clans/protocol';
+import type { AudioEngine } from './audio.js';
 import {
   commanderMapPlayers,
   debugIsStationPowered,
@@ -43,8 +44,9 @@ import {
   drainNewEvents,
   hudSourceFrom,
   PilotYawController,
-  positionOfPlayer,
+  playImpactAudio,
   playFlagStateAudio,
+  positionOfPlayer,
   setLocalGodMode,
   snapshotFlagAudioState,
   stepSinglePlayer,
@@ -52,8 +54,12 @@ import {
   syncWorldView,
   teleportPlayerToFlag,
   teleportPlayerToVehiclePad,
+  updateFootstepAudio,
+  updateMovementAudio,
   updateRemotes,
+  updateStationHumAudio,
   updateVehicleBuffers,
+  updateVehicleEngineAudio,
   vehicleRenderData,
   type RepairBeamFrame,
 } from './app.js';
@@ -1343,5 +1349,340 @@ describe('station loadout round trip (#55): request -> sim state -> HUD', () => 
       describeHud(hudSourceFrom(world, player, null)).map((row) => [row.id, row.text]),
     );
     expect(rows['hud-pack']).toBe('Repair Pack');
+  });
+});
+
+describe('playImpactAudio (#52 residual)', () => {
+  const record = (seq: number): ProjectileImpact => ({
+    x: 3,
+    y: 1,
+    z: 4,
+    weaponId: WeaponId.Spinfusor,
+    type: ProjectileType.Linear,
+    reason: ProjectileImpactReason.Direct,
+    seq,
+  });
+
+  it('plays one projectileImpact cue per record, in arrival order', () => {
+    const projectileImpact = vi.fn();
+    const audio = { projectileImpact } as unknown as AudioEngine;
+    playImpactAudio(audio, [record(1), record(2)]);
+    expect(projectileImpact).toHaveBeenCalledTimes(2);
+    expect(projectileImpact).toHaveBeenNthCalledWith(1, record(1));
+    expect(projectileImpact).toHaveBeenNthCalledWith(2, record(2));
+  });
+
+  it('is a safe no-op without an engine', () => {
+    expect(() => playImpactAudio(undefined, [record(1)])).not.toThrow();
+  });
+});
+
+/** Fresh per call so no test shares a frozen record object by accident. */
+function recordOf(seq: number): ProjectileImpact {
+  return {
+    x: 3,
+    y: 1,
+    z: 4,
+    weaponId: WeaponId.Spinfusor,
+    type: ProjectileType.Linear,
+    reason: ProjectileImpactReason.Direct,
+    seq,
+  };
+}
+
+describe('networked impact audio (#52 residual)', () => {
+  it('cues each impact record exactly once and never on the disappearance of its projectile', () => {
+    const world = createWorld(flat, 1);
+    const localId = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const projectile: ProjectileSnapshotData = {
+      id: 7,
+      type: ProjectileType.Linear,
+      weaponId: WeaponId.Spinfusor,
+      x: 3,
+      y: 1,
+      z: 4,
+      vx: 0,
+      vy: 0,
+      vz: -1,
+      ownerId: localId,
+      armed: 1,
+    };
+    const impact = recordOf(1);
+    const setProjectileSound = vi.fn();
+    const projectileImpact = vi.fn();
+    const audio = { setProjectileSound, projectileImpact } as unknown as AudioEngine;
+    const fakeNet: Pick<
+      NetClient,
+      | 'playerId'
+      | 'team'
+      | 'remotePlayers'
+      | 'projectiles'
+      | 'flags'
+      | 'teamScores'
+      | 'gameOver'
+      | 'winnerTeam'
+      | 'timeRemainingS'
+      | 'gameOverReason'
+      | 'recentEvents'
+    > & { connected: boolean } = {
+      playerId: localId,
+      team: 1,
+      remotePlayers: new Map(),
+      projectiles: [projectile],
+      flags: [],
+      teamScores: [0, 0],
+      gameOver: false,
+      winnerTeam: 0,
+      timeRemainingS: 0,
+      gameOverReason: 0,
+      recentEvents: [
+        { type: MessageType.Event, kind: EventKind.ProjectileImpact, a: 0, b: -1, impact, seq: 1 },
+      ],
+      connected: true,
+    };
+    // The cursor, scene, and previousProjectiles map persist across frames like the real
+    // app's -- the disappearance diff reads exactly that map, so a fresh-per-frame one
+    // would never see the shot vanish.
+    const cursor = { seq: 0 };
+    const previousProjectiles = new Map<number, ProjectileSnapshotData>();
+    const frame = () =>
+      syncWorldView(
+        world,
+        localId,
+        fakeNet,
+        new THREE.Scene(),
+        { update: () => {} },
+        [],
+        new Map(),
+        previousProjectiles,
+        new Map(),
+        cursor,
+        1 / 60,
+        audio,
+      );
+
+    // Frame 1: the shot is live and its impact record arrives the same frame (a fast
+    // close-range hit: born, struck, freed between snapshots).
+    frame();
+    expect(projectileImpact).toHaveBeenCalledTimes(1);
+    expect(projectileImpact).toHaveBeenCalledWith(impact);
+    // Frame 2: the same rolling event buffer (drained dry) and the shot now gone from the
+    // snapshot list. The old disappearance path fired a SECOND impact cue here; the travel
+    // loop must stop, but no cue may play.
+    fakeNet.projectiles = [];
+    frame();
+    expect(projectileImpact).toHaveBeenCalledTimes(1);
+    expect(setProjectileSound).toHaveBeenCalledWith(
+      7,
+      WeaponId.Spinfusor,
+      ProjectileType.Linear,
+      projectile,
+      false,
+    );
+  });
+
+  it('stops the travel loop when the socket drops while a shot is still live', () => {
+    const world = createWorld(flat, 1);
+    const localId = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const projectile: ProjectileSnapshotData = {
+      id: 9,
+      type: ProjectileType.Grenade,
+      weaponId: WeaponId.Mortar,
+      x: 1,
+      y: 2,
+      z: 3,
+      vx: 0,
+      vy: 0,
+      vz: -1,
+      ownerId: -1,
+      armed: 0,
+    };
+    const setProjectileSound = vi.fn();
+    const projectileImpact = vi.fn();
+    const audio = { setProjectileSound, projectileImpact } as unknown as AudioEngine;
+    const fakeNet: Pick<
+      NetClient,
+      | 'playerId'
+      | 'team'
+      | 'remotePlayers'
+      | 'projectiles'
+      | 'flags'
+      | 'teamScores'
+      | 'gameOver'
+      | 'winnerTeam'
+      | 'timeRemainingS'
+      | 'gameOverReason'
+      | 'recentEvents'
+    > & { connected: boolean } = {
+      playerId: localId,
+      team: 1,
+      remotePlayers: new Map(),
+      projectiles: [projectile],
+      flags: [],
+      teamScores: [0, 0],
+      gameOver: false,
+      winnerTeam: 0,
+      timeRemainingS: 0,
+      gameOverReason: 0,
+      recentEvents: [],
+      connected: true,
+    };
+    const previousProjectiles = new Map<number, ProjectileSnapshotData>();
+    const cursor = { seq: 0 };
+    const frame = () =>
+      syncWorldView(
+        world,
+        localId,
+        fakeNet,
+        new THREE.Scene(),
+        { update: () => {} },
+        [],
+        new Map(),
+        previousProjectiles,
+        new Map(),
+        cursor,
+        1 / 60,
+        audio,
+      );
+    frame();
+    expect(setProjectileSound).toHaveBeenCalledWith(
+      9,
+      WeaponId.Mortar,
+      ProjectileType.Grenade,
+      projectile,
+      true,
+    );
+    // The socket drops: the last snapshot's shots are a stale shell, so the travel loop
+    // stops (and no impact cue fires -- nothing struck anything).
+    fakeNet.connected = false;
+    frame();
+    expect(setProjectileSound).toHaveBeenLastCalledWith(
+      9,
+      WeaponId.Mortar,
+      ProjectileType.Grenade,
+      projectile,
+      false,
+    );
+    expect(projectileImpact).not.toHaveBeenCalled();
+  });
+});
+
+describe('movement audio lifecycle (#56)', () => {
+  function movementHarness() {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.players.alive[id] = 1;
+    world.players.energy[id] = 50;
+    const setJetting = vi.fn();
+    const setSkiing = vi.fn();
+    const footstep = vi.fn();
+    const audio = { setJetting, setSkiing, footstep } as unknown as AudioEngine;
+    return { world, id, setJetting, setSkiing, footstep, audio };
+  }
+
+  it('runs the jet loop while the input is held', () => {
+    const h = movementHarness();
+    updateMovementAudio(h.world, h.id, h.audio, true, { timer: 0 }, 1 / 60);
+    expect(h.setJetting).toHaveBeenCalledWith(h.id, true, expect.any(Number));
+  });
+
+  it('stops the jet loop when the jet input releases', () => {
+    const h = movementHarness();
+    updateMovementAudio(h.world, h.id, h.audio, true, { timer: 0 }, 1 / 60);
+    updateMovementAudio(h.world, h.id, h.audio, false, { timer: 0 }, 1 / 60);
+    expect(h.setJetting).toHaveBeenLastCalledWith(h.id, false, expect.any(Number));
+  });
+
+  it('stops the jet and ski loops and resets the footstep cadence on death', () => {
+    const h = movementHarness();
+    updateMovementAudio(h.world, h.id, h.audio, true, { timer: 0.3 }, 1 / 60);
+    h.world.players.alive[h.id] = 0;
+    updateMovementAudio(h.world, h.id, h.audio, true, { timer: 0.3 }, 1 / 60);
+    expect(h.setJetting).toHaveBeenLastCalledWith(h.id, false, 0);
+    expect(h.setSkiing).toHaveBeenLastCalledWith(h.id, false, 0);
+    expect(h.footstep).not.toHaveBeenCalled();
+  });
+
+  it('carries the player armor on the footstep cue for the variant table', () => {
+    const h = movementHarness();
+    h.world.players.onGround[h.id] = 1;
+    h.world.players.armor[h.id] = ArmorId.Medium;
+    h.world.players.velocity[h.id * 3] = 5;
+    updateFootstepAudio(h.world, h.id, h.audio, false, 5, { timer: 0.34 }, 0.02);
+    expect(h.footstep).toHaveBeenCalledTimes(1);
+    expect(h.footstep).toHaveBeenCalledWith({ x: 0, y: 0, z: 0 }, { armor: ArmorId.Medium });
+  });
+});
+
+describe('world-derived loop lifecycle (#56): disconnect, power loss, destruction', () => {
+  function humHarness() {
+    const world = createWorld(flat, 1, 8);
+    createBaseObjects(world, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 4, y: 0, z: 0 } },
+      { kind: BaseObjectKind.StationInventory, team: 1, position: { x: 8, y: 0, z: 0 } },
+    ]);
+    const setGeneratorHum = vi.fn();
+    const setStationHum = vi.fn();
+    const audio = { setGeneratorHum, setStationHum } as unknown as AudioEngine;
+    return { world, setGeneratorHum, setStationHum, audio };
+  }
+
+  it('keeps hums sounding while connected and powered', () => {
+    const h = humHarness();
+    updateStationHumAudio(h.world, h.audio, true);
+    expect(h.setGeneratorHum).toHaveBeenCalledWith(0, { x: 4, y: 0, z: 0 }, true);
+    expect(h.setStationHum).toHaveBeenCalledWith(1, { x: 8, y: 0, z: 0 }, true);
+  });
+
+  it('stops every hum loop when the client disconnects', () => {
+    const h = humHarness();
+    updateStationHumAudio(h.world, h.audio, true);
+    updateStationHumAudio(h.world, h.audio, false);
+    expect(h.setGeneratorHum).toHaveBeenLastCalledWith(0, { x: 4, y: 0, z: 0 }, false);
+    expect(h.setStationHum).toHaveBeenLastCalledWith(1, { x: 8, y: 0, z: 0 }, false);
+  });
+
+  it('stops a generator hum on power loss while still connected', () => {
+    const h = humHarness();
+    h.world.baseObjects.powered[0] = 0;
+    updateStationHumAudio(h.world, h.audio, true);
+    expect(h.setGeneratorHum).toHaveBeenLastCalledWith(0, { x: 4, y: 0, z: 0 }, false);
+    // The station, powered by its own intact generator, keeps singing.
+    expect(h.setStationHum).toHaveBeenLastCalledWith(1, { x: 8, y: 0, z: 0 }, true);
+  });
+
+  function vehicleHarness() {
+    const world = createWorld(flat, 1, 8);
+    world.vehicles.count = 1;
+    world.vehicles.active[0] = 1;
+    world.vehicles.kind[0] = VehicleKind.Shrike;
+    world.vehicles.spawnTime[0] = 0;
+    world.vehicles.position.set([10, 20, 30], 0);
+    const setVehicleEngine = vi.fn();
+    const audio = { setVehicleEngine } as unknown as AudioEngine;
+    return { world, setVehicleEngine, audio };
+  }
+
+  it('keeps a live vehicle engine running while connected', () => {
+    const h = vehicleHarness();
+    updateVehicleEngineAudio(h.world, h.audio, new Map(), true);
+    expect(h.setVehicleEngine).toHaveBeenCalledWith(0, 'shrike', { x: 10, y: 20, z: 30 }, true);
+  });
+
+  it('stops a vehicle engine loop when its vehicle is destroyed', () => {
+    const h = vehicleHarness();
+    h.world.vehicles.destroyed[0] = 1;
+    const previous = new Map([[0, 'shrike' as const]]);
+    updateVehicleEngineAudio(h.world, h.audio, previous, true);
+    expect(h.setVehicleEngine).toHaveBeenCalledWith(0, 'shrike', { x: 0, y: 0, z: 0 }, false);
+    expect(previous.size).toBe(0);
+  });
+
+  it('stops every vehicle engine loop when the client disconnects', () => {
+    const h = vehicleHarness();
+    const previous = new Map([[0, 'shrike' as const]]);
+    updateVehicleEngineAudio(h.world, h.audio, previous, false);
+    expect(h.setVehicleEngine).toHaveBeenCalledWith(0, 'shrike', { x: 0, y: 0, z: 0 }, false);
+    expect(previous.size).toBe(0);
   });
 });

@@ -1,10 +1,45 @@
-import { describe, expect, it, vi } from 'vitest';
-import { createAudioEngine } from './audio.js';
-import { WeaponId } from '@clans/sim';
+import { describe, expect, it, vi, type Mock } from 'vitest';
+import {
+  createAudioEngine,
+  footstepCue,
+  OCCLUSION_ATTENUATION,
+  projectileImpactCue,
+} from './audio.js';
+import type { FootstepSurface } from './audio.js';
+import {
+  ArmorId,
+  ProjectileImpactReason,
+  ProjectileType,
+  WeaponId,
+  type ProjectileImpact,
+  type Vec3,
+} from '@clans/sim';
 
+interface FakeGainParam {
+  value: number;
+  setValueAtTime: Mock;
+  setTargetAtTime: Mock;
+  linearRampToValueAtTime: Mock;
+  exponentialRampToValueAtTime: Mock;
+}
+interface FakeAudioNode {
+  connect: Mock;
+  disconnect: Mock;
+  start: Mock;
+  stop: Mock;
+  gain: FakeGainParam;
+  frequency: { value: number; setValueAtTime: Mock; exponentialRampToValueAtTime: Mock };
+  type: string;
+}
+interface FakePanner extends FakeAudioNode {
+  setPosition: Mock;
+}
 function fakeAudioContext() {
   const created: { osc: number; gain: number; noise: number } = { osc: 0, gain: 0, noise: 0 };
-  const node = () => ({
+  const gains: FakeAudioNode[] = [];
+  const panners: FakePanner[] = [];
+  const sources: FakeAudioNode[] = [];
+  const node = (): FakeAudioNode => ({
     connect: vi.fn().mockReturnThis(),
     disconnect: vi.fn(),
     start: vi.fn(),
@@ -31,16 +66,74 @@ function fakeAudioContext() {
     }),
     createGain: vi.fn(() => {
       created.gain += 1;
-      return node();
+      const n = node();
+      gains.push(n);
+      return n;
     }),
     createBufferSource: vi.fn(() => {
       created.noise += 1;
-      return node();
+      const n = node();
+      sources.push(n);
+      return n;
     }),
     createBuffer: vi.fn(() => ({ getChannelData: () => new Float32Array(4096) })),
     createBiquadFilter: vi.fn(() => node()),
-    createPanner: vi.fn(() => ({ ...node(), setPosition: vi.fn() })),
+    createPanner: vi.fn(() => {
+      const n = { ...node(), setPosition: vi.fn() };
+      panners.push(n);
+      return n;
+    }),
     _created: created,
+    _gains: gains,
+    _panners: panners,
+    _sources: sources,
+  };
+}
+/** Drains the engine's fetch->decode->cache promise chain deterministically: each awaited
+ *  resolved promise yields once, and the chain is exactly three deep. No wall-clock timers. */
+async function flushLoads(): Promise<void> {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+}
+
+/** An engine whose every sample has "decoded", so positive playback assertions (one source
+ *  per cue, panner graphs, mix levels) are observable; the synth-guard tests above stay on
+ *  the bufferless path. `position` puts a listener somewhere for range falloff tests. */
+async function engineWithSamples(occlusionAt?: (position: Vec3) => boolean, position?: Vec3) {
+  const ctx = fakeAudioContext();
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
+      }),
+    ),
+  );
+  Object.assign(ctx, {
+    decodeAudioData: vi.fn(() => Promise.resolve({ duration: 1 } as unknown as AudioBuffer)),
+  });
+  // exactOptionalPropertyTypes: AudioLike's optional props accept absence, not undefined,
+  // so the spread form is the honest construction.
+  const engine = createAudioEngine({
+    context: ctx as unknown as AudioContext,
+    ...(occlusionAt ? { occlusionAt } : {}),
+    ...(position ? { position } : {}),
+  });
+  await flushLoads();
+  return { ctx, engine };
+}
+
+function impactRecord(overrides: Partial<ProjectileImpact> = {}): ProjectileImpact {
+  return {
+    x: 1,
+    y: 2,
+    z: 3,
+    weaponId: WeaponId.Spinfusor,
+    type: ProjectileType.Linear,
+    reason: ProjectileImpactReason.Direct,
+    seq: 1,
+    ...overrides,
   };
 }
 
@@ -66,13 +159,6 @@ describe('createAudioEngine', () => {
     const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
     engine.weaponFire(WeaponId.Blaster, { x: 0, y: 0, z: 0 });
     expect(ctx.createOscillator).not.toHaveBeenCalled();
-  });
-
-  it('explosion does not create a fabricated noise burst while loading', () => {
-    const ctx = fakeAudioContext();
-    const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
-    engine.explosion({ x: 0, y: 0, z: 0 });
-    expect(ctx.createBufferSource).not.toHaveBeenCalled();
   });
 
   it('flagCapture does not create a synthetic fanfare', () => {
@@ -233,5 +319,226 @@ describe('createAudioEngine', () => {
       engine.dispose();
       expect(ctx.close).not.toHaveBeenCalled();
     });
+  });
+});
+
+/** Issue #52 residual: cue selection must agree with the visual rule impactEffectFor
+ *  renders, record for record. */
+describe('projectileImpactCue (#52 residual)', () => {
+  it('maps every direct or world hit to its own weapon impact recording', () => {
+    const expectations: Array<[WeaponId, string]> = [
+      [WeaponId.Spinfusor, 'spinfusor-impact'],
+      [WeaponId.Chaingun, 'chaingun-impact'],
+      [WeaponId.Mortar, 'mortar-explode'],
+      [WeaponId.LaserRifle, 'sniper-impact'],
+      [WeaponId.Blaster, 'blaster-impact'],
+    ];
+    for (const [weaponId, sound] of expectations) {
+      expect(projectileImpactCue(impactRecord({ weaponId }))?.sound).toBe(sound);
+      expect(
+        projectileImpactCue(impactRecord({ weaponId, reason: ProjectileImpactReason.World }))
+          ?.sound,
+      ).toBe(sound);
+    }
+  });
+
+  it('plays a bounce as the weapon contact it is', () => {
+    expect(
+      projectileImpactCue(
+        impactRecord({
+          weaponId: WeaponId.Blaster,
+          type: ProjectileType.Energy,
+          reason: ProjectileImpactReason.Bounce,
+        }),
+      )?.sound,
+    ).toBe('blaster-impact');
+  });
+
+  it('keeps the Shrike bolt on the handheld Blaster impact sample (none dedicated committed)', () => {
+    // 150 = projectiles.ts's VEHICLE_WEAPON_ID_OFFSET: no WEAPON_DATA row, no recording.
+    expect(
+      projectileImpactCue(impactRecord({ weaponId: 150, type: ProjectileType.VehicleLaser }))
+        ?.sound,
+    ).toBe('blaster-impact');
+  });
+
+  it('silences non-detonating lifetime expiries exactly like the visual rule', () => {
+    for (const type of [ProjectileType.Linear, ProjectileType.Tracer, ProjectileType.Energy]) {
+      expect(
+        projectileImpactCue(impactRecord({ type, reason: ProjectileImpactReason.Timeout })),
+      ).toBeNull();
+    }
+  });
+
+  it('detonates only an armed grenade lifetime expiry (finalizeGrenadeLifetime)', () => {
+    expect(
+      projectileImpactCue(
+        impactRecord({
+          weaponId: WeaponId.Mortar,
+          type: ProjectileType.Grenade,
+          reason: ProjectileImpactReason.Timeout,
+        }),
+      )?.sound,
+    ).toBe('mortar-explode');
+  });
+
+  it('sends non-mortar grenades to the generic weapon-explosion recording', () => {
+    // The alt-fire grenade rides the firing weapon's id; there is no hand-grenade sample.
+    expect(
+      projectileImpactCue(
+        impactRecord({
+          weaponId: WeaponId.Spinfusor,
+          type: ProjectileType.Grenade,
+          reason: ProjectileImpactReason.World,
+        }),
+      )?.sound,
+    ).toBe('mortar-explode');
+  });
+
+  it('leaves turret shots silent (no committed impact recording)', () => {
+    expect(projectileImpactCue(impactRecord({ weaponId: 151 }))).toBeNull();
+  });
+});
+
+describe('projectileImpact playback (#52 residual)', () => {
+  it('plays exactly one cue per record and none for a suppressed timeout', async () => {
+    const { ctx, engine } = await engineWithSamples();
+    engine.projectileImpact(impactRecord({ seq: 1 }));
+    expect(ctx._sources).toHaveLength(1);
+    engine.projectileImpact(
+      impactRecord({
+        weaponId: WeaponId.Mortar,
+        type: ProjectileType.Grenade,
+        reason: ProjectileImpactReason.Timeout,
+        seq: 2,
+      }),
+    );
+    expect(ctx._sources).toHaveLength(2);
+    engine.projectileImpact(impactRecord({ reason: ProjectileImpactReason.Timeout, seq: 3 }));
+    expect(ctx._sources).toHaveLength(2);
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('directional panning (#56)', () => {
+  it('routes a positioned one-shot through a panner at the cue position', async () => {
+    const { ctx, engine } = await engineWithSamples();
+    engine.weaponFire(WeaponId.Spinfusor, { x: 7, y: 8, z: 9 });
+    expect(ctx._panners).toHaveLength(1);
+    expect(ctx._panners[0]?.setPosition).toHaveBeenCalledWith(7, 8, 9);
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps unpositioned cues (voices, flag cues) out of the panner graph', async () => {
+    const { ctx, engine } = await engineWithSamples();
+    engine.flagDrop();
+    expect(ctx._sources).toHaveLength(1);
+    expect(ctx._panners).toHaveLength(0);
+    vi.unstubAllGlobals();
+  });
+
+  it('moves a spatial loop panner as its source moves without re-creating it', async () => {
+    const { ctx, engine } = await engineWithSamples();
+    engine.setStationHum(0, { x: 1, y: 0, z: 0 }, true);
+    engine.setStationHum(0, { x: 2, y: 0, z: 0 }, true);
+    expect(ctx._panners).toHaveLength(1);
+    expect(ctx._panners[0]?.setPosition).toHaveBeenLastCalledWith(2, 0, 0);
+    vi.unstubAllGlobals();
+  });
+
+  it('feeds the Web Audio listener position and orientation when present', () => {
+    const ctx = fakeAudioContext();
+    const listener = { setPosition: vi.fn(), setOrientation: vi.fn() };
+    Object.assign(ctx, { listener });
+    const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
+    engine.updateListener({ x: 1, y: 2, z: 3 }, { x: 0, y: 0, z: 1 }, { x: 0, y: 1, z: 0 });
+    expect(listener.setPosition).toHaveBeenCalledWith(1, 2, 3);
+    expect(listener.setOrientation).toHaveBeenCalledWith(0, 0, 1, 0, 1, 0);
+  });
+
+  it('updateListener is a safe no-op without a context listener', () => {
+    const ctx = fakeAudioContext();
+    const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
+    expect(() =>
+      engine.updateListener({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 0, y: 1, z: 0 }),
+    ).not.toThrow();
+  });
+});
+
+describe('terrain occlusion (#56)', () => {
+  it('ducks a positioned cue that fails the occlusion test', async () => {
+    const { ctx, engine } = await engineWithSamples(() => true);
+    engine.weaponFire(WeaponId.Spinfusor, { x: 5, y: 0, z: 0 });
+    // _gains[0] is the master; the one-shot's own gain carries the occluded distance level.
+    expect(ctx._gains[1]?.gain.value).toBe(OCCLUSION_ATTENUATION);
+    vi.unstubAllGlobals();
+  });
+
+  it('leaves a line-of-sight cue at its full distance level', async () => {
+    const { ctx, engine } = await engineWithSamples(() => false);
+    engine.weaponFire(WeaponId.Spinfusor, { x: 5, y: 0, z: 0 });
+    expect(ctx._gains[1]?.gain.value).toBe(1);
+    vi.unstubAllGlobals();
+  });
+
+  it('never occludes an unpositioned cue', async () => {
+    const { ctx, engine } = await engineWithSamples(() => true);
+    engine.flagDrop();
+    expect(ctx._gains[1]?.gain.value).toBe(1);
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('footstep variants (#56)', () => {
+  it('resolves every armor/surface pair to the one committed footstep recording', () => {
+    const surfaces: FootstepSurface[] = ['terrain', 'interior'];
+    for (const armor of [ArmorId.Light, ArmorId.Medium, ArmorId.Heavy]) {
+      for (const surface of surfaces) {
+        expect(footstepCue(armor, surface)).toBe('armor-footstep');
+      }
+    }
+  });
+
+  it('plays the committed sample, never a synthesis, for whatever armor the app passes', async () => {
+    const { ctx, engine } = await engineWithSamples();
+    engine.footstep({ x: 0, y: 0, z: 0 }, { armor: ArmorId.Heavy, surface: 'interior' });
+    expect(ctx._sources).toHaveLength(1);
+    expect(ctx.createOscillator).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('loop stop lifecycle (#56)', () => {
+  it('never starts a spatial loop beyond its audible range', () => {
+    const ctx = fakeAudioContext();
+    const engine = createAudioEngine({
+      context: ctx as unknown as AudioContext,
+      position: { x: 0, y: 0, z: 0 },
+    });
+    engine.setStationHum(0, { x: 1000, y: 0, z: 0 }, true);
+    // Master gain only: the out-of-range loop never even reaches its pending-start queue.
+    expect(ctx._created.gain).toBe(1);
+  });
+
+  it('stops a running spatial loop once its source leaves audible range', async () => {
+    const { ctx, engine } = await engineWithSamples(undefined, { x: 0, y: 0, z: 0 });
+    engine.setStationHum(0, { x: 1, y: 0, z: 0 }, true);
+    expect(ctx._sources).toHaveLength(1);
+    engine.setStationHum(0, { x: 1000, y: 0, z: 0 }, true);
+    expect(ctx._sources[0]?.stop).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+  });
+
+  it('stops a running spatial loop on the active=false transition', async () => {
+    // The same transition carries power loss, destruction and disconnect app-side; the
+    // engine contract is that false stops the node exactly once.
+    const { ctx, engine } = await engineWithSamples();
+    engine.setGeneratorHum(0, { x: 1, y: 0, z: 0 }, true);
+    expect(ctx._sources).toHaveLength(1);
+    engine.setGeneratorHum(0, { x: 1, y: 0, z: 0 }, false);
+    expect(ctx._sources[0]?.stop).toHaveBeenCalledTimes(1);
+    engine.setGeneratorHum(0, { x: 1, y: 0, z: 0 }, false);
+    expect(ctx._sources[0]?.stop).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
   });
 });

@@ -5,15 +5,16 @@ import {
   applyBaseObjectDamage,
   applyLoadoutSelection,
   armorFor,
+  ArmorId,
   BASE_OBJECT_DATA,
   BaseObjectKind,
   FIXED_DT,
-  FlagState,
   FIXED_TICK_MS,
+  FlagState,
+  hasLineOfSight,
   VEHICLE_DATA,
   VehicleKind,
   WeaponId,
-  ProjectileType,
   addPlayer,
   canSendVehicleUse,
   createBaseObjects,
@@ -863,7 +864,11 @@ function syncBaseAssetsView(
  * false, feed the mesh-sync functions an empty list so their own pruning naturally clears
  * everything, rather than mutating NetClient state from here.
  */
-/** Keep travel loops and weapon-specific impacts in sync with visible projectiles. */
+/** Keep travel loops in sync with visible projectiles. Issue #52 residual: a projectile
+ *  vanishing from this list stops its travel loop and plays NOTHING else -- it may have
+ *  expired silently or never appeared in any snapshot, so a disappearance was never
+ *  evidence of an impact. The authoritative impact records are the only impact-cue source
+ *  now (playImpactAudio), exactly like the visual path this mirrors. */
 function syncProjectileAudio(
   audio: AudioEngine,
   previous: Map<number, ProjectileSnapshotData>,
@@ -874,10 +879,6 @@ function syncProjectileAudio(
     const next = live.get(last.id);
     if (next?.type === last.type && next.weaponId === last.weaponId) continue;
     audio.setProjectileSound(last.id, last.weaponId, last.type, last, false);
-    audio.weaponImpact(
-      last.type === ProjectileType.VehicleLaser ? WeaponId.Blaster : last.weaponId,
-      last,
-    );
   }
   for (const p of current) audio.setProjectileSound(p.id, p.weaponId, p.type, p, true);
 }
@@ -942,6 +943,19 @@ function impactRecordsFromEvents(events: readonly TimestampedEvent[]): Projectil
   return impacts;
 }
 
+/** #52 residual: the audio twin of spawnProjectileImpacts -- one projectileImpact cue per
+ *  record, in arrival order. Callers pass each record exactly once (networked: the drained
+ *  event stream; solo: world.projectiles.lastImpacts inside the per-tick afterStep, the
+ *  same overwrite-per-call convention lastFireEvents uses), the same exactly-once contract
+ *  the visual path documents. Exported for a focused unit test. */
+export function playImpactAudio(
+  audio: Pick<AudioEngine, 'projectileImpact'> | undefined,
+  impacts: readonly ProjectileImpact[],
+): void {
+  if (!audio) return;
+  for (const impact of impacts) audio.projectileImpact(impact);
+}
+
 export function syncWorldView(
   world: World,
   playerId: number,
@@ -993,7 +1007,9 @@ export function syncWorldView(
     (id) => positionOfPlayer(world, net, id),
     localNetworkId(net, playerId),
   );
-  spawnProjectileImpacts(scene, effects, impactRecordsFromEvents(newEvents));
+  const impacts = impactRecordsFromEvents(newEvents);
+  spawnProjectileImpacts(scene, effects, impacts);
+  playImpactAudio(audio, impacts);
 
   hud.update(hudSourceFrom(world, playerId, net));
 }
@@ -1341,8 +1357,11 @@ function updateJetAudio(
 }
 
 /** Cadence-gated (FOOTSTEP_INTERVAL_S) footsteps -- only while grounded, not
- *  skiing or mounted, and moving faster than idle jitter. */
-function updateFootstepAudio(
+ *  skiing or mounted, and moving faster than idle jitter. #56: the footstep cue carries the
+ *  player's armor so the variant table (footstepCue) can pick the surface/armor recording;
+ *  only light armor's sample is committed today, so the heard feel is unchanged. Exported
+ *  for a focused unit test. */
+export function updateFootstepAudio(
   world: World,
   playerId: number,
   audio: AudioEngine,
@@ -1361,15 +1380,21 @@ function updateFootstepAudio(
   footstep.timer += dtSeconds;
   if (footstep.timer < FOOTSTEP_INTERVAL_S) return;
   footstep.timer -= FOOTSTEP_INTERVAL_S;
-  audio.footstep(localPlayerPosition(world, playerId));
+  audio.footstep(localPlayerPosition(world, playerId), {
+    armor: (world.players.armor[playerId] ?? ArmorId.Light) as ArmorId,
+  });
 }
 
 /** Task 7 (audio): jet/ski loops and cadence-gated footsteps for the local player, read
  *  straight off the just-simulated world state -- `ski`/`onGround`/`energy`/`velocity` are
  *  real PlayerStore fields (types.ts), not derived here. Split into one small function per
  *  effect (jet/footstep) to stay under the complexity budget; skiing itself is cheap enough
- *  to stay inline here. */
-function updateMovementAudio(
+ *  to stay inline here. #56 lifecycle: death stops every local-player loop the same frame
+ *  (the sim stops moving a dead player, so the loops would otherwise ride their last state
+ *  until respawn), and the explicit false calls are what actually stop them -- skipping the
+ *  update would leave the engine's per-player loop state frozen at its death-frame value.
+ *  Exported for a focused unit test. */
+export function updateMovementAudio(
   world: World,
   playerId: number,
   audio: AudioEngine,
@@ -1377,6 +1402,12 @@ function updateMovementAudio(
   footstep: FootstepState,
   dtSeconds: number,
 ): void {
+  if ((world.players.alive[playerId] ?? 0) !== 1) {
+    audio.setJetting(playerId, false, 0);
+    audio.setSkiing(playerId, false, 0);
+    footstep.timer = 0;
+    return;
+  }
   updateJetAudio(world, playerId, audio, jetInputActive);
 
   const speed = localPlayerHorizontalSpeed(world, playerId);
@@ -1388,11 +1419,26 @@ function updateMovementAudio(
   updateFootstepAudio(world, playerId, audio, skiing, speed, footstep, dtSeconds);
 }
 
+/** `position[base + i] ?? 0` for a base object's placement row -- one helper instead of three
+ *  inline coalescences, the same reason vecAt exists sim-side (turrets.ts). */
+function basePositionAt(store: World['baseObjects'], id: number): Vec3 {
+  const base = id * 3;
+  return {
+    x: store.position[base] ?? 0,
+    y: store.position[base + 1] ?? 0,
+    z: store.position[base + 2] ?? 0,
+  };
+}
+
 /** Task 7 (audio): one persistent hum loop per team generator, transitioning with
  *  `world.baseObjects.powered` -- setStationHum/setLoop already no-op a redundant start or a
  *  stop of a key that never started, so calling this every frame for every generator is cheap
- *  and still only ever actually starts/stops audio on a genuine power transition. */
-function updateStationHumAudio(world: World, audio: AudioEngine): void {
+ *  and still only ever actually starts/stops audio on a genuine power transition. #56
+ *  lifecycle: `connected` false (a dropped socket -- the last snapshot's base objects keep
+ *  their powered bits in the prediction world, but nothing behind a dead socket should keep
+ *  singing) silences every hum until a connection returns. Exported for a focused unit
+ *  test. */
+export function updateStationHumAudio(world: World, audio: AudioEngine, connected = true): void {
   const bases = world.baseObjects;
   for (let id = 0; id < bases.count; id += 1) {
     const kind = bases.kind[id];
@@ -1402,17 +1448,10 @@ function updateStationHumAudio(world: World, audio: AudioEngine): void {
       kind !== BaseObjectKind.StationVehiclePad
     )
       continue;
-    const base = id * 3;
-    const setHum = kind === BaseObjectKind.Generator ? audio.setGeneratorHum : audio.setStationHum;
-    setHum(
-      id,
-      {
-        x: bases.position[base] ?? 0,
-        y: bases.position[base + 1] ?? 0,
-        z: bases.position[base + 2] ?? 0,
-      },
-      bases.powered[id] === 1 && bases.destroyed[id] === 0,
-    );
+    const active = connected && bases.powered[id] === 1 && bases.destroyed[id] === 0;
+    if (kind === BaseObjectKind.Generator)
+      audio.setGeneratorHum(id, basePositionAt(bases, id), active);
+    else audio.setStationHum(id, basePositionAt(bases, id), active);
   }
 }
 
@@ -1421,40 +1460,78 @@ function vehicleEngineActive(world: World, id: number): boolean {
   return v.active[id] === 1 && v.destroyed[id] === 0 && v.spawnTime[id]! <= 0;
 }
 
-/** Keep original engine loops synchronized, including vehicles removed from snapshots. */
-function updateVehicleEngineAudio(
+/** `position[base + i]` for a vehicle's placement row (vehicles are never placed without a
+ *  full row, hence the assertions). */
+function vehiclePositionAt(store: World['vehicles'], id: number): Vec3 {
+  const base = id * 3;
+  return {
+    x: store.position[base]!,
+    y: store.position[base + 1]!,
+    z: store.position[base + 2]!,
+  };
+}
+
+/** The vehicles that should be audible right now, keyed by id with their loop kind: none
+ *  when disconnected (#56: the prediction world is a stale shell behind a dead socket) and
+ *  no destroyed/spawning row. Split out of updateVehicleEngineAudio to keep that function
+ *  under the complexity budget. */
+function liveVehicleKinds(world: World, connected: boolean): Map<number, 'shrike' | 'wildcat'> {
+  const current = new Map<number, 'shrike' | 'wildcat'>();
+  if (!connected) return current;
+  const vehicles = world.vehicles;
+  for (let id = 0; id < vehicles.count; id++) {
+    if (!vehicleEngineActive(world, id)) continue;
+    current.set(id, vehicles.kind[id] === VehicleKind.Shrike ? 'shrike' : 'wildcat');
+  }
+  return current;
+}
+
+/** Keep original engine loops synchronized, including vehicles removed from snapshots.
+ *  #56 lifecycle: destruction (destroyed=1) and snapshot removal both drop a vehicle from
+ *  `current`, so the removal pass stops its loop -- and `connected` false (dropped socket)
+ *  leaves `current` empty, stopping every engine until a connection returns, since the
+ *  prediction world's vehicle rows are a stale shell by then. A kind change (impossible
+ *  today -- a wrecked Shrike respawn is a new id -- but cheap to honor) stops the old
+ *  loop before the new kind's starts. Exported for a focused unit test. */
+export function updateVehicleEngineAudio(
   world: World,
   audio: AudioEngine,
   previous: Map<number, 'shrike' | 'wildcat'>,
+  connected = true,
 ): void {
-  const vehicles = world.vehicles;
-  const current = new Map<number, 'shrike' | 'wildcat'>();
-  for (let id = 0; id < vehicles.count; id++) {
-    if (!vehicleEngineActive(world, id)) continue;
-    const kind = vehicles.kind[id] === VehicleKind.Shrike ? 'shrike' : 'wildcat';
-    const base = id * 3;
-    if (previous.has(id) && previous.get(id) !== kind) {
-      audio.setVehicleEngine(id, previous.get(id)!, { x: 0, y: 0, z: 0 }, false);
-    }
-    current.set(id, kind);
-    audio.setVehicleEngine(
-      id,
-      kind,
-      {
-        x: vehicles.position[base]!,
-        y: vehicles.position[base + 1]!,
-        z: vehicles.position[base + 2]!,
-      },
-      true,
-    );
-  }
+  const current = liveVehicleKinds(world, connected);
   for (const [id, kind] of previous) {
-    if (!current.has(id)) audio.setVehicleEngine(id, kind, { x: 0, y: 0, z: 0 }, false);
+    if (!current.has(id) || current.get(id) !== kind)
+      audio.setVehicleEngine(id, kind, { x: 0, y: 0, z: 0 }, false);
+  }
+  for (const [id, kind] of current) {
+    audio.setVehicleEngine(id, kind, vehiclePositionAt(world.vehicles, id), true);
   }
   previous.clear();
   for (const [id, kind] of current) previous.set(id, kind);
 }
 
+/** Issue #56: one per-frame ambient-audio phase. The panner graph needs the listener's own
+ *  position/orientation each frame (camera state, not sim state), and every world-derived
+ *  loop (hums, engines) must follow the connection -- a dropped socket stops them until
+ *  reconnect, per each updater's own comment. Split out of frame for the same complexity
+ *  budget reason syncWorldView already was. */
+function updateAmbientAudio(
+  world: World,
+  net: Pick<NetClient, 'connected'> | null,
+  camera: THREE.PerspectiveCamera,
+  forward: THREE.Vector3,
+  up: THREE.Vector3,
+  audio: AudioEngine,
+  audibleVehicles: Map<number, 'shrike' | 'wildcat'>,
+): void {
+  camera.getWorldDirection(forward);
+  up.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  audio.updateListener(camera.position, forward, up);
+  const connected = net === null || net.connected;
+  updateStationHumAudio(world, audio, connected);
+  updateVehicleEngineAudio(world, audio, audibleVehicles, connected);
+}
 interface StationAudioState {
   id: number | null;
   kind: 'inventory' | 'vehicle';
@@ -1748,8 +1825,20 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     orderState.pending = canvasToWorld(ctx, assets.scene.missionArea, canvasX, canvasY);
   });
   const voiceMenu = createVoiceMenu(document.body);
-  // Original game recordings, decoded and cached by the audio engine.
-  const audio = createAudioEngine({ context: new AudioContext(), position: camera.position });
+  // Issue #56: reused listener-orientation scratch vectors -- two fresh allocations every
+  // frame would be waste, and getWorldDirection/applyQuaternion write in place.
+  const listenerForward = new THREE.Vector3();
+  const listenerUp = new THREE.Vector3();
+  // Original game recordings, decoded and cached by the audio engine. Issue #56: positioned
+  // cues duck when terrain blocks their straight path to the listener -- the same
+  // hasLineOfSight march turrets and repair already use, so audio never disagrees with what
+  // the rest of the game treats as visible (camera.position is a live reference; the engine
+  // re-reads it per cue).
+  const audio = createAudioEngine({
+    context: new AudioContext(),
+    position: camera.position,
+    occlusionAt: (position) => !hasLineOfSight(world, camera.position, position),
+  });
   // Browsers start a fresh AudioContext `suspended` under autoplay restriction and require a
   // real user-gesture handler to resume it -- the same click that already requests pointer
   // lock (Input's own listener on this element) is that gesture. Codex review round 1 of the
@@ -1879,6 +1968,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
           // lastImpacts is overwritten on every stepProjectiles call and a multi-step frame
           // would otherwise lose every impact but the final tick's.
           spawnProjectileImpacts(scene, effects, world.projectiles.lastImpacts);
+          playImpactAudio(audio, world.projectiles.lastImpacts);
         });
       }
       app.stats.simMs = performance.now() - simStart;
@@ -1961,8 +2051,9 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       interactionPrompt.update(world, playerId, input.uiOpen || app.freeCam);
       if (app.freeCam) moveFreeCam(app, dtSeconds);
       placeCamera(app, sky, dtSeconds);
-      updateStationHumAudio(world, audio);
-      updateVehicleEngineAudio(world, audio, audibleVehicles);
+      // Issue #56: listener orientation for the panner graph, and every world-derived
+      // loop following the connection (see updateAmbientAudio).
+      updateAmbientAudio(world, net, camera, listenerForward, listenerUp, audio, audibleVehicles);
       updateStationActivationAudio(
         world,
         audio,
