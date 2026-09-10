@@ -1,15 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import type { App } from './app.js';
-import { extraFor } from './debug.js';
+import { extraFor, pinNetworkTimeScale } from './debug.js';
 
-/** A minimal fake NetClient/App -- only the fields extraFor actually reads (net.bots,
- *  net.remotePlayers, net.recentEvents, net.projectiles) need real values; everything
- *  else on App/NetClient this function never touches is irrelevant to it and is cast
- *  away, matching the narrow-fixture style this codebase's own sim tests already use
- *  (e.g. bots' steering.test.ts casting a bare `{ tick }` to `World` for checkStuck). */
-function fakeApp(net: Record<string, unknown> | null): App {
+/** A minimal fake NetClient/App -- only the fields these tests actually read (net.bots,
+ *  net.remotePlayers, net.recentEvents, net.projectiles for extraFor; net-nullness and
+ *  timeScale for pinNetworkTimeScale) need real values; everything else on App/NetClient
+ *  this file never touches is irrelevant and is cast away, matching the narrow-fixture
+ *  style this codebase's own sim tests already use (e.g. bots' steering.test.ts casting
+ *  a bare `{ tick }` to `World` for checkStuck). */
+function fakeApp(net: Record<string, unknown> | null, timeScale = 1): App {
   return {
     net,
+    timeScale,
     // Only reached when net is null (extraFor's activeProjectileCount fallback).
     world: { projectiles: { count: 0, active: new Uint8Array(0) } },
   } as unknown as App;
@@ -55,5 +57,26 @@ describe('extraFor', () => {
     const extra = extraFor(app);
     expect(extra.botsByTeam[0]).toBe('Team 1: 0 bots (0 idle, 0 attack, 0 defend)');
     expect(extra.botsByTeam[1]).toBe('Team 2: 0 bots (0 idle, 0 attack, 0 defend)');
+  });
+});
+
+describe('pinNetworkTimeScale', () => {
+  it('pins a networked session back to time scale 1 no matter what moved it (issue #7)', () => {
+    // The F1 slider used to feed app.timeScale straight into the local accumulator, so a
+    // scale above 1 in netplay stepped prediction past the server every frame. The pin
+    // runs at panel construction and every frame after; a non-null `net` is the
+    // networked-session signal (it exists exactly when launched with ?server=).
+    const app = fakeApp({}, 4);
+    expect(pinNetworkTimeScale(app)).toBe(true);
+    expect(app.timeScale).toBe(1);
+    // Already pinned: nothing to correct, so the caller skips the slider display refresh.
+    expect(pinNetworkTimeScale(app)).toBe(false);
+    expect(app.timeScale).toBe(1);
+  });
+
+  it('leaves single-player time scaling alone', () => {
+    const app = fakeApp(null, 4);
+    expect(pinNetworkTimeScale(app)).toBe(false);
+    expect(app.timeScale).toBe(4);
   });
 });

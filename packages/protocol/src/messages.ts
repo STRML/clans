@@ -67,6 +67,10 @@ export const PROTOCOL_VERSION = 11;
 export enum WelcomeStatus {
   Ok = 0,
   VersionMismatch = 1,
+  /** Issue #31: join refused -- no team under TARGET_TEAM_SIZE can take another human, so the
+   *  client must pick the alternate team or wait. Byte-compatible addition: every client
+   *  already treats any non-Ok status as a refusal, so no protocol version bump. */
+  TeamFull = 2,
 }
 
 /** The wire shape of one tick's input is identical to the sim's own PlayerInput. */

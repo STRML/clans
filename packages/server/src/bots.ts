@@ -84,9 +84,10 @@ function removeBotFromTeam(manager: BotManager, world: World, team: number): boo
  *  (e.g. `--bots 0`, or the team's own bot budget already exhausted). This is not a
  *  regression this milestone introduces: no version of this server has ever capped human
  *  team membership, before or after M6 -- `--bots` was always a bot-count budget, never a
- *  matchmaking limit. Rejecting a human's join outright would be a real, separate feature
- *  (a wire status the client has to handle), out of this milestone's given scope; tracked
- *  as a follow-up rather than built here. See strml/clans#31. */
+ *  matchmaking limit. The join-side half of that finding is now handled upstream of this
+ *  function (issue #31): net.ts's handleJoin consults joinableTeam below and refuses the
+ *  join with a team-full Welcome status when no team can take a human, so this loop only
+ *  ever sees an over-cap team that still has a bot of its own to shed. */
 /** The team under TARGET_TEAM_SIZE with fewer players, or null once both are full.
  *  Codex review round 1, finding (P2): the old backfill loop filled team 1 completely
  *  before ever considering team 2, so a small `--bots` budget (e.g. 2) landed both bots
@@ -117,6 +118,37 @@ export function rebalanceTeams(manager: BotManager, world: World, spawns: SceneS
     addBotToTeam(manager, world, spawns, team);
     remainingBudget -= 1;
   }
+}
+
+/** The team an incoming HUMAN may join, or null when no team can take one -- issue #31,
+ *  the join-side half of rebalanceTeams's own Codex-round-1 P1 finding above. Order
+ *  follows smallerTeam's pick (its tie goes to team 1, matching every existing join and
+ *  respawn call site), then the alternate team. A team under TARGET_TEAM_SIZE always has
+ *  a slot; a team exactly at the cap still does when it carries a bot, because the
+ *  rebalanceTeams call handleJoin makes right after addPlayer sheds exactly that bot
+ *  (failure matrix row 12's own mechanic). A team OVER the cap never qualifies, even
+ *  with a bot to spare: shedding one bot cannot bring count+1 back to the cap, and no
+ *  join may deepen an over-cap team. With `--bots 0` and both teams full of humans this
+ *  returns null and the join is refused on the wire instead of silently pushing a team
+ *  to 17 humans, which this function's absence let happen before (nothing below 33
+ *  players ever tripped rebalanceTeams' over-cap loop with a botless team). */
+export function joinableTeam(world: World, manager: BotManager): 1 | 2 | null {
+  const t1 = teamCount(world, 1);
+  const t2 = teamCount(world, 2);
+  const preferred: 1 | 2 = t1 <= t2 ? 1 : 2;
+  const alternate: 1 | 2 = preferred === 1 ? 2 : 1;
+  if (teamHasJoinSlot(world, manager, preferred)) return preferred;
+  if (teamHasJoinSlot(world, manager, alternate)) return alternate;
+  return null;
+}
+
+/** One team's slot test per joinableTeam's contract: strictly under the cap, or exactly
+ *  at the cap with a bot pickBotToRemove can actually produce (an empty manager -- the
+ *  `--bots 0` case -- offers nothing, which is exactly when #31 could bite). */
+function teamHasJoinSlot(world: World, manager: BotManager, team: 1 | 2): boolean {
+  const count = teamCount(world, team);
+  if (count < TARGET_TEAM_SIZE) return true;
+  return count === TARGET_TEAM_SIZE && pickBotToRemove(world, manager, team) !== null;
 }
 
 export function createBotManager(

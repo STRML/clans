@@ -2379,6 +2379,71 @@ describe('startNetServer', () => {
     rebalanceServer.close();
   });
 
+  it('refuses a join with a team-full Welcome once both teams are full of humans with bots disabled (issue #31)', async () => {
+    // The #31 repro: with `--bots 0` (emptyBotManager) rebalanceTeams had nothing to
+    // remove, yet handleJoin accepted every join unconditionally, so team 1 hit 17
+    // humans on the 33rd join. The 32 incumbents are direct addPlayer calls (32 real
+    // socket joins would only slow this test) -- handleJoin reads the same
+    // world.players counts either way.
+    const capWorld = createWorld(terrain, 1, 64);
+    for (let i = 0; i < TARGET_TEAM_SIZE; i += 1) {
+      addPlayer(capWorld, { x: 0, y: 0, z: 0 }, 1);
+      addPlayer(capWorld, { x: 1, y: 0, z: 1 }, 2);
+    }
+    const capServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world: capWorld,
+      spawns,
+      port: TEST_PORT + 35,
+    });
+    await capServer.ready;
+    const client = await connect(TEST_PORT + 35);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    // A refused join reaches the client as a response, not a hang: the same Welcome
+    // shape as VersionMismatch, whose non-Ok status this repo's client already treats as
+    // a failed join and surfaces by closing its transport (netclient.ts handleWelcome).
+    expect(welcome.status).toBe(WelcomeStatus.TeamFull);
+    expect(welcome.playerId).toBe(0);
+    expect(capWorld.players.count).toBe(TARGET_TEAM_SIZE * 2); // nothing was added
+    client.close();
+    capServer.close();
+  });
+
+  it('places a join on the alternate team, shedding its bot, when the preferred team is full of humans (issue #31)', async () => {
+    // Team 1: 16 humans, botless -- smallerTeam's pick (tie goes to team 1) has nothing
+    // to shed. Team 2: 15 humans plus the manager's single backfilled bot, so
+    // exactly-at-cap team 2 takes the joiner by giving that bot up (row 12's mechanic)
+    // instead of refusing.
+    const altWorld = createWorld(terrain, 1, 64);
+    for (let i = 0; i < TARGET_TEAM_SIZE; i += 1) addPlayer(altWorld, { x: 0, y: 0, z: 0 }, 1);
+    for (let i = 0; i < TARGET_TEAM_SIZE - 1; i += 1) addPlayer(altWorld, { x: 1, y: 0, z: 1 }, 2);
+    const manager = createBotManager(altWorld, spawns, [], 1);
+    expect(teamCount(altWorld, 2)).toBe(TARGET_TEAM_SIZE); // the single bot backfilled team 2
+    const altServer = startNetServer({
+      botManager: manager,
+      board: createOrderBoard(),
+      world: altWorld,
+      spawns,
+      port: TEST_PORT + 36,
+    });
+    await altServer.ready;
+    const client = await connect(TEST_PORT + 36);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    expect(welcome.status).toBe(WelcomeStatus.Ok);
+    expect(welcome.team).toBe(2);
+    // Bot removed, human added: both teams sit back at the cap.
+    expect(teamCount(altWorld, 1)).toBe(TARGET_TEAM_SIZE);
+    expect(teamCount(altWorld, 2)).toBe(TARGET_TEAM_SIZE);
+    expect(manager.botIds.size).toBe(0);
+    client.close();
+    altServer.close();
+  });
+
   it('stops stepping bots once gameOver freezes the match (Codex review round 1, P2)', async () => {
     const frozenWorld = createWorld(terrain, 1, 8);
     createFlags(frozenWorld, [

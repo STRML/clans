@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { addPlayer, createFlags, createWorld, FlagState, type Heightfield } from '@clans/sim';
 import { BotRole } from '@clans/bots';
-import { createBotManager, rebalanceTeams, TARGET_TEAM_SIZE } from './bots.js';
+import { createBotManager, joinableTeam, rebalanceTeams, TARGET_TEAM_SIZE } from './bots.js';
 import { teamCount, type SceneSpawn } from './world.js';
 
 const flat: Heightfield = {
@@ -107,5 +107,48 @@ describe('rebalanceTeams', () => {
     createBotManager(world, spawns, [], 2);
     expect(teamCount(world, 1)).toBe(1);
     expect(teamCount(world, 2)).toBe(1);
+  });
+});
+
+describe('joinableTeam', () => {
+  it('returns null when both teams are full of humans and no bot exists to shed (--bots 0, issue #31)', () => {
+    // The #31 repro: with no bot on either team, rebalanceTeams had nothing to remove,
+    // yet handleJoin accepted the join unconditionally -- team 1 went to 17 humans.
+    const world = createWorld(flat, 1, 64);
+    const manager = createBotManager(world, spawns, [], 0);
+    for (let i = 0; i < TARGET_TEAM_SIZE; i += 1) {
+      addPlayer(world, { x: -95, y: 0, z: 0 }, 1);
+      addPlayer(world, { x: 95, y: 0, z: 0 }, 2);
+    }
+    expect(joinableTeam(world, manager)).toBeNull();
+  });
+
+  it('keeps sending a joiner to the smaller under-cap team while either team has a slot', () => {
+    const world = createWorld(flat, 1, 64);
+    const manager = createBotManager(world, spawns, [], 0);
+    addPlayer(world, { x: -95, y: 0, z: 0 }, 1);
+    // Same pick smallerTeam makes for this world (team 2 is the smaller), so the cap
+    // gate changes nothing for ordinary joins.
+    expect(joinableTeam(world, manager)).toBe(2);
+  });
+
+  it('offers the alternate team, and its bot, when the preferred team is at cap with no bot', () => {
+    // Team 1: 16 humans, botless -- smallerTeam's pick (tie goes to team 1) has nothing
+    // to shed. Team 2: 15 humans plus the manager's single backfilled bot, so exactly-at
+    // -cap team 2 can still take the joiner by giving that bot up (row 12's mechanic)
+    // instead of refusing the join outright.
+    const world = createWorld(flat, 1, 64);
+    for (let i = 0; i < TARGET_TEAM_SIZE; i += 1) addPlayer(world, { x: -95, y: 0, z: 0 }, 1);
+    for (let i = 0; i < TARGET_TEAM_SIZE - 1; i += 1) addPlayer(world, { x: 95, y: 0, z: 0 }, 2);
+    const manager = createBotManager(world, spawns, [], 1);
+    expect(manager.botIds.size).toBe(1);
+    expect(joinableTeam(world, manager)).toBe(2);
+    // The offer is real: the join lands on team 2, rebalanceTeams sheds exactly the bot,
+    // and both teams sit back at the cap.
+    addPlayer(world, { x: 95, y: 0, z: 0 }, 2);
+    rebalanceTeams(manager, world, spawns);
+    expect(teamCount(world, 1)).toBe(TARGET_TEAM_SIZE);
+    expect(teamCount(world, 2)).toBe(TARGET_TEAM_SIZE);
+    expect(manager.botIds.size).toBe(0);
   });
 });

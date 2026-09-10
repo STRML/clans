@@ -77,14 +77,8 @@ import {
   type InteriorFootprint,
   type RelevanceCache,
 } from './snapshot-policy.js';
-import { rebalanceTeams, stepBotManager, type BotManager } from './bots.js';
-import {
-  dropFlagsCarriedBy,
-  smallerTeam,
-  spawnPointFor,
-  teamCount,
-  type SceneSpawn,
-} from './world.js';
+import { joinableTeam, rebalanceTeams, stepBotManager, type BotManager } from './bots.js';
+import { dropFlagsCarriedBy, spawnPointFor, teamCount, type SceneSpawn } from './world.js';
 
 export interface NetServerOptions {
   world: World;
@@ -205,7 +199,31 @@ function handleJoin(
     );
     return;
   }
-  const team = smallerTeam(world);
+  // Issue #31: a human join is capped, not unconditional. joinableTeam prefers
+  // smallerTeam's own pick, falls back to the alternate team, and returns null only when
+  // neither team can take a human -- both at/over TARGET_TEAM_SIZE with no bot left for
+  // rebalanceTeams to shed. Previously smallerTeam alone chose the team and the join was
+  // accepted unconditionally, so with `--bots 0` a 33rd human pushed a full team to 17
+  // and rebalanceTeams had no bot to remove to bring it back down.
+  const team = joinableTeam(world, botManager);
+  if (team === null) {
+    // Refused with the same Welcome shape as VersionMismatch (playerId 0, team 0, zero
+    // spawn): a refused join must reach the client as a response, not as a silent hang
+    // (the socket stays open exactly like the VersionMismatch path; this repo's client
+    // closes it on receipt of any non-Ok status).
+    socket.send(
+      encodeWelcome({
+        playerId: 0,
+        team: 0,
+        tickMs: FIXED_TICK_MS,
+        status: WelcomeStatus.TeamFull,
+        spawnX: 0,
+        spawnY: 0,
+        spawnZ: 0,
+      }),
+    );
+    return;
+  }
   let x: number, y: number, z: number;
   let playerId: number;
   try {
@@ -1240,7 +1258,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
     // Codex review round 1, finding (P2): stepBotManager used to run every tick
     // unconditionally, even after gameOver froze the match -- 32 bots kept paying full
     // perception/pathing cost for a match nobody could act in, and maybeHeal's direct
-    // applyLoadoutRequest call could still mutate a "frozen" player's armor/energy/ammo.
+    // applyLoadoutSelection call could still mutate a "frozen" player's armor/energy/ammo.
     // Gated behind the same guard runOneTick already uses, matching how the rest of the
     // tick loop treats gameOver as a hard stop, not just a stop on the sim step.
     if (!options.world.gameOver) {
