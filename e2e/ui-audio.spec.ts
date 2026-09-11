@@ -1,30 +1,28 @@
 import { test, expect } from '@playwright/test';
 import { AUDIO_SOURCES } from '../packages/assets/src/audio-sources.js';
 import type { App } from '../packages/client/src/app.js';
+import { ARMORS, ArmorId } from '../packages/sim/src/armor.js';
+import { defaultWeaponMask } from '../packages/sim/src/baseObjects.js';
 
 test('original HUD artwork loads and all shipped recordings decode in Chromium', async ({
   page,
 }, testInfo) => {
   await page.goto('/');
   await page.locator('#debug-stats[data-ready="1"]').waitFor({ state: 'attached' });
-  // #55: the rack renders exactly the player's carried weapon set (armor-allowed defaults
-  // before any station visit), hides uncarried cells, and every rendered icon must load.
-  // Fresh spawn here is Light armor, so the Mortar cell is hidden and the other four show.
-  const rack = await page.evaluate(() => {
+  // #55: the rack renders exactly the player's carried weapon set and hides uncarried cells,
+  // and the expectation comes from the simulation's own rule rather than a copy of the table.
+  // A fresh spawn in Light armor has never visited a station, so it carries the armor's
+  // DEFAULT loadout: three weapons, not the four the armor merely allows. This spec used to
+  // mirror `allowedWeaponMask` by hand, so it silently disagreed with the client the moment
+  // the weapon-slot cap landed (Light's allowed set is four weapons while its cap is three).
+  // Importing the real helper is what keeps the two from drifting apart again.
+  const state = await page.evaluate(() => {
     const app = (window as unknown as { __app: App }).__app;
     const id = app.playerId;
-    const stored = app.world.players.carriedWeapons[id] ?? 0;
-    const armor = app.world.players.armor[id] ?? 0;
-    // Mirror of sim/baseObjects.ts's allowedWeaponMask, indexed by ArmorId.
-    const allowedByArmor: Record<number, number> = {
-      0: (1 << 0) | (1 << 1) | (1 << 3) | (1 << 4), // Light: Laser Rifle, no Mortar
-      1: (1 << 0) | (1 << 1) | (1 << 4), // Medium: neither
-      2: (1 << 0) | (1 << 1) | (1 << 2) | (1 << 4), // Heavy: Mortar, no Laser Rifle
-    };
-    const carried = stored === 0 ? (allowedByArmor[armor] ?? 0) : stored;
     const slots = [...document.querySelectorAll<HTMLElement>('#hud-weapon-rack .hud-weapon-slot')];
     return {
-      carried,
+      stored: app.world.players.carriedWeapons[id] ?? 0,
+      armor: app.world.players.armor[id] ?? 0,
       slots: slots.map((slot, index) => ({
         index,
         hidden: slot.hidden,
@@ -32,10 +30,15 @@ test('original HUD artwork loads and all shipped recordings decode in Chromium',
       })),
     };
   });
-  expect(rack.carried).toBeGreaterThan(0);
-  for (const slot of rack.slots) {
+  const armor = ARMORS[state.armor as ArmorId];
+  const carried = state.stored === 0 ? defaultWeaponMask(armor) : state.stored;
+  expect(carried).toBeGreaterThan(0);
+  // The rack shows exactly as many cells as the armor has weapon slots, which is the cap the
+  // station menu and the sim both enforce -- a fifth visible cell would mean the cap leaked.
+  expect(state.slots.filter((slot) => !slot.hidden)).toHaveLength(armor.maxWeapons);
+  for (const slot of state.slots) {
     expect(slot.hidden, `rack slot ${String(slot.index)} visibility`).toBe(
-      (rack.carried & (1 << slot.index)) === 0,
+      (carried & (1 << slot.index)) === 0,
     );
     if (!slot.hidden) expect(slot.loads, `rack slot ${String(slot.index)} icon`).toBe(true);
   }
