@@ -45,17 +45,34 @@ function isEngageableEnemy(world: World, botId: number, team: number, id: number
   return true;
 }
 
+/** The one definition of "this enemy is a target for this observer": engageable (see
+ *  isEngageableEnemy) AND inside VISION_RANGE of the observer's own eye AND in line of
+ *  sight from it. Returns the 3D eye-to-hitbox distance when it is a target, `null` when
+ *  it is not -- distance is never a sentinel. Both nearest-enemy scans route through here
+ *  (findNearestVisibleEnemy from the bot's own eye, findCarrierThreat from the carrier's),
+ *  so "visible" cannot drift into two different rules one caller at a time. */
+export function visibleEnemyDistanceM(
+  world: World,
+  observerId: number,
+  targetId: number,
+): number | null {
+  if (targetId < 0 || targetId >= world.players.count) return null;
+  const team = world.players.team[observerId] ?? 0;
+  if (!isEngageableEnemy(world, observerId, team, targetId)) return null;
+  const eye = botEye(world, observerId);
+  const hitbox = playerHitbox(world, targetId, armorFor(world, targetId));
+  const d = Math.hypot(eye.x - hitbox.center.x, eye.y - hitbox.center.y, eye.z - hitbox.center.z);
+  if (d > VISION_RANGE) return null;
+  if (!hasLineOfSight(world, eye, hitbox.center)) return null;
+  return d;
+}
+
 export function findNearestVisibleEnemy(world: World, botId: number): number | null {
-  const team = world.players.team[botId] ?? 0;
-  const eye = botEye(world, botId);
   let best: number | null = null;
   let bestDistance = Infinity;
   for (let id = 0; id < world.players.count; id += 1) {
-    if (!isEngageableEnemy(world, botId, team, id)) continue;
-    const hitbox = playerHitbox(world, id, armorFor(world, id));
-    const d = Math.hypot(eye.x - hitbox.center.x, eye.y - hitbox.center.y, eye.z - hitbox.center.z);
-    if (d > VISION_RANGE || d >= bestDistance) continue;
-    if (!hasLineOfSight(world, eye, hitbox.center)) continue;
+    const d = visibleEnemyDistanceM(world, botId, id);
+    if (d === null || d >= bestDistance) continue;
     best = id;
     bestDistance = d;
   }
@@ -146,6 +163,57 @@ export function findEnemyFlagCarrier(world: World, team: number): number | null 
     return carrierId;
   }
   return null;
+}
+
+/** Issue #32 escort threat priority: how far from the CARRIER an enemy still counts as
+ *  the carrier's fight. 120 m is the plasma turret's own attack radius (turrets.ts's
+ *  engagementRange) -- the envelope that measured ~70% of all carrier chip damage, see
+ *  TURRET_ATTACK_RANGE_M's comment above -- so it covers every hostile that can put
+ *  damage on a carrier before it reaches home, and nothing farther out that the escort
+ *  would only reach by leaving the carrier behind. It also sits inside VISION_RANGE
+ *  (150): a cap past the vision range could only ever be a lie, since this query can
+ *  return nothing the carrier itself cannot see. */
+export const CARRIER_THREAT_RADIUS_M = 120; // Ours, meters.
+
+/** Issue #32 escort threat priority: the closest enemy the CARRIER can see inside
+ *  `radiusM` -- the enemy that threatens the principal, not the enemy that happens to be
+ *  nearest the escort. Visibility is the same shared rule as findNearestVisibleEnemy's
+ *  (engageable, inside VISION_RANGE, line of sight), measured from the carrier's own eye:
+ *  "an enemy the carrier is looking at" is the only defensible reading of a threat the
+ *  bodyguard is asked to fight *instead of* its own nearest. A `radiusM` above
+ *  VISION_RANGE is clamped by the visibility rule itself, not by a second comparison.
+ *  Returns null for a dead, inactive, or out-of-range carrier -- flags.ts's carrierId is
+ *  only as fresh as the last stepFlags, and this query must never aim a bodyguard at
+ *  whatever a stale id now refers to. */
+export function findCarrierThreat(world: World, carrierId: number, radiusM: number): number | null {
+  if (carrierId < 0 || carrierId >= world.players.count) return null;
+  if (!world.players.active[carrierId] || !world.players.alive[carrierId]) return null;
+  let best: number | null = null;
+  let bestDistance = Infinity;
+  for (let id = 0; id < world.players.count; id += 1) {
+    const d = visibleEnemyDistanceM(world, carrierId, id);
+    if (d === null || d > radiusM || d >= bestDistance) continue;
+    best = id;
+    bestDistance = d;
+  }
+  return best;
+}
+
+/** Issue #32 carrier fire discipline: true while this bot is the one carrying the ENEMY
+ *  flag home -- the player whose life is the score. brain.ts has its own private copy
+ *  taking the runtime; this is the same rule (the enemy flag's carrierId, own flag
+ *  excluded) stated as a world query, because combat.ts's fire gate needs it and
+ *  brain.ts already imports combat.ts -- importing that helper back would be a cycle.
+ *  No liveness check, deliberately: this asks whether the bot holds the flag, and
+ *  stepBots never asks anything about a dead bot (flags.ts clears the carrier on death
+ *  anyway, one stepFlags earlier). */
+export function isCarryingEnemyFlag(world: World, botId: number): boolean {
+  const team = world.players.team[botId] ?? 0;
+  for (let flagId = 0; flagId < world.flags.team.length; flagId += 1) {
+    if (world.flags.team[flagId] === team) continue; // only the ENEMY flag is carried home
+    if (world.flags.carrierId[flagId] === botId) return true;
+  }
+  return false;
 }
 
 /** True when this turret's barrel ever engages PLAYERS: the plasma barrel (120 m attack

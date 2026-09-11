@@ -9,10 +9,13 @@ import {
   type Heightfield,
 } from '@clans/sim';
 import {
+  CARRIER_THREAT_RADIUS_M,
+  findCarrierThreat,
   findEnemyFlagCarrier,
   findEscortedCarrier,
   findNearestFriendlyStation,
   findNearestVisibleEnemy,
+  isCarryingEnemyFlag,
   needsHealing,
   VISION_RANGE,
 } from './perception.js';
@@ -209,5 +212,76 @@ describe('findEnemyFlagCarrier (issue #32)', () => {
     const mate = addPlayer(world, { x: 5, y: 0, z: 0 }, 1);
     world.flags.carrierId[0] = mate;
     expect(findEnemyFlagCarrier(world, 1)).toBeNull();
+  });
+});
+
+describe('findCarrierThreat (issue #32 escort threat priority)', () => {
+  it('returns the enemy nearest the CARRIER, measured from the carrier rather than the caller', () => {
+    const world = createWorld(flat, 1);
+    const carrier = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    addPlayer(world, { x: 0, y: 0, z: 5 }, 1); // a teammate standing closest of all
+    addPlayer(world, { x: 0, y: 0, z: 40 }, 2); // an enemy farther out than the nearest
+    const nearest = addPlayer(world, { x: 0, y: 0, z: 10 }, 2);
+    expect(findCarrierThreat(world, carrier, CARRIER_THREAT_RADIUS_M)).toBe(nearest);
+  });
+
+  it('walks the radius edge: an enemy just inside is returned, one just outside is not', () => {
+    const world = createWorld(flat, 1);
+    const carrier = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    // +/- 1 m of the edge rather than its exact metre: the measure is eye (feet + 1.6 m
+    // muzzle height) to hitbox CENTRE (feet + half the armor height), so a target
+    // "exactly" at the radius on the horizontal plane is a fraction of a metre past it.
+    const enemy = addPlayer(world, { x: 0, y: 0, z: CARRIER_THREAT_RADIUS_M - 1 }, 2);
+    expect(findCarrierThreat(world, carrier, CARRIER_THREAT_RADIUS_M)).toBe(enemy);
+    world.players.position[enemy * 3 + 2] = CARRIER_THREAT_RADIUS_M + 1;
+    expect(findCarrierThreat(world, carrier, CARRIER_THREAT_RADIUS_M)).toBeNull();
+  });
+
+  it('judges visibility from the CARRIER, not from whoever asks', () => {
+    const world = createWorld(wallAcrossX(50), 1);
+    const carrier = addPlayer(world, { x: -5, y: 0, z: 0 }, 1);
+    addPlayer(world, { x: 5, y: 0, z: 0 }, 2); // across the wall from the carrier
+    const visible = addPlayer(world, { x: -5, y: 0, z: 20 }, 2);
+    expect(findCarrierThreat(world, carrier, CARRIER_THREAT_RADIUS_M)).toBe(visible);
+  });
+
+  it('skips a mounted enemy the carrier cannot shoot (failure matrix row 18)', () => {
+    const world = createWorld(flat, 1);
+    const carrier = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const rider = addPlayer(world, { x: 0, y: 0, z: 10 }, 2);
+    world.players.mountedVehicleId[rider] = 0;
+    expect(findCarrierThreat(world, carrier, CARRIER_THREAT_RADIUS_M)).toBeNull();
+    world.players.mountedVehicleId[rider] = -1;
+    expect(findCarrierThreat(world, carrier, CARRIER_THREAT_RADIUS_M)).toBe(rider);
+  });
+
+  it('returns null for a dead, inactive, or out-of-world carrier', () => {
+    const world = createWorld(flat, 1);
+    const carrier = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    addPlayer(world, { x: 0, y: 0, z: 10 }, 2);
+    world.players.alive[carrier] = 0;
+    expect(findCarrierThreat(world, carrier, CARRIER_THREAT_RADIUS_M)).toBeNull();
+    world.players.alive[carrier] = 1;
+    world.players.active[carrier] = 0;
+    expect(findCarrierThreat(world, carrier, CARRIER_THREAT_RADIUS_M)).toBeNull();
+    expect(findCarrierThreat(world, world.players.count + 5, CARRIER_THREAT_RADIUS_M)).toBeNull();
+  });
+});
+
+describe('isCarryingEnemyFlag (issue #32 carrier fire discipline)', () => {
+  it('is true only for the bot carrying the ENEMY flag', () => {
+    const world = createWorld(flat, 1);
+    createFlags(world, [
+      { team: 1, position: { x: -10, y: 0, z: 0 } },
+      { team: 2, position: { x: 10, y: 0, z: 0 } },
+    ]);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    expect(isCarryingEnemyFlag(world, bot)).toBe(false);
+    world.flags.carrierId[0] = bot; // our own flag is not the one carried home
+    expect(isCarryingEnemyFlag(world, bot)).toBe(false);
+    world.flags.carrierId[1] = bot; // the enemy flag is
+    expect(isCarryingEnemyFlag(world, bot)).toBe(true);
+    const mate = addPlayer(world, { x: 5, y: 0, z: 0 }, 1);
+    expect(isCarryingEnemyFlag(world, mate)).toBe(false);
   });
 });
