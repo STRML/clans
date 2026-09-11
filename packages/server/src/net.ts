@@ -78,14 +78,23 @@ import {
   type RelevanceCache,
 } from './snapshot-policy.js';
 import { joinableTeam, rebalanceTeams, stepBotManager, type BotManager } from './bots.js';
-import { dropFlagsCarriedBy, spawnPointFor, teamCount, type SceneSpawn } from './world.js';
+import {
+  activePlayerPositions,
+  dropFlagsCarriedBy,
+  respawnSpawnIndex,
+  spawnPointFor,
+  teamCount,
+  type SceneSpawn,
+} from './world.js';
 
 export interface NetServerOptions {
   world: World;
   spawns: SceneSpawn[];
-  /** Owns bot ids, per-bot runtime memory, and rebalancing toward TARGET_TEAM_SIZE. A
-   *  server always has one, even at `--bots 0` (an empty-budget manager that's a no-op
-   *  everywhere it's called) -- this milestone does not support running with none at all. */
+  /** Owns bot ids, per-bot runtime memory, and rebalancing toward the manager's own
+   *  per-team cap (`teamSize`, TARGET_TEAM_SIZE unless createBotManager was raised with
+   *  cli.ts's `--team-size`). A server always has one, even at `--bots 0` (an empty-budget
+   *  manager that's a no-op everywhere it's called) -- this milestone does not support
+   *  running with none at all. */
   botManager: BotManager;
   /** One active order per team, TTL-expired -- runtime memory, never part of World/hashWorld
    *  (mirrors BotManager's own runtime-memory convention, M6 Global Constraints). */
@@ -201,10 +210,11 @@ function handleJoin(
   }
   // Issue #31: a human join is capped, not unconditional. joinableTeam prefers
   // smallerTeam's own pick, falls back to the alternate team, and returns null only when
-  // neither team can take a human -- both at/over TARGET_TEAM_SIZE with no bot left for
-  // rebalanceTeams to shed. Previously smallerTeam alone chose the team and the join was
-  // accepted unconditionally, so with `--bots 0` a 33rd human pushed a full team to 17
-  // and rebalanceTeams had no bot to remove to bring it back down.
+  // neither team can take a human -- both at/over the manager's per-team cap (`teamSize`,
+  // 16 by default, 24 for a `--team-size 24` match) with no bot left for rebalanceTeams to
+  // shed. Previously smallerTeam alone chose the team and the join was accepted
+  // unconditionally, so with `--bots 0` a 33rd human pushed a full team to 17 and
+  // rebalanceTeams had no bot to remove to bring it back down.
   const team = joinableTeam(world, botManager);
   if (team === null) {
     // Refused with the same Welcome shape as VersionMismatch (playerId 0, team 0, zero
@@ -227,7 +237,14 @@ function handleJoin(
   let x: number, y: number, z: number;
   let playerId: number;
   try {
-    [x, y, z] = spawnPointFor(world.terrain, spawns, team, teamCount(world, team), world.interiors);
+    [x, y, z] = spawnPointFor(
+      world.terrain,
+      spawns,
+      team,
+      teamCount(world, team),
+      world.interiors,
+      activePlayerPositions(world),
+    );
     playerId = addPlayer(world, { x, y, z }, team);
   } catch {
     // A full world or unusable spawn area can reject a join before registration.
@@ -258,8 +275,8 @@ function handleJoin(
     }),
   );
   // The joining human's team/id are already committed to world.players above, so
-  // rebalanceTeams sees an accurate count and, if that team is already at
-  // TARGET_TEAM_SIZE, removes exactly one bot on it before this join would push it over
+  // rebalanceTeams sees an accurate count and, if that team is already at the manager's
+  // per-team cap, removes exactly one bot on it before this join would push it over
   // (failure matrix row 12) -- never the other way around.
   rebalanceTeams(botManager, world, spawns);
 }
@@ -707,32 +724,25 @@ function ordersForSnapshot(board: OrderBoard, world: World): WorldExtras['orders
  * that id's corpse stood before the respawn (Codex PR #9 round 3, P1 finding 2). */
 function respawnDuePlayers(world: World, spawns: SceneSpawn[], history: PositionHistory): void {
   // Codex review round 16, finding 3: dead players stay `active` (death only clears `alive`),
-  // so teamCount(world, team) reads the same value for every id processed in this same pass --
-  // two teammates due on the same tick both computed index `teamCount - 1` and landed on the
-  // identical spawn point. Track how many respawns this pass has already placed per team and
-  // add that offset, so simultaneous same-team respawns fan out across the team's spawn list
-  // instead of stacking on one point.
-  const respawnedThisPass = new Map<number, number>();
+  // so teamCount(world, team) reads the same value for every id processed in this same pass,
+  // and on a full 24-seat team that value is the seat cap itself -- 23 % <spheres> pinned
+  // every respawn wave to one fixed sphere at one fixed golden angle. world.ts's
+  // respawnSpawnIndex derives the slot from the player's own seat plus their own respawn
+  // count instead: simultaneous teammates keep distinct seats, and each wave advances one
+  // slot (flipping sphere parity), so consecutive waves land on different positions. The
+  // occupied list keeps a fresh spawn from landing inside whoever is already standing there.
   for (const id of dueForRespawn(world)) {
     const team = world.players.team[id] ?? 1;
-    const alreadyPlaced = respawnedThisPass.get(team) ?? 0;
-    // handleJoin picks an initial spawn using the team's count BEFORE that player is added
-    // (teamCount is read before addPlayer runs), i.e. a count that never includes the
-    // player being placed. dueForRespawn's id is already active (death only clears
-    // `alive`, never `active`), so teamCount(world, team) here already counts it -- the
-    // -1 restores the same "count of everyone else on the team" convention join uses, so
-    // a player's very first respawn picks the same spawn their initial join would have
-    // (Codex review round 5, finding 2).
     const [x, y, z] = spawnPointFor(
       world.terrain,
       spawns,
       team,
-      teamCount(world, team) - 1 + alreadyPlaced,
+      respawnSpawnIndex(world, id),
       world.interiors,
+      activePlayerPositions(world, id),
     );
     respawnPlayer(world, id, { x, y, z });
     clearHistory(history, id);
-    respawnedThisPass.set(team, alreadyPlaced + 1);
   }
 }
 

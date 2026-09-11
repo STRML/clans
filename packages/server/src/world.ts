@@ -15,6 +15,7 @@ import {
   type Heightfield,
   type InteriorInstance,
   type InteriorTriangles,
+  type Vec3,
   type World,
 } from '@clans/sim';
 
@@ -174,13 +175,63 @@ export function spawnPointFor(
   team: number,
   index: number,
   interiors: readonly InteriorInstance[] = [],
+  occupied: readonly Vec3[] = [],
 ): [number, number, number] {
   const teamSpawns = spawns.filter((spawn) => spawn.team === team);
   const chosen = teamSpawns[index % teamSpawns.length];
   if (!chosen) throw new Error(`No spawn point for team ${String(team)}`);
   const [x, y, z] = chosen.position;
-  const point = findSpawnPosition(terrain, interiors, { x, y, z }, chosen.radius, index);
+  const point = findSpawnPosition(
+    terrain,
+    interiors,
+    { x, y, z },
+    chosen.radius,
+    index,
+    occupied,
+  );
   return [point.x, point.y, point.z];
+}
+
+/** Every active player's position, for `findSpawnPosition`'s capsule-overlap rejection.
+ *  Dead players count too: death only clears `alive`, so a corpse is still a body the
+ *  next spawn may not share space with -- and it may be re-seated on any later tick.
+ *  `exceptId` omits the player being seated, whose current position is the one thing a
+ *  respawn is explicitly moving away from. */
+export function activePlayerPositions(world: World, exceptId = -1): Vec3[] {
+  const positions: Vec3[] = [];
+  for (let id = 0; id < world.players.count; id += 1) {
+    if (!world.players.active[id] || id === exceptId) continue;
+    const base = id * 3;
+    positions.push({
+      x: world.players.position[base] ?? 0,
+      y: world.players.position[base + 1] ?? 0,
+      z: world.players.position[base + 2] ?? 0,
+    });
+  }
+  return positions;
+}
+
+/**
+ * Spawn slot for a respawning player: the player's own seat on the team (how many active
+ * teammates joined before them -- the same 0-based count handleJoin reads via teamCount
+ * BEFORE addPlayer, so a lone player's first respawn stays on their join spawn, net.test
+ * round 5), plus their own respawn count, so each respawn wave moves one slot off the last.
+ *
+ * The previous derivation -- teamCount(world, team) - 1 + alreadyPlaced -- pinned a full
+ * team to one point: dead players stay `active`, so a 24-seat team always read 23 (+0 for
+ * the first player processed in a pass), and 23 % 2 always picked the same secondary
+ * sphere at the same golden-angle position. Measured on the real Katabatic map with 24
+ * seated bots per team: two consecutive respawn waves landed on identical positions.
+ * `respawnSeq` (damage.ts's respawnPlayer is its only writer, +1 per respawn) flips the
+ * sphere parity and advances the golden-angle slot on every wave, and seats keep
+ * simultaneous teammates apart without any pass-order bookkeeping. */
+export function respawnSpawnIndex(world: World, id: number): number {
+  const team = world.players.team[id] ?? 1;
+  let seat = 0;
+  for (let other = 0; other < id; other += 1) {
+    if (world.players.active[other] && world.players.team[other] === team) seat += 1;
+  }
+  return seat + (world.players.respawnSeq[id] ?? 0);
 }
 
 /**
@@ -218,6 +269,7 @@ export function addOneBot(world: World, spawns: SceneSpawn[], team: number): num
     team,
     teamCount(world, team),
     world.interiors,
+    activePlayerPositions(world),
   );
   return addPlayer(world, { x, y, z }, team);
 }

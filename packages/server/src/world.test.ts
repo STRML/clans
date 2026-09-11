@@ -8,14 +8,22 @@ import {
   createFlags,
   createTurrets,
   createWorld,
+  dueForRespawn,
+  HEAVY_ARMOR,
+  respawnPlayer,
+  sampleTerrain,
   stepWorld,
   raycastInteriors,
   type Heightfield,
   type PlayerInput,
+  type World,
 } from '@clans/sim';
+import { createBotManager, rebalanceTeams } from './bots.js';
 import {
+  activePlayerPositions,
   addBots,
   loadKatabaticWorld,
+  respawnSpawnIndex,
   smallerTeam,
   spawnPointFor,
   teamCount,
@@ -241,4 +249,136 @@ it('every real spawn lets a player walk forward out of the starting area', async
         `team ${team}, spawn ${index}`,
       ).toBeGreaterThan(8);
     }
+});
+
+/** Two seated players may not share space: capsules interpenetrate when they are less than
+ *  one capsule wide apart horizontally AND less than one capsule tall apart vertically.
+ *  HEAVY_ARMOR is the widest capsule a respawn can wear (armor.ts; a station loadout
+ *  change persists across death), so clearing it clears every armor. */
+const [capsuleX, capsuleY, capsuleHeight] = HEAVY_ARMOR.boundingBox;
+const capsuleWidth = Math.max(capsuleX, capsuleY);
+
+function capsulesOverlap(
+  a: readonly [number, number, number],
+  b: readonly [number, number, number],
+): boolean {
+  return (
+    Math.hypot(a[0] - b[0], a[2] - b[2]) < capsuleWidth && Math.abs(a[1] - b[1]) < capsuleHeight
+  );
+}
+
+function expectNoOverlaps(points: ReadonlyMap<number, [number, number, number]>): void {
+  const entries = [...points.entries()];
+  for (let i = 0; i < entries.length; i += 1) {
+    for (let j = i + 1; j < entries.length; j += 1) {
+      const [firstId, first] = entries[i]!;
+      const [secondId, second] = entries[j]!;
+      expect(
+        capsulesOverlap(first, second),
+        `players ${String(firstId)} and ${String(secondId)} spawn inside each other`,
+      ).toBe(false);
+    }
+  }
+}
+
+function playerPoint(world: World, id: number): [number, number, number] {
+  return [
+    world.players.position[id * 3] ?? 0,
+    world.players.position[id * 3 + 1] ?? 0,
+    world.players.position[id * 3 + 2] ?? 0,
+  ];
+}
+
+function activeTeamIds(world: World, team: number): number[] {
+  const ids: number[] = [];
+  for (let id = 0; id < world.players.count; id += 1) {
+    if (world.players.active[id] && world.players.team[id] === team) ids.push(id);
+  }
+  return ids;
+}
+
+describe('24-versus-24 spawn seating', () => {
+  // Katabatic has two spawn spheres per team (radii 100/75 and 100/65) and only a few
+  // degrees of any one sampling ring is walkable ground, so 24 seats per team pile into
+  // the same first successful slot unless the search is told who is already standing
+  // there. Measured on this map before the occupancy rejection: 57 of 552 same-team pairs
+  // sat closer than the light capsule diameter, minimum separation 0.05 m -- two players
+  // inside each other, with no player-vs-player collision anywhere in packages/sim to
+  // separate them afterwards. Same measurement after: minimum 1.66 m, zero overlaps, and
+  // zero findSpawnPosition saturation throws (there were none before either; the earlier
+  // fan-out overlapped, it never exhausted a sphere).
+  it('seats 24 bots per team without overlap or a saturation throw, all on walkable ground', async () => {
+    const { world, spawns } = await loadKatabaticWorld();
+    const manager = createBotManager(world, spawns, [], 48, 24);
+    rebalanceTeams(manager, world, spawns);
+    expect(teamCount(world, 1)).toBe(24);
+    expect(teamCount(world, 2)).toBe(24);
+
+    const points = new Map<number, [number, number, number]>();
+    for (const team of [1, 2]) {
+      for (const id of activeTeamIds(world, team)) {
+        const point = playerPoint(world, id);
+        const ground = sampleTerrain(world.terrain, point[0], point[2]);
+        expect(ground.empty, `player ${String(id)} is not over ground`).toBe(false);
+        expect(
+          ground.normal.y,
+          `player ${String(id)} is not on walkable ground`,
+        ).toBeGreaterThanOrEqual(0.85);
+        expect(point[1]).toBeCloseTo(ground.height + 0.1, 6);
+        points.set(id, point);
+      }
+    }
+    expect(points.size).toBe(48);
+    expectNoOverlaps(points);
+  });
+
+  it('lands two consecutive respawn waves of a full team on different, non-overlapping positions', async () => {
+    const { world, spawns } = await loadKatabaticWorld();
+    const manager = createBotManager(world, spawns, [], 48, 24);
+    rebalanceTeams(manager, world, spawns);
+
+    // Mirrors net.ts's respawnDuePlayers: every active teammate dies at once (a disc
+    // splash on a cluster is exactly the case this guards), then each due id is seated
+    // through world.ts's respawnSpawnIndex and told who else is already standing there.
+    const respawnWave = (): Map<number, [number, number, number]> => {
+      for (const team of [1, 2]) {
+        for (const id of activeTeamIds(world, team)) {
+          world.players.alive[id] = 0;
+          world.players.respawnAt[id] = 0;
+        }
+      }
+      const wave = new Map<number, [number, number, number]>();
+      for (const id of dueForRespawn(world)) {
+        const team = world.players.team[id] ?? 1;
+        const point = spawnPointFor(
+          world.terrain,
+          spawns,
+          team,
+          respawnSpawnIndex(world, id),
+          world.interiors,
+          activePlayerPositions(world, id),
+        );
+        respawnPlayer(world, id, { x: point[0], y: point[1], z: point[2] });
+        wave.set(id, point);
+      }
+      return wave;
+    };
+
+    const first = respawnWave();
+    expect(first.size).toBe(48);
+    expectNoOverlaps(first);
+    const second = respawnWave();
+    expect(second.size).toBe(48);
+    expectNoOverlaps(second);
+    for (const [id, point] of first) {
+      const next = second.get(id)!;
+      // Before the fix every one of the 48 ids landed on its wave-1 position exactly
+      // (teamCount - 1 was a constant 23 on a full team, so 23 % 2 pinned one sphere at
+      // one golden angle); respawnSeq advances the slot by one per wave.
+      expect(
+        Math.hypot(point[0] - next[0], point[1] - next[1], point[2] - next[2]),
+        `player ${String(id)} respawned on its previous spawn point`,
+      ).toBeGreaterThan(capsuleWidth);
+    }
+  });
 });
