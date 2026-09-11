@@ -1,4 +1,3 @@
-import { turretHitbox } from './turrets.js';
 import { armorFor } from './armor.js';
 import { applyBaseObjectDamage, BaseObjectKind } from './baseObjects.js';
 import {
@@ -22,10 +21,14 @@ import {
 } from './types.js';
 import {
   applyTurretDamage,
+  distanceToTurretHitShape,
+  rayTurretHitShapeDistance,
   TURRET_BARREL_DATA,
+  turretHitShape,
   type TurretBarrelData,
   type TurretBarrelId,
   type TurretFireEvent,
+  type TurretHitShape,
 } from './turrets.js';
 import {
   applyVehicleDamage,
@@ -392,11 +395,17 @@ function explodeBaseObjects(world: World, point: Vec3, radiusDamage: number, rad
   }
 }
 
+/** Issue #54: the blast measures to the turret's own collision shape, not to its ground
+ *  anchor. A Spinfusor that lands on the barrel used to read as 1.83 m further away than it
+ *  visually was (the anchor sits at the placement's feet, the barrel at 1.83 m), so the
+ *  falloff it took was not the falloff it earned; `distanceToTurretHitShape` is the same
+ *  helper the direct-hit search resolves against. */
 function explodeTurrets(world: World, point: Vec3, radiusDamage: number, radius: number): void {
   const turrets = world.turrets;
   for (let id = 0; id < turrets.count; id += 1) {
     if (turrets.destroyed[id]) continue;
-    const falloff = radiusFalloff(distanceToPoint(turrets.position, id * 3, point), radius);
+    const distance = distanceToTurretHitShape(turretHitShape(world, id), point);
+    const falloff = radiusFalloff(distance, radius);
     if (falloff > 0) applyTurretDamage(world, id, radiusDamage * falloff);
   }
 }
@@ -424,7 +433,8 @@ function explodeVehicles(
 }
 
 /** Splash also reaches a base object, turret, or vehicle standing in the blast: same falloff
- *  math, reusing radiusFalloff against the structure's own hit-sphere center. */
+ *  math, reusing radiusFalloff against the structure's own hit-sphere center -- except the
+ *  turret, which measures to its measured collision shape (see explodeTurrets). */
 function explodeStructures(
   world: World,
   point: Vec3,
@@ -482,7 +492,6 @@ function findDirectHit(
 }
 
 export const BASE_OBJECT_HIT_RADIUS = 1.5; // Ours — see this plan's "ours" numbers table.
-export const TURRET_HIT_RADIUS = 1.2; // Ours.
 
 interface StructureHit {
   kind: 'baseObject' | 'turret' | 'vehicle';
@@ -500,11 +509,15 @@ interface StructureArray {
   count: number;
   position: Float64Array;
   destroyed: Uint8Array;
+  /** Uniform hit radius; unused when `shapeFor` supplies the turret's measured volumes. */
   radius: number;
   /** Per-id override for a store whose hit-sphere radius isn't uniform (vehicles: Shrike
    *  5.5 m vs. Wildcat 1.7785 m) -- falls back to `radius` above when absent. */
   radiusFor?: (id: number) => number;
-  hitboxFor?: (id: number) => PlayerHitbox;
+  /** Issue #54: stores whose hit volume is not a sphere at all (turrets) return their shared
+   *  measured shape here, and the ray resolves against its cylinders/capsule instead of a
+   *  hit-sphere. */
+  shapeFor?: (id: number) => TurretHitShape;
   kind: StructureHit['kind'];
   skip?: (id: number) => boolean;
 }
@@ -522,7 +535,9 @@ function structureCandidateDistance(
   array: StructureArray,
   id: number,
 ): number | null {
-  const hitbox: PlayerHitbox = array.hitboxFor?.(id) ?? {
+  const shape = array.shapeFor?.(id);
+  if (shape) return rayTurretHitShapeDistance(previous, direction, shape);
+  const hitbox: PlayerHitbox = {
     center: positionAt(array.position, id * 3),
     radius: array.radiusFor?.(id) ?? array.radius,
     headY: Infinity,
@@ -580,8 +595,9 @@ function nearestStructureHitFrom(
     count: turrets.count,
     position: turrets.position,
     destroyed: turrets.destroyed,
-    radius: TURRET_HIT_RADIUS,
-    hitboxFor: (id) => turretHitbox(world, id),
+    // Unused: `shapeFor` below supplies the turret's measured volumes (issue #54).
+    radius: 0,
+    shapeFor: (id) => turretHitShape(world, id),
     kind: 'turret',
     // Excludes the turret that fired this exact shot -- see ProjectileStore.sourceTurretId.
     skip: (id) => id === excludeTurretId,
@@ -763,7 +779,7 @@ const NO_HIT: HitResult = { hitPlayerId: -1, hitPoint: null };
 /** `ProjectileStore.weaponId` is a `Uint8Array` shared by both player weapons (`WeaponId`,
  *  0-4) and turret barrels (`TurretBarrelId`, 0-2); this offset keeps the two ranges from
  *  colliding on the wire. */
-const TURRET_WEAPON_ID_OFFSET = 100;
+export const TURRET_WEAPON_ID_OFFSET = 100;
 /** Same collision-avoidance offset, one range over, for the Shrike blaster -- the only
  *  vehicle weapon this milestone ships (the Wildcat has none), so a single sentinel value is
  *  enough; a second vehicle weapon would need its own small enum the way TurretBarrelId has. */

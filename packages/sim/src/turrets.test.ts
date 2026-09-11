@@ -15,10 +15,14 @@ import { BaseObjectKind, createBaseObjects, stepPower } from './baseObjects.js';
 import {
   applyTurretDamage,
   createTurrets,
+  distanceToTurretHitShape,
   hasLineOfSight,
+  rayTurretHitShapeDistance,
   stepTurrets,
   TURRET_BARREL_DATA,
   TURRET_BASE_DATA,
+  turretHitbox,
+  turretHitShape,
   TurretBarrelId,
   TurretBaseId,
 } from './turrets.js';
@@ -422,12 +426,12 @@ describe('stepTurrets: interior and force-field occlusion (issue #49)', () => {
     stepPower(world);
     addPlayer(world, { x: 8, y: 0, z: 0 }, 2);
     stepTurrets(world, FIXED_DT);
-    // Geometry, not charity: turretHitbox centers the plasma assembly at (-8, 1.3, 0)
-    // with a 2 m radius, and the eye->target sightline from (-8, 2, 0) to (8, 0, 0)
-    // passes ~0.72 m from that center — well inside the envelope. A turret that could
-    // occlude itself could never see past its own barrel; acquisition (and the fresh
-    // turret's same-tick fire) must succeed because the occlusion test never consults
-    // the turret's own assembly.
+    // Geometry, not charity: the measured assembly's head column is a 1.314 m radius about
+    // the placement axis from y 0.354 to 2.219 (the Arms/Sleeve's circumscribed bounds), and
+    // the eye->target sightline from (-8, 2, 0) to (8, 0, 0) enters it at x -6.686, y 1.836
+    // -- well inside the envelope. A turret that could occlude itself could never see past
+    // its own barrel; acquisition (and the fresh turret's same-tick fire) must succeed
+    // because the occlusion test never consults the turret's own assembly.
     expect(world.turrets.targetId[0]).toBe(0);
     expect(world.pendingTurretFireEvents).toHaveLength(1);
   });
@@ -646,5 +650,107 @@ describe('AA seeker flight (issue #57)', () => {
     }
     // Past seekTime with no lock: the missile flies dead straight, z velocity untouched.
     expect(world.projectiles.velocity[base + 2]).toBe(0);
+  });
+});
+
+describe('issue #54: the collision shape is the measured assembly, not a sphere', () => {
+  /** The plasma (Large) barrel's measurement, quoted in turrets.ts's TURRET_HIT_SHAPE_DATA
+   *  comment: `turret_base_large.glb`'s BaseMain box corner (1.1194, 2.0712) sits 2.3543 m
+   *  from the placement axis, its Arms corner (0.5310, 1.2007) 1.3130 m, its lowest node
+   *  -0.0004 and its PostCap tops 1.3260; `turret_fusion_large.glb`'s Muzzlepoint lands
+   *  1.7573 m out from the socket at (0, 1.8265, -0.4001), and its barrel mesh's maximum
+   *  perpendicular radius (the breech block) is 0.4363. Every constant is rounded outward to
+   *  the millimetre. */
+  function largeShape() {
+    const world = createWorld(flat, 1);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.PlasmaBarrelLarge, team: 2, position: { x: 0, y: 0, z: 0 } },
+    ]);
+    return turretHitShape(world, 0);
+  }
+
+  it('a shot into the pedestal stops at the measured 2.3543 m base-body radius', () => {
+    // BaseMain, the base's widest intact part: a 2.2388 x 2.4822 slab whose far corner is
+    // (1.1194, 2.0712) -> 2.3543 m from the placement axis, carried as 2.355.
+    expect(
+      rayTurretHitShapeDistance({ x: 0, y: 0.5, z: -8 }, { x: 0, y: 0, z: 1 }, largeShape()),
+    ).toBeCloseTo(8 - 2.355, 6);
+  });
+
+  it('a shot over the assembly misses it, where the replaced sphere hit', () => {
+    // Nothing in the intact GLBs reaches the Sleeve's 2.2179 m top in the authored rest pose,
+    // and the barrel capsule's own cap tops out at 1.8427 + 0.4363 = 2.2790. (A barrel pitched
+    // up the mount's 15..140 deg theta band reaches higher -- see TURRET_HIT_SHAPE_DATA's
+    // residual note -- but the sim carries no mount state, so the rest pose is the shape.)
+    // The replaced sphere (centre y +1.3, radius 2) reached y 3.30 and stopped this ray at
+    // z -1.053 instead.
+    expect(
+      rayTurretHitShapeDistance({ x: 0, y: 3, z: -8 }, { x: 0, y: 0, z: 1 }, largeShape()),
+    ).toBeNull();
+  });
+
+  it('a shot beside the barrel at barrel height misses, where the replaced sphere hit', () => {
+    // x 1.5 at y 1.83: the head column's 1.314 m measured radius ends before it, and the
+    // pedestal only reaches y 1.327. The replaced sphere's reach at y 1.83 was
+    // sqrt(2^2 - 0.53^2) = 1.928 m, so it blocked this shot 0.5 m clear of any geometry.
+    expect(
+      rayTurretHitShapeDistance({ x: 1.5, y: 1.83, z: -8 }, { x: 0, y: 0, z: 1 }, largeShape()),
+    ).toBeNull();
+  });
+
+  it('a shot into the barrel registers a hit on the barrel capsule', () => {
+    // Down the barrel's own axis from +z: the muzzle marker sits at z 1.3571, so the capsule's
+    // front cap starts at 1.3571 + 0.4363 = 1.7934. The replaced sphere's entry was 1.9234,
+    // 0.13 m in front of the barrel.
+    expect(
+      rayTurretHitShapeDistance({ x: 0, y: 1.8427, z: 8 }, { x: 0, y: 0, z: -1 }, largeShape()),
+    ).toBeCloseTo(8 - 1.7934, 6);
+  });
+
+  it('splash measures to the shape, not to the ground anchor', () => {
+    const shape = largeShape();
+    // A blast 0.5 m past the muzzle cap at barrel height is 0.5 m from the turret, not the
+    // 2.57 m the anchor-based falloff used to read.
+    expect(distanceToTurretHitShape(shape, { x: 0, y: 1.8427, z: 2.2934 })).toBeCloseTo(0.5, 6);
+    expect(distanceToTurretHitShape(shape, { x: 0, y: 0.5, z: 0 })).toBe(0);
+    // Outside the pedestal's own radius, at its widest: 3 m from the axis is 3 - 2.355.
+    expect(distanceToTurretHitShape(shape, { x: 3, y: 0.5, z: 0 })).toBeCloseTo(3 - 2.355, 6);
+  });
+
+  it('repair targeting reads the same shape through its circumscribed sphere', () => {
+    // The bound is the pedestal cylinder's own circumsphere: centre (0 + 1.327 - 0.001)/2 =
+    // 0.663, radius sqrt(2.355^2 + 0.664^2) = 2.4468. The shape's furthest point -- the
+    // muzzle cap at (0, 1.8427, 1.3571 + 0.4363) -- is 2.2349 from that centre, so the sphere
+    // covers every volume, the same way repair.ts's ray-sphere search needs it to.
+    const world = createWorld(flat, 1);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.PlasmaBarrelLarge, team: 2, position: { x: 0, y: 5, z: 0 } },
+    ]);
+    const hitbox = turretHitbox(world, 0);
+    expect(hitbox.center).toEqual({ x: 0, y: 5.663, z: 0 });
+    expect(hitbox.radius).toBeCloseTo(2.4468, 4);
+    expect(hitbox.headY).toBe(Infinity);
+  });
+
+  it('the sentry is one measured cylinder, and a shot over it misses', () => {
+    const world = createWorld(flat, 1);
+    createTurrets(world, [
+      { barrel: TurretBarrelId.SentryTurretBarrel, team: 1, position: { x: 0, y: 0, z: 0 } },
+    ]);
+    const shape = turretHitShape(world, 0);
+    // `turret_sentry.glb` draws the whole sentry: Base's corner (0.4550, -0.4329) is 0.6280 m
+    // from the placement axis, the intact assembly spans y -0.2597..0.3898, and its widest
+    // head part (Body, r 0.4975) turns about a post axis 0.0386 m off the placement axis, so
+    // the one cylinder covers every yaw and no head/barrel volume is needed.
+    expect(shape.data.head).toBeNull();
+    expect(shape.data.barrel).toBeNull();
+    expect(
+      rayTurretHitShapeDistance({ x: 0, y: 0, z: -8 }, { x: 0, y: 0, z: 1 }, shape),
+    ).toBeCloseTo(8 - 0.629, 6);
+    // y 0.5 is above the 0.3898 top; the replaced sphere (centre y -0.07, radius 0.65)
+    // reached y 0.58 and stopped this ray at z -0.312.
+    expect(
+      rayTurretHitShapeDistance({ x: 0, y: 0.5, z: -8 }, { x: 0, y: 0, z: 1 }, shape),
+    ).toBeNull();
   });
 });

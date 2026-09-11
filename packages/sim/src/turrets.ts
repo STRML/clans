@@ -1,4 +1,5 @@
 import { teamHasPower } from './baseObjects.js';
+import type { PlayerHitbox } from './damage.js';
 import { segmentBlockedByInteriors } from './occlusion.js';
 import { sampleTerrain } from './terrain.js';
 import { ProjectileType } from './weapons.js';
@@ -34,7 +35,7 @@ export function hasLineOfSight(world: World, from: Vec3, to: Vec3): boolean {
  *  perception/waypoints and sim/repair.ts depend on exactly those), so the interior/
  *  enemy-force-field half comes from occlusion.ts and the two answers AND together. The
  *  field test runs against the turret's OWN team, so only an opposing field can blind
- *  it, and the turret's own assembly (turretHitbox) is deliberately not part of the
+ *  it, and the turret's own assembly (turretHitShape) is deliberately not part of the
  *  test at all: a sightline grazing the turret's own envelope must still resolve, or no
  *  turret could ever see past its own barrel. */
 function turretCanSee(world: World, eye: Vec3, target: Vec3, team: number): boolean {
@@ -638,19 +639,350 @@ export function stepTurrets(world: World, dt: number): void {
   stepAASeekers(world, dt);
 }
 
-/** Shared collision/repair target around the visible turret, above its placement origin.
- * Large base geometry reaches 2.26 m high; its barrel socket is at 1.83 m.
- * Conservative sphere envelopes approximate the original mounted GLB geometry. */
-export function turretHitbox(world: World, id: number) {
-  const base = id * 3;
-  const sentry = world.turrets.barrel[id] === TurretBarrelId.SentryTurretBarrel;
-  return {
-    center: {
-      x: world.turrets.position[base] ?? 0,
-      y: (world.turrets.position[base + 1] ?? 0) + (sentry ? -0.07 : 1.3),
-      z: world.turrets.position[base + 2] ?? 0,
+// --- Collision shape (issue #54) -------------------------------------------------------------
+
+/** A vertical cylinder on the placement's own axis, in the placement's frame: the pedestal
+ *  and the head column are both solids of revolution, so neither needs a turret yaw the sim
+ *  does not carry. */
+interface TurretHitCylinder {
+  y0: number;
+  y1: number;
+  radius: number;
+}
+
+/** The barrel's own capsule, bored from the mount socket (a) out along the barrel axis to the
+ *  GLB's muzzle marker (b). The one volume that is not a solid of revolution: a barrel is long
+ *  and thin, and a sphere that covered it would have to be as long as the barrel. */
+interface TurretHitCapsule {
+  a: Vec3;
+  b: Vec3;
+  radius: number;
+}
+
+/** Measured shape data for one barrel, shared and frozen: every number below is read from the
+ *  source GLBs (see TURRET_HIT_SHAPE_DATA), never tuned. */
+export interface TurretHitShapeData {
+  pedestal: TurretHitCylinder;
+  /** Head column: the base mesh's arms/sleeve (and the drawn barrel inside them). Null only
+   *  for the pedestal-less sentry, whose whole head fits the pedestal cylinder. */
+  head: TurretHitCylinder | null;
+  /** Null when the barrel's own mesh and muzzle marker already stay inside the head column
+   *  (the AA barrel and the sentry). */
+  barrel: TurretHitCapsule | null;
+  /** The union's circumscribed sphere, for the one consumer that still ray-tests a sphere:
+   *  repair.ts's repair-beam candidate search (see turretHitbox). */
+  bound: { centerY: number; radius: number };
+}
+
+/**
+ * Issue #54: the turret's collision volumes, measured from the source GLBs rather than
+ * approximated. Every volume is a solid of revolution about the placement's own vertical axis
+ * except the barrel capsule, so the shape needs no turret yaw -- and `createTurrets` carries
+ * none: both call sites pass only `{ barrel, team, position }`, and the scene's placement
+ * rotation never reaches the sim (packages/server/src/world.ts and packages/client/src/app.ts
+ * both drop it; the client's call site is out of this task's scope). The residuals that leaves
+ * are measured and listed below rather than papered over with a bigger sphere.
+ *
+ * Measured by reading the JSON chunks of `packages/assets/cache/shapes.vl2/shapes/*.glb`: each
+ * mesh-bearing node's POSITION accessor min/max baked through the node's static transform (the
+ * same JSON-chunk read `packages/assets/src/interiors.ts`'s `extractTriangles` performs,
+ * without decoding the Draco buffers), keeping the intact nodes and dropping the `HULK_*`
+ * wreck variants (`vis_keyframes_visibility` is 0 while intact, 1 once destroyed). All numbers
+ * are metres in the placement's own frame; the bracketed point is the box corner that sets a
+ * radius.
+ *
+ * `turret_base_large.glb` (the pedestal every large barrel mounts on):
+ *   BaseMain     x ±1.1194  y 0.0011..1.2833  z -0.4110..2.0712  -> r 2.3543 [1.1194, 2.0712]
+ *   PostBaseL/R  x ±0.8632  y -0.0004..0.5079  z -1.0651..-0.4019
+ *   PostCapL/R   y 1.2780..1.3260 (the tallest node that does not turn with the head)
+ *   Arms         x ±0.5310  y 0.3544..2.0508  z -0.3740..1.2007  -> r 1.3130 [0.5310, 1.2007]
+ *   Sleeve       x ±0.3819  y 1.4375..2.2179  z -1.0417..0.2566  (intact top 2.2179)
+ *   BaseWingL/R  x 0.4492..1.3162  y -0.0001..1.1802  z 0.5510..2.4015 -> r 2.7385
+ *   Mount0 (the barrel socket) sits at (0, 1.8265, -0.4001); the head's yaw joint (DumTurn)
+ *   sits at (0, 0.7608, 0.6989), so the socket swings on a 1.0994 m radius about it.
+ * `turret_fusion_large.glb`, mounted on that socket (its Mountpoint is at (0, 0.3499, 0)):
+ *   its Muzzlepoint lands at (0, 1.8427, 1.3571), 1.7573 m out along the barrel axis, while the
+ *   intact barrel nodes span -0.5029..0.8937 along that axis with a 0.4363 m maximum
+ *   perpendicular radius (the breech block, Body_ 0.5098 x 0.6951). The remaining 0.86 m to the
+ *   muzzle marker is the source's barrel-extension animation (DumActBarrelExtend) -- i.e. the
+ *   barrel a firing mount draws.
+ * `turret_aa_large.glb` on the same socket: its muzzle marker is only 0.8382 m out, at
+ *   (0, 2.0012, 0.4196), and its whole intact mesh (max radius 0.9353, top 2.1751) is inside
+ *   the head column, so it gets no barrel volume of its own.
+ * `turret_sentry.glb` (barrel 2 draws this GLB whole): Base x -0.3566..0.4550,
+ *   z -0.4329..0.4212 -> r 0.6280, intact y -0.2597..0.3898. Its head turns about a post axis
+ *   0.0386 m off the placement axis and its widest head part (Body, r 0.4975) stays inside that
+ *   radius in every yaw, so one cylinder is its exact shape.
+ *
+ * Measured volume and coverage against the intact node boxes (600k-sample Monte Carlo over the
+ * union AABB; "phantom" is the shape's own volume lying outside every box, "covers" is the
+ * boxes' volume inside the shape):
+ *   large, the replaced sphere (r 2.0 at +1.3):    33.510 m3, 73.1% phantom, covers 80.6%
+ *   large, this shape:                             34.653 m3, 44.4% phantom, covers 95.7%
+ *   sentry, the replaced sphere (r 0.65 at -0.07):   1.150 m3, 86.6% phantom, covers 100%
+ *   sentry, this cylinder:                           0.808 m3, 64.3% phantom, covers 100%
+ * The old sphere reached y 3.30, 1.08 m of phantom above the intact 2.2179 top; this shape's
+ * highest volume is the barrel capsule's muzzle cap at y 2.279. The old sphere stopped at
+ * r 2.0, and so missed the 2.3543 base-body corners and the 2.7385 wing tips entirely.
+ *
+ * Known residuals, both needing scene rotation on the sim store -- a `createTurrets` field no
+ * call site passes today, so they are reported rather than guessed at:
+ *  - The base wings reach r 2.7385, 0.384 m past the pedestal cylinder. The sphere this
+ *    replaces missed them by 0.739 m, so this is still the tighter of the two.
+ *  - The barrel capsule sits in the placement's own frame, so a head yawed away from it (up to
+ *    1.7994 m of socket travel about the joint above) or a barrel pitched anywhere in the
+ *    base's own 15..140 deg theta band can leave it: measured over that whole band about the
+ *    elevation joint (DumElevate, at y 1.8246), the drawn barrel mesh reaches y 2.6402, its
+ *    Muzzlepoint -- the fired extension's tip -- 3.0010, and the horizontal radius grows to
+ *    1.3572. Covering every yaw instead measures r 2.4939 about the placement axis: a cylinder
+ *    over the head's own 0.354..2.218 m band alone is 36.4 m3, more than this entire shape's
+ *    34.653 m3, and it would block shots that visibly pass beside the barrel. The authored
+ *    frame is the pose the client relaxes to (turret-mount.ts's `relaxTowardRest`) and the
+ *    frame every other turret constant in this file already uses.
+ */
+export const TURRET_HIT_SHAPE_DATA: Record<TurretBarrelId, TurretHitShapeData> = {
+  // The pedestal cylinder is BaseMain's circumscribed radius (its widest intact part), rounded
+  // outward a hair to the nearest millimetre; the head column is the Arms/Sleeve span above it.
+  [TurretBarrelId.PlasmaBarrelLarge]: {
+    pedestal: { y0: -0.001, y1: 1.327, radius: 2.355 },
+    head: { y0: 0.354, y1: 2.219, radius: 1.314 },
+    barrel: {
+      a: { x: 0, y: 1.8265, z: -0.4001 },
+      b: { x: 0, y: 1.8427, z: 1.3571 },
+      radius: 0.4363,
     },
-    radius: sentry ? 0.65 : 2,
+    bound: { centerY: 0.663, radius: 2.4468 },
+  },
+  [TurretBarrelId.AABarrelLarge]: {
+    pedestal: { y0: -0.001, y1: 1.327, radius: 2.355 },
+    head: { y0: 0.354, y1: 2.219, radius: 1.314 },
+    barrel: null,
+    bound: { centerY: 0.663, radius: 2.4468 },
+  },
+  [TurretBarrelId.SentryTurretBarrel]: {
+    pedestal: { y0: -0.26, y1: 0.39, radius: 0.629 },
+    head: null,
+    barrel: null,
+    bound: { centerY: 0.065, radius: 0.7079 },
+  },
+};
+
+/** A turret's collision shape in world space: the placement origin every local volume in
+ *  `data` is offset by. `data` is the shared frozen table above, so a lookup costs one small
+ *  object per turret per hit test rather than one per volume. */
+export interface TurretHitShape {
+  x: number;
+  y: number;
+  z: number;
+  data: TurretHitShapeData;
+}
+
+export function turretHitShape(world: World, id: number): TurretHitShape {
+  const base = id * 3;
+  return {
+    x: world.turrets.position[base] ?? 0,
+    y: world.turrets.position[base + 1] ?? 0,
+    z: world.turrets.position[base + 2] ?? 0,
+    data: TURRET_HIT_SHAPE_DATA[world.turrets.barrel[id] as TurretBarrelId],
+  };
+}
+
+/** Entry distance of the unit-direction ray `origin + t * dir` into one vertical cylinder, or
+ *  null when it misses or only meets it behind the origin. Standard slab/interval test: the
+ *  entry is the later of the two axes' entries and must not be past the earlier of the exits,
+ *  which also makes an origin already inside it resolve to 0 rather than a negative root. */
+function rayCylinderDistance(
+  lx: number,
+  ly: number,
+  lz: number,
+  dir: Vec3,
+  cylinder: TurretHitCylinder,
+): number | null {
+  let enter = -Infinity;
+  let exit = Infinity;
+  if (dir.y === 0) {
+    if (ly < cylinder.y0 || ly > cylinder.y1) return null;
+  } else {
+    const a = (cylinder.y0 - ly) / dir.y;
+    const b = (cylinder.y1 - ly) / dir.y;
+    enter = Math.min(a, b);
+    exit = Math.max(a, b);
+  }
+  const a2 = dir.x * dir.x + dir.z * dir.z;
+  const b2 = lx * dir.x + lz * dir.z;
+  const c2 = lx * lx + lz * lz - cylinder.radius * cylinder.radius;
+  const discriminant = b2 * b2 - a2 * c2;
+  if (discriminant < 0) return null;
+  if (a2 === 0) {
+    if (c2 > 0) return null;
+  } else {
+    const root = Math.sqrt(discriminant);
+    enter = Math.max(enter, (-b2 - root) / a2);
+    exit = Math.min(exit, (-b2 + root) / a2);
+  }
+  return enter > exit ? null : Math.max(0, enter);
+}
+
+/** Closest distance from (px, py, pz) to the segment a..b -- shared by the capsule's own
+ *  containment test and its point distance, so the two can never disagree. */
+function distanceToSegment(px: number, py: number, pz: number, a: Vec3, b: Vec3): number {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const abz = b.z - a.z;
+  const length2 = abx * abx + aby * aby + abz * abz;
+  const axial = (px - a.x) * abx + (py - a.y) * aby + (pz - a.z) * abz;
+  const t = length2 === 0 ? 0 : Math.max(0, Math.min(1, axial / length2));
+  return Math.hypot(px - a.x - abx * t, py - a.y - aby * t, pz - a.z - abz * t);
+}
+
+/** The scalar twin of damage.ts's `raySphereDistance`: the same "an origin inside counts as a
+ *  hit at 0, a sphere entirely behind the origin does not" contract, without allocating a
+ *  PlayerHitbox for every end cap of every barrel on every projectile tick. */
+function raySphereEntry(
+  lx: number,
+  ly: number,
+  lz: number,
+  dir: Vec3,
+  center: Vec3,
+  radius: number,
+): number | null {
+  const px = lx - center.x;
+  const py = ly - center.y;
+  const pz = lz - center.z;
+  const b = px * dir.x + py * dir.y + pz * dir.z;
+  const c = px * px + py * py + pz * pz - radius * radius;
+  const discriminant = b * b - c; // `dir` is unit length, so the quadratic's a term is 1.
+  if (discriminant < 0) return null;
+  if (c <= 0) return 0;
+  const t = -b - Math.sqrt(discriminant);
+  return t >= 0 ? t : null;
+}
+
+/** Entry distance of the ray into the capsule's straight side: the infinite cylinder about
+ *  the segment's axis, clamped to the segment's own span `0..length`. Split out of
+ *  `rayCapsuleDistance` to keep both under this file's complexity budget. */
+function capsuleSideEntry(
+  lx: number,
+  ly: number,
+  lz: number,
+  dir: Vec3,
+  capsule: TurretHitCapsule,
+  length: number,
+): number | null {
+  const ox = lx - capsule.a.x;
+  const oy = ly - capsule.a.y;
+  const oz = lz - capsule.a.z;
+  const ux = (capsule.b.x - capsule.a.x) / length;
+  const uy = (capsule.b.y - capsule.a.y) / length;
+  const uz = (capsule.b.z - capsule.a.z) / length;
+  const axial = ox * ux + oy * uy + oz * uz;
+  const px = ox - axial * ux;
+  const py = oy - axial * uy;
+  const pz = oz - axial * uz;
+  const along = dir.x * ux + dir.y * uy + dir.z * uz;
+  const qx = dir.x - along * ux;
+  const qy = dir.y - along * uy;
+  const qz = dir.z - along * uz;
+  const a2 = qx * qx + qy * qy + qz * qz;
+  if (a2 === 0) return null;
+  const b2 = px * qx + py * qy + pz * qz;
+  const c2 = px * px + py * py + pz * pz - capsule.radius * capsule.radius;
+  const discriminant = b2 * b2 - a2 * c2;
+  if (discriminant < 0) return null;
+  const t = (-b2 - Math.sqrt(discriminant)) / a2;
+  const hitAxial = axial + t * along;
+  if (t < 0 || hitAxial < 0 || hitAxial > length) return null;
+  return t;
+}
+
+/** Entry distance of the ray into the barrel capsule, or null. The side comes from the
+ *  segment's own cylinder and each cap from the sphere at its end; the earliest non-negative
+ *  of the three is the entry. */
+function rayCapsuleDistance(
+  lx: number,
+  ly: number,
+  lz: number,
+  dir: Vec3,
+  capsule: TurretHitCapsule,
+): number | null {
+  if (distanceToSegment(lx, ly, lz, capsule.a, capsule.b) <= capsule.radius) return 0;
+  const entryA = raySphereEntry(lx, ly, lz, dir, capsule.a, capsule.radius);
+  const entryB = raySphereEntry(lx, ly, lz, dir, capsule.b, capsule.radius);
+  const nearest = minEntry(entryA, entryB);
+  const length = Math.hypot(
+    capsule.b.x - capsule.a.x,
+    capsule.b.y - capsule.a.y,
+    capsule.b.z - capsule.a.z,
+  );
+  if (length === 0) return nearest;
+  return minEntry(nearest, capsuleSideEntry(lx, ly, lz, dir, capsule, length));
+}
+
+function minEntry(a: number | null, b: number | null): number | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.min(a, b);
+}
+
+/** Nearest entry distance of a unit-direction ray into a turret's shape, or null when it
+ *  misses every volume. Shared by the live shot test and the lag-comp recheck (both go through
+ *  projectiles.ts's `nearestStructureHitFrom`), so a hit that resolves live resolves the same
+ *  way when it is re-run against a rewound segment. */
+export function rayTurretHitShapeDistance(
+  origin: Vec3,
+  dir: Vec3,
+  shape: TurretHitShape,
+): number | null {
+  const lx = origin.x - shape.x;
+  const ly = origin.y - shape.y;
+  const lz = origin.z - shape.z;
+  let nearest = rayCylinderDistance(lx, ly, lz, dir, shape.data.pedestal);
+  const head = shape.data.head;
+  const barrel = shape.data.barrel;
+  if (head) nearest = minEntry(nearest, rayCylinderDistance(lx, ly, lz, dir, head));
+  if (barrel) nearest = minEntry(nearest, rayCapsuleDistance(lx, ly, lz, dir, barrel));
+  return nearest;
+}
+
+function distanceToCylinder(
+  lx: number,
+  ly: number,
+  lz: number,
+  cylinder: TurretHitCylinder,
+): number {
+  const radial = Math.max(0, Math.hypot(lx, lz) - cylinder.radius);
+  const vertical = Math.max(0, cylinder.y0 - ly, ly - cylinder.y1);
+  return Math.hypot(radial, vertical);
+}
+
+/** Distance from `point` to the shape's nearest surface, 0 when inside: what splash damage
+ *  measures its falloff against, so a blast landing on the barrel is as close to the turret as
+ *  it looks. */
+export function distanceToTurretHitShape(shape: TurretHitShape, point: Vec3): number {
+  const lx = point.x - shape.x;
+  const ly = point.y - shape.y;
+  const lz = point.z - shape.z;
+  let nearest = distanceToCylinder(lx, ly, lz, shape.data.pedestal);
+  const head = shape.data.head;
+  const barrel = shape.data.barrel;
+  if (head) nearest = Math.min(nearest, distanceToCylinder(lx, ly, lz, head));
+  if (barrel)
+    nearest = Math.min(nearest, distanceToSegment(lx, ly, lz, barrel.a, barrel.b) - barrel.radius);
+  return Math.max(0, nearest);
+}
+
+/** Shared collision/repair target around the visible turret: the circumscribed sphere of
+ *  `turretHitShape`'s own volumes, so repair targeting reads the same measured geometry the
+ *  projectile and splash tests do. A sphere rather than the cylinders because repair.ts tests
+ *  candidates with `raySphereDistance`; converting its turret search to the shape's own ray
+ *  test is a change inside that file, which this task froze. The sphere bounds exactly the
+ *  same volumes, so it can never select a turret the shape does not cover, and the terrain/
+ *  interior gate above it (`hasRepairLineOfSight`) is unchanged. */
+export function turretHitbox(world: World, id: number): PlayerHitbox {
+  const shape = turretHitShape(world, id);
+  return {
+    center: { x: shape.x, y: shape.y + shape.data.bound.centerY, z: shape.z },
+    radius: shape.data.bound.radius,
     headY: Infinity,
   };
 }

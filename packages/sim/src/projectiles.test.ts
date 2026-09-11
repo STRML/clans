@@ -13,7 +13,13 @@ import {
   type InteriorPlacement,
   type InteriorTriangles,
 } from './interiors.js';
-import { ProjectileImpactReason, addPlayer, createWorld, type Heightfield } from './index.js';
+import {
+  ProjectileImpactReason,
+  addPlayer,
+  createWorld,
+  type Heightfield,
+  type World,
+} from './index.js';
 import {
   createTurrets,
   stepTurretPower,
@@ -363,10 +369,11 @@ describe('Laser Rifle: intact base objects/turrets occlude, live and lag-comp al
     fire(world, { ...laserEvent, playerId: shooter });
     stepProjectiles(world, FIXED_DT);
     expect(world.players.damage[target]).toBe(0);
-    // turretHitbox centers the plasma assembly 1.3 m above its placement with a 2 m
-    // radius: the ray at muzzle height 1.6 passes 0.3 m off that center, so the sphere
-    // entry sits at z = 5 - sqrt(2^2 - 0.3^2).
-    expect(world.lastFireEvents[0]?.beamEnd?.z).toBeCloseTo(5 - Math.sqrt(4 - 0.09), 3);
+    // Issue #54: the beam stops on the turret's measured head column, not on a sphere. The
+    // ray at muzzle height 1.6 enters the Arms/Sleeve cylinder (radius 1.3130 measured from
+    // the placement axis, carried as 1.314) at z = 5 - 1.314; the pedestal below it only
+    // reaches y 1.327, and the barrel capsule's own entry is 4.169 m out, further along.
+    expect(world.lastFireEvents[0]?.beamEnd?.z).toBeCloseTo(5 - 1.314, 3);
   });
 
   it('closest obstruction wins: a nearer interior wall stops the beam before the generator behind it', () => {
@@ -883,6 +890,75 @@ describe('projectiles vs turrets', () => {
   });
 });
 
+describe('issue #54: turret impacts resolve against the measured assembly, not a sphere', () => {
+  /** A large (plasma) barrel on flat ground at z = 0, the frame turrets.ts's measured
+   *  constants are quoted in. */
+  function plasmaTurret(world: World): void {
+    createTurrets(world, [
+      { barrel: TurretBarrelId.PlasmaBarrelLarge, team: 2, position: { x: 0, y: 0, z: 0 } },
+    ]);
+  }
+
+  it('a shot over the turret reaches the player behind it, where the old sphere stopped it', () => {
+    const world = createWorld(flat, 1);
+    plasmaTurret(world);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: -8 }, 1);
+    // Hitbox centre y = 1.25 + LIGHT_ARMOR's 1.15, so the beam at y 2.4 crosses the target
+    // dead centre -- 5 m of clear air above the turret's measured rest-pose top (2.2179 m) and
+    // the barrel capsule's 2.2790 m muzzle cap. The sphere this replaces (centre y +1.3,
+    // radius 2) reached y 3.30 and stopped the beam at z 3.947, so the target was never hit.
+    const target = addPlayer(world, { x: 0, y: 1.25, z: 10 }, 2);
+    fire(world, {
+      playerId: shooter,
+      weaponId: WeaponId.LaserRifle,
+      origin: { x: 0, y: 2.4, z: -8 },
+      direction: { x: 0, y: 0, z: 1 },
+    });
+    stepProjectiles(world, FIXED_DT);
+    expect(world.lastFireEvents[0]?.hitPlayerId).toBe(target);
+    expect(world.players.damage[target]).toBeGreaterThan(0);
+    expect(world.turrets.energy[0]).toBe(TURRET_BASE_DATA[TurretBaseId.Large].maxEnergy);
+  });
+
+  it('a shot into the barrel registers a hit on the barrel itself', () => {
+    const world = createWorld(flat, 1);
+    plasmaTurret(world);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 8 }, 1);
+    // Down the barrel's own axis: `turret_fusion_large.glb`'s Muzzlepoint sits 1.3571 m out
+    // from the socket at (0, 1.8265, -0.4001) and the intact barrel mesh's maximum
+    // perpendicular radius is 0.4363, so the shot comes to rest at the barrel's tip,
+    // z = 1.3571 + 0.4363 = 1.7934. The replaced sphere's entry was 1.9234, 0.13 m of empty
+    // air in front of the barrel.
+    fire(world, {
+      playerId: shooter,
+      weaponId: WeaponId.Chaingun,
+      origin: { x: 0, y: 1.8427, z: 8 },
+      direction: { x: 0, y: 0, z: -1 },
+    });
+    stepProjectiles(world, FIXED_DT);
+    expect(world.projectiles.lastImpacts[0]?.z).toBeCloseTo(1.7934, 3);
+    expect(world.turrets.energy[0]).toBeLessThan(TURRET_BASE_DATA[TurretBaseId.Large].maxEnergy);
+  });
+
+  it('a Spinfusor landing on the barrel reads point-blank falloff, not the anchor distance', () => {
+    const world = createWorld(flat, 1);
+    plasmaTurret(world);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 8 }, 1);
+    fire(world, {
+      playerId: shooter,
+      weaponId: WeaponId.Spinfusor,
+      origin: { x: 0, y: 1.8427, z: 8 },
+      direction: { x: 0, y: 0, z: -1 },
+    });
+    for (let tick = 0; tick < 4; tick += 1) stepProjectiles(world, FIXED_DT);
+    // The disc detonates on the barrel, i.e. 0 m from the shape, so all of the Spinfusor's
+    // 0.5 radiusDamage lands: shield energy 150 - 0.5 * Large's 50 energyPerDamagePoint = 125.
+    // The old distance-from-the-ground-anchor falloff read that blast as
+    // hypot(1.8427, 1.7934) = 2.571 m away and landed only 0.329 of it (energy 133.5).
+    expect(world.turrets.energy[0]).toBeCloseTo(125, 3);
+  });
+});
+
 describe('turret-fired shots become real, damaging projectiles', () => {
   it('a turret shot spawned this tick damages the target player on a later tick', () => {
     const world = createWorld(flat, 1);
@@ -1040,11 +1116,16 @@ describe('the Shrike blaster becomes a real, damaging projectile', () => {
       { barrel: TurretBarrelId.PlasmaBarrelLarge, team: 2, position: { x: 0, y: 0, z: 10 } },
     ]);
     const energy = world.turrets.energy[0]!;
-    fireVehicle(world, { origin: { x: 0, y: 2.4, z: 0 } });
+    // Issue #54: the shot flies at the barrel's own measured axis, 1.8427 m above the
+    // placement (turret_fusion_large.glb's Muzzlepoint height). It used to fly at 2.4, which
+    // only the replaced sphere (centre +1.3, radius 2, top 3.3) covered -- the measured
+    // assembly tops out at 2.2179 and the barrel capsule's muzzle cap at 2.2790, so 2.4 is
+    // empty air a shot now flies through.
+    fireVehicle(world, { origin: { x: 0, y: 1.8427, z: 0 } });
     stepProjectiles(world, FIXED_DT);
     expect(world.turrets.energy[0]).toBeLessThan(energy);
     world.turrets.energy[0] = 0;
-    fireVehicle(world, { origin: { x: 0, y: 2.4, z: 0 } });
+    fireVehicle(world, { origin: { x: 0, y: 1.8427, z: 0 } });
     stepProjectiles(world, FIXED_DT);
     expect(world.turrets.damage[0]).toBeCloseTo(SHRIKE_BLASTER_DATA.directDamage);
   });
