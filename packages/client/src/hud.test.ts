@@ -11,7 +11,13 @@ import {
   WeaponId,
   type Heightfield,
 } from '@clans/sim';
-import { carriedWeaponSlots, describeHud, describeKillFeed, type HudSource } from './hud.js';
+import {
+  carriedWeaponSlots,
+  describeHud,
+  describeKillFeed,
+  packIconSrc,
+  type HudSource,
+} from './hud.js';
 import { EventKind, type EventMessage, type FlagSnapshotData } from '@clans/protocol';
 
 const flat: Heightfield = {
@@ -199,6 +205,19 @@ describe('describeHud', () => {
       source.world.players.hasEnergyPack[source.playerId] = 0;
       source.world.players.hasRepairPack[source.playerId] = 1;
       expect(rowsOf(source)['hud-pack']).toBe('Repair Pack');
+    });
+
+    it('resolves the pack cell to the original bitmap for each pack, and to none without one', () => {
+      // The rack cell grounds its <img> on these paths; the Repair Pack's bitmap was missing
+      // from packages/assets/src/gui-sources.ts, which is why its cell showed text instead.
+      const source = baseSource();
+      expect(packIconSrc(source)).toBeNull();
+      source.world.players.hasEnergyPack[source.playerId] = 1;
+      expect(packIconSrc(source)).toBe('/katabatic/gui/hud_new_packenergy.png');
+      // The station replaces the whole pack, so Repair arrives as Energy leaves.
+      source.world.players.hasEnergyPack[source.playerId] = 0;
+      source.world.players.hasRepairPack[source.playerId] = 1;
+      expect(packIconSrc(source)).toBe('/katabatic/gui/hud_new_packrepair.png');
     });
 
     it('expands a zero carriedWeapons mask (no station visit) to the full armor-allowed set', () => {

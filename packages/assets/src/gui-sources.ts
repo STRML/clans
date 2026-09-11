@@ -15,6 +15,7 @@ export const GUI_SOURCE_FILES = [
   'hud_new_sniper.png',
   'hud_new_blaster.png',
   'hud_new_packenergy.png',
+  'hud_new_packrepair.png',
   'RET_disc.png',
   'RET_chaingun.png',
   'RET_mortor.png',

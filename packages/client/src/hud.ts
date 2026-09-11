@@ -229,17 +229,28 @@ function updateRack(items: HTMLElement[], source: HudSource, packCell: HTMLEleme
   }
 }
 
-/** The rack's pack cell (#55): the original Energy Pack bitmap for Energy, a text cell for
- *  Repair (hud_new_packrepair.png exists in the source mirror but is NOT in the committed
- *  gui-sources set, so there is no fetched bitmap to ground an <img> on), and hidden when
- *  no pack is carried. */
+/** The pack cell's bitmap (#55): the original T2 art for whichever pack a station visit
+ *  granted -- hud_new_packenergy.png or hud_new_packrepair.png, both committed in
+ *  packages/assets/src/gui-sources.ts -- or null when the player carries no pack. The only
+ *  carried PackId values are Repair and Energy (baseObjects.ts's applyLoadoutSelection
+ *  replaces the whole pack on every station visit), so every state the cell can show has
+ *  committed art. */
+export function packIconSrc(source: HudSource): string | null {
+  const players = source.world.players;
+  if (players.hasEnergyPack[source.playerId]) return assetUrl('gui/hud_new_packenergy.png');
+  if (players.hasRepairPack[source.playerId]) return assetUrl('gui/hud_new_packrepair.png');
+  return null;
+}
+
+/** The rack's pack cell (#55): the same icon-plus-label shape as the weapon cells, with the
+ *  label kept as the text fallback for a pack that has no committed bitmap (none today) and
+ *  the whole cell hidden when no pack is carried. */
 function createPackCell(rack: HTMLElement): HTMLElement {
   const item = document.createElement('div');
   item.className = 'hud-weapon-slot hud-pack-slot';
   item.title = 'Pack';
   const icon = document.createElement('img');
   icon.className = 'pack-icon';
-  icon.src = assetUrl('gui/hud_new_packenergy.png');
   icon.alt = '';
   const label = document.createElement('span');
   item.append(icon, label);
@@ -251,9 +262,9 @@ function syncPackCell(cell: HTMLElement, source: HudSource): void {
   const players = source.world.players;
   const energy = players.hasEnergyPack[source.playerId] !== 0;
   const repair = players.hasRepairPack[source.playerId] !== 0;
-  cell.hidden = !energy && !repair;
-  (cell.querySelector('.pack-icon') as HTMLImageElement).style.display = energy ? '' : 'none';
-  cell.lastElementChild!.textContent = repair ? 'R' : '';
+  const src = packIconSrc(source);
+  cell.hidden = src === null;
+  if (src !== null) (cell.querySelector('.pack-icon') as HTMLImageElement).src = src;
   cell.setAttribute('aria-label', energy ? 'Energy Pack' : repair ? 'Repair Pack' : 'No pack');
 }
 
