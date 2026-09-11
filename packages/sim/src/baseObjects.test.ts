@@ -7,7 +7,7 @@ import {
   stepWorld,
   type Heightfield,
 } from './index.js';
-import { ArmorId, HEAVY_ARMOR, MEDIUM_ARMOR } from './armor.js';
+import { ArmorId, ARMORS, HEAVY_ARMOR, MEDIUM_ARMOR } from './armor.js';
 import { WeaponId, ammoIndex, respawnPlayer } from './weapons.js';
 import { raycastInteriors } from './interiors.js';
 import {
@@ -17,7 +17,9 @@ import {
   allowedWeaponMask,
   BASE_OBJECT_DATA,
   BaseObjectKind,
+  clampWeaponMask,
   createBaseObjects,
+  defaultWeaponMask,
   ENERGY_PACK_RECHARGE_BONUS,
   PackId,
   STATION_USE_RADIUS,
@@ -287,12 +289,79 @@ describe('applyLoadoutSelection (#55)', () => {
     const world = createWorld(flat, 1);
     twoGeneratorsOneStation(world);
     const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
-    const lightMask = 0b11111;
-    expect(applyLoadoutSelection(world, player, ArmorId.Light, PackId.None, lightMask)).toBe(true);
-    // Mortar bit (1 << 2) sanitized away; everything Light allows survives.
-    expect(world.players.carriedWeapons[player]).toBe(lightMask & allowedWeaponMask(LIGHT_ARMOR));
+    // Spinfusor + Chaingun + Mortar: three picks, so the weapon CAP (below) is not what
+    // narrows this one -- the armor's per-weapon allowance is.
+    expect(applyLoadoutSelection(world, player, ArmorId.Light, PackId.None, 0b00111)).toBe(true);
+    // Mortar bit (1 << WeaponId.Mortar) sanitized away; everything Light allows survives.
+    expect(world.players.carriedWeapons[player]).toBe(
+      (1 << WeaponId.Spinfusor) | (1 << WeaponId.Chaingun),
+    );
     expect(world.players.ammo[ammoIndex(player, WeaponId.Mortar)]).toBe(0);
     expect(world.players.ammo[ammoIndex(player, WeaponId.Spinfusor)]).toBe(LIGHT_ARMOR.discAmmo);
+  });
+
+  it('caps an over-full weapon mask at the armor maxWeapons, keeping the lowest-numbered weapons', () => {
+    // #55 left ArmorData.maxWeapons unconsumed. Source: GameData/base/scripts/player.cs:1391
+    // `maxWeapons = 3; // Max number of different weapons the player can have`, and the
+    // server cuts a client's own submitted favorites down to it (hud.cs:349
+    // `if (%weaponCount < %armor.maxWeapons)`), so the surplus weapons are DROPPED, not the
+    // whole loadout. Light is the only armor in the committed table where a legal selection
+    // can exceed the cap: it allows four weapons (laserRifleAllowed) but has three slots.
+    const world = createWorld(flat, 1);
+    twoGeneratorsOneStation(world);
+    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
+    // Every bit at once: four survive sanitization (Mortar disallowed), three fit the cap.
+    expect(applyLoadoutSelection(world, player, ArmorId.Light, PackId.None, 0b11111)).toBe(true);
+    // Spinfusor (0) + Chaingun (1) + Laser Rifle (3); Blaster (4) is the surplus pick.
+    expect(world.players.carriedWeapons[player]).toBe(0b01011);
+    expect(world.players.carriedWeapons[player]).toBe(defaultWeaponMask(LIGHT_ARMOR));
+    expect(world.players.ammo[ammoIndex(player, WeaponId.Blaster)]).toBe(0);
+    expect(world.players.ammo[ammoIndex(player, WeaponId.Chaingun)]).toBe(LIGHT_ARMOR.chaingunAmmo);
+    // The cap narrows the weapon set only: the visit still applies armor and pack.
+    expect(world.players.armor[player]).toBe(ArmorId.Light);
+    expect(world.players.hasRepairPack[player]).toBe(0);
+  });
+
+  it('accepts a loadout at exactly the cap unchanged', () => {
+    const world = createWorld(flat, 1);
+    twoGeneratorsOneStation(world);
+    const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
+    // A Light's three slots filled with a non-default set: Spinfusor + Chaingun + Blaster
+    // (bits 0,1,4) must survive bit for bit -- the cap drops picks, it never reorders them.
+    expect(applyLoadoutSelection(world, player, ArmorId.Light, PackId.None, 0b10011)).toBe(true);
+    expect(world.players.carriedWeapons[player]).toBe(0b10011);
+    // A Heavy can hold its whole four-weapon allowed set (4 <= maxWeapons 5).
+    const heavyWorld = createWorld(flat, 1);
+    twoGeneratorsOneStation(heavyWorld);
+    const heavy = addPlayer(heavyWorld, { x: 10, y: 0, z: 0 }, 1);
+    const heavyMask = allowedWeaponMask(HEAVY_ARMOR);
+    expect(applyLoadoutSelection(heavyWorld, heavy, ArmorId.Heavy, PackId.None, heavyMask)).toBe(
+      true,
+    );
+    expect(heavyWorld.players.carriedWeapons[heavy]).toBe(heavyMask);
+  });
+
+  it('every armor default loadout fits its own weapon cap', () => {
+    // The mask-0 sentinel's set is the armor's own default loadout; #55 granted the FULL
+    // allowed set, which for Light is four weapons against maxWeapons 3.
+    expect(defaultWeaponMask(LIGHT_ARMOR)).toBe(0b01011);
+    expect(defaultWeaponMask(MEDIUM_ARMOR)).toBe(0b10011);
+    expect(defaultWeaponMask(HEAVY_ARMOR)).toBe(0b10111);
+    for (const armor of [ArmorId.Light, ArmorId.Medium, ArmorId.Heavy]) {
+      const data = ARMORS[armor];
+      const weaponsInDefault = [0, 1, 2, 3, 4].filter(
+        (bit) => defaultWeaponMask(data) & (1 << bit),
+      );
+      expect(weaponsInDefault.length).toBeLessThanOrEqual(data.maxWeapons);
+      expect(weaponsInDefault.length).toBeGreaterThan(0);
+      expect(clampWeaponMask(defaultWeaponMask(data), data)).toBe(defaultWeaponMask(data));
+      // Behavior, not just the helper: an empty request lands on exactly that set.
+      const world = createWorld(flat, 1);
+      twoGeneratorsOneStation(world);
+      const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
+      expect(applyLoadoutSelection(world, player, armor, PackId.None, 0)).toBe(true);
+      expect(world.players.carriedWeapons[player]).toBe(defaultWeaponMask(data));
+    }
   });
 
   it('a narrowed selection persists through respawn and selects a carried weapon slot', () => {
@@ -309,16 +378,21 @@ describe('applyLoadoutSelection (#55)', () => {
     expect(world.players.weaponSlot[player]).toBe(WeaponId.Spinfusor);
   });
 
-  it('an empty weapon mask lands on the armor full allowed set', () => {
+  it('an empty weapon mask lands on the armor defaults, within the armor weapon cap', () => {
     const world = createWorld(flat, 1);
     twoGeneratorsOneStation(world);
     const player = addPlayer(world, { x: 10, y: 0, z: 0 }, 1);
     applyLoadoutSelection(world, player, ArmorId.Light, PackId.None, 0b00001);
     applyLoadoutSelection(world, player, ArmorId.Light, PackId.None, 0);
-    // An empty mask expands to the armor's full ALLOWED set (see applyLoadoutSelection),
-    // so the Chaingun comes back with its armor ammo, explicitly carried.
-    expect(world.players.carriedWeapons[player]).toBe(allowedWeaponMask(LIGHT_ARMOR));
+    // An empty mask expands to the armor's defaults (see applyLoadoutSelection), so the
+    // Chaingun comes back with its armor ammo, explicitly carried. Light's defaults cannot
+    // be its full four-weapon allowed set -- maxWeapons is 3 -- so the last slot's weapon,
+    // the Blaster (bit 4 of 5), is the one the cap drops (player.cs:1391, the station's
+    // three "Weapon Slot" rows).
+    expect(world.players.carriedWeapons[player]).toBe(defaultWeaponMask(LIGHT_ARMOR));
+    expect(world.players.carriedWeapons[player]).toBe(0b01011);
     expect(world.players.ammo[ammoIndex(player, WeaponId.Chaingun)]).toBe(LIGHT_ARMOR.chaingunAmmo);
+    expect(world.players.ammo[ammoIndex(player, WeaponId.Blaster)]).toBe(0);
   });
 
   it('refuses an unknown pack id, an out-of-range armor byte, and keeps the loadout untouched', () => {

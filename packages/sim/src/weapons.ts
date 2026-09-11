@@ -579,9 +579,12 @@ export function stepWeapons(
  * a station-selected weapon set (`carriedWeapons`, written by baseObjects.ts's
  * applyLoadoutSelection), that choice PERSISTS -- the source's inventory station remembers
  * a loadout until the player changes it, so a respawn must not resurrect weapons the
- * player did not select. The mask is sanitized at selection time (only armor-allowed bits
- * can ever be set), so this is a plain subset check, not a re-validation. 0 = armor
- * defaults, exactly the pre-#55 full loadout.
+ * player did not select. The mask is sanitized and capped at selection time
+ * (baseObjects.ts's clampWeaponMask: only armor-allowed bits, at most maxWeapons of them),
+ * so this is a plain subset check, not a re-validation. 0 is NOT a station loadout: it is
+ * the pre-#55 legacy spawn table below (every weapon, with the Laser Rifle's infinite ammo),
+ * which a player who has never visited a station keeps -- baseObjects.ts's defaultWeaponMask
+ * is what an EMPTY station request grants instead.
  */
 export function resetLoadout(world: World, id: number, armor: ArmorData): void {
   const players = world.players;

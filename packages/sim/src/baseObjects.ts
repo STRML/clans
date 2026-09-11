@@ -1,7 +1,7 @@
 import { ARMORS, ArmorId, type ArmorData } from './armor.js';
 import { buildInteriorCollider, type InteriorInstance } from './interiors.js';
 import type { Vec3, World } from './types.js';
-import { resetLoadout, WeaponId } from './weapons.js';
+import { resetLoadout, WEAPON_COUNT, WeaponId } from './weapons.js';
 
 export enum BaseObjectKind {
   Generator = 0,
@@ -313,17 +313,77 @@ export enum PackId {
  */
 export const ENERGY_PACK_RECHARGE_BONUS = 0.15;
 
-/** Bit `1 << WeaponId` for every weapon the armor may carry at all -- the two ArmorData
- *  allowance flags finally get their consumer here (they were data without a reader before
- *  #55): Laser Rifle is light-armor-only, Mortar heavy-only, Spinfusor/Chaingun/Blaster
- *  universal. Deliberately NOT capped by maxWeapons: the committed armor table gives no
- *  rule for how that number would reduce a chosen weapon set (the station lists every
- *  allowed weapon), so enforcing it here would be an invented constraint. */
+/** Bit `1 << WeaponId` for every weapon the armor may put in a station slot -- the two
+ *  ArmorData allowance flags finally get their consumer here (they were data without a
+ *  reader before #55): Laser Rifle is light-armor-only, Mortar heavy-only,
+ *  Spinfusor/Chaingun/Blaster universal.
+ *
+ *  This is the weapon LIST the station offers in each slot (exactly what the source's item
+ *  list is built from, `inventoryHud.cs:154-183`, which skips any weapon whose
+ *  `%armor.max[%WInv]` is 0 at :162 -- the armor's own per-item restrictions at
+ *  `player.cs:1396-1438`), never the carried set: how many of these a player may actually
+ *  carry is `ArmorData.maxWeapons`, enforced by clampWeaponMask. */
 export function allowedWeaponMask(armor: ArmorData): number {
   let mask = (1 << WeaponId.Spinfusor) | (1 << WeaponId.Chaingun) | (1 << WeaponId.Blaster);
   if (armor.laserRifleAllowed) mask |= 1 << WeaponId.LaserRifle;
   if (armor.mortarAllowed) mask |= 1 << WeaponId.Mortar;
   return mask;
+}
+
+/**
+ * Truncates a `1 << WeaponId` station selection to the armor's own weapon-slot count
+ * (`ArmorData.maxWeapons`), keeping the lowest-numbered weapons -- the source station's
+ * "fill the first slots, drop the rest" rule.
+ *
+ * Source (vanilla datablocks and scripts, mirror jdknight/t2ds):
+ * `GameData/base/scripts/player.cs:1391/1645/1895`, the LightMaleHumanArmor /
+ * MediumMaleHumanArmor / HeavyMaleHumanArmor datablocks -- `maxWeapons = 3/4/5; // Max
+ * number of different weapons the player can have`. A client's weapon picks are cut down to
+ * that number on the AUTHORITATIVE side, which is the case this function mirrors:
+ * `GameData/base/scripts/hud.cs:324-392` `serverCmdSetClientFav` walks the client-submitted
+ * favorites string and keeps a weapon entry only while `%weaponCount < %armor.maxWeapons`
+ * (:349) -- the surplus picks never reach `%client.favorites`, so they are dropped rather
+ * than rejected. The station builds exactly that many weapon rows too,
+ * `inventoryHud.cs:254-278` (`for (%x = 0; %x < %armor.maxWeapons; %x++)`, labelled
+ * `"Weapon Slot " @ %x + 1`), and the deployable station's purchase loop stops once the
+ * count reaches the cap, `inventoryHud.cs:507` `if (%weapCount >= %player.getDatablock().
+ * maxWeapons) break;` (the cap+1'th weapon is never set). The cap is not station-only:
+ * Player::pickup refuses a weapon at `player.cs:3029-3033` (`%this.weaponCount >=
+ * %this.getDatablock().maxWeapons` returns 0, so the pick is dropped), corpse looting stops
+ * at the same count (`player.cs:2339`), and the bot loadout gate hard-codes the same 3/4/5
+ * at `aiInventory.cs:485-487`. The engine itself has no `maxWeapons`/`weaponCount` member at
+ * all (no hit in player.h/player.cc/shapeBase.cc/item.cc) -- `weaponCount` is script state
+ * maintained by `Weapon::incCatagory`/`decCatagory` (`weapons.cs:327-339`, which count
+ * every weapon except the TargetingLaser), so the count is enforced here in the sim.
+ */
+export function clampWeaponMask(mask: number, armor: ArmorData): number {
+  let kept = 0;
+  let slots = 0;
+  for (let bit = 0; bit < WEAPON_COUNT && slots < armor.maxWeapons; bit += 1) {
+    if ((mask & (1 << bit)) === 0) continue;
+    kept |= 1 << bit;
+    slots += 1;
+  }
+  return kept;
+}
+
+/**
+ * The masked set a station visit grants when the request names no usable weapon (the wire's
+ * mask-0 "armor defaults" sentinel, see applyLoadoutSelection): every weapon the armor may
+ * carry, reduced to its own maxWeapons slots.
+ *
+ * The scripts ship no default weapon set to copy -- `%client.favorites` is only ever filled
+ * from the client-submitted favorites string (`hud.cs:324-392`), and a grep of the whole
+ * `GameData/base/scripts` tree finds no favorites/loadout initializer -- so the sentinel's
+ * set is bounded by the same cap rule as any other station loadout. Light is the one armor
+ * where the two bounds differ: `laserRifleAllowed` makes four weapons selectable
+ * (Spinfusor, Chaingun, Blaster, Laser Rifle) while `maxWeapons` is 3, so its default set is
+ * the first three in WeaponId order (Spinfusor, Chaingun, Laser Rifle) and the last slot's
+ * weapon, the Blaster at bit 4, is the one that does not fit. Medium (3 selectable / 4
+ * slots) and Heavy (4 selectable / 5 slots) are already under their caps.
+ */
+export function defaultWeaponMask(armor: ArmorData): number {
+  return clampWeaponMask(allowedWeaponMask(armor), armor);
 }
 
 /**
@@ -369,8 +429,9 @@ export function applyBaseObjectSnapshot(
  * outside ARMORS the same way the pre-#55 two-choice loadout request did (Codex round 1, finding
  * 3: reject BEFORE writing, or a thrown half-applied loadout poisons the player).
  * `weapons` is a `1 << WeaponId` bitmask, sanitized against `allowedWeaponMask` for the
- * chosen armor -- a hostile or stale client cannot talk a Light into a Mortar. A mask of 0
- * selects the armor defaults (every allowed weapon, the pre-#55 loadout).
+ * chosen armor and then capped to that armor's `maxWeapons` slots -- a hostile or stale
+ * client cannot talk a Light into a Mortar, nor into more than three weapons. A mask of 0
+ * selects the armor defaults (every weapon the armor may carry, within the cap).
  */
 export function applyLoadoutSelection(
   world: World,
@@ -391,14 +452,21 @@ export function applyLoadoutSelection(
   players.armor[playerId] = armor;
   players.damage[playerId] = 0;
   players.energy[playerId] = data.maxEnergy;
-  // A station visit always lands on an EXPLICIT allowed set: requesting nothing (or only
-  // bits this armor disallows) grants the armor's full allowed set, never an unarmed
-  // loadout and never the pre-#55 legacy table -- whose -1 "infinite" Laser Rifle ammo for
-  // every armor (weapons.ts's resetLoadout defaults) ignored laserRifleAllowed entirely.
-  // Fresh players who never visited a station keep that legacy table; the mask-0
-  // sentinel in carriedWeapons means exactly that state.
-  const carried = weapons & allowedWeaponMask(data);
-  players.carriedWeapons[playerId] = carried === 0 ? allowedWeaponMask(data) : carried;
+  // A station visit always lands on an EXPLICIT allowed set, capped to the armor's own
+  // weapon-slot count: requesting nothing (or only bits this armor disallows) grants the
+  // armor defaults (defaultWeaponMask), never an unarmed loadout and never the pre-#55
+  // legacy table -- whose -1 "infinite" Laser Rifle ammo for every armor (weapons.ts's
+  // resetLoadout defaults) ignored laserRifleAllowed entirely. Fresh players who never
+  // visited a station keep that legacy table; the mask-0 sentinel in carriedWeapons means
+  // exactly that state.
+  // The cap is the sim's own gate on this untrusted mask (baseObjects.ts's clampWeaponMask,
+  // from the scripts' `maxWeapons`): a client asking for more weapons than the armor has
+  // slots gets the first maxWeapons of them (ascending WeaponId, the station's slot order),
+  // exactly like the source server dropping the surplus weapon entries of a client's own
+  // favorites string (hud.cs:349-357) rather than rejecting the whole loadout.
+  const requested = weapons & allowedWeaponMask(data);
+  const carried = requested === 0 ? defaultWeaponMask(data) : clampWeaponMask(requested, data);
+  players.carriedWeapons[playerId] = carried;
   // The station replaces the whole pack (source semantics): exactly one of the two pack
   // bits is ever set, and picking one clears the other.
   players.hasRepairPack[playerId] = pack === PackId.Repair ? 1 : 0;
