@@ -575,6 +575,46 @@ export function stepWeapons(
 }
 
 /**
+ * The pre-#55 legacy spawn table as a `1 << WeaponId` carried set, capped to the armor's own
+ * weapon-slot count (`ArmorData.maxWeapons`).
+ *
+ * Why the table still exists: `carriedWeapons` 0 is the "never visited a station" sentinel
+ * (types.ts), and before #55 every player spawned from the table `resetLoadout` assigns --
+ * every weapon the armor's ammo table makes usable, with the Laser Rifle given -1 (infinite)
+ * ammo for EVERY armor, `laserRifleAllowed` be damned. #55 added the weapon-slot cap on the
+ * station path (baseObjects.ts's clampWeaponMask, from the scripts' `maxWeapons`) but left
+ * this spawn path alone; a Light spawning from the table carried four usable weapons
+ * (Spinfusor, Chaingun, Laser Rifle, Blaster) against `maxWeapons` 3.
+ *
+ * What changed: the same cap now trims the table, so no armor can spawn above its slot
+ * count. The surplus Light weapon is the Blaster -- the last in WeaponId order, and exactly
+ * the bit `defaultWeaponMask` drops from the station's own Light default, which leaves a
+ * Light's spawn loadout identical to what an empty station request grants it. The rest of
+ * the table is untouched: Medium (4 usable / 4 slots) and Heavy (5 / 5) fit and are
+ * unchanged, and the surviving weapons keep their ammo counts, the Laser Rifle's -1
+ * included.
+ *
+ * The "fill the first slots, drop the rest" loop is clampWeaponMask's own rule, inlined
+ * because baseObjects.ts already imports resetLoadout from this module -- importing it back
+ * would close an import cycle.
+ */
+function legacyLoadoutMask(armor: ArmorData): number {
+  let mask = (1 << WeaponId.LaserRifle) | (1 << WeaponId.Blaster);
+  if (armor.discAmmo !== 0) mask |= 1 << WeaponId.Spinfusor;
+  if (armor.chaingunAmmo !== 0) mask |= 1 << WeaponId.Chaingun;
+  if (armor.mortarAmmo !== 0) mask |= 1 << WeaponId.Mortar;
+  let capped = 0;
+  let slots = 0;
+  for (const weapon of ALL_WEAPONS) {
+    if ((mask & (1 << weapon)) === 0) continue;
+    if (slots === armor.maxWeapons) break;
+    capped |= 1 << weapon;
+    slots += 1;
+  }
+  return capped;
+}
+
+/**
  * The loadout a (re)spawn grants, from the armor's own ammo table. #55: if the player has
  * a station-selected weapon set (`carriedWeapons`, written by baseObjects.ts's
  * applyLoadoutSelection), that choice PERSISTS -- the source's inventory station remembers
@@ -582,9 +622,9 @@ export function stepWeapons(
  * player did not select. The mask is sanitized and capped at selection time
  * (baseObjects.ts's clampWeaponMask: only armor-allowed bits, at most maxWeapons of them),
  * so this is a plain subset check, not a re-validation. 0 is NOT a station loadout: it is
- * the pre-#55 legacy spawn table below (every weapon, with the Laser Rifle's infinite ammo),
- * which a player who has never visited a station keeps -- baseObjects.ts's defaultWeaponMask
- * is what an EMPTY station request grants instead.
+ * the pre-#55 legacy spawn table (legacyLoadoutMask), which a player who has never visited a
+ * station keeps -- baseObjects.ts's defaultWeaponMask is what an EMPTY station request
+ * grants instead.
  */
 export function resetLoadout(world: World, id: number, armor: ArmorData): void {
   const players = world.players;
@@ -600,14 +640,18 @@ export function resetLoadout(world: World, id: number, armor: ArmorData): void {
   players.ammo[ammoIndex(id, WeaponId.Blaster)] = -1;
   players.grenades[id] = armor.grenadeCount;
   const carried = players.carriedWeapons[id] ?? 0;
-  if (carried === 0) return;
+  // 0 keeps the legacy table assigned above (legacyLoadoutMask has the why and the #55 cap);
+  // any other value is the player's own station selection, already sanitized and capped.
+  const carriedSet = carried === 0 ? legacyLoadoutMask(armor) : carried;
   for (const weapon of ALL_WEAPONS) {
-    if ((carried & (1 << weapon)) === 0) players.ammo[ammoIndex(id, weapon)] = 0;
+    if ((carriedSet & (1 << weapon)) === 0) players.ammo[ammoIndex(id, weapon)] = 0;
   }
   // Firing from an empty-handed slot is a DryFire click; point the spawn at a weapon the
-  if ((carried & (1 << WeaponId.Blaster)) === 0) {
+  // player actually carries. The capped legacy table needs this as much as a station pick
+  // does: the Blaster assigned above is the slot fixup's fallback, and Light's cap drops it.
+  if ((carriedSet & (1 << WeaponId.Blaster)) === 0) {
     for (const weapon of ALL_WEAPONS) {
-      if ((carried & (1 << weapon)) !== 0) {
+      if ((carriedSet & (1 << weapon)) !== 0) {
         players.weaponSlot[id] = weapon;
         break;
       }

@@ -1289,7 +1289,9 @@ describe('NetClient', () => {
     expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
     expect(client.world.players.ammo[ammoIndex(0, WeaponId.Chaingun)]).toBe(100);
     expect(client.world.players.grenades[0]).toBe(5);
-    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Blaster);
+    // #55 caps Light's spawn loadout at its three slots and drops the Blaster, so the reset
+    // (not the snapshot's own weaponSlot above) is what leaves the Spinfusor equipped.
+    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Spinfusor);
     expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
     expect(client.world.players.weaponTimer[0]).toBe(0);
     expect(client.world.players.respawnAt[0]).toBe(-1);
@@ -1361,7 +1363,9 @@ describe('NetClient', () => {
     expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
     expect(client.world.players.ammo[ammoIndex(0, WeaponId.Chaingun)]).toBe(100);
     expect(client.world.players.grenades[0]).toBe(5);
-    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Blaster);
+    // #55 caps Light's spawn loadout at its three slots and drops the Blaster, so the reset
+    // (not the snapshot's own weaponSlot above) is what leaves the Spinfusor equipped.
+    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Spinfusor);
     expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
     expect(client.world.players.weaponTimer[0]).toBe(0);
     expect(client.world.players.respawnAt[0]).toBe(-1);
@@ -1437,7 +1441,9 @@ describe('NetClient', () => {
     expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
     expect(client.world.players.ammo[ammoIndex(0, WeaponId.Chaingun)]).toBe(100);
     expect(client.world.players.grenades[0]).toBe(5);
-    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Blaster);
+    // #55 caps Light's spawn loadout at its three slots and drops the Blaster, so the reset
+    // (not the snapshot's own weaponSlot above) is what leaves the Spinfusor equipped.
+    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Spinfusor);
     expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
     expect(client.world.players.weaponTimer[0]).toBe(0);
     expect(client.world.players.respawnAt[0]).toBe(-1);
@@ -2011,7 +2017,9 @@ describe('NetClient', () => {
     ]);
 
     expect(client.world.players.ammo[ammoIndex(0, WeaponId.Spinfusor)]).toBe(15);
-    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Blaster);
+    // #55 caps Light's spawn loadout at its three slots and drops the Blaster, so the join
+    // reset leaves the Spinfusor equipped rather than the old Blaster fallback.
+    expect(client.world.players.weaponSlot[0]).toBe(WeaponId.Spinfusor);
     expect(client.world.players.weaponState[0]).toBe(WeaponState.Ready);
     expect(client.world.projectiles.count).toBe(0);
     expect(Array.from(client.world.projectiles.active).every((flag) => flag === 0)).toBe(true);

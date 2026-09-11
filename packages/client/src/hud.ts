@@ -4,8 +4,8 @@ import {
   GameOverReason,
   VEHICLE_DATA,
   WeaponId,
-  allowedWeaponMask,
   ammoIndex,
+  defaultWeaponMask,
   sampleTerrain,
   armorFor,
   VehicleKind,
@@ -199,10 +199,12 @@ function killFeedLine(event: EventMessage): string | null {
 
 /** The weapon slots this player can actually reach: an explicit station selection
  *  (PlayerStore.carriedWeapons, #55) or, when no station visit has ever narrowed it, the
- *  armor's full allowed set -- the same expansion the sim's own resetLoadout applies. */
+ *  armor's own default loadout -- baseObjects.ts's defaultWeaponMask, the clamped set the
+ *  sim's legacy spawn table grants too, so the rack never shows a slot the armor has no room
+ *  for (Light allows four weapons but carries three, inventoryHud.cs:254-279). */
 export function carriedWeaponSlots(world: World, playerId: number): number {
   const stored = world.players.carriedWeapons[playerId] ?? 0;
-  return stored === 0 ? allowedWeaponMask(armorFor(world, playerId)) : stored;
+  return stored === 0 ? defaultWeaponMask(armorFor(world, playerId)) : stored;
 }
 
 function updateRack(items: HTMLElement[], source: HudSource, packCell: HTMLElement): void {

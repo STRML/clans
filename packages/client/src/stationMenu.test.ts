@@ -7,7 +7,14 @@ import {
   LoadoutSelection,
   stationMenuVisible,
 } from './stationMenu.js';
-import { allowedWeaponMask, ArmorId, ARMORS, PackId, WeaponId } from '@clans/sim';
+import {
+  allowedWeaponMask,
+  ArmorId,
+  ARMORS,
+  defaultWeaponMask,
+  PackId,
+  WeaponId,
+} from '@clans/sim';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -100,6 +107,44 @@ describe('LoadoutSelection (#55)', () => {
     expect(selection.confirmable).toBe(true);
   });
 
+  it('refuses a weapon pick once the armor has no slot left, and frees the slot on uncheck', () => {
+    // #55: Light may list four weapons (laserRifleAllowed) but has maxWeapons 3 slots, and
+    // the sim drops a surplus pick on Confirm (baseObjects.ts's clampWeaponMask, from
+    // hud.cs:349). The picker refuses the fourth tick outright -- the source station builds
+    // exactly maxWeapons weapon rows (inventoryHud.cs:254-279), so there is no row for it.
+    const selection = new LoadoutSelection({
+      armor: ArmorId.Light,
+      pack: PackId.None,
+      weapons: defaultWeaponMask(ARMORS[ArmorId.Light]),
+    });
+    expect(selection.isWeaponAllowed(WeaponId.Blaster)).toBe(true);
+    expect(selection.slotCount).toBe(3);
+    expect(selection.slotCapacity).toBe(3);
+
+    selection.toggleWeapon(WeaponId.Blaster);
+    expect(selection.isWeaponSelected(WeaponId.Blaster)).toBe(false);
+    expect(selection.slotCount).toBe(3);
+    expect(selection.choice.weapons).toBe(defaultWeaponMask(ARMORS[ArmorId.Light]));
+
+    selection.toggleWeapon(WeaponId.Spinfusor); // unchecking frees a slot...
+    expect(selection.isWeaponSelected(WeaponId.Spinfusor)).toBe(false);
+    selection.toggleWeapon(WeaponId.Blaster); // ...and the same pick now lands
+    expect(selection.isWeaponSelected(WeaponId.Blaster)).toBe(true);
+    expect(selection.slotCount).toBe(3);
+  });
+
+  it('prefills a stored over-cap set as the capped loadout the sim would apply', () => {
+    // A pre-#55 Light save holds all four allowed weapons; prefill must show what Confirm
+    // actually sends (three), not the stale four.
+    const selection = new LoadoutSelection({
+      armor: ArmorId.Light,
+      pack: PackId.None,
+      weapons: allowedWeaponMask(ARMORS[ArmorId.Light]), // 0b11011
+    });
+    expect(selection.choice.weapons).toBe(defaultWeaponMask(ARMORS[ArmorId.Light]));
+    expect(selection.isWeaponSelected(WeaponId.Blaster)).toBe(false);
+  });
+
   it('ignores weapon toggles the current armor disallows and unknown pack ids', () => {
     const selection = new LoadoutSelection({
       armor: ArmorId.Medium,
@@ -116,15 +161,18 @@ describe('LoadoutSelection (#55)', () => {
 });
 
 describe('currentLoadoutChoice', () => {
-  it('expands a zero carriedWeapons mask (no station visit yet) to the armor defaults', () => {
+  it("expands a zero carriedWeapons mask (no station visit yet) to the armor's clamped defaults", () => {
     const world = createWorld(flat, 1);
     const player = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
     const choice = currentLoadoutChoice(world, player);
+    // The armor's own default set (baseObjects.ts's defaultWeaponMask), not every weapon it
+    // allows: Light lists four weapons but has three slots, and the sim drops the surplus.
     expect(choice).toEqual({
       armor: ArmorId.Light,
       pack: PackId.None,
-      weapons: allowedWeaponMask(ARMORS[ArmorId.Light]),
+      weapons: defaultWeaponMask(ARMORS[ArmorId.Light]),
     });
+    expect(choice.weapons).toBe(0b01011); // Spinfusor + Chaingun + Laser Rifle, no Blaster
   });
 
   it('reads back a stored station loadout, pack included', () => {

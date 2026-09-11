@@ -82,8 +82,10 @@ export interface PlayerStore {
    *  "server-authoritative, client-predicted" class as armor itself. */
   hasEnergyPack: Uint8Array;
   /** Bitmask of the weapon set a station visit granted (bit `1 << WeaponId`), 0 = "no
-   *  explicit selection: armor defaults" (every armor-allowed weapon, the pre-#55
-   *  behavior). Written by applyLoadoutSelection and read by resetLoadout so the choice
+   *  station visit yet": the pre-#55 legacy spawn table, which weapons.ts's resetLoadout
+   *  caps at the armor's own `maxWeapons` exactly as it caps a station selection (a Light
+   *  never carries more than the three weapons baseObjects.ts's defaultWeaponMask grants an
+   *  empty request). Written by applyLoadoutSelection and read by resetLoadout so the choice
    *  PERSISTS across respawns -- the source's inventory station remembers your loadout
    *  until you change it; without this, weapons.ts's respawn-time resetLoadout would
    *  silently resurrect every weapon the player did not select. */
@@ -185,11 +187,11 @@ export interface ProjectileStore {
   team: Uint8Array;
   /** -1 for a player-fired shot; the firing turret's own id for a turret-fired one. A turret
    *  shot spawns at its own turret's exact position, which sits inside that same turret's own
-   *  TURRET_HIT_RADIUS hit-sphere — without this, the shot's very first hit-test would
-   *  register an immediate self-hit at distance 0 (`raySphereDistance`'s "origin already
-   *  inside the sphere" case) and detonate against the turret that just fired it, never
-   *  reaching its actual target. Mirrors how a player-fired shot already excludes its own
-   *  shooter via `ownerId`/`isValidTarget` — see `nearestStructureHitFrom`. */
+   *  collision shape (turrets.ts's `turretHitShape`, whose pedestal volume starts at the
+   *  placement origin) — without this, the shot's very first hit-test would register an
+   *  immediate self-hit at distance 0 and detonate against the turret that just fired it,
+   *  never reaching its actual target. Mirrors how a player-fired shot already excludes its
+   *  own shooter via `ownerId`/`isValidTarget` — see `nearestStructureHitFrom`. */
   sourceTurretId: Int16Array;
   /** -1 for every non-vehicle-fired shot; the firing vehicle's own id for a Shrike blaster
    *  shot. Same self-hit-exclusion reason as sourceTurretId (M4): the shot spawns at its own

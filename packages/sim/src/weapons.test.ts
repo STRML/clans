@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { LIGHT_ARMOR } from './armor.js';
-import { addPlayer, createWorld, type Heightfield, type PlayerInput } from './index.js';
+import { ArmorId, HEAVY_ARMOR, LIGHT_ARMOR } from './armor.js';
+import {
+  addPlayer,
+  createWorld,
+  defaultWeaponMask,
+  type Heightfield,
+  type PlayerInput,
+  type World,
+} from './index.js';
 import { PROJECTILE_CAPACITY, stepProjectiles } from './projectiles.js';
 import {
   ammoIndex,
@@ -178,6 +185,10 @@ describe('stepWeapons: Blaster held-trigger cadence', () => {
     const world = createWorld(flat, 1);
     const id = addPlayer(world, { x: 0, y: 0, z: 0 });
     world.players.weaponSlot[id] = WeaponId.Blaster;
+    // #55 caps a fresh Light's legacy spawn table at three slots, which drops the Blaster,
+    // so this test grants the infinite ammo itself -- the subject here is the Blaster's
+    // trigger cadence, not which loadout carries one.
+    world.players.ammo[ammoIndex(id, WeaponId.Blaster)] = -1;
     const held = new Map([[id, { ...IDLE, fire: true }]]);
     let shots = 0;
 
@@ -318,7 +329,60 @@ describe('respawnPlayer resets the loadout', () => {
     respawnPlayer(world, id, { x: 0, y: 0, z: 0 });
     expect(world.players.ammo[ammoIndex(id, WeaponId.Spinfusor)]).toBe(LIGHT_ARMOR.discAmmo);
     expect(world.players.grenades[id]).toBe(LIGHT_ARMOR.grenadeCount);
-    expect(world.players.weaponSlot[id]).toBe(WeaponId.Blaster);
+    // Blaster is the pre-fixup default, but Light's capped legacy table (#55) leaves it at 0
+    // ammo, so the spawn points at the first weapon that table does grant.
+    expect(world.players.weaponSlot[id]).toBe(WeaponId.Spinfusor);
     expect(world.players.weaponState[id]).toBe(WeaponState.Ready);
+  });
+});
+
+describe('legacy spawn loadout (#55 weapon-slot cap)', () => {
+  const ALL: readonly WeaponId[] = [
+    WeaponId.Spinfusor,
+    WeaponId.Chaingun,
+    WeaponId.Mortar,
+    WeaponId.LaserRifle,
+    WeaponId.Blaster,
+  ];
+  /** The weapons a spawn actually grants ammo for -- 0 is an empty slot (DryFire). */
+  const usableWeapons = (world: World, id: number): WeaponId[] =>
+    ALL.filter((weapon) => (world.players.ammo[ammoIndex(id, weapon)] ?? 0) !== 0);
+
+  it('caps a never-station-visit Light at its three slots, dropping only the Blaster', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 }); // Light by default
+    // Still the mask-0 sentinel: the legacy table, not a station selection.
+    expect(world.players.carriedWeapons[id]).toBe(0);
+    // The pre-#55 table's four usable Light weapons (Mortar is 0 for Light) trimmed to
+    // maxWeapons 3 by the same "keep the lowest WeaponId slots" rule as clampWeaponMask.
+    const lightDefault = defaultWeaponMask(LIGHT_ARMOR);
+    expect(usableWeapons(world, id)).toEqual(
+      ALL.filter((weapon) => (lightDefault & (1 << weapon)) !== 0),
+    );
+    expect(usableWeapons(world, id)).toEqual([
+      WeaponId.Spinfusor,
+      WeaponId.Chaingun,
+      WeaponId.LaserRifle,
+    ]);
+    expect(usableWeapons(world, id).length).toBeLessThanOrEqual(LIGHT_ARMOR.maxWeapons);
+    // The surviving weapons keep the legacy table's own ammo counts, infinite Laser Rifle
+    // included; only the surplus slot is emptied.
+    expect(world.players.ammo[ammoIndex(id, WeaponId.Spinfusor)]).toBe(LIGHT_ARMOR.discAmmo);
+    expect(world.players.ammo[ammoIndex(id, WeaponId.Chaingun)]).toBe(LIGHT_ARMOR.chaingunAmmo);
+    expect(world.players.ammo[ammoIndex(id, WeaponId.LaserRifle)]).toBe(-1);
+    expect(world.players.ammo[ammoIndex(id, WeaponId.Blaster)]).toBe(0);
+    // Blaster's 0-ammo fallback would dry-fire, so the spawn points at a carried weapon.
+    expect(world.players.weaponSlot[id]).toBe(WeaponId.Spinfusor);
+  });
+
+  it('leaves a Heavy legacy spawn untouched: five usable weapons, five slots', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 }, 1, ArmorId.Heavy);
+    expect(usableWeapons(world, id)).toEqual(ALL);
+    expect(usableWeapons(world, id).length).toBeLessThanOrEqual(HEAVY_ARMOR.maxWeapons);
+    expect(world.players.ammo[ammoIndex(id, WeaponId.Mortar)]).toBe(HEAVY_ARMOR.mortarAmmo);
+    expect(world.players.ammo[ammoIndex(id, WeaponId.LaserRifle)]).toBe(-1);
+    expect(world.players.ammo[ammoIndex(id, WeaponId.Blaster)]).toBe(-1);
+    expect(world.players.weaponSlot[id]).toBe(WeaponId.Blaster);
   });
 });

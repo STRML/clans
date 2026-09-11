@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   addPlayer,
-  allowedWeaponMask,
   armorFor,
   createWorld,
+  defaultWeaponMask,
   GameOverReason,
   LIGHT_ARMOR,
   VEHICLE_DATA,
@@ -220,11 +220,13 @@ describe('describeHud', () => {
       expect(packIconSrc(source)).toBe('/katabatic/gui/hud_new_packrepair.png');
     });
 
-    it('expands a zero carriedWeapons mask (no station visit) to the full armor-allowed set', () => {
+    it('expands a zero carriedWeapons mask (no station visit) to the same capped default the sim grants', () => {
       const source = baseSource();
-      expect(carriedWeaponSlots(source.world, source.playerId)).toBe(
-        allowedWeaponMask(armorFor(source.world, source.playerId)),
-      );
+      const armor = armorFor(source.world, source.playerId);
+      // baseObjects.ts's defaultWeaponMask, not every weapon the armor allows: Light allows
+      // four and carries three (#55), so the rack must not show a Blaster the sim drops.
+      expect(carriedWeaponSlots(source.world, source.playerId)).toBe(defaultWeaponMask(armor));
+      expect(carriedWeaponSlots(source.world, source.playerId)).toBe(0b01011);
     });
 
     it('reports an explicit station selection as-is', () => {

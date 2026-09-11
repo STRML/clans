@@ -3,8 +3,11 @@ import {
   ARMORS,
   ArmorId,
   armorFor,
+  clampWeaponMask,
+  defaultWeaponMask,
   PackId,
   stationAt,
+  WEAPON_COUNT,
   type ArmorData,
   type World,
 } from '@clans/sim';
@@ -41,15 +44,22 @@ export interface LoadoutChoice {
   weapons: number;
 }
 
+// The picker's own default when it has never shown a loadout; app.ts always opens it with
+// currentLoadoutChoice, so this is the pre-first-open fallback. It is the armor's CLAMPED
+// default (defaultWeaponMask), not every weapon it allows: Light can list four weapons but
+// carries three.
 const LIGHT_DEFAULT: LoadoutChoice = {
   armor: ArmorId.Light,
   pack: PackId.None,
-  weapons: allowedWeaponMask(ARMORS[ArmorId.Light]),
+  weapons: defaultWeaponMask(ARMORS[ArmorId.Light]),
 };
 
 /** The loadout the player currently carries, for pre-filling the menu on every open --
  *  the source station shows your existing inventory, not a blank form. A stored
- *  carriedWeapons of 0 (no station visit yet) expands to the armor's own defaults. */
+ *  carriedWeapons of 0 (no station visit yet) expands to the armor's own default loadout
+ *  (baseObjects.ts's defaultWeaponMask) -- the same set the sim grants an empty station
+ *  request, capped at the armor's weapon-slot count, so the menu cannot prefill a loadout
+ *  the sim would truncate on Confirm. */
 export function currentLoadoutChoice(world: World, playerId: number): LoadoutChoice {
   const armor = (world.players.armor[playerId] ?? ArmorId.Light) as ArmorId;
   const stored = world.players.carriedWeapons[playerId] ?? 0;
@@ -60,7 +70,7 @@ export function currentLoadoutChoice(world: World, playerId: number): LoadoutCho
       : world.players.hasRepairPack[playerId]
         ? PackId.Repair
         : PackId.None,
-    weapons: stored === 0 ? allowedWeaponMask(ARMORS[armor]) : stored,
+    weapons: stored === 0 ? defaultWeaponMask(ARMORS[armor]) : stored,
   };
 }
 
@@ -69,8 +79,10 @@ export function currentLoadoutChoice(world: World, playerId: number): LoadoutCho
  * unit tests the same way hud.ts keeps describeHud pure. Every mutation re-sanitizes against
  * the CURRENT armor: switching armor unchecks weapons it disallows (Laser Rifle is
  * light-only, Mortar heavy-only -- sim/baseObjects.ts's allowedWeaponMask is the one gate
- * list, shared with the sim itself). `armor` must be a real ArmorId; anything else is
- * caller error and reads as Light, exactly like the sim's own armorFor fallback.
+ * list, shared with the sim itself), and the set is capped at the armor's `maxWeapons`
+ * (clampWeaponMask) so the menu can never hold a loadout the sim would truncate. `armor`
+ * must be a real ArmorId; anything else is caller error and reads as Light, exactly like
+ * the sim's own armorFor fallback.
  */
 export class LoadoutSelection {
   private data: ArmorData;
@@ -82,15 +94,20 @@ export class LoadoutSelection {
     this.armor = choice.armor;
     this.data = ARMORS[choice.armor];
     this.pack = choice.pack;
-    this.weapons = choice.weapons & allowedWeaponMask(this.data);
+    // The same two steps the sim applies to a wire mask (baseObjects.ts's
+    // applyLoadoutSelection): sanitize to the armor's list, then cap to its slot count. A
+    // stored set from a pre-#55 save (Light's four-weapon legacy table) prefills as what the
+    // player will actually carry after Confirm, not as what the save holds.
+    this.weapons = clampWeaponMask(choice.weapons & allowedWeaponMask(this.data), this.data);
   }
 
   setArmor(armor: ArmorId): void {
     this.armor = armor;
     this.data = ARMORS[armor];
     // Dropping to an armor that cannot carry a checked weapon unchecks it, exactly like the
-    // source station re-filtering its item list around the selected armor.
-    this.weapons &= allowedWeaponMask(this.data);
+    // source station re-filtering its item list around the selected armor; an armor with
+    // fewer slots (Light's 3) drops the surplus picks the same way.
+    this.weapons = clampWeaponMask(this.weapons & allowedWeaponMask(this.data), this.data);
   }
 
   setPack(pack: number): void {
@@ -99,9 +116,17 @@ export class LoadoutSelection {
     if (pack === PackId.None || pack === PackId.Repair || pack === PackId.Energy) this.pack = pack;
   }
 
+  /** Ticks a weapon on or off. An unselected weapon with no slot left is refused outright,
+   *  never checked and then dropped later: the source station builds exactly `maxWeapons`
+   *  weapon rows (`inventoryHud.cs:254-279`, `"Weapon Slot " @ %x + 1`) and its server keeps
+   *  only the first `maxWeapons` of a client's picks (`hud.cs:349`), so a fourth Light pick
+   *  has no slot to land in and the honest thing to show is a full rack, not a vanishing
+   *  checkmark. Unchecking a selected weapon always works -- that is how a slot frees up. */
   toggleWeapon(weapon: number): void {
-    if ((allowedWeaponMask(this.data) & (1 << weapon)) === 0) return;
-    this.weapons ^= 1 << weapon;
+    const bit = 1 << weapon;
+    if ((allowedWeaponMask(this.data) & bit) === 0) return;
+    if ((this.weapons & bit) === 0 && this.slotCount >= this.data.maxWeapons) return;
+    this.weapons ^= bit;
   }
 
   isWeaponAllowed(weapon: number): boolean {
@@ -110,6 +135,21 @@ export class LoadoutSelection {
 
   isWeaponSelected(weapon: number): boolean {
     return (this.weapons & (1 << weapon)) !== 0;
+  }
+
+  /** How many weapon slots the current set fills. */
+  get slotCount(): number {
+    let count = 0;
+    for (let bit = 0; bit < WEAPON_COUNT; bit += 1) {
+      if ((this.weapons & (1 << bit)) !== 0) count += 1;
+    }
+    return count;
+  }
+
+  /** The armor's own weapon-slot count (`ArmorData.maxWeapons`) -- the cap toggleWeapon
+   *  enforces and the menu renders the slot counter against. */
+  get slotCapacity(): number {
+    return this.data.maxWeapons;
   }
 
   /** A loadout with no weapons would decode as "armor defaults" (mask 0 on the wire), not
@@ -199,6 +239,14 @@ export function createStationMenu(
   const weaponsHeading = document.createElement('h3');
   weaponsHeading.textContent = 'Weapons';
   root.append(weaponsHeading);
+  // The source station lists exactly one row per armor weapon slot (inventoryHud.cs:254-279,
+  // `for (%x = 0; %x < %armor.maxWeapons; %x++)`, each labelled "Weapon Slot N"), so the
+  // picker has to say how many slots this armor has and hold the player to them: ticking a
+  // weapon the armor has no room for would be dropped by the sim on Confirm anyway
+  // (baseObjects.ts's clampWeaponMask, from hud.cs:349).
+  const slotLine = document.createElement('small');
+  slotLine.id = 'station-weapon-slots';
+  root.append(slotLine);
   const weaponBoxes: Record<number, HTMLInputElement> = {};
   for (const weapon of Object.keys(WEAPON_LABEL)) {
     const id = Number(weapon);
@@ -231,6 +279,9 @@ export function createStationMenu(
   /** One repaint of every control from the selection state -- every mutation goes through
    *  here, so the DOM can never drift from what Confirm would actually send. */
   function syncSelection(): void {
+    const slotsUsed = selection.slotCount;
+    const slotCapacity = selection.slotCapacity;
+    slotLine.textContent = `Weapon slots ${String(slotsUsed)} / ${String(slotCapacity)}`;
     for (const armor of Object.keys(armorButtons))
       armorButtons[Number(armor)]!.setAttribute(
         'aria-pressed',
@@ -241,10 +292,14 @@ export function createStationMenu(
         'aria-pressed',
         String(Number(pack) === selection.choice.pack),
       );
+    const full = slotsUsed >= slotCapacity;
     for (const weapon of Object.keys(weaponBoxes)) {
       const id = Number(weapon);
-      weaponBoxes[id]!.checked = selection.isWeaponSelected(id);
-      weaponBoxes[id]!.disabled = !selection.isWeaponAllowed(id);
+      const selected = selection.isWeaponSelected(id);
+      weaponBoxes[id]!.checked = selected;
+      // A full rack keeps the checked weapons clickable (unchecking is how a slot frees) and
+      // greys out the rest, so the picker shows the refusal instead of dropping a tick.
+      weaponBoxes[id]!.disabled = !selection.isWeaponAllowed(id) || (full && !selected);
     }
     confirm.disabled = !selection.confirmable;
   }
