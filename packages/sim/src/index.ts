@@ -23,6 +23,7 @@ export { GRAVITY } from './movement.js';
 export * from './flags.js';
 export * from './hash.js';
 export * from './interiors.js';
+export * from './match.js';
 export * from './projectiles.js';
 export * from './random.js';
 export * from './repair.js';

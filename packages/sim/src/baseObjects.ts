@@ -160,6 +160,23 @@ function forceFieldQuad(scale: Vec3): { positions: Float32Array } {
   };
 }
 
+/**
+ * Returns one base object's damageable state to its as-placed values: undamaged, at full
+ * shield energy, and nominally powered (`stepPower` recomputes the real power state of every
+ * `needsPower` kind on the next tick, from whether that team's generator still stands).
+ * Shared by createBaseObjects, which uses it as the initial values, and by match.ts's match
+ * reset, which uses it to undo a match's worth of damage -- one implementation, so the two
+ * can never disagree about what "undamaged" means, the same reason world.ts's resetPlayerRow
+ * is shared with addPlayer. `kind` must already be set (it is what picks `maxEnergy`).
+ */
+export function resetBaseObject(world: World, id: number): void {
+  const store = world.baseObjects;
+  store.damage[id] = 0;
+  store.destroyed[id] = 0;
+  store.energy[id] = BASE_OBJECT_DATA[store.kind[id] as BaseObjectKind].maxEnergy;
+  store.powered[id] = 1;
+}
+
 export function createBaseObjects(
   world: World,
   placements: Array<{
@@ -178,10 +195,7 @@ export function createBaseObjects(
     store.team[id] = team;
     store.position.set([position.x, position.y, position.z], id * 3);
     store.usePosition.set([usePosition.x, usePosition.y, usePosition.z], id * 3);
-    store.damage[id] = 0;
-    store.destroyed[id] = 0;
-    store.energy[id] = BASE_OBJECT_DATA[kind].maxEnergy;
-    store.powered[id] = 1;
+    resetBaseObject(world, id);
     store.count = Math.max(store.count, id + 1);
     if (kind === BaseObjectKind.ForceField) {
       const instance = buildInteriorCollider(forceFieldQuad(scale ?? { x: 1, y: 4, z: 6 }), {

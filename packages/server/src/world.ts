@@ -10,6 +10,7 @@ import {
   createWorld,
   FlagState,
   RETURN_TICKS,
+  TIME_LIMIT_TICKS,
   findSpawnPosition,
   groundHeightAt,
   type Heightfield,
@@ -106,6 +107,7 @@ async function loadInteriors(interiors: SceneInterior[]): Promise<InteriorInstan
 
 export async function loadKatabaticWorld(
   seed = 1,
+  timeLimitTicks = TIME_LIMIT_TICKS,
 ): Promise<{ world: World; spawns: SceneSpawn[] }> {
   const manifest = JSON.parse(
     await readFile(resolve(assetsRoot, 'terrain.json'), 'utf8'),
@@ -126,6 +128,7 @@ export async function loadKatabaticWorld(
   createFlags(
     world,
     scene.flagStands.map(({ team, position: [x, y, z] }) => ({ team, position: { x, y, z } })),
+    timeLimitTicks,
   );
   createBaseObjects(
     world,
@@ -181,14 +184,7 @@ export function spawnPointFor(
   const chosen = teamSpawns[index % teamSpawns.length];
   if (!chosen) throw new Error(`No spawn point for team ${String(team)}`);
   const [x, y, z] = chosen.position;
-  const point = findSpawnPosition(
-    terrain,
-    interiors,
-    { x, y, z },
-    chosen.radius,
-    index,
-    occupied,
-  );
+  const point = findSpawnPosition(terrain, interiors, { x, y, z }, chosen.radius, index, occupied);
   return [point.x, point.y, point.z];
 }
 

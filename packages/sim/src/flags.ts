@@ -84,7 +84,12 @@ function dropCarriedFlagsOnDeath(world: World): void {
   }
 }
 
-function returnHome(world: World, flagId: number): void {
+/** Puts one flag back on its stand: home, at its stand position, carried by nobody, with no
+ *  return timer pending. Exported for match.ts's match reset, which returns every flag home
+ *  -- the reset must not re-derive this, or "what a home flag looks like" would have two
+ *  implementations that can drift (the same reason world.ts's resetPlayerRow is shared with
+ *  addPlayer). */
+export function returnHome(world: World, flagId: number): void {
   const flags = world.flags;
   const base = flagId * 3;
   flags.state[flagId] = FlagState.Home;

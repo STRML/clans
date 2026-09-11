@@ -1,25 +1,53 @@
 import { describe, expect, it } from 'vitest';
+import { FIXED_DT, TIME_LIMIT_TICKS } from '@clans/sim';
 import { parseArgs } from './cli.js';
 import { TARGET_TEAM_SIZE } from './bots.js';
 import { WORLD_CAPACITY } from './world.js';
 
 describe('parseArgs', () => {
+  // The sim's own default match length, in seconds -- the CLI derives it from flags.ts's
+  // TIME_LIMIT_TICKS rather than repeating 1500, so this is what "no --time-limit" means.
+  const defaultTimeLimit = TIME_LIMIT_TICKS * FIXED_DT;
+  const defaults = {
+    bots: 0,
+    teamSize: TARGET_TEAM_SIZE,
+    port: 7777,
+    timeLimitSeconds: defaultTimeLimit,
+    intermissionSeconds: 5,
+  };
+
   it('reads --bots and --port', () => {
     expect(parseArgs(['--bots', '31', '--port', '7777'])).toEqual({
+      ...defaults,
       bots: 31,
-      teamSize: TARGET_TEAM_SIZE,
-      port: 7777,
     });
   });
-  it('defaults bots to 0, team size to TARGET_TEAM_SIZE, and port to 7777', () => {
-    expect(parseArgs([])).toEqual({ bots: 0, teamSize: TARGET_TEAM_SIZE, port: 7777 });
+  it('defaults bots to 0, team size to TARGET_TEAM_SIZE, port to 7777, and the clock to the sim default', () => {
+    expect(parseArgs([])).toEqual(defaults);
   });
   it('reads a raised --team-size so --bots 48 can seat the 24-versus-24 target', () => {
     expect(parseArgs(['--bots', '48', '--team-size', '24'])).toEqual({
+      ...defaults,
       bots: 48,
       teamSize: 24,
-      port: 7777,
     });
+  });
+  it('reads --time-limit and --intermission in seconds, so a test can drive a whole cycle', () => {
+    expect(parseArgs(['--time-limit', '20', '--intermission', '0.5'])).toEqual({
+      ...defaults,
+      timeLimitSeconds: 20,
+      intermissionSeconds: 0.5,
+    });
+    // 0 is legal for the pause (play the next match immediately) but never for the clock.
+    expect(parseArgs(['--intermission', '0']).intermissionSeconds).toBe(0);
+  });
+  it('rejects a clock or pause that would leave the sim with nothing to measure', () => {
+    expect(() => parseArgs(['--time-limit', '0'])).toThrow(RangeError);
+    expect(() => parseArgs(['--time-limit', '-1'])).toThrow(RangeError);
+    expect(() => parseArgs(['--time-limit', 'x'])).toThrow(RangeError);
+    expect(() => parseArgs(['--intermission', '-1'])).toThrow(RangeError);
+    expect(() => parseArgs(['--intermission', 'x'])).toThrow(RangeError);
+    expect(() => parseArgs(['--time-limit'])).toThrow(RangeError);
   });
   it('rejects a non-positive or non-numeric --team-size, and one above world capacity', () => {
     expect(() => parseArgs(['--team-size', '0'])).toThrow(RangeError);

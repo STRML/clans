@@ -1166,6 +1166,29 @@ describe('NetClient', () => {
     ]);
   });
 
+  it('clears the kill feed when a snapshot announces a new match (gameOver true -> false)', () => {
+    // The server's match cycle (net.ts's startNextMatch -> sim's resetMatch) clears gameOver
+    // after the intermission. Every other HUD row is rebuilt from that snapshot, but the kill
+    // feed is accumulated client state, and nothing else would ever clear it: the previous
+    // match's last kills would head the new match's feed until 100 further events evicted them
+    // (and the intermission itself generates no events).
+    clock.ms = 0;
+    const transport = makeTransport(makeLink({ value: 24 }));
+    const client = new NetClient(transport, terrain, { now: () => clock.ms });
+    client.playerId = 0;
+    transport.pump([encodeEvent({ kind: EventKind.PlayerKilled, a: 1, b: 2 })]);
+    // Match one ends: the frozen final state carries gameOver = true.
+    transport.pump([
+      encodeSnapshot(1, 0, 0, [], null, { ...emptyExtras(), gameOver: true, winnerTeam: 1 }),
+    ]);
+    expect(client.gameOver).toBe(true);
+    expect(client.recentEvents).toHaveLength(1);
+    // The intermission ends: the next snapshot is a new match, and the feed must not carry over.
+    transport.pump([encodeSnapshot(2, 0, 0, [], null, emptyExtras())]);
+    expect(client.gameOver).toBe(false);
+    expect(client.recentEvents).toEqual([]);
+  });
+
   it('tags each event with a never-reused, ever-increasing sequence number', () => {
     // Codex review round 1, finding 14 (PR #9): a consumer tracking "new since last
     // frame" by array index into this rolling buffer breaks once the buffer's own

@@ -435,6 +435,15 @@ export class NetClient {
     // is true. Setting it after reconcile() let the very first game-over snapshot's replay
     // run against a world that did not yet know the match had ended, advancing local
     // prediction one extra tick past the true end state.
+    // A NEW MATCH: the server cleared gameOver after its intermission (net.ts's
+    // startNextMatch -> sim's resetMatch). Everything else the HUD shows is rebuilt from this
+    // snapshot -- scores, the clock, the flag rows, the game-over line -- but the kill feed is
+    // accumulated client state (hud.ts's describeKillFeed reads recentEvents), and nothing else
+    // would ever clear it: the previous match's last kills would head the new match's feed
+    // until 100 further events evicted them, and the intermission itself generates no events.
+    // The gameOver true -> false edge is state the snapshot path already carries, so this
+    // needs no new message. Split out of this method, which is already at complexity budget.
+    this.resetKillFeedForNewMatch(decoded.gameOver);
     this.gameOver = decoded.gameOver;
     this.winnerTeam = decoded.winnerTeam;
     this.timeRemainingS = decoded.timeRemainingS;
@@ -528,6 +537,16 @@ export class NetClient {
     this.vehicleSnapshots.push({ tick: decoded.tick, vehicles: decoded.vehicles });
     if (this.vehicleSnapshots.length > MAX_REMOTE_SNAPSHOT_QUEUE) this.vehicleSnapshots.shift();
     this.stats.entityCount = decoded.players.length;
+  }
+
+  /**
+   * Clears the accumulated kill feed when a snapshot reports the match live again after the
+   * server's intermission (net.ts's startNextMatch -> sim's resetMatch) -- see the call site in
+   * handleSnapshot for why nothing else in the HUD needs this. Kept a method of its own purely
+   * because handleSnapshot's own cyclomatic complexity is already at the lint's cap.
+   */
+  private resetKillFeedForNewMatch(serverGameOver: boolean): void {
+    if (this.gameOver && !serverGameOver) this.recentEvents = [];
   }
 
   private reconcile(

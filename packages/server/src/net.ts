@@ -21,6 +21,7 @@ import {
   serializeActiveVehicles,
   setGodMode,
   requestVehicleAtPad,
+  resetMatch,
   stepWorld,
   VEHICLE_PAD_USE_RADIUS,
   type ArmorData,
@@ -67,7 +68,7 @@ import {
   rewindOthers,
   type PositionHistory,
 } from './lagcomp.js';
-import { currentOrder, issueOrder, type OrderBoard } from './orders.js';
+import { clearOrders, currentOrder, issueOrder, type OrderBoard } from './orders.js';
 import { applyInputMessage, createSession, recordAck, type Session } from './session.js';
 import {
   createRelevanceCache,
@@ -102,6 +103,10 @@ export interface NetServerOptions {
   port: number;
   /** How long an accepted socket may stay unjoined before it is closed. */
   joinTimeoutMs?: number;
+  /** Intermission between matches, in ticks. The match freezes at game over (stepWorld's own
+   *  guard) and the next one starts this many ticks later; 0 starts it on the very next tick.
+   *  Defaults to DEFAULT_INTERMISSION_TICKS (5 s). */
+  intermissionTicks?: number;
   /** Clock used for ping/ack timing. Defaults to `Date.now`; tests inject a fake clock. */
   now?: () => number;
 }
@@ -110,6 +115,14 @@ export interface NetServer {
   close(): void;
   tick(tickNumber: number): void;
 }
+
+/**
+ * How long the frozen final state stays up before the next match begins, in ticks. Ours: 5 s
+ * is the stock Torque template's own end-of-game pause (`$Game::EndGamePause`, set from the
+ * game scripts -- Templates/Full/game/scripts/server/gameCore.cs; see sim/match.ts's header
+ * for the whole flow and why an in-mission "between matches" only exists here at all).
+ */
+export const DEFAULT_INTERMISSION_TICKS = Math.round(5 / FIXED_DT);
 
 interface QueuedInput {
   sequence: number;
@@ -1132,6 +1145,13 @@ export function startNetServer(options: NetServerOptions): NetServer {
   const now = options.now ?? (() => Date.now());
   let nextSnapshotId = 1;
   const joinTimeoutMs = options.joinTimeoutMs ?? DEFAULT_JOIN_TIMEOUT_MS;
+  const intermissionTicks = options.intermissionTicks ?? DEFAULT_INTERMISSION_TICKS;
+  // -1 = no intermission pending (a match is live). Armed by runIntermission the first tick it
+  // sees gameOver, counted down there, and disarmed by startNextMatch.
+  let intermissionTicksLeft = -1;
+  // Set by startNextMatch, consumed by the next sendAllSnapshots: a reset is a resync, so the
+  // first snapshot after one is a full send for every client (see startNextMatch).
+  let forceFullSnapshot = false;
 
   wss.on('connection', (socket) => {
     // clients.has(socket) is only ever set once handleJoin succeeds, so this is a plain
@@ -1201,11 +1221,9 @@ export function startNetServer(options: NetServerOptions): NetServer {
         entry.socket.terminate();
         continue;
       }
-      const full = needsFullSnapshot(
-        entry.session.lastAckedSnapshotId,
-        entry.session.lastAckedAt,
-        now(),
-      );
+      const full =
+        forceFullSnapshot ||
+        needsFullSnapshot(entry.session.lastAckedSnapshotId, entry.session.lastAckedAt, now());
       // Issue #5: the per-client relevance view replaces the old one-roster-fits-all send.
       // sendSnapshot stores THIS view as the client's next delta baseline, so the stale
       // distant-player copies the sparse cadence re-sends diff clean against what the
@@ -1224,6 +1242,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
       // tickNumber argument (the pre-step value): see issue #6.
       sendSnapshot(entry, nextSnapshotId, options.world.tick, full, view.players, view.extras, now);
     }
+    forceFullSnapshot = false;
   }
 
   function runOneTick(inputs: Map<number, PlayerInput>): void {
@@ -1261,17 +1280,61 @@ export function startNetServer(options: NetServerOptions): NetServer {
     for (const event of impactEvents(options.world)) broadcastEvent(clients, event);
   }
 
+  /**
+   * Starts the next match, and drops every server-side store keyed off the clock the reset
+   * just rewound. sim's resetMatch (sim/match.ts) returns the world itself; these three are
+   * the server's own runtime memory beside it:
+   *
+   *  - the lag-comp position history: its samples carry absolute ticks from the match that
+   *    just ended, so a shooter's rewind window would otherwise be searched at match-two tick
+   *    numbers against match-one samples;
+   *  - the order board: an order's expiresAtTick is absolute too (see clearOrders);
+   *  - the per-client relevance caches, via a forced full snapshot: a viewer's cached copy of
+   *    a distant player is otherwise replayed from before the reset for up to
+   *    DISTANT_PLAYER_UPDATE_EVERY snapshots, which would show a reset player standing where
+   *    the previous match left them.
+   */
+  function startNextMatch(): void {
+    resetMatch(options.world);
+    for (let id = 0; id < options.world.players.count; id += 1) clearHistory(history, id);
+    clearOrders(options.board);
+    forceFullSnapshot = true;
+    intermissionTicksLeft = -1;
+  }
+
+  /**
+   * One tick of the pause between matches, and -- on the tick the pause runs out -- the reset
+   * that starts the next one. Only ever called while world.gameOver is true.
+   *
+   * The countdown lives here, not in the sim: stepWorld returns before incrementing world.tick
+   * once gameOver is true, so the sim has no clock to count an intermission with, and how long
+   * a finished match is left on screen is server policy anyway (sim/match.ts's header).
+   */
+  function runIntermission(): void {
+    if (intermissionTicksLeft < 0) intermissionTicksLeft = intermissionTicks;
+    if (intermissionTicksLeft > 0) intermissionTicksLeft -= 1;
+    if (intermissionTicksLeft === 0) startNextMatch();
+  }
+
   // Game over freezes the sim: no more stepWorld, no more respawns or events, but snapshots
-  // keep going out on the normal cadence so every client sees the frozen final state.
+  // keep going out on the normal cadence so every client sees the frozen final state. Once the
+  // intermission runs out, the match cycle starts the next match rather than sitting frozen
+  // forever -- that is the whole of what "one match per server process" used to mean.
   function tick(tickNumber: number): void {
     const inputs = collectTickInputs(clients);
-    // Codex review round 1, finding (P2): stepBotManager used to run every tick
-    // unconditionally, even after gameOver froze the match -- 32 bots kept paying full
-    // perception/pathing cost for a match nobody could act in, and maybeHeal's direct
-    // applyLoadoutSelection call could still mutate a "frozen" player's armor/energy/ammo.
-    // Gated behind the same guard runOneTick already uses, matching how the rest of the
-    // tick loop treats gameOver as a hard stop, not just a stop on the sim step.
-    if (!options.world.gameOver) {
+    if (options.world.gameOver) {
+      // Inputs are drained above and dropped, exactly as they were when gameOver was a hard
+      // stop: a sample queued for a frozen tick has no tick to belong to, and holding it would
+      // burst it into the new match instead.
+      runIntermission();
+    } else {
+      // Codex review round 1, finding (P2): stepBotManager used to run every tick
+      // unconditionally, even after gameOver froze the match -- 32 bots kept paying full
+      // perception/pathing cost for a match nobody could act in, and maybeHeal's direct
+      // applyLoadoutSelection call could still mutate a "frozen" player's armor/energy/ammo.
+      // Gated behind the same guard runOneTick already uses, matching how the rest of the
+      // tick loop treats gameOver as a hard stop, not just a stop on the sim step. A reset
+      // clears that flag, so the tick after startNextMatch steps the bots again.
       // A bot id is never also a socket-bound player id (a human never joins as an id a
       // bot already occupies -- handleJoin's own addPlayer always allocates a fresh id),
       // so the two maps' key sets never overlap and this merge order doesn't matter.

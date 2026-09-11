@@ -13,6 +13,14 @@ export function createOrderBoard(): OrderBoard {
   return { byTeam: new Map() };
 }
 
+/** Drops every team's order. Called when a match ends (net.ts's startNextMatch): an order's
+ *  `expiresAtTick` is an absolute tick stamped by the match that issued it, and the match reset
+ *  rewinds world.tick to 0 -- so an order issued late in one match would otherwise outlive the
+ *  next match's entire clock, its expiry sitting above a fresh match's whole tick budget. */
+export function clearOrders(board: OrderBoard): void {
+  board.byTeam.clear();
+}
+
 /** A second order for a team that already has one replaces it -- never queues (Global
  *  Constraints: "one active order per team, no queue"). */
 export function issueOrder(

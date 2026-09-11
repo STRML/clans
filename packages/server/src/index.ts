@@ -1,3 +1,4 @@
+import { FIXED_DT } from '@clans/sim';
 import { createBotManager } from './bots.js';
 import { parseArgs } from './cli.js';
 import { startTickLoop } from './loop.js';
@@ -6,7 +7,11 @@ import { createOrderBoard } from './orders.js';
 import { loadKatabaticWorld } from './world.js';
 
 const options = parseArgs(process.argv.slice(2));
-const { world, spawns } = await loadKatabaticWorld();
+// Seconds -> ticks at this boundary: the CLI speaks to operators in seconds (the unit they
+// read off a stopwatch), everything below it in the fixed 32 ms tick the sim requires.
+const timeLimitTicks = Math.round(options.timeLimitSeconds / FIXED_DT);
+const intermissionTicks = Math.round(options.intermissionSeconds / FIXED_DT);
+const { world, spawns } = await loadKatabaticWorld(1, timeLimitTicks);
 // Landmarks for the waypoint graph: every real flag stand and base object already placed
 // in the loaded world (loadKatabaticWorld's own createFlags/createBaseObjects calls),
 // read back from the populated stores rather than the raw scene JSON -- world.ts's
@@ -42,7 +47,14 @@ for (let id = 0; id < world.baseObjects.count; id += 1) {
 const botManager = createBotManager(world, spawns, landmarks, options.bots, options.teamSize);
 const board = createOrderBoard();
 
-const net = startNetServer({ world, spawns, botManager, board, port: options.port });
+const net = startNetServer({
+  world,
+  spawns,
+  botManager,
+  board,
+  port: options.port,
+  intermissionTicks,
+});
 await net.ready;
 
 let overrunCount = 0;
@@ -79,5 +91,7 @@ if (options.bots > MAX_USABLE_BOTS) {
 console.log(
   `[clans-server] listening on ws://127.0.0.1:${String(options.port)} with ${String(
     botManager.botIds.size,
-  )} bots`,
+  )} bots (match ${String(options.timeLimitSeconds)}s, intermission ${String(
+    options.intermissionSeconds,
+  )}s, then the next match starts on the same map)`,
 );

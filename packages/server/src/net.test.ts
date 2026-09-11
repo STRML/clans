@@ -3,18 +3,26 @@ import { WebSocket } from 'ws';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   addPlayer,
+  applyBaseObjectDamage,
+  applyDamage,
+  applyTurretDamage,
+  BASE_OBJECT_DATA,
   BaseObjectKind,
+  baseFor,
   buildInteriorCollider,
   createBaseObjects,
   createFlags,
+  createTurrets,
   createWorld,
   FIXED_DT,
   FlagState,
+  GameOverReason,
   LIGHT_ARMOR,
   ProjectileImpactReason,
   ProjectileType,
   spawnVehicleAtPad,
   stepPower,
+  TurretBarrelId,
   VehicleKind,
   WeaponId,
   WeaponState,
@@ -39,13 +47,14 @@ import {
   PROTOCOL_VERSION,
   VOICE_LINE_COUNT,
   WelcomeStatus,
+  type DecodedSnapshot,
   type NetInputSample,
 } from '@clans/protocol';
 import { buildWaypointGraph } from '@clans/bots';
 import { createBotManager, TARGET_TEAM_SIZE, type BotManager } from './bots.js';
 import { buildExtras, flagEvents, startNetServer, type NetServer } from './net.js';
 import { DISTANT_PLAYER_UPDATE_EVERY } from './snapshot-policy.js';
-import { createOrderBoard, currentOrder } from './orders.js';
+import { createOrderBoard, currentOrder, issueOrder } from './orders.js';
 import { teamCount, type SceneSpawn } from './world.js';
 
 /** A bot manager with zero budget: every net.ts test in this file that doesn't care
@@ -142,6 +151,87 @@ describe('flagEvents', () => {
 });
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Waits for the socket to have delivered at least `atLeast` frames. Frames arrive as ws
+ *  events, so there is no promise to await: this polls the count with a bounded wait and fails
+ *  loudly if they never arrive, rather than sleeping a fixed guess at how long delivery takes. */
+async function waitForFrames(frames: readonly Uint8Array[], atLeast: number): Promise<void> {
+  for (let attempt = 0; attempt < 100 && frames.length < atLeast; attempt += 1) await wait(5);
+  expect(frames.length).toBeGreaterThanOrEqual(atLeast);
+}
+
+/** Match one's state, still present at game over: what the frozen snapshots keep showing, and
+ *  therefore what the reset has to answer for. See the match-cycle test below. */
+function expectMatchOneStillDirty(world: World, botId: number, board: OrderBoard): void {
+  expect(world.teamScores[1]).toBe(200);
+  expect(world.players.alive[botId]).toBe(0);
+  expect(world.baseObjects.damage[0]).toBeGreaterThan(0);
+  expect(world.turrets.damage[0]).toBeGreaterThan(0);
+  expect(world.flags.state[1]).toBe(FlagState.Dropped);
+  expect(world.projectiles.count).toBeGreaterThan(0);
+  expect(world.projectiles.active[0]).toBe(1);
+  expect(currentOrder(board, 1, world.tick)).not.toBeNull();
+}
+
+/** Every flag home on its own stand, carried by nobody, with no return timer pending. */
+function expectFlagsHome(world: World): void {
+  for (let id = 0; id < world.flags.team.length; id += 1) {
+    const base = id * 3;
+    expect(world.flags.state[id]).toBe(FlagState.Home);
+    expect(world.flags.carrierId[id]).toBe(-1);
+    expect(world.flags.returnAt[id]).toBe(-1);
+    expect([
+      world.flags.position[base],
+      world.flags.position[base + 1],
+      world.flags.position[base + 2],
+    ]).toEqual([
+      world.flags.standPosition[base],
+      world.flags.standPosition[base + 1],
+      world.flags.standPosition[base + 2],
+    ]);
+  }
+}
+
+/** Every base object undamaged, at its own full shield energy, and nominally powered. */
+function expectBaseObjectsUndamaged(world: World): void {
+  for (let id = 0; id < world.baseObjects.count; id += 1) {
+    expect(world.baseObjects.damage[id]).toBe(0);
+    expect(world.baseObjects.destroyed[id]).toBe(0);
+    expect(world.baseObjects.powered[id]).toBe(1);
+    const data = BASE_OBJECT_DATA[world.baseObjects.kind[id] as BaseObjectKind];
+    expect(world.baseObjects.energy[id]).toBe(data.maxEnergy);
+  }
+}
+
+/** Every active player alive at a full bar, standing on a spawn point of their own team --
+ *  the sim's own recorded spawn, which is one of the scene's team spawns at its radius, not a
+ *  point the reset invented. */
+function expectPlayersFreshAtTeamSpawns(world: World, sceneSpawns: readonly SceneSpawn[]): void {
+  for (let id = 0; id < world.players.count; id += 1) {
+    if (!world.players.active[id]) continue;
+    const base = id * 3;
+    expect(world.players.alive[id]).toBe(1);
+    expect(world.players.damage[id]).toBe(0);
+    expect(world.players.energy[id]).toBe(LIGHT_ARMOR.maxEnergy);
+    expect([
+      world.players.position[base],
+      world.players.position[base + 1],
+      world.players.position[base + 2],
+    ]).toEqual([
+      world.players.spawn[base],
+      world.players.spawn[base + 1],
+      world.players.spawn[base + 2],
+    ]);
+    const teamSpawn = sceneSpawns.find((spawn) => spawn.team === world.players.team[id]);
+    if (teamSpawn === undefined) throw new Error('no scene spawn for that team');
+    const distance = Math.hypot(
+      (world.players.position[base] ?? 0) - teamSpawn.position[0],
+      (world.players.position[base + 1] ?? 0) - teamSpawn.position[1],
+      (world.players.position[base + 2] ?? 0) - teamSpawn.position[2],
+    );
+    expect(distance).toBeLessThanOrEqual(teamSpawn.radius);
+  }
 }
 
 describe('startNetServer', () => {
@@ -2546,6 +2636,167 @@ describe('startNetServer', () => {
     ];
     expect(after).toEqual(before);
     frozenServer.close();
+  });
+
+  it('starts a second match after an intermission, with no trace of the first (the match cycle)', async () => {
+    // Before this, a match was one per server process: stepWorld freezes the sim once
+    // gameOver is true and nothing ever cleared it, so playing again meant restarting the
+    // server. Here a 30-tick clock (--time-limit) plus a 2-tick intermission (--intermission)
+    // drives a whole match one -> intermission -> match two cycle, and every assertion below
+    // is on the observable reset rather than on the reset's own bookkeeping.
+    const MATCH_TICKS = 30;
+    const INTERMISSION_TICKS = 2;
+    const cycleWorld = createWorld(terrain, 1, 8);
+    createFlags(
+      cycleWorld,
+      [
+        { team: 1, position: { x: 0, y: 0, z: 0 } },
+        { team: 2, position: { x: 8, y: 0, z: 8 } },
+      ],
+      MATCH_TICKS,
+    );
+    createBaseObjects(cycleWorld, [
+      { kind: BaseObjectKind.Generator, team: 1, position: { x: 0, y: 0, z: 0 } },
+      { kind: BaseObjectKind.Generator, team: 2, position: { x: 8, y: 0, z: 8 } },
+    ]);
+    createTurrets(cycleWorld, [
+      { barrel: TurretBarrelId.SentryTurretBarrel, team: 1, position: { x: 2, y: 0, z: 2 } },
+    ]);
+    const cycleSpawns: SceneSpawn[] = [
+      { name: null, team: 1, position: [0, 0, 0], radius: 5 },
+      { name: null, team: 2, position: [8, 0, 8], radius: 5 },
+    ];
+    const manager = createBotManager(
+      cycleWorld,
+      cycleSpawns,
+      [
+        { position: { x: 0, y: 0, z: 0 }, label: 'homeFlag' },
+        { position: { x: 8, y: 0, z: 8 }, label: 'enemyFlag' },
+      ],
+      2,
+    );
+    const botIds = [...manager.botIds];
+    expect(botIds).toHaveLength(2);
+    const cycleBotId = botIds[0] as number;
+    const board = createOrderBoard();
+    const cycleServer = startNetServer({
+      botManager: manager,
+      board,
+      world: cycleWorld,
+      spawns: cycleSpawns,
+      port: TEST_PORT + 40,
+      intermissionTicks: INTERMISSION_TICKS,
+    });
+    await cycleServer.ready;
+
+    // A joined (non-acking, so every send is a full snapshot) client: the last section checks
+    // the reset on the wire, i.e. what a real client would come out of it with.
+    const cycleClient = await connect(TEST_PORT + 40);
+    const welcomePromise = receive(cycleClient);
+    cycleClient.send(encodeJoin());
+    await welcomePromise;
+    const frames: Uint8Array[] = [];
+    cycleClient.on('message', (data: unknown) => frames.push(new Uint8Array(data as Uint8Array)));
+
+    // --- Match one, dirtied the way an actual match dirties a world ------------------------
+    issueOrder(board, 1, OrderKind.Attack, 3, 3, cycleWorld.tick);
+    cycleWorld.teamScores[1] = 200; // well short of the 8-capture / 800-point limit
+    // Enough to punch through each structure's shield pool (30 energy per damage point on the
+    // generator, 100 on the sentry) and leave real health damage behind.
+    applyBaseObjectDamage(cycleWorld, 0, 2);
+    applyTurretDamage(cycleWorld, 0, 2);
+    applyDamage(cycleWorld, cycleBotId, 99, -1, LIGHT_ARMOR);
+    // A dropped flag somewhere nobody can reach it in the remaining 30 ticks (2 m pickup
+    // radius, y 200, and a 45 s return timer): a real match's flag state that has to be gone
+    // after the reset, without a bot being able to race the assertion by returning it.
+    cycleWorld.flags.state[1] = FlagState.Dropped;
+    cycleWorld.flags.carrierId[1] = -1;
+    cycleWorld.flags.position.set([4, 200, 4], 3);
+    cycleWorld.flags.returnAt[1] = cycleWorld.tick + 1_406;
+    cycleWorld.projectiles.count = 1;
+    cycleWorld.projectiles.active[0] = 1;
+    cycleWorld.projectiles.type[0] = ProjectileType.Linear;
+    cycleWorld.projectiles.weaponId[0] = WeaponId.Spinfusor;
+    cycleWorld.projectiles.ownerId[0] = cycleBotId;
+    cycleWorld.projectiles.team[0] = 1;
+    cycleWorld.projectiles.position.set([4, 200, 4], 0);
+    // expiresAtTick counts UP toward the weapon's lifetime in ticks (projectiles.ts's
+    // expireOneTick), so 0 is the fresh value: any large number here would free the shot on
+    // the very next step instead of leaving it in flight.
+    cycleWorld.projectiles.expiresAtTick[0] = 0;
+
+    let tickNumber = 1;
+    while (!cycleWorld.gameOver) cycleServer.tick(tickNumber++);
+    expect(cycleWorld.tick).toBe(MATCH_TICKS);
+    expect(cycleWorld.gameOverReason).toBe(GameOverReason.TimeLimit);
+    expectMatchOneStillDirty(cycleWorld, cycleBotId, board);
+
+    // --- The intermission: frozen exactly as the match left it ----------------------------
+    const frozenTick = cycleWorld.tick;
+    const frozenPositions = Array.from(cycleWorld.players.position);
+    cycleServer.tick(tickNumber++); // intermission tick 1 of 2
+    expect(cycleWorld.gameOver).toBe(true);
+    expect(cycleWorld.tick).toBe(frozenTick);
+    expect(Array.from(cycleWorld.players.position)).toEqual(frozenPositions);
+    cycleServer.tick(tickNumber++); // intermission tick 2 of 2: the reset fires
+
+    // --- Match two begins -----------------------------------------------------------------
+    expect(cycleWorld.gameOver).toBe(false);
+    expect(cycleWorld.tick).toBe(0); // the match clock, rewound
+    expect(cycleWorld.winnerTeam).toBe(0);
+    expect(cycleWorld.teamScores[1]).toBe(0);
+    expect(cycleWorld.teamScores[2]).toBe(0);
+    expect(cycleWorld.projectiles.count).toBe(0);
+    expect(currentOrder(board, 1, cycleWorld.tick)).toBeNull();
+    expectFlagsHome(cycleWorld);
+    expectBaseObjectsUndamaged(cycleWorld);
+    expect(cycleWorld.turrets.damage[0]).toBe(0);
+    expect(cycleWorld.turrets.destroyed[0]).toBe(0);
+    expect(cycleWorld.turrets.energy[0]).toBe(baseFor(TurretBarrelId.SentryTurretBarrel).maxEnergy);
+    expectPlayersFreshAtTeamSpawns(cycleWorld, cycleSpawns);
+
+    // Bots are being stepped again, and the reset is visible on the wire (a full snapshot with
+    // gameOver false, zeroed scores and both flags home -- what the HUD reads).
+    const restartPositions = new Map(
+      botIds.map((id) => [id, cycleWorld.players.position[id * 3] ?? 0]),
+    );
+    // Every tick match two runs, from its first to its last, is counted here: the new match's
+    // clock has to be its own (MATCH_TICKS), not the sum of both matches'.
+    let secondMatchTicks = 0;
+    for (let i = 0; i < 10; i += 1) {
+      cycleServer.tick(tickNumber++);
+      secondMatchTicks += 1;
+    }
+    expect(cycleWorld.tick).toBe(secondMatchTicks);
+    expect(
+      botIds.some((id) => (cycleWorld.players.position[id * 3] ?? 0) !== restartPositions.get(id)),
+    ).toBe(true);
+    const framesBefore = frames.length;
+    await waitForFrames(frames, framesBefore + 1);
+    let decoded: DecodedSnapshot | null = null;
+    for (const bytes of frames) {
+      try {
+        decoded = decodeSnapshot(bytes, null);
+      } catch {
+        continue; // the Welcome frame (and any delta this non-acking client never baselined)
+      }
+    }
+    if (decoded === null) throw new Error('no snapshot frame decoded');
+    expect(decoded.gameOver).toBe(false);
+    expect(decoded.teamScores).toEqual([0, 0]);
+    expect(decoded.flags.every((flag) => flag.state === FlagState.Home)).toBe(true);
+
+    // --- Match two reaches its own game over, on its own clock ----------------------------
+    while (!cycleWorld.gameOver) {
+      cycleServer.tick(tickNumber++);
+      secondMatchTicks += 1;
+    }
+    expect(secondMatchTicks).toBe(MATCH_TICKS);
+    expect(cycleWorld.tick).toBe(MATCH_TICKS); // not 2 x MATCH_TICKS: the clock restarted
+    expect(cycleWorld.gameOverReason).toBe(GameOverReason.TimeLimit);
+
+    cycleClient.close();
+    cycleServer.close();
   });
 
   it("a CommandOrder message issues an order for the sender's own team, and never affects the other team (row 19)", async () => {

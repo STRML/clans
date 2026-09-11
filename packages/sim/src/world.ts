@@ -133,17 +133,24 @@ export function resetPlayerToSpawn(world: World, id: number, spawn: Vec3): void 
   players.wasUseHeld[id] = 0;
 }
 
-export function addPlayer(world: World, spawn: Vec3, team = 0, armor = ArmorId.Light): number {
+/**
+ * Restores one player id's row to the state a fresh join leaves it in: alive at full health,
+ * no score, god mode off, the armor's own spawn loadout with full energy, a cleared respawn
+ * countdown, and every per-player edge-detection flag cleared. Shared by `addPlayer` (where
+ * this IS the initial state) and by match.ts's match reset (where it undoes a whole match of
+ * play), so the two can never disagree about what "fresh player" means -- a split here is
+ * exactly how one field ends up reset on a join but stale across a match reset, or vice
+ * versa. `team` is deliberately untouched: a match reset keeps every player on the team they
+ * already are, while addPlayer assigns one before calling this.
+ */
+export function resetPlayerRow(world: World, id: number, spawn: Vec3, armor: ArmorId): void {
   const players = world.players;
-  const id = players.freeIds.pop() ?? players.count;
-  if (id >= players.energy.length) throw new RangeError('Player capacity exceeded');
-  if (id === players.count) players.count += 1;
-  players.active[id] = 1;
   // A reused id must not inherit the previous occupant's station loadout (#55): a fresh
   // player starts on armor defaults with no pack, exactly like the old fresh-player shape.
   players.hasEnergyPack[id] = 0;
   players.carriedWeapons[id] = 0;
-  players.team[id] = team;
+  // Written before resetPlayerToSpawn, which reads armorFor(world, id) for the full-energy
+  // write -- assigning armor afterwards would fill the tank to the old armor's max.
   players.armor[id] = armor;
   players.hasRepairPack[id] = 0;
   players.damage[id] = 0;
@@ -156,6 +163,16 @@ export function addPlayer(world: World, spawn: Vec3, team = 0, armor = ArmorId.L
   players.score[id] = 0;
   resetPlayerToSpawn(world, id, spawn);
   resetLoadout(world, id, ARMORS[armor]);
+}
+
+export function addPlayer(world: World, spawn: Vec3, team = 0, armor = ArmorId.Light): number {
+  const players = world.players;
+  const id = players.freeIds.pop() ?? players.count;
+  if (id >= players.energy.length) throw new RangeError('Player capacity exceeded');
+  if (id === players.count) players.count += 1;
+  players.active[id] = 1;
+  players.team[id] = team;
+  resetPlayerRow(world, id, spawn, armor);
   return id;
 }
 
