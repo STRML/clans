@@ -1,11 +1,12 @@
 # Known issues and continuation notes
 
-Updated September 9, 2026 (third pass: two more parallel implementation waves landed on
-`main`, taking the tree from protocol 9 to **protocol 11**, 958 to **1092 unit tests**, and a
-green 37-case browser suite). This is the handoff for the next implementation agent,
-including DeepSeek. The original milestone plans describe intended scope, not proof that the
-game faithfully reproduces Tribes 2. Prefer current code, tests, source assets, and user
-observations over earlier completion claims.
+Updated September 11, 2026 (fourth pass: a measurement-and-attribution wave on issue #32, a
+Wildcat bug fix, and a new `CHANGELOG.md`; the tree is at protocol 11, **1159 unit tests**
+across 73 files plus the opt-in telemetry sweep, and a green 37-case browser suite). This is
+the handoff for the next implementation agent, including DeepSeek. The original milestone
+plans describe intended scope, not proof that the game faithfully reproduces Tribes 2.
+Prefer current code, tests, source assets, and user observations over earlier completion
+claims.
 
 Priority: P1 affects ordinary gameplay; P2 is fidelity, robustness, or tooling.
 “Historical report” means an existing GitHub report whose exact reproduction has not been
@@ -14,18 +15,22 @@ rerun in this audit. GitHub issue numbers below refer to
 
 ## Start here
 
-1. **#32 captures.** Navigation, fall arrest, pocket escape, escort formations, turret
-   suppression and energy economy are all in, and carriers now cross the map with energy
-   instead of dying in the enemy base. Still **zero completed captures**: the residual
-   blocker is mid-route duel attrition (chains of pursuers 400–900 m from home). Next
-   levers, in order: escort climb/regroup cohesion across the ridge, a carrier
-   hold-fire-to-sprint trade study, and a dynamic post-sally to cover the last 400 m.
-   Evidence caveat: the harness result is byte-identical across world seeds because the
-   world seed does not reach bot RNG (`manager.nextSeed` does), so cross-seed variance is
-   inherently low — do not read three identical seeds as three independent samples.
-2. **Wildcat bugs (user report, 2026-09-10).** Spawns below its own pad, handles awkwardly,
-   and drives in a third-person chase camera. Filed with evidence and a reproduce-first
-   instruction in the P1 entry under Still open.
+1. **#32 captures.** The mechanics are all in (navigation, fall arrest, pocket escape, escort
+   formations, turret suppression, energy economy) and the last wave made the failure
+   measurable and rewrote the story: with real per-seed variation, **no carrier ever reaches
+   its own stand**. Over four seeds and 48000 ticks, carriers made 12 to 21 runs, none
+   entered the 2 m capture radius, and the best approach was 33 m. They die in midfield to a
+   single enemy: median killer distance 17-27 m, a median of one live enemy within 100 m,
+   and a median of ZERO live teammates within 100 m, at ~780 m from the carrier's own stand.
+   The capture-refusal rule (`flags.ts` `ownFlagHome`) is therefore still **untested by
+   data**: `refused` is 0 in every measured configuration. Re-run the telemetry before
+   theorizing, and read the ablation table below before changing any carrier policy: two of
+   the three policies this issue's last wave added turned out to cost far more than they
+   bought, and both were retuned on that evidence.
+2. **Wildcat bugs (user report, 2026-09-10): spawn and handling fixed, camera still open.**
+   The pad spawn and the steering limit cycle are fixed and measured (`1e26db4`); the
+   third-person chase camera is deliberate code and awaits a product decision from the user,
+   not another agent. Details in the P1 entry under Still open.
 3. **#53 remaining art.** The IFL playback driver and frame table are in and tested, but
    only frame-0 PNGs are committed, so real sequence playback needs the frame images copied
    from the cached `skins.vl2` archive under the manifest keys. Blaster ball/trail and
@@ -42,7 +47,78 @@ rerun in this audit. GitHub issue numbers below refer to
    below, #56's missing recordings, #55's unconsumed `maxWeapons` and absent Repair Pack
    icon, then #57's remaining vehicle scope.
 
-## Landed this pass
+## Landed this wave (2026-09-10 to 2026-09-11)
+
+| Commit | Work |
+| --- | --- |
+| `1e26db4` | Wildcat: spawns above its pad deck, hover support sees the deck, steering critically damped |
+| `f137812` | Bot matches seeded from the world seed; carrier telemetry behind `BOT_TELEMETRY=1` (#32) |
+| `5a89be9` | Escort threat priority and the carrier hold-fire predicates (#32) |
+| `f47699b` | Terrain-profile route chains for long graph edges, with the turret-avoidance measurement (#32) |
+| `20fd9c7` | Carrier stand hold, launch staging, thief recovery, escort engagement range (#32) |
+| `4aa22eb` | Retune of the two carrier policies an ablation measured as harmful (#32) |
+
+Verification: **1159 unit tests pass across 73 files** (the opt-in telemetry sweep is the one
+skip); `pnpm typecheck`, `pnpm lint` and `prettier --check` clean; **37/37 Playwright cases
+pass** (`env -u CI node_modules/.bin/playwright test`). Protocol stays **11**.
+
+### The seed defect, and why every earlier "three seeds" result was one match
+
+`createBotManager` started its bot RNG stream at a hardcoded 0, so the harness's seeds 1/2/3
+produced **byte-identical matches** — bot jitter comes from `manager.nextSeed`, not from
+`world.random`, which has no consumer in a vehicle-less match. The manager now seeds from
+`world.random.value` while keeping the per-bot increment, proven both ways: reverting the one
+line restores byte-identical rows across all four seeds. Any pre-`f137812` claim of the form
+"passes on three seeds" was one scenario run three times.
+
+### The telemetry, and the honest state of #32
+
+`packages/server/src/carrier-telemetry.ts` records, per carrier run: pickup and end ticks,
+end reason, killer with its relation (enemy / teammate / self / unattributed) and distance,
+live enemies and teammates within 100 m, the closest approach to the carrier's own stand, and
+the ticks inside the 2 m capture radius split by whether the own flag was home; per match, the
+flag-state tick shares and the both-flags-carried ticks. Run it with:
+
+```
+BOT_TELEMETRY=1 node_modules/.bin/vitest run packages/server/src/bots.katabatic.test.ts \
+  -t 'carrier telemetry sweep' --reporter=verbose > /tmp/telemetry.txt 2>&1
+```
+
+The `--reporter=verbose` is required: the default reporter drops `console.log` from a passing
+test when stdout is not a TTY.
+
+**Current configuration** (seeds 1-4, 12000 ticks each): 121 kills, 11 flag touches, **0
+captures, 0 arrivals**, 0 refused ticks, 16484 both-flags-carried ticks of 48000 (34%),
+carrier deaths 11 (all enemy-credited except one unattributed), best approach to a carrier's
+own stand 45 m. For comparison, the same harness at `20fd9c7` measured 69 kills, 18199
+both-flags ticks and 2 carrier **self-kills**.
+
+### The ablation that retuned the wave's own policies
+
+Each row is a single behavior disabled, everything else at `20fd9c7`, four seeds pooled; the
+control reproduces byte-for-byte, so every delta is the edit and not sim noise.
+
+| Configuration | kills | carrier deaths | self-kills | arrivals | both-flags ticks |
+| --- | --- | --- | --- | --- | --- |
+| Control (`20fd9c7` as shipped) | 69 | 7 | 2 | 0 | 18199 |
+| No decision-layer hold-fire gate | 104 | 10 | 0 | 0 | 18265 |
+| No 600-tick staged wait | 122 | 15 | 1 | 0 | 10371 |
+| No terrain-profile route chain | 92 | 14 | 2 | 1 (seed 1, 2 m) | 9400 |
+| No stand hold | 75 | 7 | 1 | 0 | 18020 |
+
+Decisions taken on that table, all landed in `4aa22eb`: the decision-layer hold-fire gate is
+**removed** (it cost 35 kills for zero arrivals), the 600-tick wait is **retuned to 100 ticks**
+(it cost 53 kills and 7828 stalemate ticks for eight saved carriers that never converted), and
+the route chain is **kept** — the single arrival seen without it is knife-edge and did not
+reproduce under the retuned configuration (measured again: 103 kills, 11863 both-flags ticks,
+still 0 arrivals). The stand hold is **kept** although it never fires on these seeds: `refused`
+is 0 everywhere, so the state it exists for still has not occurred.
+
+**The trap this table documents:** single-seed arrivals are not results. Three different
+configurations produced one, on different seeds, and none reproduced. Do not tune a constant
+because one seed arrived.
+
+## Landed in the second wave
 
 | Commit | Work |
 | --- | --- |
@@ -59,17 +135,10 @@ rerun in this audit. GitHub issue numbers below refer to
 | `4e59d58` | Open station menu no longer re-prefills under the player's click (#55) |
 | `b7ce7b5` | Parked vehicle no longer shoves a player standing at its center (#57) |
 
-Verification for the wave: **1092 unit tests pass across 72 files**; `pnpm typecheck` clean;
-`pnpm lint` clean; **37/37 Playwright cases pass** (`env -u CI node_modules/.bin/playwright
-test` with the dev server running). Protocol is now **11**.
+Verification for that wave: 1092 unit tests across 72 files, typecheck and lint clean, 37/37
+Playwright cases.
 
-Three browser regressions were caught by that gate and fixed before push: the station menu
-re-prefilled every frame so a click could not stick, the HUD weapon rack assertion still
-expected five icons after the rack started hiding uncarried weapons, and the new
-vehicle-player contact rule read a dismounted player's fall back into the parked vehicle's
-own sphere as a fresh collision, producing a perpetual micro-bounce.
-
-## Resolved this pass
+## Resolved in the second wave
 
 ### P2: authoritative projectile impacts — #52
 
@@ -190,32 +259,39 @@ own sphere as a fresh collision, producing a perpetual micro-bounce.
 
 ## Still open
 
-### P1: Wildcat spawns under its pad, handles poorly, drives in third person (2026-09-10)
+### P1: Wildcat — spawn and handling fixed, camera awaiting a product decision (2026-09-10, updated 2026-09-11)
 
-User-reported, three symptoms, each with the evidence a fix needs so nobody re-derives it:
+User-reported. Two of the three symptoms are fixed and measured in `1e26db4`; the third is a
+product decision, not a bug.
 
-- **Spawns below the pad.** `spawnVehicleAtPad` writes the vehicle at the pad's own position,
-  so the Wildcat starts inside the pad's geometry and the hover spring has to push it out.
-  Reproduce headless first: spawn at a powered pad and record `world.vehicles.position` on
-  the y axis for the first 60 ticks. The fix belongs in the spawn placement, not in a
-  damping tweak that hides the pop.
-- **Handles awkwardly.** The Wildcat's steering and thrust constants are the script's values
-  treated as accelerations (`vehicles.ts` `applyWildcatSteering` / `applyWildcatThrust`; the
-  plan's numbers table records which of them are ours), and its top speed is a flat
-  `WILDCAT_MAX_SPEED` cap standing in for the script's drag term. Those are the levers;
-  a handling change must name which one moved and what it fixed.
-- **Third person.** Deliberate code, not an accident: `client/src/app.ts`
-  `placeVehicleCamera` gives the Shrike its authored `Eye` node and falls back for the
-  Wildcat to a trailing chase camera. Note the conflict with the repo's own reference
-  material: `docs/ui-audio-reference.md` describes the source Wildcat frame as a third-person
-  view on a pad, so "make it first person" is a product decision rather than a proven
-  fidelity fix. The Wildcat dashboard art already exists in the manifest
-  (`hud_veh_new_dash.png` and the `hud_veh_*` set) if a cockpit view is wanted.
+- **Spawned below the pad — FIXED.** The pad's deck top sits 2.3 m above the pad object's own
+  origin, and `spawnVehicleAtPad` placed the craft at origin + 2 m: 0.30 m inside the deck
+  mesh, which the hover spring then dragged down through (79.8 to 77.4 over 60 ticks, with
+  lateral drift, because the spring read terrain before interiors). The spawn now probes the
+  pad's own deck and starts at its top plus the hover rest height, and `applyHoverSpring`
+  reads the higher of terrain and any deck within 8 m below the craft. Pinned by a
+  regression test that fails on the old placement.
+- **Handled awkwardly — FIXED.** The steering controller was underdamped (zeta about 0.05):
+  a held 90-degree input overshot 77 degrees and limit-cycled 65 degrees under it forever,
+  which is what "awkward" was. It is now critically damped with the plan's own steering
+  constant restored; closed-loop 90% in 1.47 s, zero overshoot. Parked hover amplitude is
+  0.000 m, so the spring was never the problem.
+- **Third person — OPEN, by design.** `client/src/app.ts` `placeVehicleCamera` gives the
+  Shrike its authored `Eye` node and the Wildcat a trailing chase camera. That is deliberate
+  code, and the camera itself measures clean (first-order lerp, frame-rate independent,
+  3.06 degrees of lag through a 90-degree flick), so the perceived badness was the steering
+  limit cycle above, now fixed. Note the conflict with the repo's own reference material:
+  `docs/ui-audio-reference.md` describes the source Wildcat frame as a third-person view on a
+  pad, so "make it first person" is a product call rather than a proven fidelity fix. The
+  Wildcat dashboard art already exists in the manifest (`hud_veh_new_dash.png` and the
+  `hud_veh_*` set) if a cockpit view is wanted.
 
 ### P1: bots take the flag but never capture — #32
 
-See Start here. All the mechanical blockers are gone; the remainder is combat economics on
-the return leg.
+See Start here for the current measurements and the ablation table. In one line: carriers are
+killed by lone enemies in midfield with no teammate within 100 m, roughly 780 m from their own
+stand, and no carrier has yet reached the capture radius in any measured configuration, so the
+capture-refusal rule remains untested by data.
 
 ### P2: projectile art and texture animation — #53
 
@@ -307,10 +383,17 @@ the return leg.
   and the loadout/pack/weapons selection). Converted assets are committed; ordinary startup
   needs no fetch/build. Asset additions need manifest, builder and generated output changes
   together.
-- Gates: `pnpm test` (1092 tests, 72 files), `pnpm typecheck`, `pnpm lint`, and
-  `env -u CI node_modules/.bin/playwright test` (37 cases; the environment sets `CI=true`,
-  which disables reuse of an already-running dev server). Do not edit while browser tests
-  run: HMR causes false failures.
+- Gates: `pnpm test` (1159 tests, 73 files; the opt-in telemetry sweep is the one skip),
+  `pnpm typecheck`, `pnpm lint`, and `env -u CI node_modules/.bin/playwright test` (37 cases;
+  the environment sets `CI=true`, which disables reuse of an already-running dev server). Do
+  not edit while browser tests run: HMR causes false failures.
+- Measuring bot behavior: run the carrier telemetry sweep before and after any carrier-policy
+  change, and treat a single-seed arrival as noise. The command, and the reason
+  `--reporter=verbose` is required, are in the telemetry section above. Three different
+  configurations produced one arrival each on three different seeds this wave, and none
+  reproduced; a control re-run reproduces byte-for-byte, so any delta you see is your edit.
+- `CHANGELOG.md` is maintained with the work: add an entry under Unreleased as each wave
+  lands, and keep `docs/ISSUES.md` for what is still wrong or missing.
 - Deliberate weapon tuning: Blaster 0.3 s cycle; Chaingun 0.1 s held fire versus source
   0.15 s, with 0.5 s spin-up; Shrike 0.2 s versus source 0.125 s. The user requested faster
   infantry guns and slower Shrike fire. Do not silently revert.

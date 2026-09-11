@@ -12,6 +12,49 @@ redeployed together.
 
 ## Unreleased
 
+### 2026-09-11 — measurement wave on bot captures, Wildcat fixes
+
+#### Added
+
+- Carrier telemetry and a real seed dimension for the bot acceptance harness. Bot matches now
+  derive their RNG from the world seed (a hardcoded `0` had made "seeds 1/2/3" the same match
+  three times), and `BOT_TELEMETRY=1` prints per-run and per-match carrier data: end reason,
+  the killer and its relation, nearby enemies and teammates at the death, closest approach to
+  the carrier's own stand, ticks inside the capture radius with the own flag home or out, and
+  both-flags-carried ticks. The three existing acceptance thresholds are unchanged (#32).
+- Terrain-profile route chains: a long waypoint-graph edge can now follow a graded line across
+  the terrain instead of cutting straight over a crest, within a documented length budget.
+  The enemy-turret avoidance it was meant to enable is measured to be infeasible on Katabatic,
+  and that measurement is recorded at the constant (#32).
+
+#### Changed
+
+- Carrier policies retuned on a four-seed ablation: the decision-layer hold-fire gate is
+  removed (it cost 35 kills for zero arrivals) and the 600-tick staged wait becomes 100 ticks
+  (it cost 53 kills and 7828 both-flags-carried ticks for eight saved carriers that never
+  converted). Escort threat priority, the own-flag-out stand hold and thief recovery stay.
+  Net effect against the previous revision: 69 kills to 121, carrier self-kills 2 to 0,
+  both-flags-carried ticks 18199 to 16484 (#32).
+- The Wildcat's steering controller is critically damped, with the plan's own steering
+  constant restored. A held 90-degree input previously overshot by 77 degrees and then
+  limit-cycled 65 degrees under it forever; it now closes 90% in 1.47 s with zero overshoot,
+  which is what the "handles awkwardly" report was. Parked hover amplitude is 0.000 m.
+
+#### Fixed
+
+- The Wildcat no longer spawns inside its vehicle pad. The pad's deck top sits 2.3 m above the
+  pad's own origin, so the old spawn started 0.30 m inside the deck mesh and the hover spring
+  dragged the craft down through it. The spawn probes the deck and starts at hover rest
+  height, and the hover spring now reads interior decks as well as terrain, since terrain
+  alone can never hold a hover vehicle on a pad.
+
+#### Known gaps
+
+Captures still do not happen: no carrier has reached the capture radius in any measured
+configuration, so the capture-refusal rule remains untested by data (#32). The Wildcat's
+third-person chase camera is deliberate code awaiting a product decision; the remaining four
+T2 vehicles (Bomber, Havoc, Tank, Mobile Point Base) are unbuilt. Details in `docs/ISSUES.md`.
+
 ### 2026-09-10 — capture work, vehicle scope, loadouts, audio (protocol 8 to 11)
 
 #### Added
