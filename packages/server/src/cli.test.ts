@@ -1,13 +1,32 @@
 import { describe, expect, it } from 'vitest';
 import { parseArgs } from './cli.js';
+import { TARGET_TEAM_SIZE } from './bots.js';
 import { WORLD_CAPACITY } from './world.js';
 
 describe('parseArgs', () => {
   it('reads --bots and --port', () => {
-    expect(parseArgs(['--bots', '31', '--port', '7777'])).toEqual({ bots: 31, port: 7777 });
+    expect(parseArgs(['--bots', '31', '--port', '7777'])).toEqual({
+      bots: 31,
+      teamSize: TARGET_TEAM_SIZE,
+      port: 7777,
+    });
   });
-  it('defaults bots to 0 and port to 7777', () => {
-    expect(parseArgs([])).toEqual({ bots: 0, port: 7777 });
+  it('defaults bots to 0, team size to TARGET_TEAM_SIZE, and port to 7777', () => {
+    expect(parseArgs([])).toEqual({ bots: 0, teamSize: TARGET_TEAM_SIZE, port: 7777 });
+  });
+  it('reads a raised --team-size so --bots 48 can seat the 24-versus-24 target', () => {
+    expect(parseArgs(['--bots', '48', '--team-size', '24'])).toEqual({
+      bots: 48,
+      teamSize: 24,
+      port: 7777,
+    });
+  });
+  it('rejects a non-positive or non-numeric --team-size, and one above world capacity', () => {
+    expect(() => parseArgs(['--team-size', '0'])).toThrow(RangeError);
+    expect(() => parseArgs(['--team-size', '-1'])).toThrow(RangeError);
+    expect(() => parseArgs(['--team-size', 'x'])).toThrow(RangeError);
+    expect(() => parseArgs(['--team-size', String(WORLD_CAPACITY + 1)])).toThrow(RangeError);
+    expect(parseArgs(['--team-size', String(WORLD_CAPACITY)]).teamSize).toBe(WORLD_CAPACITY);
   });
   it('rejects a negative or non-numeric --bots', () => {
     expect(() => parseArgs(['--bots', '-1'])).toThrow(RangeError);

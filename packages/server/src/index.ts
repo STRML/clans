@@ -1,4 +1,4 @@
-import { createBotManager, TARGET_TEAM_SIZE } from './bots.js';
+import { createBotManager } from './bots.js';
 import { parseArgs } from './cli.js';
 import { startTickLoop } from './loop.js';
 import { startNetServer } from './net.js';
@@ -39,7 +39,7 @@ for (let id = 0; id < world.baseObjects.count; id += 1) {
     label: 'baseObject',
   });
 }
-const botManager = createBotManager(world, spawns, landmarks, options.bots);
+const botManager = createBotManager(world, spawns, landmarks, options.bots, options.teamSize);
 const board = createOrderBoard();
 
 const net = startNetServer({ world, spawns, botManager, board, port: options.port });
@@ -59,17 +59,21 @@ startTickLoop({
 });
 
 // Codex review round 1, finding (P1): this used to log the raw --bots value, not the
-// actual number of bots the manager could place. rebalanceTeams only ever fills up to
-// TARGET_TEAM_SIZE (16) per team, so a budget above 32 never gets fully used regardless
-// of what was requested -- cli.ts's own validation still allows up to WORLD_CAPACITY (64)
-// since this milestone does not change that flag's contract (Global Constraints), so the
-// mismatch is real and worth surfacing to whoever is reading server startup logs.
-const MAX_USABLE_BOTS = TARGET_TEAM_SIZE * 2;
+// actual number of bots the manager could place. rebalanceTeams only ever fills up to the
+// match's per-team cap (--team-size, 16 by default) per team, so a budget above
+// teamSize * 2 never gets fully used regardless of what was requested (e.g. --bots 48
+// with the default cap seats 32). cli.ts's own validation allows up to WORLD_CAPACITY (64)
+// for --bots since that flag is a budget, not a match size, so the mismatch is real and
+// worth surfacing to whoever is reading server startup logs -- and the fix is a second
+// flag, not a smaller budget: --team-size 24 is what seats the 24-versus-24 target.
+const MAX_USABLE_BOTS = options.teamSize * 2;
 if (options.bots > MAX_USABLE_BOTS) {
   console.warn(
     `[clans-server] --bots ${String(options.bots)} exceeds the usable maximum of ${String(
       MAX_USABLE_BOTS,
-    )} (${String(TARGET_TEAM_SIZE)} per team); only ${String(botManager.botIds.size)} bots were placed`,
+    )} (${String(options.teamSize)} per team, raise --team-size for a larger match); only ${String(
+      botManager.botIds.size,
+    )} bots were placed`,
   );
 }
 console.log(

@@ -59,6 +59,7 @@ function emptyBotManager(): BotManager {
     runtimes: new Map(),
     graph: buildWaypointGraph([]),
     maxBots: 0,
+    teamSize: TARGET_TEAM_SIZE,
     nextSeed: 0,
   };
 }
@@ -2442,6 +2443,65 @@ describe('startNetServer', () => {
     expect(manager.botIds.size).toBe(0);
     client.close();
     altServer.close();
+  });
+
+  it('refuses a join once both teams sit at the raised 24-seat cap with bots disabled (issue #31 at --team-size 24)', async () => {
+    // Same #31 refusal as the 16-cap case above, one cap value up: the join gate reads
+    // the manager's own cap, so a 24-seat match refuses on the 49th human exactly as a
+    // 16-seat match refuses on the 33rd -- no separate code path, no protocol change.
+    const wideCapWorld = createWorld(terrain, 1, 64);
+    for (let i = 0; i < 24; i += 1) {
+      addPlayer(wideCapWorld, { x: 0, y: 0, z: 0 }, 1);
+      addPlayer(wideCapWorld, { x: 1, y: 0, z: 1 }, 2);
+    }
+    const wideCapServer = startNetServer({
+      botManager: emptyBotManager(),
+      board: createOrderBoard(),
+      world: wideCapWorld,
+      spawns,
+      port: TEST_PORT + 37,
+    });
+    await wideCapServer.ready;
+    const client = await connect(TEST_PORT + 37);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    expect(welcome.status).toBe(WelcomeStatus.TeamFull);
+    expect(welcome.playerId).toBe(0);
+    expect(wideCapWorld.players.count).toBe(48); // nothing was added
+    client.close();
+    wideCapServer.close();
+  });
+
+  it('admits a human to a team exactly at the raised 24-seat cap by shedding its bot (issue #31 at --team-size 24)', async () => {
+    // --team-size 24 and --bots 1: team 1 gets 24 humans, team 2 gets 23 humans plus the
+    // manager's single backfilled bot. The joiner's preferred pick (tie goes to team 1)
+    // has no bot to shed, so handleJoin takes joinableTeam's alternate-team offer and
+    // team 2 gives its bot up -- the row-12 mechanic at the raised cap.
+    const wideJoinWorld = createWorld(terrain, 1, 64);
+    for (let i = 0; i < 24; i += 1) addPlayer(wideJoinWorld, { x: 0, y: 0, z: 0 }, 1);
+    for (let i = 0; i < 23; i += 1) addPlayer(wideJoinWorld, { x: 1, y: 0, z: 1 }, 2);
+    const manager = createBotManager(wideJoinWorld, spawns, [], 1, 24);
+    expect(teamCount(wideJoinWorld, 2)).toBe(24); // the single bot backfilled team 2
+    const wideJoinServer = startNetServer({
+      botManager: manager,
+      board: createOrderBoard(),
+      world: wideJoinWorld,
+      spawns,
+      port: TEST_PORT + 38,
+    });
+    await wideJoinServer.ready;
+    const client = await connect(TEST_PORT + 38);
+    const welcomePromise = receive(client);
+    client.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+    expect(welcome.status).toBe(WelcomeStatus.Ok);
+    expect(welcome.team).toBe(2);
+    expect(teamCount(wideJoinWorld, 1)).toBe(24);
+    expect(teamCount(wideJoinWorld, 2)).toBe(24);
+    expect(manager.botIds.size).toBe(0);
+    client.close();
+    wideJoinServer.close();
   });
 
   it('stops stepping bots once gameOver freezes the match (Codex review round 1, P2)', async () => {

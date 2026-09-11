@@ -159,6 +159,67 @@ describe('joinableTeam', () => {
   });
 });
 
+describe('configurable per-team cap (--team-size, 24 versus 24)', () => {
+  it('seats exactly 24 per team at a 24-seat cap with a 48-bot budget', () => {
+    const world = createWorld(flat, 1, 64);
+    const manager = createBotManager(world, spawns, [], 48, 24);
+    expect(teamCount(world, 1)).toBe(24);
+    expect(teamCount(world, 2)).toBe(24);
+    expect(manager.botIds.size).toBe(48);
+    // Idempotent: a later rebalance (what handleJoin/handleClose call) must not add a
+    // 25th bot or shed one of the 24 -- the cap is the seating target, not just a ceiling.
+    rebalanceTeams(manager, world, spawns);
+    expect(teamCount(world, 1)).toBe(24);
+    expect(teamCount(world, 2)).toBe(24);
+    expect(manager.botIds.size).toBe(48);
+  });
+
+  it('keeps the 16-seat default when the cap argument is omitted, even at a 48-bot budget', () => {
+    const world = createWorld(flat, 1, 64);
+    const manager = createBotManager(world, spawns, [], 48);
+    expect(manager.teamSize).toBe(TARGET_TEAM_SIZE);
+    expect(teamCount(world, 1)).toBe(TARGET_TEAM_SIZE);
+    expect(teamCount(world, 2)).toBe(TARGET_TEAM_SIZE);
+    // The remaining 16 bots of the requested budget stay unplaced -- exactly today's
+    // behavior for any budget above 32 (index.ts warns about this at startup).
+    expect(manager.botIds.size).toBe(TARGET_TEAM_SIZE * 2);
+  });
+
+  it('refuses a join once both teams sit at the raised cap with no bot to shed, exactly as at 16 (issue #31)', () => {
+    for (const cap of [TARGET_TEAM_SIZE, 24]) {
+      const world = createWorld(flat, 1, 64);
+      const manager = createBotManager(world, spawns, [], 0, cap);
+      for (let i = 0; i < cap; i += 1) {
+        addPlayer(world, { x: -95, y: 0, z: 0 }, 1);
+        addPlayer(world, { x: 95, y: 0, z: 0 }, 2);
+      }
+      expect(teamCount(world, 1)).toBe(cap);
+      expect(teamCount(world, 2)).toBe(cap);
+      // Same refusal semantics the issue describes: null here is what net.ts's handleJoin
+      // turns into a team-full Welcome, at either cap.
+      expect(joinableTeam(world, manager)).toBeNull();
+    }
+  });
+
+  it('admits a human to a team exactly at the raised cap by shedding its bot, not refusing (issue #31 at 24)', () => {
+    // Team 1: 24 humans, botless -- smallerTeam's pick (tie goes to team 1) has nothing to
+    // shed. Team 2: 23 humans plus the manager's single backfilled bot, so exactly-at-cap
+    // team 2 takes the joiner by giving that bot up (row 12's mechanic) instead of
+    // refusing the way the both-full case above does.
+    const world = createWorld(flat, 1, 64);
+    for (let i = 0; i < 24; i += 1) addPlayer(world, { x: -95, y: 0, z: 0 }, 1);
+    for (let i = 0; i < 23; i += 1) addPlayer(world, { x: 95, y: 0, z: 0 }, 2);
+    const manager = createBotManager(world, spawns, [], 1, 24);
+    expect(teamCount(world, 2)).toBe(24); // the single bot backfilled team 2
+    expect(joinableTeam(world, manager)).toBe(2);
+    addPlayer(world, { x: 95, y: 0, z: 0 }, 2); // the joining human takes team 2's offer
+    rebalanceTeams(manager, world, spawns);
+    expect(teamCount(world, 1)).toBe(24);
+    expect(teamCount(world, 2)).toBe(24);
+    expect(manager.botIds.size).toBe(0);
+  });
+});
+
 describe('bot RNG seeding (issue #32)', () => {
   /** Each bot's own stream seed, in the manager's insertion (join) order. This is the
    *  whole of bot randomness: createBotRuntimeState stores it and combat.ts's aim jitter
