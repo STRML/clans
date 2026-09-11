@@ -35,6 +35,11 @@ redeployed together.
   converted). Escort threat priority, the own-flag-out stand hold and thief recovery stay.
   Net effect against the previous revision: 69 kills to 121, carrier self-kills 2 to 0,
   both-flags-carried ticks 18199 to 16484 (#32).
+- The Wildcat's camera is T2's own. It rests on the model's authored `Eye` node, which is the
+  source game's default view (`GameConnection::mFirstPerson` is true), and `X` slides it to
+  the datablock's chase end and back at the engine's own traversal speed: Wildcat 5.0 m behind
+  and 0.7 m up, Shrike 15 / 2.5, with the trailing end keeping the `cameraLag` smoothing
+  (#57).
 - The Wildcat's steering controller is critically damped, with the plan's own steering
   constant restored. A held 90-degree input previously overshot by 77 degrees and then
   limit-cycled 65 degrees under it forever; it now closes 90% in 1.47 s with zero overshoot,

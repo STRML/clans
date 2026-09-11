@@ -27,10 +27,12 @@ rerun in this audit. GitHub issue numbers below refer to
    theorizing, and read the ablation table below before changing any carrier policy: two of
    the three policies this issue's last wave added turned out to cost far more than they
    bought, and both were retuned on that evidence.
-2. **Wildcat bugs (user report, 2026-09-10): spawn and handling fixed, camera still open.**
-   The pad spawn and the steering limit cycle are fixed and measured (`1e26db4`); the
-   third-person chase camera is deliberate code and awaits a product decision from the user,
-   not another agent. Details in the P1 entry under Still open.
+2. **Wildcat bugs (user report, 2026-09-10): closed.** Pad spawn and steering were fixed and
+   measured in `1e26db4`; the camera followed in `c9e729f`, which gives the Wildcat T2's own
+   camera: the cockpit rests on the model's authored `Eye` node and `X` slides it to the
+   script's chase end (cameraMaxDist 5.0, cameraOffset 0.7) at the engine's own traversal
+   speed. T2 ships that resting mode by default (`GameConnection::mFirstPerson`), matching
+   what the user asked for. See the wave section below.
 3. **#53 remaining art.** The IFL playback driver and frame table are in and tested, but
    only frame-0 PNGs are committed, so real sequence playback needs the frame images copied
    from the cached `skins.vl2` archive under the manifest keys. Blaster ball/trail and
@@ -57,10 +59,26 @@ rerun in this audit. GitHub issue numbers below refer to
 | `f47699b` | Terrain-profile route chains for long graph edges, with the turret-avoidance measurement (#32) |
 | `20fd9c7` | Carrier stand hold, launch staging, thief recovery, escort engagement range (#32) |
 | `4aa22eb` | Retune of the two carrier policies an ablation measured as harmful (#32) |
+| `c9e729f` | Wildcat camera: T2's own Eye-node cockpit, chase end behind the `X` toggle |
 
 Verification: **1159 unit tests pass across 73 files** (the opt-in telemetry sweep is the one
-skip); `pnpm typecheck`, `pnpm lint` and `prettier --check` clean; **37/37 Playwright cases
+skip); `pnpm typecheck`, `pnpm lint` and `prettier --check` clean; **38/38 Playwright cases
 pass** (`env -u CI node_modules/.bin/playwright test`). Protocol stays **11**.
+
+### The Wildcat report, closed
+
+All three user-reported symptoms are fixed. The pad spawn was placing the craft 0.30 m inside
+the deck mesh (the deck top is 2.3 m above the pad object's own origin) and the hover spring,
+reading terrain before interiors, then dragged it down 79.8 to 77.4 with lateral drift; the
+spawn now probes the deck and starts at its top plus hover rest height, and the spring sees
+interiors within 8 m. The handling was a steering controller with zeta about 0.05: a held
+90-degree input overshot 77 degrees and limit-cycled 65 degrees under it forever, now
+critically damped with the plan's own constant restored (90% closed in 1.47 s, no overshoot,
+parked hover amplitude 0.000 m). The third-person camera was never broken, only not T2's
+default: `c9e729f` puts the camera on the model's authored `Eye` node for every vehicle and
+moves the chase end -- Wildcat 5.0 m / 0.7 m, Shrike 15 / 2.5 -- behind the `X` toggle, with
+`GameConnection::mFirstPerson` defaulting true as the source does. `e2e/vehicle-camera.spec.ts`
+pins both ends of that slider.
 
 ### The seed defect, and why every earlier "three seeds" result was one match
 
@@ -258,33 +276,6 @@ Playwright cases.
   browser listen is still the honest check.
 
 ## Still open
-
-### P1: Wildcat — spawn and handling fixed, camera awaiting a product decision (2026-09-10, updated 2026-09-11)
-
-User-reported. Two of the three symptoms are fixed and measured in `1e26db4`; the third is a
-product decision, not a bug.
-
-- **Spawned below the pad — FIXED.** The pad's deck top sits 2.3 m above the pad object's own
-  origin, and `spawnVehicleAtPad` placed the craft at origin + 2 m: 0.30 m inside the deck
-  mesh, which the hover spring then dragged down through (79.8 to 77.4 over 60 ticks, with
-  lateral drift, because the spring read terrain before interiors). The spawn now probes the
-  pad's own deck and starts at its top plus the hover rest height, and `applyHoverSpring`
-  reads the higher of terrain and any deck within 8 m below the craft. Pinned by a
-  regression test that fails on the old placement.
-- **Handled awkwardly — FIXED.** The steering controller was underdamped (zeta about 0.05):
-  a held 90-degree input overshot 77 degrees and limit-cycled 65 degrees under it forever,
-  which is what "awkward" was. It is now critically damped with the plan's own steering
-  constant restored; closed-loop 90% in 1.47 s, zero overshoot. Parked hover amplitude is
-  0.000 m, so the spring was never the problem.
-- **Third person — OPEN, by design.** `client/src/app.ts` `placeVehicleCamera` gives the
-  Shrike its authored `Eye` node and the Wildcat a trailing chase camera. That is deliberate
-  code, and the camera itself measures clean (first-order lerp, frame-rate independent,
-  3.06 degrees of lag through a 90-degree flick), so the perceived badness was the steering
-  limit cycle above, now fixed. Note the conflict with the repo's own reference material:
-  `docs/ui-audio-reference.md` describes the source Wildcat frame as a third-person view on a
-  pad, so "make it first person" is a product call rather than a proven fidelity fix. The
-  Wildcat dashboard art already exists in the manifest (`hud_veh_new_dash.png` and the
-  `hud_veh_*` set) if a cockpit view is wanted.
 
 ### P1: bots take the flag but never capture — #32
 
