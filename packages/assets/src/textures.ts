@@ -24,12 +24,12 @@ export function textureKey(resource: string): string {
 /**
  * The export key for one IFL frame texture: the resource's manifest directory plus the
  * frame's lowercase stem (the same normalization `textureKey` applies to whole
- * materials). `attachShapeTextures` itself ships only frame 0 of each material from
- * texture-sources.json; a build step that wants original texture-sequence playback
- * copies the remaining authored frames under these keys (`out/textures/<key>.png`),
- * where the client's `bindIflPlayback` already looks for them and honestly keeps frame 0
- * while they are absent. Mirrored client-side in shape-animation.ts because
- * @clans/client does not depend on this package.
+ * materials). texture-sources.json carries an entry for every authored frame that the
+ * client's `IFL_FRAME_LISTS` names (transcribed from the mirror's skins.vl2 .ifl files),
+ * so the build copies each of them to `out/textures/<key>.png` -- where the client's
+ * `bindIflPlayback` looks for it. A frame the manifest cannot resolve is left out and
+ * playback honestly keeps frame 0, per that function's own doc. Mirrored client-side in
+ * shape-animation.ts because @clans/client does not depend on this package.
  */
 export function iflFrameKey(resource: string, frame: string): string {
   const directory = textureKey(resource).split('/')[0];

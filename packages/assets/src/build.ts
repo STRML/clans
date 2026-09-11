@@ -276,7 +276,10 @@ await writeFile(
   )}\n`,
 );
 
-// Original diffuse textures are external to the exported GLBs; animated IFLs use frame 1.
+// Original diffuse textures are external to the exported GLBs. The manifest also carries
+// one entry per authored IFL frame (skins/<frame>), so bindIflPlayback can load a whole
+// texture sequence instead of holding frame 0; the mirror's bitmaps are copied verbatim,
+// keeping their 8-bit-per-channel encoding and dimensions (issue #53).
 for (const [key, source] of Object.entries(textureSources)) {
   const directory = resolve(output, 'textures', key.split('/')[0]!);
   await mkdir(directory, { recursive: true });

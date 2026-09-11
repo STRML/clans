@@ -89,6 +89,57 @@ describe('original IFL texture-sequence playback', () => {
     mixer.uncacheRoot(root);
   });
 
+  it('advances the real lite_red table through successive decoded frame textures', () => {
+    // The tick math above is exercised against the real table, but a viewer never sees
+    // an index: it sees material.map change. Decode-equivalent textures stand in for the
+    // PNGs the asset build commits under iflFrameKey (one per authored frame), so the
+    // applier has to select a different texture at each authored boundary.
+    const resource = 'skins/lite_red';
+    const entries = IFL_FRAME_LISTS[resource]!;
+    const totalTicks = entries.reduce((sum, [, ticks]) => sum + ticks, 0);
+    const root = new THREE.Group();
+    const mesh = iflMesh('Ambient', totalTicks / IFL_TICKS_PER_SECOND, 1);
+    root.add(mesh);
+    bindIflPlayback(mesh);
+    const material = mesh.material as THREE.MeshStandardMaterial;
+    const frames = iflFramesFor(resource);
+    expect(frames).toHaveLength(entries.length);
+    const decoded = entries.map(() => new THREE.Texture());
+    decoded.forEach((texture, index) => {
+      frames[index] = texture;
+    });
+    const clip = withVisibility(root, [new THREE.AnimationClip('ambient', 1, [])])[0]!;
+    const mixer = new THREE.AnimationMixer(root);
+    const action = mixer.clipAction(clip);
+    action.setLoop(THREE.LoopRepeat, Infinity);
+    action.play();
+    const render = (): void => {
+      mesh.onBeforeRender(
+        {} as never,
+        new THREE.Scene(),
+        {} as never,
+        mesh.geometry,
+        material,
+        new THREE.Group(),
+      );
+    };
+    render();
+    expect(material.map).toBe(decoded[0]);
+    // lite_red.ifl holds lite_red0 for its first 10 ticks, so the map is unchanged at 9.
+    mixer.update(10 / IFL_TICKS_PER_SECOND - 1e-9);
+    render();
+    expect(material.map).toBe(decoded[0]);
+    // Tick 10 crosses into lite_red1's 2-tick run: a different texture, not a blend.
+    mixer.update(1 / IFL_TICKS_PER_SECOND);
+    render();
+    expect(material.map).toBe(decoded[1]);
+    expect(decoded[1]).not.toBe(decoded[0]);
+    mixer.update(1.5 / IFL_TICKS_PER_SECOND); // inside the second entry's 12..14-tick window
+    render();
+    expect(material.map).toBe(decoded[2]);
+    mixer.uncacheRoot(root);
+  });
+
   it('wraps a cyclic list and clamps a one-shot list per the source sequence definition', () => {
     // No shipped binding is shorter than its list, so exercise both ends of Torque's
     // matFrame rule (wrap when cyclic, clamp when not) on a synthetic two-tick list.
@@ -197,5 +248,32 @@ describe('original IFL texture-sequence playback', () => {
       );
     }
     disposeShape(root);
+  });
+
+  it('commits an 8-bit PNG under the frame key the driver loads for every authored frame', async () => {
+    // Issue #53: playback stays on frame 0 unless the remaining frames of each sequence
+    // exist on disk. The asset build copies them from the cached skins.vl2 mirror under
+    // iflFrameKey, so every frame of the real table must resolve to a committed file.
+    const manifest = JSON.parse(
+      await readFile(new URL('../../assets/src/texture-sources.json', import.meta.url), 'utf8'),
+    ) as Record<string, string>;
+    const checked = new Set<string>();
+    for (const [resource, entries] of Object.entries(IFL_FRAME_LISTS)) {
+      for (const [frame] of entries) {
+        const key = iflFrameKey(resource, frame);
+        if (checked.has(key)) continue;
+        checked.add(key);
+        // The build copies out/textures/<key>.png from this manifest entry, so a key
+        // missing here means the file can never ship.
+        expect(key in manifest, key).toBe(true);
+        const bytes = await readFile(
+          new URL(`../../../assets/out/katabatic/textures/${key}.png`, import.meta.url),
+        );
+        // PNG signature, then IHDR: the mirror's bitmaps are 8 bits per channel and the
+        // build copies them verbatim, so the bit-depth byte at offset 24 stays <= 8.
+        expect([...bytes.subarray(0, 8)], key).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+        expect(bytes[24]!, key).toBeLessThanOrEqual(8);
+      }
+    }
   });
 });
