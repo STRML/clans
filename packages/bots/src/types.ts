@@ -123,6 +123,10 @@ export interface BotRuntimeState {
   /** The gap to the current waypoint when the pocket window opened, for the closure
    *  test above. */
   pocketBaseGap: number;
+  /** Issue #32 launch cohesion: world.tick the carrier began staging for company, or -1
+   *  when it is not staging. Decision-layer state with no world-side equivalent: the sim
+   *  records no flag-pickup tick, and the bounded wait is exactly this clock. */
+  carrierStageSinceTick: number;
   /** Issue #32: which side (-1 left / +1 right) the last stuck-skip fallback offset its
    *  escape goal to. Consecutive skips alternate sides -- re-ramming the same wall from the
    *  same side on every skip is exactly the "repath recomputes the identical unreachable
@@ -161,6 +165,7 @@ export function createBotRuntimeState(
     escapeJetTicks: 0,
     pocketTicks: 0,
     pocketBaseGap: 0,
+    carrierStageSinceTick: -1,
     lastSteerPosition: null,
     stuckSkipSide: 1,
     random: { value: seed || 1 },

@@ -2,6 +2,7 @@ import {
   applyLoadoutSelection,
   armorFor,
   FlagState,
+  groundHeightAt,
   PackId,
   STATION_USE_RADIUS,
   type ArmorId,
@@ -11,14 +12,23 @@ import {
   type World,
 } from '@clans/sim';
 import { OrderKind, type TeamOrder } from '@clans/protocol';
-import { aimAndFire, aimAtPoint } from './combat.js';
 import {
+  aimAndFire,
+  aimAtPoint,
+  carrierHoldsFireOn,
+  carrierHoldsFireOnPoint,
+  selectCombatTarget,
+} from './combat.js';
+import {
+  CARRIER_THREAT_RADIUS_M,
   findAttackableTurret,
   findCarrierHealStation,
+  findCarrierThreat,
   findEnemyFlagCarrier,
   findEscortedCarrier,
   findNearestFriendlyStation,
   findNearestVisibleEnemy,
+  isCarryingEnemyFlag,
   LOW_HEALTH_FRACTION,
   needsHealing,
 } from './perception.js';
@@ -99,40 +109,328 @@ function carrierShouldRegroup(world: World, runtime: BotRuntimeState): boolean {
   return true;
 }
 
-/** Attacker: carrying the enemy flag -> head home (backing off to regroup when a close
- *  threat has no friendly answer nearby -- carrierShouldRegroup above); otherwise -> head
- *  to the enemy flag wherever it currently is (home, dropped, or being carried by a
- *  teammate you're about to catch up to and pass, which is fine -- there's nothing wrong
- *  with two teammates converging on the same flag). */
+/** Issue #32 home-leg economy: the flag stand's own capture gate, restated from flags.ts
+ *  (ownFlagHome). A capture is refused while the capturer's own flag is anything but Home
+ *  -- only the own flag's STATE matters, not who has it: a Dropped flag re-arms the capture
+ *  only once somebody touches it back home, a carried one only when its carrier dies (or
+ *  the 45 s return timer fires after it drops). This is the fact the whole home leg is
+ *  built on: while it is true, the enemy flag a carrier holds converts to NOTHING. */
+function ownFlagAway(world: World, team: number): boolean {
+  return world.flags.state[ownFlagId(world, team)] !== FlagState.Home;
+}
 
+/** Issue #32 home-leg economy: how far off the stand the carrier holds while ownFlagAway
+ *  is true. PICKUP_RADIUS (flags.ts, 2 m, 3D) is the entire capture gate, so the hold point
+ *  has to stay comfortably inside it -- but exactly ON the stand point is the one place not
+ *  to hold: it is where every teammate converging on the post ends up (defenders falling
+ *  back to it, escorts, a second carrier), and players collide -- LIGHT_ARMOR's collision
+ *  radius is 0.6 m (movement.ts's `Math.max(boxX, boxY) / 2`), so two bodies collide within
+ *  1.2 m and a teammate parked on the stand point shoves the carrier off it (the same
+ *  standoff reasoning as ESCORT_STANDOFF_M). 1.5 m clears that 1.2 m contact diameter and
+ *  still leaves 0.5 m of the 2 m capture radius for the approach's own overshoot.
+ *
+ *  Measured (flat terrain, the real steering + movement stack, 2000 settled ticks of a
+ *  carrier holding this point): distance to the stand ran mean 2.34 m, min 0.72 m, max
+ *  10.32 m, and the carrier was inside the 2 m capture gate on 61% of ticks. It is a SWEEP,
+ *  not a park: steering drives at the goal at full speed with no arrival damping (steering
+ *  is not this slice's file) and the approach overshoots, then comes back -- the anti-stuck
+ *  ladder is NOT what moves it (stuck streak peaked at 2 against its threshold of 3, zero
+ *  skips, zero escape windows in the same run). A tighter point measured tighter (0.6 m ->
+ *  80% of ticks inside), and costs the clearance from a teammate standing on the post: at
+ *  0.6 m the carrier sits inside a 0.6 m-radius body's 1.2 m contact diameter, which is the
+ *  shoving this standoff exists to avoid, so 1.5 m is the tightest defensible radius. That
+ *  is enough for the gate it exists for: flags.ts's tryCapture runs for every player every
+ *  tick, so each of those 61% of ticks is a live capture check -- the carrier sweeps the
+ *  radius rather than parking in it, and a sweep still converts the moment the own flag
+ *  comes back. */
+export const CARRIER_HOLD_STANDOFF_M = 1.5; // Ours, meters.
+
+/** Issue #32 home-leg economy -- the explicit preference call between the two things a
+ *  carrier can do while its own flag is away: walk to its own stand and hold inside the
+ *  capture radius, or turn and take the own flag back. While a thief that is carrying our
+ *  flag is inside this radius the design prefers RECOVERY, on the brief's own premise: the
+ *  enemy flag aboard is worth nothing until the own flag returns (ownFlagAway above), so the
+ *  carrier must not park itself waiting on a flag an enemy is still walking away with when
+ *  it is the closest body that can end that walk. Killing the thief drops our flag on the
+ *  spot, and one touch returns it home (the 45 s return timer does it anyway), which
+ *  re-arms every carrier we have. Beyond this radius the carrier HOLDS instead: a longer
+ *  chase is the documented wandering failure this file already carries (carriers walking
+ *  backwards off their return route), and the thief is the defenders' standing intercept
+ *  duty (decideDefenderGoal) rather than something the carrier should abandon the capture
+ *  window for. 60 m is REGROUP_ENEMY_M: the range at which this file already treats a
+ *  visible enemy as an unavoidable encounter, so the diversion never leaves a fight the
+ *  carrier was going to be in anyway. */
+export const CARRIER_RECOVER_M = 60; // Ours, meters.
+
+/** Where the carrier waits while ownFlagAway is true: CARRIER_HOLD_STANDOFF_M from the
+ *  stand, along the ray from the stand to the carrier -- stop one body-width short on the
+ *  side you are arriving from instead of walking onto the stand point itself. A moving
+ *  hold point is fine (steering's drift repathing follows it exactly like the escort screen
+ *  and the regroup point below), and it is what keeps the hold reachable: the approach side
+ *  is by construction the side the carrier has already walked, so the point cannot land
+ *  inside a base wall or off a deck lip the way a fixed offset axis could. Degenerate when
+ *  the carrier is already ON the stand (the `|| 1` route guard, same idiom as the regroup
+ *  point): the goal collapses to the stand point, which is still a legal capture position. */
+function carrierHoldPoint(world: World, runtime: BotRuntimeState, ownId: number): Vec3 {
+  const stand = flagStandPosition(world, ownId);
+  const me = playerPoint(world, runtime.playerId);
+  const dx = me.x - stand.x;
+  const dz = me.z - stand.z;
+  const route = Math.hypot(dx, dz) || 1;
+  return {
+    x: stand.x + (dx / route) * CARRIER_HOLD_STANDOFF_M,
+    y: stand.y,
+    z: stand.z + (dz / route) * CARRIER_HOLD_STANDOFF_M,
+  };
+}
+
+/** The recovery half of CARRIER_RECOVER_M: the goal that takes the own flag back when the
+ *  enemy carrying it is close enough to fight, or null when the carrier should hold
+ *  instead. The key is the defender duty's own (`intercept:<id>`), so steering's drift
+ *  repathing and the stuck ladder treat a carrier's recovery as the same task any defender
+ *  runs. A flag already DROPPED is deliberately not a recovery case for the carrier: the
+ *  defenders' own goal function already opens with exactly that errand
+ *  (decideDefenderGoal's `recoverOwn` branch), one touch returns it, the 45 s timer
+ *  returns it anyway, and the carrier's ready-inside-the-radius role is the one no
+ *  teammate can cover -- only the player HOLDING the enemy flag can convert it. */
+function carrierRecoverGoal(
+  world: World,
+  runtime: BotRuntimeState,
+  team: number,
+): { position: Vec3; key: string } | null {
+  const thief = findEnemyFlagCarrier(world, team);
+  if (thief === null) return null;
+  const me = playerPoint(world, runtime.playerId);
+  const thiefPos = playerPoint(world, thief);
+  const gap = Math.hypot(me.x - thiefPos.x, me.y - thiefPos.y, me.z - thiefPos.z);
+  if (gap > CARRIER_RECOVER_M) return null;
+  return { position: thiefPos, key: `intercept:${String(thief)}` };
+}
+
+/** Issue #32 launch cohesion: how many teammates have to be within
+ *  CARRIER_STAGE_RADIUS_M of the carrier before it starts the return leg. The HARNESS
+ *  slice's four-seed telemetry is what this exists for: 21 carrier runs, 16 ended in death,
+ *  15 of those 16 credited to an enemy PLAYER at a median 647 m from the carrier's own
+ *  stand -- carriers are losing duels in midfield, alone, and never get near their own
+ *  stand at all (best closest approach across all 21 runs: 272 m). The carrier is by
+ *  definition the body that took the flag, so it also leaves the enemy base FIRST and the
+ *  return leg starts with nobody around it. Two is the smallest group that makes the
+ *  crossing a fight the enemy has to win 3v1 instead of a duel it wins 1v1, and this file
+ *  already treats "no teammate within REGROUP_FRIENDLY_M" as alone (carrierShouldRegroup). */
+export const CARRIER_STAGE_TEAMMATES = 2; // Ours.
+
+/** How close a teammate has to be to count as the company above: DEFEND_ENGAGE_RADIUS
+ *  (120 m), this file's existing answer to "how close is close enough to be fighting the
+ *  same fight", and inside VISION_RANGE (150 m), so a body that counts is a body that can
+ *  see and shoot whatever is shooting the carrier. */
+export const CARRIER_STAGE_RADIUS_M = 120; // Ours, meters.
+
+/** Issue #32 launch cohesion: how far out from the ENEMY stand, along the straight line to
+ *  the carrier's own stand, the staging point sits -- the enemy side of midfield, and
+ *  deliberately not the enemy flag deck. Both ends are ruled out by measurement rather than
+ *  taste: the deck approach is where the #32 probes put ~70% of all carrier chip damage
+ *  (inside an enemy plasma turret's 120 m envelope), so the wait has to sit outside that
+ *  envelope; and the deaths this gate exists for land at a median 647 m from the carrier's
+ *  OWN stand, i.e. around the middle of the ~1 km map, so the stage point has to stay well
+ *  short of midfield. 200 m is 80 m clear of the plasma envelope and still ~300 m on the
+ *  enemy side of the midpoint. */
+export const CARRIER_STAGE_FROM_ENEMY_M = 200; // Ours, meters.
+
+/** Issue #32 launch cohesion: how long the carrier stages for company before it launches
+ *  alone (the give-up). Long enough for the trailing attack wave to close a real gap -- the
+ *  regroup comment's own measurement has the wave trailing the carrier by 100-400 m at a
+ *  ~10 m/s run, so 600 ticks (~19 s) is the tail of "a body 150 m out arrives" and
+ *  deliberately short of the ~40 s the farthest straggler would need: the gate is there to
+ *  pick up the nearest bodies, not to reassemble the team. Short enough that the wait
+ *  cannot become the new dead end (a parked carrier is bot-time the harness's stall-window
+ *  gate, under 0.2 per seed, is measuring) nor throw away a live capture window (a third of
+ *  the 45 s the enemy flag's own return timer needs before a dropped flag comes home by
+ *  itself). */
+export const CARRIER_STAGE_WAIT_TICKS = 600; // Ours, ticks (~19 s at 32 ms/tick).
+
+/** Issue #32 launch cohesion, escort side: below this horizontal speed the carrier counts
+ *  as standing still, which for a carrier means it is staging for company (or wedged --
+ *  either way its bodyguard's job is to close on it). 1 m/s, a tenth of the ~10 m/s run, so
+ *  a carrier that is actually walking never reads as still, while a steering-stopped one
+ *  (the stage goal collapses onto its own position, so movement.ts gets zero input) decays
+ *  under it within a few ticks. */
+export const CARRIER_STILL_SPEED_MPS = 1; // Ours, m/s.
+
+/** Issue #32 launch cohesion: living teammates within CARRIER_STAGE_RADIUS_M of the
+ *  carrier -- the company the launch gate counts. */
+function teammatesNearCarrier(world: World, runtime: BotRuntimeState): number {
+  const me = playerPoint(world, runtime.playerId);
+  const team = world.players.team[runtime.playerId] ?? 0;
+  let count = 0;
+  for (let id = 0; id < world.players.count; id += 1) {
+    if (id === runtime.playerId) continue;
+    if (!world.players.active[id] || !world.players.alive[id]) continue;
+    if (world.players.team[id] !== team) continue;
+    const mate = playerPoint(world, id);
+    if (Math.hypot(me.x - mate.x, me.y - mate.y, me.z - mate.z) <= CARRIER_STAGE_RADIUS_M)
+      count += 1;
+  }
+  return count;
+}
+
+/** The staging point: CARRIER_STAGE_FROM_ENEMY_M along the enemy stand -> own stand ray, at
+ *  whatever ground height the map has there. Deliberately NOT the enemy stand's own y: that
+ *  is a deck height, and a goal sitting a deck-height above a carrier 200 m out would have
+ *  steering's climb-jet gate firing at nothing. */
+function carrierStagePoint(world: World, team: number): Vec3 {
+  const home = flagStandPosition(world, ownFlagId(world, team));
+  const enemy = flagStandPosition(world, enemyFlagId(world, team));
+  const dx = home.x - enemy.x;
+  const dz = home.z - enemy.z;
+  const route = Math.hypot(dx, dz) || 1;
+  const x = enemy.x + (dx / route) * CARRIER_STAGE_FROM_ENEMY_M;
+  const z = enemy.z + (dz / route) * CARRIER_STAGE_FROM_ENEMY_M;
+  return { x, y: groundHeightAt(world, { x, y: 0, z }) ?? enemy.y, z };
+}
+
+/** Issue #32 launch cohesion: TRUE when the carrier is standing still (see
+ *  CARRIER_STILL_SPEED_MPS). The escort reads this off the carrier's own velocity instead
+ *  of sharing a flag with the carrier's decision layer, so the two duties stay independent
+ *  -- and so the launch gate's company count can open the moment a bodyguard actually
+ *  arrives. */
+function carrierStandingStill(world: World, carrierId: number): boolean {
+  const base = carrierId * 3;
+  return (
+    Math.hypot(world.players.velocity[base] ?? 0, world.players.velocity[base + 2] ?? 0) <
+    CARRIER_STILL_SPEED_MPS
+  );
+}
+
+/** Issue #32 launch cohesion: the bounded company wait, run for its side effect on the
+ *  staging clock (`carrierStageSinceTick`). Returns the stage goal while the carrier is
+ *  waiting for company, or null when it should be walking home -- company present, wait
+ *  expired, or the carrier already out of the gate's scope.
+ *
+ *  Two scope guards, both about the leg rather than the flag. ENEMY HALF: the gate delays
+ *  the long crossing, so it only applies while the carrier is still on the far side of
+ *  midfield; a carrier that is already home-side has committed to the leg, and on a map
+ *  whose stands are barely farther apart than the staging distance itself there is no long
+ *  leg to launch (the gate never opens there). NO BACKTRACK: the stage point is only
+ *  offered while the carrier has not reached it yet (`remaining` against `stageRemaining`),
+ *  so a carrier that took the flag late, or got shoved past the line, walks home instead of
+ *  turning around -- walking backwards off its own route is the documented carrier failure
+ *  this file already carries.
+ *
+ *  The wait ends three ways, two of them early. Company: the gate opens the moment
+ *  CARRIER_STAGE_TEAMMATES are inside CARRIER_STAGE_RADIUS_M, so the clock never has to
+ *  expire. The give-up: CARRIER_STAGE_WAIT_TICKS after the carrier began staging, it
+ *  launches alone. The reset: decideGoal clears the clock on any tick the bot is not
+ *  carrying, so a fresh take can never inherit the previous run's elapsed wait. */
+function carrierStageGoal(
+  world: World,
+  runtime: BotRuntimeState,
+  team: number,
+): { position: Vec3; key: string } | null {
+  const ownId = ownFlagId(world, team);
+  const home = flagStandPosition(world, ownId);
+  const enemy = flagStandPosition(world, enemyFlagId(world, team));
+  const stage = carrierStagePoint(world, team);
+  const me = playerPoint(world, runtime.playerId);
+  const remaining = Math.hypot(me.x - home.x, me.z - home.z);
+  const route = Math.hypot(home.x - enemy.x, home.z - enemy.z);
+  const stageRemaining = Math.hypot(stage.x - home.x, stage.z - home.z);
+  // Enemy half only, and never backwards. The first guard is the gate's own scope: the
+  // crossing this delays is the long one, and a carrier that is already on its own half has
+  // committed to it (on a map whose stands are barely farther apart than the staging
+  // distance itself, there is no long leg to launch and the gate correctly never opens).
+  // The second is the no-backtrack rule above.
+  if (remaining <= route / 2 || remaining <= stageRemaining) {
+    runtime.carrierStageSinceTick = -1;
+    return null;
+  }
+  if (teammatesNearCarrier(world, runtime) >= CARRIER_STAGE_TEAMMATES) {
+    runtime.carrierStageSinceTick = -1;
+    return null;
+  }
+  if (
+    runtime.carrierStageSinceTick >= 0 &&
+    world.tick - runtime.carrierStageSinceTick >= CARRIER_STAGE_WAIT_TICKS
+  ) {
+    runtime.carrierStageSinceTick = -1;
+    return null;
+  }
+  if (runtime.carrierStageSinceTick < 0) runtime.carrierStageSinceTick = world.tick;
+  return { position: stage, key: `stage:${String(ownId)}` };
+}
+
+/** The carrier's home leg (issue #32 home-leg economy + launch cohesion), split out of
+ *  decideGoal so the carry outranks the bot's ROLE: whichever role picked the enemy flag
+ *  up, the only way it converts is this player standing inside the capture radius while
+ *  ownFlagAway turns false. Four states, in order:
+ *
+ *  0. LAUNCH: still on the enemy side of the stage line and short of company -- hold at
+ *     the staging point until CARRIER_STAGE_TEAMMATES arrive or CARRIER_STAGE_WAIT_TICKS
+ *     runs out (carrierStageGoal). This is the leg the HARNESS telemetry says carriers
+ *     die on: alone, in midfield, at a median 647 m from home, never once reaching the
+ *     stand. Company first, then the walk.
+ *  1. Own flag HOME -- the capture is live and the flag stand is the goal, exactly as
+ *     before; the only detour left is the regroup retreat (carrierShouldRegroup), which
+ *     still applies here because a healthy carrier in midfield with a deadline is a
+ *     different animal from one standing in its own base.
+ *  2. Own flag AWAY with the thief carrying it inside CARRIER_RECOVER_M -- recovery (see
+ *     CARRIER_RECOVER_M): the carry is unconvertible until the own flag returns, and this
+ *     is the only way the carrier can make that happen.
+ *  3. Own flag AWAY otherwise -- HOLD inside the capture radius at the stand. This is the
+ *     point of the state: carrierHoldPoint is a legal capture position, flags.ts's
+ *     tryCapture runs for every player every tick, so the moment ownFlagAway turns false
+ *     the capture lands even though the carrier never moved again. Nothing may pull the
+ *     carrier off it: no regroup retreat (the regroup point is measured from the carrier's
+ *     own position, so a carrier 30 m from home with a threat nearby gets a point 80 m
+ *     along its own ray -- 50 m PAST the stand and 50 m out of the capture radius, i.e.
+ *     the retreat actively fights the thing the carrier is waiting to do), and no station
+ *     detour except the low-health valve (holdingCarrierSkipsHeal).
+ *
+ *  The goal key is `home:<ownId>` in every state except the stage, so steering sees one
+ *  task (drift repathing handles the moving hold point) and any escort formation keyed to
+ *  the carrier keeps following it; `stage:<ownId>` is its own key so the launch itself
+ *  repaths from the staging point. */
+function carrierHomeGoal(
+  world: World,
+  runtime: BotRuntimeState,
+  team: number,
+): { position: Vec3; key: string } {
+  const ownId = ownFlagId(world, team);
+  const key = `home:${String(ownId)}`;
+  const recover = carrierRecoverGoal(world, runtime, team);
+  if (recover !== null) return recover;
+  const stage = carrierStageGoal(world, runtime, team);
+  if (stage !== null) return stage;
+  if (ownFlagAway(world, team)) {
+    return { position: carrierHoldPoint(world, runtime, ownId), key };
+  }
+  const home = flagStandPosition(world, ownId);
+  if (!carrierShouldRegroup(world, runtime)) return { position: home, key };
+  // Regroup hold point: REGROUP_HOLD_M along the carrier -> home ray. Key stays
+  // `home:<id>` so steering treats it as the same task (drift repathing handles the
+  // moving point) and any escort formation keyed to the carrier keeps following.
+  const me = playerPoint(world, runtime.playerId);
+  const dx = home.x - me.x;
+  const dz = home.z - me.z;
+  const route = Math.hypot(dx, dz) || 1;
+  return {
+    position: {
+      x: me.x + (dx / route) * REGROUP_HOLD_M,
+      y: me.y,
+      z: me.z + (dz / route) * REGROUP_HOLD_M,
+    },
+    key,
+  };
+}
+
+/** Attacker not carrying the flag (the carry is handled by carrierHomeGoal above): head to
+ *  the enemy flag wherever it currently is (home, dropped, or being carried by a teammate
+ *  you're about to catch up to and pass, which is fine -- there's nothing wrong with two
+ *  teammates converging on the same flag). */
 function decideAttackerGoal(
   world: World,
   runtime: BotRuntimeState,
 ): { position: Vec3; key: string } {
-  const team = world.players.team[runtime.playerId] ?? 0;
-  const ownId = ownFlagId(world, team);
-  const enemyId = enemyFlagId(world, team);
-  if (world.flags.carrierId[enemyId] === runtime.playerId) {
-    const home = flagStandPosition(world, ownId);
-    if (carrierShouldRegroup(world, runtime)) {
-      // Regroup hold point: REGROUP_HOLD_M along the carrier -> home ray. Key stays
-      // `home:<id>` so steering treats it as the same task (drift repathing handles the
-      // moving point) and any escort formation keyed to the carrier keeps following.
-      const me = playerPoint(world, runtime.playerId);
-      const dx = home.x - me.x;
-      const dz = home.z - me.z;
-      const route = Math.hypot(dx, dz) || 1;
-      return {
-        position: {
-          x: me.x + (dx / route) * REGROUP_HOLD_M,
-          y: me.y,
-          z: me.z + (dz / route) * REGROUP_HOLD_M,
-        },
-        key: `home:${String(ownId)}`,
-      };
-    }
-    return { position: home, key: `home:${String(ownId)}` };
-  }
+  const enemyId = enemyFlagId(world, world.players.team[runtime.playerId] ?? 0);
   return { position: flagPosition(world, enemyId), key: `enemyFlag:${String(enemyId)}` };
 }
 
@@ -203,18 +501,61 @@ export const ESCORT_AHEAD_M = 100; // Ours, meters.
 export const CARRIER_CLOSE_HEALTH = 0.8; // Ours.
 export const ESCORT_CLOSE_M = 30; // Ours, meters.
 
+/** Issue #32 launch cohesion, return-leg arm: how far from the carrier, on the THREAT's
+ *  side of it, the escort stations itself when the carrier has a live threat. The measured
+ *  deaths in the four-seed telemetry have a median killer distance of 17 m -- point blank,
+ *  one enemy, no pack -- while the escort paces ESCORT_AHEAD_M (100 m) up the route, so the
+ *  bodyguard is a spectator at the only fight that matters. 25 m puts it inside every
+ *  weapon's useful envelope (the same scale ESCORT_CLOSE_M's health-triggered pull-in uses)
+ *  and, against a 17 m killer, within ~8 m of it: close enough that its own fire lands on
+ *  the fight instead of on the carrier's corpse, far enough that it is not standing inside
+ *  the carrier's own knife-range answer. */
+export const ESCORT_ENGAGE_M = 25; // Ours, meters.
+
+/** Issue #32: the escort's station when the carrier has a live threat -- ESCORT_ENGAGE_M
+ *  from the carrier along the carrier -> threat ray, clamped to the threat itself when it
+ *  is already that close, i.e. between the two with its guns facing the enemy. A threat that
+ *  runs drags the point with it; a carrier with no threat keeps the picket (escortGoal). */
+function escortEngagePoint(world: World, threatId: number, carrierId: number): Vec3 {
+  const carrier = playerPoint(world, carrierId);
+  const threat = playerPoint(world, threatId);
+  const dx = threat.x - carrier.x;
+  const dz = threat.z - carrier.z;
+  const gap = Math.hypot(dx, dz) || 1;
+  const reach = Math.min(ESCORT_ENGAGE_M, gap);
+  return { x: carrier.x + (dx / gap) * reach, y: carrier.y, z: carrier.z + (dz / gap) * reach };
+}
+
 /** The escort's goal: the close screen-ahead hold point (escortPoint) once it is within
  *  ESCORT_CATCHUP_M of the carrier, or -- while it is still far away -- the point ahead
  *  of the carrier along the straight route to the home stand (clamped to the stand
  *  itself on the final approach). A carrier below CARRIER_CLOSE_HEALTH pulls the point
  *  in to ESCORT_CLOSE_M so the escort stops pacing and closes. Same `escort:<id>` goal
  *  key either way, so steering's drift repathing keeps following the moving point
- *  exactly as before. */
+ *  exactly as before.
+ *
+ *  Issue #32 launch cohesion, return-leg arm: a carrier with a LIVE THREAT outranks all of
+ *  that. The picket is a bet that the next fight is 100 m up the route, and the telemetry
+ *  says the bet loses -- the carrier dies to a single enemy at a median 17 m with no
+ *  teammate within 100 m, i.e. while its bodyguard is pacing a point the fight is not at.
+ *  When the carrier can see an enemy inside CARRIER_THREAT_RADIUS_M (the COMBAT slice's own
+ *  envelope for "the carrier's fight is the escort's fight", so the goal and the fire
+ *  discipline agree on where that fight is), the escort's goal becomes
+ *  escortEngagePoint: the carrier's threat side, at engagement range. */
 function escortGoal(world: World, runtime: BotRuntimeState, carrierId: number): Vec3 {
   const carrier = playerPoint(world, carrierId);
   const me = playerPoint(world, runtime.playerId);
   const gap = Math.hypot(me.x - carrier.x, me.z - carrier.z);
-  if (gap <= ESCORT_CATCHUP_M) return escortPoint(world, runtime, carrierId);
+  const threat = findCarrierThreat(world, carrierId, CARRIER_THREAT_RADIUS_M);
+  if (threat !== null) return escortEngagePoint(world, threat, carrierId);
+  // Issue #32 launch cohesion, escort side: a carrier that is standing still is staging for
+  // company (once it reaches the staging point its goal collapses onto its own position, so
+  // it stops), and a distant escort's usual point is ESCORT_AHEAD_M along the route home --
+  // a point a parked carrier is never going to walk to. Close on the body instead, the same
+  // point the close screen uses, which is what actually satisfies the launch gate's company
+  // count and lets the pair leave together.
+  if (gap <= ESCORT_CATCHUP_M || carrierStandingStill(world, carrierId))
+    return escortPoint(world, runtime, carrierId);
   const carrierArmor = armorFor(world, carrierId);
   const carrierHealth = 1 - (world.players.damage[carrierId] ?? 0) / carrierArmor.maxDamage;
   const aheadM = carrierHealth < CARRIER_CLOSE_HEALTH ? ESCORT_CLOSE_M : ESCORT_AHEAD_M;
@@ -312,18 +653,6 @@ function resetHealChase(runtime: BotRuntimeState): void {
   runtime.healChaseCooldownUntilTick = 0;
 }
 
-/** True when the bot is the enemy-flag carrier. The carry is time-critical (the moment
- *  it dies the flag drops and a return timer starts), so a carrier's heal behavior is
- *  deliberately different from everyone else's: full cross-map heal chases walked
- *  carriers backwards off their return route (observed carriers bouncing mid-map for
- *  10k+ ticks between heal goals at under half the distance home they had already
- *  covered), but NO heal at all let attrition kill them 100 m from home -- see
- *  decideHealGoal's bounded carrier detour. */
-function isCarryingEnemyFlag(world: World, runtime: BotRuntimeState): boolean {
-  const team = world.players.team[runtime.playerId] ?? 0;
-  return world.flags.carrierId[enemyFlagId(world, team)] === runtime.playerId;
-}
-
 function stationPosition(world: World, stationId: number): Vec3 {
   const base = stationId * 3;
   return {
@@ -398,27 +727,64 @@ function forgiveHealCooldown(world: World, runtime: BotRuntimeState): void {
   runtime.healChaseSinceTick = -1;
 }
 
+/** Issue #32 home-leg economy: TRUE when the carrier's station detour must yield to the
+ *  home leg -- carrying the enemy flag with the own flag away (ownFlagAway), and healthy
+ *  enough that the detour costs more than it saves. While the own flag is away the carry
+ *  cannot be converted at all, so the carrier's whole job is to be inside the capture
+ *  radius the tick the flag returns: a 180-190 m marginal station detour (the measured cost
+ *  of the midfield towers) walks it off that radius, and the regroup/hold design is exactly
+ *  what keeps it there. The valve is the fraction. CARRIER_HEAL_HEALTH_FRACTION (0.6) is the
+ *  carrier's top-up line while a live capture is still to protect, but that line is far too
+ *  eager to be a "leave the hold" line: at 0.6 every chip a carrier takes in a firefight
+ *  would send it off the stand, and the hold would never survive contact. Below
+ *  LOW_HEALTH_FRACTION (0.4 -- the same line every non-carrier in the match backs off at)
+ *  the carrier dies to the next exchange, and a dead carrier drops the flag and forfeits
+ *  the carry entirely, so below that line it may still leave. Between the two lines the
+ *  hold wins, and the carrier is not stranded without a heal: it is standing in its own
+ *  base among its own defenders and turrets, and any station it is actually within range of
+ *  still tops it up through maybeHeal's own request path, which needs no goal change at
+ *  all. */
+function holdingCarrierSkipsHeal(
+  world: World,
+  runtime: BotRuntimeState,
+  carrying: boolean,
+  health: number,
+): boolean {
+  if (!carrying || health < LOW_HEALTH_FRACTION) return false;
+  return ownFlagAway(world, world.players.team[runtime.playerId] ?? 0);
+}
+
+/** The station a wounded bot walks to: the marginal-detour carrier scan while the enemy
+ *  flag is aboard (findCarrierHealStation), the plain nearest one otherwise. Split out of
+ *  decideHealGoal for the lint complexity cap. */
+function healStationFor(world: World, runtime: BotRuntimeState, carrying: boolean): number | null {
+  if (!carrying) return findNearestFriendlyStation(world, runtime.playerId);
+  const team = world.players.team[runtime.playerId] ?? 0;
+  return findCarrierHealStation(
+    world,
+    runtime.playerId,
+    flagStandPosition(world, ownFlagId(world, team)),
+    CARRIER_HEAL_MAX_MARGINAL_M,
+  );
+}
+
 function decideHealGoal(
   world: World,
   runtime: BotRuntimeState,
 ): { position: Vec3; key: string } | null {
   const armor = armorFor(world, runtime.playerId);
   const health = 1 - (world.players.damage[runtime.playerId] ?? 0) / armor.maxDamage;
-  const carrying = isCarryingEnemyFlag(world, runtime);
+  const carrying = isCarryingEnemyFlag(world, runtime.playerId);
   if (health >= healGateFor(carrying)) {
     resetHealChase(runtime);
     return null;
   }
-  const team = world.players.team[runtime.playerId] ?? 0;
+  if (holdingCarrierSkipsHeal(world, runtime, carrying, health)) {
+    resetHealChase(runtime);
+    return null;
+  }
   if (carrying) forgiveHealCooldown(world, runtime);
-  const stationId = carrying
-    ? findCarrierHealStation(
-        world,
-        runtime.playerId,
-        flagStandPosition(world, ownFlagId(world, team)),
-        CARRIER_HEAL_MAX_MARGINAL_M,
-      )
-    : findNearestFriendlyStation(world, runtime.playerId);
+  const stationId = healStationFor(world, runtime, carrying);
   if (stationId === null) return null;
   const station = stationPosition(world, stationId);
   if (!healChaseAllowed(world, runtime, station)) return null;
@@ -443,8 +809,18 @@ function decideHealGoal(
  *  picks that tower; the healChase give-up state machine below still bounds a chase
  *  that wedges. */
 export const CARRIER_HEAL_MAX_MARGINAL_M = 250; // Ours, meters.
+// A carrier's heal behavior is deliberately different from everyone else's: the carry is
+// time-critical (the moment it dies the flag drops and a return timer starts), so full
+// cross-map heal chases walked carriers backwards off their return route (observed
+// carriers bouncing mid-map for 10k+ ticks between heal goals at under half the distance
+// home they had already covered), while NO heal at all let attrition kill them 100 m from
+// home. What survived is this bounded detour.
 // Top up earlier than the bare LOW_HEALTH_FRACTION line: the carrier's job (survive to
 // the stand) dies to attrition, so the refill must happen while there is health to save.
+// Only while a capture is still live, though -- with the own flag away this line is
+// suppressed down to LOW_HEALTH_FRACTION by holdingCarrierSkipsHeal (issue #32 home-leg
+// economy), because the carry cannot convert until the flag returns and a detour then
+// costs the capture window rather than protecting it.
 const CARRIER_HEAL_HEALTH_FRACTION = 0.6; // Ours.
 
 function healGateFor(carrying: boolean): number {
@@ -514,6 +890,17 @@ export function decideGoal(
   if (healGoal !== null) return healGoal;
   const team = world.players.team[runtime.playerId] ?? 0;
   if (order && order.team === team) return orderGoal(world, runtime, order);
+  // Issue #32 home-leg economy: the CARRY outranks the ROLE. A bot holding the enemy flag
+  // converts it one way only -- by standing inside its own stand's capture radius while
+  // its own flag is Home -- so whichever role actually picked the flag up (an Attacker on
+  // the take, or a Defender that walked over the drop) its goal is carrierHomeGoal, not the
+  // role's own duty. Before this, a Defender carrier had no carrier branch at all: it fell
+  // through to escort/intercept/vehicle-mount and could walk its flag back out of the base.
+  if (isCarryingEnemyFlag(world, runtime.playerId)) return carrierHomeGoal(world, runtime, team);
+  // Issue #32 launch cohesion: the staging clock exists only while the carry does. Cleared
+  // here, on every tick the bot is not carrying, so a fresh take can never inherit the
+  // previous run's elapsed wait and launch on its first tick (carrierStageGoal).
+  runtime.carrierStageSinceTick = -1;
   return runtime.role === BotRole.Attacker
     ? decideAttackerGoal(world, runtime)
     : decideDefenderGoal(world, runtime);
@@ -550,7 +937,7 @@ export function decideState(runtime: BotRuntimeState, engagedTargetId: number | 
  *  cannot defend from 150 m away with a flag gone is not a post. */
 function defenderPostGone(world: World, runtime: BotRuntimeState): boolean {
   const team = world.players.team[runtime.playerId] ?? 0;
-  if (world.flags.state[ownFlagId(world, team)] !== FlagState.Home) return true;
+  if (ownFlagAway(world, team)) return true;
   return findEscortedCarrier(world, team, runtime.playerId) !== null;
 }
 
@@ -578,7 +965,19 @@ function isOutsideDefendLeash(world: World, runtime: BotRuntimeState, targetId: 
  *  hundred metres of the return walk home, exactly where every carrier must survive.
  *  `targetId` stays null (a turret is not a BotState target), so the caller keys the
  *  aim decision off `aiming` instead: true whenever this tick has a real aim solution,
- *  player OR structure. */
+ *  player OR structure.
+ *
+ *  Issue #32 escort priority and carrier fire discipline (the COMBAT slice, wired here):
+ *  the player branch takes combat.ts's selectCombatTarget, which swaps a nearest-enemy
+ *  pick for the enemy threatening the teammate carrier whenever this bot is escorting
+ *  one; both branches are then gated by combat.ts's carrier hold-fire envelope. A bot
+ *  carrying the flag therefore returns `aiming: false` at range rather than turning onto
+ *  a distant shooter, and that reaches further than the trigger: the caller composes
+ *  `yaw = aiming ? combat.yaw : move.headingYaw`, so an aim solution IS a steering
+ *  command, and a carrier that "aims" at a distant enemy walks off its own route. The
+ *  fall-through deliberately reports `aiming: false` (not a synthesized yaw) for the same
+ *  reason -- a stale yaw would freeze the carrier on a fixed bearing while the route
+ *  turns underneath it. */
 export function decideCombat(
   world: World,
   runtime: BotRuntimeState,
@@ -590,14 +989,18 @@ export function decideCombat(
   weaponId: WeaponId | null;
   aiming: boolean;
 } {
-  const targetId = findNearestVisibleEnemy(world, runtime.playerId);
-  if (targetId !== null && !isOutsideDefendLeash(world, runtime, targetId)) {
+  const targetId = selectCombatTarget(world, runtime.playerId);
+  if (
+    targetId !== null &&
+    !carrierHoldsFireOn(world, runtime.playerId, targetId) &&
+    !isOutsideDefendLeash(world, runtime, targetId)
+  ) {
     const { yaw, pitch, fire, weaponId } = aimAndFire(world, runtime, runtime.playerId, targetId);
     return { yaw, pitch, fire, targetId, weaponId, aiming: true };
   }
   runtime.engagedTargetId = -1;
   const turret = findAttackableTurret(world, runtime.playerId);
-  if (turret !== null) {
+  if (turret !== null && !carrierHoldsFireOnPoint(world, runtime.playerId, turret.position)) {
     const { yaw, pitch, fire, weaponId } = aimAtPoint(
       world,
       runtime,
