@@ -56,8 +56,7 @@ redeployed together.
 #### Known gaps
 
 Captures still do not happen: no carrier has reached the capture radius in any measured
-configuration, so the capture-refusal rule remains untested by data (#32). The Wildcat's
-third-person chase camera is deliberate code awaiting a product decision; the remaining four
+configuration, so the capture-refusal rule remains untested by data (#32). The remaining four
 T2 vehicles (Bomber, Havoc, Tank, Mobile Point Base) are unbuilt. Details in `docs/ISSUES.md`.
 
 ### 2026-09-10 — capture work, vehicle scope, loadouts, audio (protocol 8 to 11)
@@ -116,8 +115,9 @@ T2 vehicles (Bomber, Havoc, Tank, Mobile Point Base) are unbuilt. Details in `do
 Deliberately not done, with reasons, in `docs/ISSUES.md`: captures still do not land (#32);
 IFL texture-sequence frames beyond frame 0 are not committed (#53); the repair beam is silent
 because no original sample exists (#51); the terrain texture repeat scale is not verifiable
-from committed evidence (#2); the Wildcat dashboard and cockpit view does not exist, its
-authoritative camera is a trailing chase camera (`client/src/app.ts` `placeVehicleCamera`).
+from committed evidence (#2); the Wildcat's dashboard and cockpit view did not exist yet, its
+camera then a trailing chase camera (`client/src/app.ts` `placeVehicleCamera`) — both landed
+the next day (see 2026-09-11 above).
 
 ### 2026-09-09 — bug waves (protocol 8)
 
