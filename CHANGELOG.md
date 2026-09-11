@@ -12,6 +12,110 @@ redeployed together.
 
 ## Unreleased
 
+### 2026-09-11 — the four remaining vehicles, and an asset pipeline that builds from source
+
+#### Added
+
+- The four remaining Tribes 2 vehicles as full simulation kinds, each with its own source
+  constants cited by script line: **Bomber** (`FlyingVehicleData(BomberFlyer)`, mass 350, 400
+  energy, 85 m/s forward cutoff, camera 22/5/1.0), **Havoc** (`HAPCFlyer`, mass 550, 550
+  energy, 71 m/s, camera 17/2/8.5), **Tank** (`HoverVehicleData(AssaultVehicle)`, mass 1500,
+  floating gravity 4.5, gyro 400, camera 20/3/1.5) and **Mobile Point Base**
+  (`WheeledVehicleData(MobileBaseVehicle)`, mass 2000, `maxWheelSpeed` 20, `cantAbandon`),
+  with their own models and skins. The physics went from two hardcoded kinds to three classes
+  (`stepFlyer`, `stepHover`, and a new `stepWheeled`) with the Shrike and Wildcat proven
+  bit-identical across a 900-tick differential before and after. Their weapons, mounted
+  turrets, passenger seats and the MPB's deployment are not in yet and are named as such
+  (#57).
+- A Tribes 2 `.dts` shape reader (`packages/assets/src/dts.ts`) written from the Torque
+  engine's stream code with a citation per field group, emitting GLB with the node hierarchy,
+  names, transforms and bounds the shipped files had. It reproduces the cached reference
+  Wildcat exactly on bounds and triangle count, and it is what builds the four new vehicle
+  models from their original sources. Its sequence reading is complete and its animation
+  emission is written but not enabled, with the parity table and the three known deviations
+  recorded in the function's own doc comment (#57).
+- The twelve original recordings whose absence the audio gaps were blamed on: the repair
+  beam's own `CloseLooping3d` firing state, its activate one-shot, the chaingun's activate /
+  spin-up / spin-down, the hand grenade's detonation, both turret impacts, and the medium and
+  heavy armour footstep sets, each mapped from the T2 profile that names it rather than by
+  filename (#51, #56).
+- All 104 IFL sequence frames across twelve sequences, so the texture sequences animate
+  instead of holding frame 0 (#53).
+- Per-team seat cap (`--team-size`) and a match clock (`--time-limit`), plus an intermission
+  (`--intermission`), so a 24-versus-24 match can be seated and a match can end and be
+  replaced without restarting the process (#31, #57).
+- A 24-versus-24 case in the bot acceptance harness, which until now measured 8-versus-8
+  while the project targets 24-versus-24, and a `hashWorld` fingerprint on the telemetry path
+  so a table can be attributed to one world state (#32).
+
+#### Changed
+
+- `MAX_SNAPSHOT_BOTS` is the roster capacity (64) rather than 32, which is what a 48-bot
+  match needs: the match used to throw `RangeError: Snapshot bot count exceeds 32` on its
+  first snapshot. The count is a u8 on the wire, so no bytes and no protocol bump changed.
+- Spawns are seated apart and respawn waves rotate. Twenty-four bots per team on Katakatic's
+  two spawn spheres landed 0.05 m apart with 57 pairs inside a capsule's diameter, and a full
+  team derived a constant respawn index, so every wave reused one point; the minimum
+  same-team distance is now 1.66 m with zero overlapping pairs, and consecutive waves land
+  516 m apart.
+- The bot stall detector measures net progress toward the goal instead of the absolute change
+  in distance to it, which had let a carrier hold one waypoint for 3,020 ticks without
+  tripping a single escape. Carrier stall share fell from 59% to 43% at the same match size
+  (#32).
+- The armour weapon-slot cap is enforced where a client cannot lie about it, and the client
+  now refuses the tick that would exceed it rather than letting the simulation silently drop
+  the weapon (#55).
+- Turret collision uses a shape measured from the source models -- a pedestal cylinder, a
+  head cylinder and a barrel capsule read out of the GLB node bounds -- instead of one
+  conservative sphere that was 73% phantom volume on the large turret and mis-scored a barrel
+  hit by 1.83 m (#54).
+- Player repair candidates honour terrain and interior line of sight, which base objects and
+  turrets already did (#51).
+
+#### Fixed
+
+- Light armour's default loadout granted four weapons against its own cap of three, because
+  the target laser is allowed but must not count against the slot count; defaults are clamped
+  to the armour, and the legacy no-station spawn table is clipped the same way (#55).
+- The HUD rack's end-to-end expectation was a hand copy of the armour table, so it disagreed
+  with the client the moment the slot cap landed; it now derives from the simulation's own
+  helper and asserts the visible slot count equals the armour's.
+
+### 2026-09-11 — the regenerated shapes are back in the basis the shipped ones used
+
+#### Fixed
+
+- `dtsToGlb` writes the Torque-to-glTF basis (`(-x, z, y)`, a half turn about the (0, 1, 1)
+  diagonal) that every `.glb` this repository has ever published used, as one node wrapping
+  the shape's roots, and `parseDts` publishes the conjugate of each stored node rotation --
+  the rotation the engine actually applies, because `QuatF::setMatrix` (`m_quatF_set_matF_C`)
+  builds the transpose of the standard rotation matrix. Reading the shapes without either left
+  all 21 of them lying on their side and put every non-180-degree node in the wrong place: the
+  Shrike's nose-to-heading alignment in `e2e/shrike-spawn.spec.ts` read 0.0054 against the
+  >0.98 a correct basis gives, and the vehicle pad's `Mount0` attachment moved 8-10 m, taking
+  the spawned station's `usePosition` with it. With both, every shape that has a shipped
+  counterpart matches it vertex for vertex (100% of its vertices within 0.02, mean nearest
+  5e-5, Draco quantization), all 22 converted shapes carry exactly their `.dts` source's
+  triangle count, and `assets/out/katabatic/scene.json` returns to its committed values to
+  within 8e-6 m of float32 noise in one coordinate (no protocol change).
+
+### 2026-09-11 — a match cycle: an ended match starts the next one
+
+#### Added
+
+- A match cycle. `sim`'s `resetMatch` (packages/sim/src/match.ts) returns a loaded world to
+  its as-loaded state -- clock, outcome, team scores, every player's row, flags, base assets,
+  turrets, vehicles, projectiles, and the one-tick event queues -- written as a table of named
+  slices, so the reset's implementation and its documented list of responsibilities cannot
+  drift apart. The server drives it: when the sim freezes at game over the final state stays
+  up for an intermission (`--intermission`, seconds, default 5 -- the stock Torque
+  `$Game::EndGamePause`), and then the next match begins on the same map in the same process,
+  with the bots stepping again. `--time-limit` (seconds, default the sim's own 25 minutes) sets
+  the clock. The reset is sim state, so it is predictable and hashable like every other
+  transition: `hashWorld` after a reset equals a freshly created world's at the same tick. No
+  new message: the reset reaches clients on the existing snapshot path, as a forced full send,
+  and the kill feed clears on the snapshot that reports `gameOver` false again (protocol 11).
+
 ### 2026-09-11 — measurement wave on bot captures, Wildcat fixes
 
 #### Added
@@ -26,8 +130,28 @@ redeployed together.
   the terrain instead of cutting straight over a crest, within a documented length budget.
   The enemy-turret avoidance it was meant to enable is measured to be infeasible on Katabatic,
   and that measurement is recorded at the constant (#32).
+- A configurable per-team seat cap: `--team-size` (default 16, the spec's own "16 versus 16")
+  raises the cap that both bot seating and the human-join gate read, so `--bots 48
+  --team-size 24` seats the 24-versus-24 target match. Omitting the flag leaves every
+  existing invocation's seating unchanged, including the startup warning above 32 bots; the
+  team-full Welcome refusal (issue #31) now follows whatever cap the match runs (#31,
+  protocol 11).
+- The original recordings issues #51 and #56 recorded as missing: the Repair Pack's beam loop
+  and its Activate one-shot (#51), and the Chaingun's Activate, Spinup and Spindown state
+  sounds, the hand grenade's own detonation, the sentry and plasma turret impact samples, and
+  the medium and heavy armour footstep sets (#56). Every entry in the audio manifest cites the
+  datablock and `stateSound` index it was taken from. The files were in the t2-mapper volume
+  the manifest already fetches from; they had simply never been listed, so the beam and every
+  turret bolt were mute (#51, #56).
 
 #### Changed
+
+- Cue selection follows those recordings. The repair beam loops and the pack's Activate
+  one-shot fire independently (#51); the Chaingun plays Activate/Spinup/Spindown off the sim's
+  own weapon state; a hand grenade detonates with `fx/weapons/grenade_explode` rather than the
+  mortar's explosion; turret bolts resolve through their barrel script's own recording; and the
+  medium and heavy footstep rows resolve to their armour's `soft` (terrain) and `metal`
+  (interior) takes. Light armour's recordings are unchanged (#56).
 
 - Carrier policies retuned on a four-seed ablation: the decision-layer hold-fire gate is
   removed (it cost 35 kills for zero arrivals) and the 600-tick staged wait becomes 100 ticks
@@ -52,6 +176,26 @@ redeployed together.
   dragged the craft down through it. The spawn probes the deck and starts at hover rest
   height, and the hover spring now reads interior decks as well as terrain, since terrain
   alone can never hold a hover vehicle on a pad.
+- The station picker, the HUD rack and the never-visited-station spawn table now agree with the
+  armor weapon-slot cap the sim enforces. The picker refuses a pick past the armor's own
+  `maxWeapons` slots (Light's fourth weapon, previously ticked and then silently dropped on
+  Confirm) and shows the slot count as full; the menu and the rack expand the mask-0 "no
+  station visit" state to the same clamped default the sim grants; and that legacy spawn table
+  is capped too, so a Light spawns on three usable weapons (Spinfusor, Chaingun, Laser Rifle)
+  instead of four -- the surplus Blaster is 0-ammo and no longer the spawn slot, while the
+  table's infinite Laser Rifle and Medium/Heavy's own sets are unchanged (#55).
+- Turret collision now follows the measured assembly instead of one conservative sphere
+  (#54). The pedestal is a cylinder at `turret_base_large.glb`'s BaseMain circumscribed
+  radius (2.3543 m) up to the base's 1.3260 m post caps; the head is a second cylinder at the
+  Arms/Sleeve's measured 1.3130 m radius up to the intact 2.2179 m top; and the barrel is a
+  capsule from the mount socket out to its own Muzzlepoint (radius 0.4363 m). Direct hits,
+  splash falloff, repair selection and bot threat targeting all read that one shape. The
+  sphere this replaces reached y 3.30 -- 1.08 m above anything the model draws -- so it stopped
+  shots that passed over the turret, while stopping short of the 2.3543 m base corners it
+  should have covered; 44.4% of the new shape's volume lies outside the model's own bounds,
+  against the sphere's 73.1%. Sentry turrets collapse to one measured cylinder (r 0.629),
+  exact in every yaw. Protocol stays 11. The residuals that remain (the 2.7385 m wing tips,
+  and a yawed or elevated mount leaving the barrel capsule) are recorded in `docs/ISSUES.md`.
 
 #### Known gaps
 

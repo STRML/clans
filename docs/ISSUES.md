@@ -15,39 +15,64 @@ rerun in this audit. GitHub issue numbers below refer to
 
 ## Start here
 
-1. **#32 captures.** The mechanics are all in (navigation, fall arrest, pocket escape, escort
-   formations, turret suppression, energy economy) and the last wave made the failure
-   measurable and rewrote the story: with real per-seed variation, **no carrier ever reaches
-   its own stand**. Over four seeds and 48000 ticks, carriers made 12 to 21 runs, none
-   entered the 2 m capture radius, and the best approach was 33 m. They die in midfield to a
-   single enemy: median killer distance 17-27 m, a median of one live enemy within 100 m,
-   and a median of ZERO live teammates within 100 m, at ~780 m from the carrier's own stand.
-   The capture-refusal rule (`flags.ts` `ownFlagHome`) is therefore still **untested by
-   data**: `refused` is 0 in every measured configuration. Re-run the telemetry before
-   theorizing, and read the ablation table below before changing any carrier policy: two of
-   the three policies this issue's last wave added turned out to cost far more than they
-   bought, and both were retuned on that evidence.
+1. **#32 captures.** The failure is now measured at the project's own match size, and the
+   story changed again: **no carrier reaches its own stand at any size**, but how close they
+   get scales hard with the number of bodies. Four seeds, 12,000 ticks each:
+
+   | | 8v8 | 12v12 | 24v24 |
+   | --- | --- | --- | --- |
+   | kills | 106 | 185 | **370** |
+   | flag touches | 12 | 14 | 19 |
+   | carrier runs | 15 | 16 | 24 |
+   | closest approach, min/median | 570/801 m | 270/681 m | **48/730 m** |
+   | carrier deaths | 13 | 10 | 21 |
+
+   Captures, arrivals and refused ticks are **0 in every configuration**, so the
+   capture-refusal rule (`flags.ts` `ownFlagHome`) is still untested by data. At the target
+   size 21 of 24 runs end in death, 16 of them by an enemy, a median 1,455 ticks after pickup
+   and 730 m from home, at 15 m/s with the killer 23 m away. The one-sided match the smaller
+   sizes showed (one flag never taken in 48,000 ticks) disappears at 24v24, where both flags
+   are carried and both sides lose carriers.
+
+   Three carrier-side levers are measured and **closed**, each with the number that killed it:
+   a lateral dodge (target size: closest approach 48 to 85 m, enemy-caused deaths 16 to 18,
+   minus 14% kills), a tighter escort station (escort distance 38 to 37 m, deaths flat, closest
+   approach 48 to 268 m), and letting the carrier ski for speed (home leg 14.6 to 18.4 m/s and
+   exposure 1296 to 1011 ticks, but kills 370 to 257 and closest approach 48 to 264 m). The
+   number behind all three: at the death tick the nearest live teammate is a median **209 m
+   behind the carrier** while the team is at full strength, so the carrier is killed by the
+   first enemy that reaches it, alone, with its help behind it. Re-run the telemetry before
+   theorizing, and read the wave section below before changing any carrier policy.
 2. **Wildcat bugs (user report, 2026-09-10): closed.** Pad spawn and steering were fixed and
    measured in `1e26db4`; the camera followed in `c9e729f`, which gives the Wildcat T2's own
    camera: the cockpit rests on the model's authored `Eye` node and `X` slides it to the
    script's chase end (cameraMaxDist 5.0, cameraOffset 0.7) at the engine's own traversal
    speed. T2 ships that resting mode by default (`GameConnection::mFirstPerson`), matching
    what the user asked for. See the wave section below.
-3. **#53 remaining art.** The IFL playback driver and frame table are in and tested, but
-   only frame-0 PNGs are committed, so real sequence playback needs the frame images copied
-   from the cached `skins.vl2` archive under the manifest keys. Blaster ball/trail and
-   Chaingun crossed-ribbon tracers remain approximations. Per-side Shrike muzzle origins
-   need `VehicleFireEvent` side data in the sim (the client already alternates visually).
-4. **#51 remaining.** The repair beam, HUD feedback and lifecycle are wired, but no
-   original repair-beam sample exists in the cached T2 audio, so the loop is silent until a
-   source sample is added to the manifest and the asset build. Player-candidate repair also
-   still ignores terrain occlusion in the sim (base objects and turrets check it).
+3. **#53 remaining art.** The IFL playback driver, its frame table and **all 104 sequence
+   frames** are committed (12 sequences: disc explosion, plasma barrel glow, both blaster
+   muzzles, laser sweeps, spinfusor casing, jet exhaust, pad light, station blink, screen
+   static), so the sequences now animate instead of holding frame 0. Blaster ball/trail and
+   Chaingun crossed-ribbon tracers remain approximations. Per-side Shrike muzzle origins need
+   `VehicleFireEvent` side data in the sim (the client already alternates visually).
+4. **#51 remaining: the perceptual listen.** The beam, HUD feedback, lifecycle gating, the
+   player-candidate line-of-sight fix and the recording are all in: the "no source sample
+   exists" claim was wrong, `fx/packs/repair_use.wav` is the source's own
+   `CloseLooping3d` firing state (`repairpack.cs:33-39`) and it is now wired. What remains is
+   the two-client listen, which needs a human and cannot be asserted by a test.
 5. **#2 terrain texture scale.** Cannot be established from committed evidence; `terrain.ts`
    keeps 64 repeats over 2048 m with the uncertainty documented. Closing it needs the
    original renderer/material data, not another guess.
-6. **Fidelity backlog:** #54's conservative turret collision sphere, the #5/#10 residuals
-   below, #56's missing recordings, #55's unconsumed `maxWeapons` and absent Repair Pack
-   icon, then #57's remaining vehicle scope.
+6. **Fidelity backlog:** #54's yawed and elevated mount coverage (the measured shape replaces
+   the sphere for every static pose, and the residual is written down in the shape data),
+   the #5/#10 residuals below, #56's interior and force-field occlusion and its two-client
+   listen, then #57's remaining vehicle work: the four new kinds exist with their own models
+   and source constants, and their weapons, mounted turrets, passenger seats and the Mobile
+   Point Base's deployment are the next slice.
+7. **Interiors cannot be rebuilt from source.** Every `interiors.vl2/interiors/*.glb` source
+   is 404 while the `.dif` originals are served, so a clean clone cannot build the interiors;
+   the local cache hides that. A DIF reader is the same kind of job as the `.dts` reader and
+   is not started. See the asset section below.
 
 ## Landed this wave (2026-09-10 to 2026-09-11)
 
@@ -64,6 +89,49 @@ rerun in this audit. GitHub issue numbers below refer to
 Verification: **1159 unit tests pass across 73 files** (the opt-in telemetry sweep is the one
 skip); `pnpm typecheck`, `pnpm lint` and `prettier --check` clean; **38/38 Playwright cases
 pass** (`env -u CI node_modules/.bin/playwright test`). Protocol stays **11**.
+
+## Landed in the second 2026-09-11 wave
+
+| Commit | Work |
+| --- | --- |
+| `3dc8aa4` | Armor weapon-slot cap enforced, with the Light default it was silently breaking (#55) |
+| `5e8d2bd` | Per-team seat cap configurable, so `--bots 48 --team-size 24` seats 24 versus 24 (#31, #57) |
+| `c76e5e9` | Snapshot bot bound raised to the roster capacity: a 48-bot match no longer throws on its first snapshot |
+| `70548f8` | Spawns separated (0.05 to 1.66 m minimum) and respawn waves rotated instead of one fixed point |
+| `e3f79ff` | All 104 IFL sequence frames committed, so the texture sequences animate (#53) |
+| `b1b7866` | Player repair candidates obey line of sight like the other three kinds (#51) |
+| `e59eb98`, `f1ce478` | The twelve recordings the audio gaps blamed on missing source, listed and wired; Repair Pack icon bitmap (#51, #56) |
+| `76dfc9f`, `2176d67` | Turret hit shape measured from the source models, replacing a 73%-phantom sphere (#54) |
+| `ff16620` | Match cycle: intermission, restart, `--time-limit`, `--intermission` |
+| `6807cf7` | Stall detection measures net progress, not distance moved (#32) |
+| `7a440cf` | The HUD rack's expectation comes from the simulation instead of a hand copy |
+| `f6be7b7` | The harness measures the project's own match size, with a 24v24 acceptance case (#32) |
+| `b27fe50` | Station picker, HUD and the legacy spawn path all honour the weapon-slot cap (#55) |
+| `78ad7bf`, `90f4d94`, `7ad5feb` | A `.dts` shape reader, the four missing vehicle models built from source, and the four vehicles as full kinds (#57) |
+
+Measured and **reverted**, with the numbers that killed each: the carrier lateral dodge, the
+tighter escort station, and carrier ski speed (see Start here item 1). Also reverted on
+evidence in the earlier wave: launch staging and the decision-layer hold-fire gate.
+
+### The asset pipeline was fetching dead URLs
+
+Every pre-converted `shapes.vl2/shapes/*.glb` source is 404 upstream, including the two
+vehicles the repo shipped, so the cache was a relic and a clean clone could not build any
+shape. The `.dts` originals are still served (345 of them) and `packages/assets/src/dts.ts`
+now reads that format, implemented from the Torque engine's own stream code with a citation
+per field group.
+
+The switch is deliberately partial and the reason is in the code: the pipeline cannot yet
+emit animation clips, and the 17 shapes that already have a committed GLB carry clips the
+client plays by name (weapons' `discSpin`/`Fire`/`Reload`, turrets' `Deploy`/`Elevate`/`Turn`,
+stations' and pads' powered states). Regenerating those today would silently strip their
+animations, so only the four shapes with no prior asset convert from source. The sequence
+work is in the tree and dormant with its parity table in the doc comment: clip names,
+durations, targets and sampled poses match on every real transform clip, and the three known
+deviations are named there. That comment is where the next pass starts.
+
+Interiors are the remaining hole: `.dif` sources are served and their `.glb` counterparts are
+404, so a clean clone still cannot build them.
 
 ### The Wildcat report, closed
 
@@ -316,9 +384,22 @@ capture-refusal rule remains untested by data.
 - Aim limits derive from the mount (pedestal → Large 15/140, none → Sentry 89/175), targets
   clamp to the source theta band, no-target syncs relax to the authored rest pose, and
   presentation advances in simulated seconds (`{ dt, timeScale }` from `app.ts`).
-- Remaining: collision still uses a conservative elevated sphere rather than exact barrel
-  geometry; check edge hits and splash/repair targeting consistency before treating it as
-  physically exact.
+- Collision is now the measured assembly rather than one conservative sphere: a pedestal
+  cylinder and a head cylinder read from `turret_base_large.glb` (radii 2.3543 m and 1.3130 m,
+  top 2.2179 m), plus a barrel capsule out to `turret_fusion_large.glb`'s own Muzzlepoint
+  (`turretHitShape`). Direct hits, splash falloff and repair/bot targeting all share it, and
+  tests pin the shots that used to stop in the air above or beside the turret.
+- Remaining, both needing scene rotation on the sim store — a `createTurrets` field no call
+  site passes today (the client's is out of scope), so they are measured, not guessed:
+  the base wings reach 2.7385 m from the placement axis, 0.384 m past the pedestal cylinder
+  (the old sphere missed them by 0.739 m); and the barrel capsule sits in the placement's own
+  frame, so a mount whose head has yawed (the socket swings 0.4001..1.7979 m from the
+  placement axis about `DumTurn`) or whose barrel is pitched anywhere in its 15..140° theta
+  band can leave it — measured over that band, the drawn barrel mesh reaches y 2.6402 and its
+  `Muzzlepoint` (the fired extension's tip) 3.0010, with the horizontal radius growing to
+  1.3572 m. Covering every yaw instead measures r 2.4939 about the placement axis; a cylinder
+  over the head's own band alone is 36.4 m³, more than the whole new shape's 34.653 m³, and it
+  blocks shots that visibly pass beside the barrel.
 
 ### P2: remaining net and protocol residuals
 
