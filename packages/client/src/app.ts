@@ -157,13 +157,15 @@ export interface App {
   renderer: THREE.WebGLRenderer;
   weaponModel: ReturnType<typeof createWeaponModel>;
   /**
-   * WONTFIX (PR #4, M2 status table): only reachable through the F1 debug panel
-   * (debug.ts), never during normal play. Codex round 15 found that running this above
-   * 1 in networked mode calls net.tick() faster than the server's fixed-rate queue can
-   * drain, silently evicting older queued inputs once the per-client backlog exceeds
-   * MAX_PENDING_INPUTS and desyncing that player's own prediction. It affects only the
-   * player who opens the debug panel and moves this slider, with no effect on server
-   * stability or other players, so this is an accepted debug-tool caveat, not a defect.
+   * Local time scale. Pinned to 1 whenever a network transport exists.
+   *
+   * The F1 debug panel (debug.ts) exposes it, and the pin is why that panel's slider now
+   * renders disabled in netplay: Codex round 15 found that running this above 1 in
+   * networked mode calls net.tick() faster than the server's fixed-rate queue can drain,
+   * silently evicting older queued inputs once the per-client backlog exceeds
+   * MAX_PENDING_INPUTS and desyncing that player's own prediction. `pinNetworkTimeScale`
+   * rewrites the value every frame in netplay (debug.ts), so the desync is unreachable
+   * rather than accepted.
    */
   timeScale: number;
   paused: boolean;
