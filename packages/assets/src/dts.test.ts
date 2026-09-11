@@ -1,0 +1,183 @@
+import { readFile } from 'node:fs/promises';
+import { describe, expect, it } from 'vitest';
+import { dtsToGlb, parseDts, type DtsShape } from './dts.js';
+import { NodeIO } from '@gltf-transform/core';
+
+/** `turret_muzzlepoint.dts` (809 bytes, version 19) and `reticle_bomber.dts` (1,448 bytes,
+ *  version 22) are unmodified `base/@vl2/shapes.vl2/shapes` files from the same mirror the
+ *  rest of this package's assets come from. Two of them because the reader branches on the
+ *  version word — a version 19 shape has no node-scale block, no encoded normals and legacy
+ *  decal fields, all of which the version 22 shape exercises the other way — and both
+ *  together are smaller than one compressed screenshot. */
+async function fixture(name: string): Promise<Uint8Array> {
+  return new Uint8Array(await readFile(new URL(`./__fixtures__/${name}`, import.meta.url)));
+}
+
+describe('parseDts', () => {
+  it('reads a version 22 shape, its names, its triangles and its material', async () => {
+    const shape = parseDts(await fixture('reticle_bomber.dts'));
+    expect(shape.version).toBe(22);
+    expect(shape.exporterVersion).toBe(122);
+    expect(shape.nodes.map((node) => node.name)).toEqual(['Shape', 'Start', 'ObjectB1']);
+    expect(shape.nodes.map((node) => node.parentIndex)).toEqual([-1, 0, 1]);
+    expect(shape.detailLevels).toEqual([
+      {
+        name: 'Detail1',
+        size: 1,
+        subShapeNum: 0,
+        objectDetailNum: 0,
+        averageError: -1,
+        maxError: -1,
+        polyCount: 37,
+      },
+    ]);
+    expect(shape.meshes).toHaveLength(1);
+    const mesh = shape.meshes[0];
+    // The mesh takes its name from the object that owns it, which the author named
+    // separately from the node it renders under (`ObjectB1`).
+    expect(mesh?.name).toBe('ObjectB');
+    expect(shape.nodes[2]?.name).toBe('ObjectB1');
+    expect(mesh?.kind).toBe('standard');
+    expect(mesh?.nodeIndex).toBe(2);
+    expect(mesh?.triangleCount).toBe(20);
+    expect(mesh?.primitives).toHaveLength(1);
+    expect(mesh?.primitives[0]?.materialIndex).toBe(0);
+    // The authored texture path, which the build's attachShapeTextures resolves by name.
+    expect(shape.materials).toEqual([
+      {
+        name: 'gui\\hud_ret_bomber',
+        flags: 79,
+        flagNames: ['SWrap', 'TWrap', 'Translucent', 'Additive', 'NeverEnvMap'],
+      },
+    ]);
+    expect(shape.objects).toEqual([
+      { name: 'ObjectB', numMeshes: 1, startMeshIndex: 0, nodeIndex: 2 },
+    ]);
+    expect(shape.subShapes).toEqual([{ firstNode: 0, numNodes: 3, firstObject: 0, numObjects: 1 }]);
+  });
+
+  it('reads a version 19 shape through the older container branches', async () => {
+    const shape = parseDts(await fixture('turret_muzzlepoint.dts'));
+    expect(shape.version).toBe(19);
+    expect(shape.nodes.map((node) => node.name)).toEqual([
+      'Shape',
+      'Start',
+      'Mountpoint',
+      'Muzzlepoint',
+      'Mesh1',
+    ]);
+    expect(shape.detailLevels.map((detail) => detail.name)).toEqual(['Detail1']);
+    expect(shape.meshes.map((mesh) => mesh.triangleCount)).toEqual([1]);
+    // An older shape can carry no material list at all; the mesh's single primitive then has
+    // no material slot rather than a fabricated one.
+    expect(shape.materials).toEqual([]);
+  });
+
+  it('rejects a version it does not implement, naming the version', async () => {
+    const newer = await fixture('reticle_bomber.dts');
+    new DataView(newer.buffer).setUint32(0, 24 | (122 << 16), true);
+    expect(() => parseDts(newer)).toThrow(
+      'Unsupported DTS version 24 (exporter 122): this reader implements versions 19..23',
+    );
+    const older = await fixture('reticle_bomber.dts');
+    new DataView(older.buffer).setUint32(0, 12, true);
+    expect(() => parseDts(older)).toThrow('Unsupported DTS version 12 (exporter 0)');
+  });
+
+  it('rejects a truncated buffer instead of parsing garbage out of it', async () => {
+    const bytes = await fixture('reticle_bomber.dts');
+    expect(() => parseDts(bytes.subarray(0, 400))).toThrow(/Truncated DTS/);
+    expect(() => parseDts(bytes.subarray(0, 8))).toThrow(/Truncated DTS/);
+    expect(() => parseDts(new Uint8Array(0))).toThrow(/Truncated DTS/);
+    // Cut inside the model's own data rather than the header: the engine's guard values are
+    // what catch that, and they must not be papered over.
+    expect(() => parseDts(bytes.subarray(0, bytes.byteLength - 64))).toThrow(
+      /Truncated DTS|out of step/,
+    );
+  });
+
+  it('rejects a stream whose field order was disturbed instead of returning shifted data', async () => {
+    // `numNodes` sits in the shape buffer's first dword (the file header precedes it): one
+    // extra node makes every later read land elsewhere, which the engine's guard values
+    // detect. The old shape's counts are still intact, so this is a pure ordering failure.
+    const bytes = await fixture('reticle_bomber.dts');
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    view.setInt32(16, view.getInt32(16, true) + 1, true);
+    expect(() => parseDts(bytes)).toThrow(/out of step with the engine write order/);
+  });
+});
+
+describe('dtsToGlb', () => {
+  it('round-trips through @gltf-transform/core with names, triangles and materials intact', async () => {
+    const shape = parseDts(await fixture('reticle_bomber.dts'));
+    const glb = dtsToGlb(shape, { name: 'reticle_bomber' });
+    const document = await new NodeIO().readBinary(glb);
+    const root = document.getRoot();
+    expect(root.listNodes().map((node) => node.getName())).toEqual(['Shape', 'Start', 'ObjectB1']);
+    expect(root.listScenes()[0]?.getName()).toBe('reticle_bomber');
+    const mesh = root.listMeshes()[0];
+    expect(mesh?.getName()).toBe('ObjectB');
+    const primitive = mesh?.listPrimitives()[0];
+    expect(primitive?.getIndices()?.getCount()).toBe(60);
+    expect(primitive?.getAttribute('POSITION').getCount()).toBe(
+      primitive?.getAttribute('NORMAL').getCount() ?? -1,
+    );
+    expect(primitive?.getAttribute('POSITION').getCount()).toBe(
+      primitive?.getAttribute('TEXCOORD_0').getCount() ?? -1,
+    );
+    const material = root.listMaterials()[0];
+    expect(material?.getName()).toBe('gui\\hud_ret_bomber');
+    expect(material?.getExtras()).toEqual({
+      resource_path: 'gui\\hud_ret_bomber',
+      flags: 79,
+      flag_names: ['SWrap', 'TWrap', 'Translucent', 'Additive', 'NeverEnvMap'],
+    });
+    // Torque draws a translucent material without culling.
+    expect(material?.getDoubleSided()).toBe(true);
+  });
+
+  it('leaves base color unassigned and keeps geometry in DTS model space', async () => {
+    const shape = parseDts(await fixture('reticle_bomber.dts'));
+    const document = await new NodeIO().readBinary(dtsToGlb(shape));
+    const material = document.getRoot().listMaterials()[0];
+    expect(material?.getBaseColorTexture()).toBeNull();
+    // The reticle is a flat panel authored in the XY plane, 0.09 m thick in Z. An axis
+    // conversion (the cached shapes' Blender export rotates Z-up to Y-up) would make it flat
+    // in a different plane and move its node, so this pins "as authored".
+    const position = document.getRoot().listMeshes()[0]?.listPrimitives()[0]?.getAttribute('POSITION');
+    // Min/max recomputed from the parsed mesh: an axis conversion or a recentring anywhere
+    // between the file and the emitted accessor would move them.
+    const source = shape.meshes[0]?.primitives[0]?.positions ?? new Float32Array(0);
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+    for (let index = 0; index + 2 < source.length; index += 3) {
+      for (let axis = 0; axis < 3; axis += 1) {
+        min[axis] = Math.min(min[axis] ?? 0, source[index + axis] ?? 0);
+        max[axis] = Math.max(max[axis] ?? 0, source[index + axis] ?? 0);
+      }
+    }
+    expect(position?.getMin([])).toEqual(min);
+    expect(position?.getMax([])).toEqual(max);
+    const node = document.getRoot().listNodes().find((candidate) => candidate.getName() === 'ObjectB1');
+    expect(node?.getTranslation()).toEqual([...shape.nodes[2]!.translation]);
+  });
+
+  it('refuses a detail level the shape does not have', async () => {
+    const shape = parseDts(await fixture('turret_muzzlepoint.dts'));
+    expect(() => dtsToGlb(shape, { detailLevel: 4 })).toThrow(
+      'dtsToGlb: detail level 4 does not exist; the shape has 1 (Detail1).',
+    );
+  });
+});
+
+describe('DtsShape shape', () => {
+  it('carries the shape-level bounds and radius the engine loads', async () => {
+    const shape: DtsShape = parseDts(await fixture('turret_muzzlepoint.dts'));
+    expect(shape.radius).toBeCloseTo(0.0866, 4);
+    expect(shape.center).toEqual([0, 0, 0.05000000074505806]);
+    expect(shape.bounds).toEqual({
+      min: [-0.05000000074505806, -0.05000000074505806, 0],
+      max: [0.05000000074505806, 0.05000000074505806, 0.10000000149011612],
+    });
+  });
+});
