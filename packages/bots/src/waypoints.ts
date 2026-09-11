@@ -333,10 +333,406 @@ function stonePosition(world: World, a: Vec3, b: Vec3, t: number): Vec3 {
   return { x, y, z };
 }
 
-/** Replaces edge a-b with a chain of stone nodes when every stone lands on something
- *  standable and every sub-segment stays interior-clear; otherwise leaves the edge
- *  untouched (a partially followable edge is worse than a connected one -- the chain must
- *  never be a regression). Interior-less worlds are rejected by the caller. */
+// Issue #32 terrain-profile lines. A straight bridge dropped on Katabatic cuts across
+// whatever the terrain does between its endpoints, and the stones inherit that profile
+// verbatim: measured on the team-2-flag to midfield-tower bridge -- (-569, 88, -334) to
+// (-280, 169, 26), the route's first long hop home -- the straight line is 565 m of
+// walking that climbs 186 m and includes a 77 m leg falling 100 m at gradient -1.29
+// (52 degrees). That descent is the carrier's own death mode: steering.ts's fall-arrest
+// note measures landing hits of 0.05-0.29 at 30-90 m/s exactly there, and every carrier
+// death in the seed-1 trace was `attackerId -1`. The same terrain routed properly is 693 m
+// with 120 m of climb and a worst descent of 0.66 (measured with the search below at this
+// file's own constants: PROFILE_CHAIN_ASCENT_PENALTY 4, PROFILE_CHAIN_MAX_GRADE 0.7) --
+// 36% less climbing and no cliff, paid for with 23% more length. So a long edge now
+// carries whichever of the two lines is better on length-plus-climb (profileLineWorthCarrying
+// below), and the straight chain it is compared against is byte-for-byte the pre-#32 one,
+// so an edge whose terrain offers nothing better is unchanged. Applied to every long edge
+// rather than to a carrier's route alone: the graph is built once, shared by both teams,
+// and the two lines' cost difference (climb) is paid by whichever bot walks the edge --
+// the carrier most of all, since the climb spends the energy its fall arrest needs.
+const PROFILE_CHAIN_CELL_M = 8; // Ours, meters: one Katabatic terrain square (terrain.json
+// squareSize 8) -- a finer lattice only re-samples the same bilinear field.
+/** Issue #32: the profile line's hop length -- half the straight chain's
+ *  EDGE_STONE_STEP_M, because the bot walks a STRAIGHT line between consecutive
+ *  waypoints: an 80 m hop across a curving lattice path cuts the corner and puts the bot
+ *  back onto the ground the profile was routed around. Measured end to end on the
+ *  acceptance telemetry sweep (4 seeds x 12000 ticks, 13-18 carrier runs each): at this
+ *  spacing 112 kills and 17970 of 48000 ticks with both flags carried, at the straight
+ *  chain's own 80 m spacing 97 kills and 20530 ticks; the individual capture/reach numbers
+ *  (0-1 of 4 seeds, best approach 0-86 m) move with sub-10 m stone placement across all
+ *  these spacings, so they are knife-edge and are NOT what this constant is chosen on. */
+const PROFILE_CHAIN_STONE_STEP_M = EDGE_STONE_STEP_M / 2; // Ours, meters.
+const PROFILE_CHAIN_MARGIN_M = 120; // Ours, meters of room either side of the straight
+// line for the search to leave it. Measured: the best crossing of the bridge above ran
+// 48 m outside the endpoints' bounding box at its widest, so 120 m is generous headroom.
+const PROFILE_CHAIN_MAX_GRADE = 0.7; // Ours: rise/run, ~35 degrees. Above this the bot is
+// skiing or jetting, not walking, which is what turns a descent into a 30-90 m/s landing.
+// The straight chain above used gradient 1.29 legs; capped at 0.7 they become ordinary.
+const PROFILE_CHAIN_ASCENT_PENALTY = 4; // Ours: meters of route cost charged per meter
+// climbed (descent is free -- the sim's ski assists it). Sized from the same measurement:
+// at 4 the bridge above buys 66 m of climb back for 128 m of length, which is the trade
+// the carrier's energy reserve and its fall arrest both want.
+const PROFILE_CHAIN_LENGTH_BUDGET = 1.35; // Ours: a profile line longer than this multiple
+// of the straight line's own length is not built at all -- the route's exposure time is a
+// real cost too, and the measured lines land at 1.23. See CARRIER_ROUTE_LENGTH_BUDGET for
+// the separate cap on how far a carrier's WHOLE route may stretch to use one.
+
+/** Turret engagement envelopes are captured in the slice's report, not consumed here:
+ *  measured on this build, a route that trades climb for envelope cover buys 37-66 m of
+ *  ascent back with ~100 m inside a plasma turret's reach, and every weighted route this
+ *  file's search can produce on Katabatic is byte-identical to the unweighted one (the
+ *  corridor has no alternative). See the report's envelope-coverage table. */
+
+interface ChainGrid {
+  x0: number;
+  z0: number;
+  nx: number;
+  nz: number;
+  height: Float64Array;
+  walkable: Uint8Array;
+}
+
+interface ChainFrontier {
+  cells: number[];
+  costs: number[];
+}
+
+/** Binary min-heap push -- the chain search's frontier. The waypoint graph's own Dijkstra
+ *  can afford a linear scan per pop (476 nodes today), but every long edge's chain search
+ *  sweeps a few thousand terrain cells and `subdivideLongEdges` runs over every long edge
+ *  at once, where an O(n^2) scan costs whole seconds of server start. */
+function frontierPush(frontier: ChainFrontier, cell: number, cost: number): void {
+  frontier.cells.push(cell);
+  frontier.costs.push(cost);
+  let child = frontier.cells.length - 1;
+  while (child > 0) {
+    const parent = (child - 1) >> 1;
+    if ((frontier.costs[parent] as number) <= (frontier.costs[child] as number)) return;
+    swapFrontier(frontier, parent, child);
+    child = parent;
+  }
+}
+
+function swapFrontier(frontier: ChainFrontier, a: number, b: number): void {
+  const cell = frontier.cells[a] as number;
+  const cost = frontier.costs[a] as number;
+  frontier.cells[a] = frontier.cells[b] as number;
+  frontier.costs[a] = frontier.costs[b] as number;
+  frontier.cells[b] = cell;
+  frontier.costs[b] = cost;
+}
+
+/** Pops the cheapest cell. Duplicate entries for a cell are left to the caller's settled
+ *  check, the same way runDijkstra's visited set handles them. */
+function frontierPop(frontier: ChainFrontier): number {
+  const top = frontier.cells[0] as number;
+  const lastCell = frontier.cells.pop() as number;
+  const lastCost = frontier.costs.pop() as number;
+  if (frontier.cells.length > 0) {
+    frontier.cells[0] = lastCell;
+    frontier.costs[0] = lastCost;
+    let parent = 0;
+    for (;;) {
+      const left = parent * 2 + 1;
+      const right = left + 1;
+      let best = parent;
+      if (
+        left < frontier.cells.length &&
+        (frontier.costs[left] as number) < (frontier.costs[best] as number)
+      ) {
+        best = left;
+      }
+      if (
+        right < frontier.cells.length &&
+        (frontier.costs[right] as number) < (frontier.costs[best] as number)
+      ) {
+        best = right;
+      }
+      if (best === parent) return top;
+      swapFrontier(frontier, parent, best);
+      parent = best;
+    }
+  }
+  return top;
+}
+
+/** The terrain around a long edge, as a lattice of standable-on-terrain cells. Terrain
+ *  holes (Katabatic's base cut-outs) are unwalkable: the search is for the open-terrain
+ *  profile of a midfield bridge, and a chain through a base interior is rejected by the
+ *  interior-clearance check anyway. */
+function chainGrid(world: World, a: Vec3, b: Vec3): ChainGrid {
+  const spanX = Math.abs(b.x - a.x) + 2 * PROFILE_CHAIN_MARGIN_M;
+  const spanZ = Math.abs(b.z - a.z) + 2 * PROFILE_CHAIN_MARGIN_M;
+  const nx = Math.ceil(spanX / PROFILE_CHAIN_CELL_M) + 1;
+  const nz = Math.ceil(spanZ / PROFILE_CHAIN_CELL_M) + 1;
+  const x0 = Math.min(a.x, b.x) - PROFILE_CHAIN_MARGIN_M;
+  const z0 = Math.min(a.z, b.z) - PROFILE_CHAIN_MARGIN_M;
+  const grid: ChainGrid = {
+    x0,
+    z0,
+    nx,
+    nz,
+    height: new Float64Array(nx * nz),
+    walkable: new Uint8Array(nx * nz),
+  };
+  for (let ix = 0; ix < nx; ix += 1) {
+    for (let iz = 0; iz < nz; iz += 1) {
+      const sample = sampleTerrain(
+        world.terrain,
+        x0 + ix * PROFILE_CHAIN_CELL_M,
+        z0 + iz * PROFILE_CHAIN_CELL_M,
+      );
+      if (sample.empty) continue;
+      const cell = ix * nz + iz;
+      grid.walkable[cell] = 1;
+      grid.height[cell] = sample.height ?? 0;
+    }
+  }
+  return grid;
+}
+
+function gridCellPosition(grid: ChainGrid, cell: number): Vec3 {
+  const ix = Math.floor(cell / grid.nz);
+  return {
+    x: grid.x0 + ix * PROFILE_CHAIN_CELL_M,
+    y: grid.height[cell] as number,
+    z: grid.z0 + (cell % grid.nz) * PROFILE_CHAIN_CELL_M,
+  };
+}
+
+/** The walkable cell nearest to `point`, searched over a fixed window wide enough to jump
+ *  a base cut-out (120 m of cells at 8 m) -- the bridge endpoints frequently sit on one. */
+function nearestGridCell(grid: ChainGrid, point: Vec3): number {
+  const cx = Math.round((point.x - grid.x0) / PROFILE_CHAIN_CELL_M);
+  const cz = Math.round((point.z - grid.z0) / PROFILE_CHAIN_CELL_M);
+  const window = 15;
+  let best = -1;
+  let bestDistance = Infinity;
+  for (let dx = -window; dx <= window; dx += 1) {
+    for (let dz = -window; dz <= window; dz += 1) {
+      const ix = cx + dx;
+      const iz = cz + dz;
+      if (ix < 0 || iz < 0 || ix >= grid.nx || iz >= grid.nz) continue;
+      const cell = ix * grid.nz + iz;
+      if (grid.walkable[cell] === 0) continue;
+      const d = Math.hypot(dx, dz);
+      if (d < bestDistance) {
+        bestDistance = d;
+        best = cell;
+      }
+    }
+  }
+  return best;
+}
+
+/** Length plus climb for one lattice step, or Infinity when the step is steeper than the
+ *  grade cap in either direction -- the cap is what keeps a profile line off cliffs. */
+function chainStepCost(grid: ChainGrid, from: number, to: number, flat: number): number {
+  const dy = (grid.height[to] as number) - (grid.height[from] as number);
+  if (Math.abs(dy) > flat * PROFILE_CHAIN_MAX_GRADE) return Infinity;
+  return Math.hypot(flat, dy) + (dy > 0 ? dy * PROFILE_CHAIN_ASCENT_PENALTY : 0);
+}
+
+const CHAIN_NEIGHBOUR_STEPS: Array<[number, number]> = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+  [1, 1],
+  [1, -1],
+  [-1, 1],
+  [-1, -1],
+];
+
+/** Relaxes the eight neighbours of one settled cell. Split out of the search loop to keep
+ *  that loop's own nesting inside the lint's depth budget. */
+function relaxChainCell(
+  grid: ChainGrid,
+  frontier: ChainFrontier,
+  dist: Float64Array,
+  prev: Int32Array,
+  settled: Uint8Array,
+  current: number,
+): void {
+  const ix = Math.floor(current / grid.nz);
+  const iz = current % grid.nz;
+  for (const [dx, dz] of CHAIN_NEIGHBOUR_STEPS) {
+    const nx = ix + dx;
+    const nz = iz + dz;
+    if (nx < 0 || nz < 0 || nx >= grid.nx || nz >= grid.nz) continue;
+    const next = nx * grid.nz + nz;
+    if (grid.walkable[next] === 0 || settled[next] === 1) continue;
+    const cost = chainStepCost(grid, current, next, Math.hypot(dx, dz) * PROFILE_CHAIN_CELL_M);
+    const candidate = (dist[current] as number) + cost;
+    if (candidate >= (dist[next] as number)) continue;
+    dist[next] = candidate;
+    prev[next] = current;
+    frontierPush(frontier, next, candidate);
+  }
+}
+
+/** Dijkstra over the lattice; the predecessor array back to `start`, or null when no
+ *  route under the grade cap exists (a canyon the profile chain cannot cross at all). */
+function gridPredecessors(grid: ChainGrid, start: number, goal: number): Int32Array | null {
+  const count = grid.nx * grid.nz;
+  const dist = new Float64Array(count).fill(Infinity);
+  const prev = new Int32Array(count).fill(-1);
+  const settled = new Uint8Array(count);
+  const frontier: ChainFrontier = { cells: [], costs: [] };
+  dist[start] = 0;
+  frontierPush(frontier, start, 0);
+  while (frontier.cells.length > 0) {
+    const current = frontierPop(frontier);
+    if (settled[current] === 1) continue;
+    settled[current] = 1;
+    if (current === goal) return prev;
+    relaxChainCell(grid, frontier, dist, prev, settled, current);
+  }
+  return null;
+}
+
+/** Snap a searched cell to the standable surface under it (plus headroom), mirroring
+ *  stonePosition -- -Infinity when nothing standable is below. */
+function stoneAt(world: World, point: Vec3): Vec3 {
+  const y = standableYAt(world, point.x, point.z, point.y + 2);
+  return { x: point.x, y, z: point.z };
+}
+
+/** True when every point stands on something and every sub-segment of [a, ...stones, b]
+ *  stays interior-clear -- the whole-chain acceptance rule the straight chain has always
+ *  used, shared so the profile chain cannot commit a chain the straight one would have
+ *  refused. */
+function chainValid(world: World, points: Vec3[]): boolean {
+  for (const point of points) {
+    if (point.y === -Infinity) return false;
+  }
+  for (let i = 0; i + 1 < points.length; i += 1) {
+    if (!segmentClearOfInteriors(world.interiors, points[i] as Vec3, points[i + 1] as Vec3)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** The straight-line chain: evenly spaced stones on the a->b line, snapped to the
+ *  standable surface. Null when any stone has nothing standable under the line or any
+ *  sub-segment crosses interior geometry. */
+function straightChain(world: World, a: Vec3, b: Vec3): Vec3[] | null {
+  const interiorCount = Math.ceil(distance(a, b) / EDGE_STONE_STEP_M) - 1;
+  const chain: Vec3[] = [];
+  for (let i = 1; i <= interiorCount; i += 1) {
+    chain.push(stonePosition(world, a, b, i / (interiorCount + 1)));
+  }
+  return chainValid(world, [a, ...chain, b]) ? chain : null;
+}
+
+/** The terrain-profile chain: a lattice route around whatever the straight line would
+ *  climb over or drop into, thinned back to EDGE_STONE_STEP_M hops so the graph gains
+ *  ordinary stones rather than a navmesh. The search runs between the straight chain's
+ *  own first and last stones, not the edge's raw endpoints: those two stones are already
+ *  proven clear of the base geometry at each end (the straight chain's own acceptance),
+ *  whereas a search anchored on a raw endpoint can leave a base through a wall it had to
+ *  walk around, and no thinning distance can repair the resulting cut-through. Null when
+ *  the lattice search finds nothing or the chain fails the straight chain's own rule. */
+function profileChain(world: World, straight: Vec3[], a: Vec3, b: Vec3): Vec3[] | null {
+  const from = straight[0] as Vec3;
+  const to = straight[straight.length - 1] as Vec3;
+  const grid = chainGrid(world, from, to);
+  const start = nearestGridCell(grid, from);
+  const goal = nearestGridCell(grid, to);
+  if (start === -1 || goal === -1) return null;
+  const prev = gridPredecessors(grid, start, goal);
+  if (prev === null) return null;
+  const cells: number[] = [];
+  let walk = goal;
+  while (walk !== -1) {
+    cells.unshift(walk);
+    if (walk === start) break;
+    walk = prev[walk] as number;
+  }
+  const stones: Vec3[] = [from];
+  let travelled = 0;
+  let previous = from;
+  for (const cell of cells) {
+    const point = gridCellPosition(grid, cell);
+    travelled += distance(previous, point);
+    previous = point;
+    if (
+      travelled < PROFILE_CHAIN_STONE_STEP_M ||
+      distance(point, to) < PROFILE_CHAIN_STONE_STEP_M / 2
+    ) {
+      continue;
+    }
+    stones.push(stoneAt(world, point));
+    travelled = 0;
+  }
+  // The chain always ends on the straight chain's own last stone: its final hop back to
+  // the edge's endpoint is the one the straight chain already proved clear, while an
+  // arbitrary lattice stone's hop to that same endpoint can cut the corner of whatever
+  // structure the endpoint sits in (measured: the first cut of this search failed on
+  // exactly that segment, 13 of 13 stones valid and the last hop through a wall).
+  stones.push(to);
+  return chainValid(world, [a, ...stones, b]) ? stones : null;
+}
+
+function chainLength(points: Vec3[]): number {
+  let total = 0;
+  for (let i = 0; i + 1 < points.length; i += 1) {
+    total += distance(points[i] as Vec3, points[i + 1] as Vec3);
+  }
+  return total;
+}
+
+/** Metres climbed along a chain -- the other half of the profile cost. Descent is
+ *  deliberately free: the sim's ski assists it down, it is only the climb that spends the
+ *  carrier's energy reserve (steering.ts's CLIMB_ENERGY_RESERVE_FRACTION note). */
+function chainAscent(points: Vec3[]): number {
+  let ascent = 0;
+  for (let i = 0; i + 1 < points.length; i += 1) {
+    const dy = (points[i + 1] as Vec3).y - (points[i] as Vec3).y;
+    if (dy > 0) ascent += dy;
+  }
+  return ascent;
+}
+
+/** Issue #32: whether a profile line is worth carrying at all -- it must exist and stay
+ *  inside the length budget, measured over the full point lists including the edge's own
+ *  endpoints so the approach legs count exactly as much as the interior hops. The climb
+ *  term is deliberately one-sided: descent is free, because the sim's ski assists it down,
+ *  while every metre climbed spends the carrier's energy reserve (steering.ts's
+ *  CLIMB_ENERGY_RESERVE_FRACTION note). */
+function profileLineWorthCarrying(a: Vec3, b: Vec3, straight: Vec3[], profile: Vec3[]): boolean {
+  const straightPoints = [a, ...straight, b];
+  const profilePoints = [a, ...profile, b];
+  const straightLength = chainLength(straightPoints);
+  if (chainLength(profilePoints) > straightLength * PROFILE_CHAIN_LENGTH_BUDGET) return false;
+  return (
+    chainLength(profilePoints) + PROFILE_CHAIN_ASCENT_PENALTY * chainAscent(profilePoints) <
+    straightLength + PROFILE_CHAIN_ASCENT_PENALTY * chainAscent(straightPoints)
+  );
+}
+
+/** Links a chain's stones between the edge's two endpoint nodes. */
+function appendChain(
+  nodes: WaypointNode[],
+  edges: Map<number, number[]>,
+  aId: number,
+  bId: number,
+  chain: Vec3[],
+): void {
+  let previous = aId;
+  for (const stone of chain) {
+    nodes.push({ id: nodes.length, position: stone, label: 'relay' });
+    addEdge(edges, previous, nodes.length - 1);
+    previous = nodes.length - 1;
+  }
+  addEdge(edges, previous, bId);
+}
+
+/** Replaces long edge a-b with the better of the two lines it can carry (see
+ *  profileLineWorthCarrying); leaves the edge untouched when neither chain is acceptable
+ *  (a partially followable edge is worse than a connected one -- the chain must never be a
+ *  regression). Interior-less worlds are rejected by the caller. */
 function insertStoneChain(
   world: World,
   nodes: WaypointNode[],
@@ -346,28 +742,20 @@ function insertStoneChain(
 ): void {
   const a = (nodes[aId] as WaypointNode).position;
   const b = (nodes[bId] as WaypointNode).position;
-  const length = distance(a, b);
-  const interiorCount = Math.ceil(length / EDGE_STONE_STEP_M) - 1;
-  const chain: Vec3[] = [];
-  for (let i = 1; i <= interiorCount; i += 1) {
-    const stone = stonePosition(world, a, b, i / (interiorCount + 1));
-    if (stone.y === -Infinity) return;
-    chain.push(stone);
-  }
-  const points = [a, ...chain, b];
-  for (let i = 0; i + 1 < points.length; i += 1) {
-    if (!segmentClearOfInteriors(world.interiors, points[i] as Vec3, points[i + 1] as Vec3)) return;
-  }
+  const straight = straightChain(world, a, b);
+  // Under two stones the edge is a single hop either way -- nothing for the lattice search
+  // to shape, and it would cost a grid sweep to discover that.
+  const candidate =
+    straight !== null && straight.length >= 2 ? profileChain(world, straight, a, b) : null;
+  const chain =
+    straight !== null && candidate !== null && profileLineWorthCarrying(a, b, straight, candidate)
+      ? candidate
+      : straight;
+  if (chain === null) return;
   // The chain commits only as a whole: drop the parent edge (equal total cost would let
   // Dijkstra keep routing over the unfollowable straight leg) and link stone to stone.
   removeEdge(edges, aId, bId);
-  let previous = aId;
-  for (const stone of chain) {
-    nodes.push({ id: nodes.length, position: stone, label: 'relay' });
-    addEdge(edges, previous, nodes.length - 1);
-    previous = nodes.length - 1;
-  }
-  addEdge(edges, previous, bId);
+  appendChain(nodes, edges, aId, bId, chain);
 }
 
 /** Splits every edge longer than EDGE_SUBDIVIDE_MIN_M into stepping stones. Runs after
