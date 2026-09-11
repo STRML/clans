@@ -359,6 +359,12 @@ export interface CarrierTelemetry {
   runsReachingRadius: number;
   refusedTicks: number;
   capturesPerTeam: [number, number];
+  /** Total ticks any run spent carrying, and how many of those were stall ticks (a full
+   *  `STALL_CHECK_TICKS` window with no net progress toward the carrier's own stand). The
+   *  denominator and the numerator of the stall share the sweep prints, accumulated per tick
+   *  so a run still in progress is counted rather than only the runs that have ended. */
+  carrierTicks: number;
+  carrierStallTicks: number;
 }
 
 export function createCarrierTelemetry(world: World): CarrierTelemetry {
@@ -563,6 +569,22 @@ function trackProximity(run: ActiveCarrierRun, world: World): void {
     run.closestTeammateM === null ? closest : Math.min(run.closestTeammateM, closest);
 }
 
+/** Encounter tracking for one tick: exposure ticks (any tick with an enemy inside the
+ *  radius) and episodes (the rising edge of that condition, carrying the carrier's own speed
+ *  on the tick it began, which is what separates "caught while slow" from "caught despite
+ *  moving well"). Split out of `sampleRunTick` to keep that function inside the lint's
+ *  complexity budget. */
+function trackEncounter(run: ActiveCarrierRun, displacement: number): void {
+  const closestEnemy = run.lastNearby.closestEnemyM;
+  if (closestEnemy !== null && closestEnemy <= ENCOUNTER_RADIUS_M) run.enemyNearTicks += 1;
+  const wasOutside = run.lastClosestEnemyM === null || run.lastClosestEnemyM > ENCOUNTER_RADIUS_M;
+  if (wasOutside && closestEnemy !== null && closestEnemy <= ENCOUNTER_RADIUS_M) {
+    run.encounterIndex.push(run.runTicks);
+    run.encounterSpeedsMps.push(displacement / FIXED_DT);
+  }
+  run.lastClosestEnemyM = closestEnemy;
+}
+
 /** One tick of per-run measurement: displacement, own-stand distance, encounter rising
  *  edges, and the escort sample cadence. Indexed by `run.runTicks` at entry, which is the
  *  0-based tick index within the run (0 = the pickup tick -- `sampleCarrierTelemetry` runs
@@ -581,15 +603,7 @@ function sampleRunTick(run: ActiveCarrierRun, world: World): void {
   run.lastPosition = [x, y, z];
   run.tickDistancesM.push(displacement);
   run.tickStandDistancesM.push(standDistance(world, run.team, base).d3);
-  const closestEnemy = run.lastNearby.closestEnemyM;
-  if (closestEnemy !== null && closestEnemy <= ENCOUNTER_RADIUS_M) run.enemyNearTicks += 1;
-  const wasOutside =
-    run.lastClosestEnemyM === null || run.lastClosestEnemyM > ENCOUNTER_RADIUS_M;
-  if (wasOutside && closestEnemy !== null && closestEnemy <= ENCOUNTER_RADIUS_M) {
-    run.encounterIndex.push(run.runTicks);
-    run.encounterSpeedsMps.push(displacement / FIXED_DT);
-  }
-  run.lastClosestEnemyM = closestEnemy;
+  trackEncounter(run, displacement);
   if (run.runTicks % ESCORT_SAMPLE_TICKS === 0) {
     run.escortSampleIndex.push(run.runTicks);
     run.escortSampleM.push(run.lastNearby.closestTeammateM);

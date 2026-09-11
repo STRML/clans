@@ -54,7 +54,7 @@ import { buildWaypointGraph } from '@clans/bots';
 import { createBotManager, TARGET_TEAM_SIZE, type BotManager } from './bots.js';
 import { buildExtras, flagEvents, startNetServer, type NetServer } from './net.js';
 import { DISTANT_PLAYER_UPDATE_EVERY } from './snapshot-policy.js';
-import { createOrderBoard, currentOrder, issueOrder } from './orders.js';
+import { createOrderBoard, currentOrder, issueOrder, type OrderBoard } from './orders.js';
 import { teamCount, type SceneSpawn } from './world.js';
 
 /** A bot manager with zero budget: every net.ts test in this file that doesn't care
