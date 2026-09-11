@@ -10,6 +10,13 @@ export interface TerrainManifest {
   layers: Array<{ name: string; texture: string; alpha: string }>;
   emptySquares: number[];
 }
+/** One entry of scene.json's `vehicles` map: which fallback tier the asset build resolved
+ *  for that shape, and the file to load from shapes/. */
+export interface VehicleShapeEntry {
+  source: 'glb' | 'stl' | 'procedural';
+  shape: string;
+}
+
 export interface ClientSceneData {
   terrain: {
     terrainFile: string;
@@ -60,14 +67,24 @@ export interface ClientSceneData {
   shapesForBaseObjectKind: Record<number, string>;
   shapesForTurretBarrel: Record<number, string>;
   /** M5: which fallback tier packages/assets's build.ts actually resolved for each vehicle
-   *  shape (both real T2 .glb this session, per the plan's own source-confirmation note) and
-   *  the shape file name (already sitting in shapes/, same directory shapeUrl already reads
-   *  from -- no separate URL scheme needed). vehicle-view.ts reads `source` once at mesh-
-   *  creation time to pick a real-shape load, an STL-converted load, or a procedural
-   *  placeholder, without re-probing the network to find out which tier landed. */
+   *  shape and the shape file name (already sitting in shapes/, same directory shapeUrl
+   *  already reads from -- no separate URL scheme needed). vehicle-view.ts reads `source`
+   *  once at mesh-creation time to pick a real-shape load, an STL-converted load, or a
+   *  procedural placeholder, without re-probing the network to find out which tier landed.
+   *
+   *  Only the two M5 kinds are named here: build.ts's own VEHICLE_SHAPES publishes the
+   *  Bomber/Havoc/Tank/MPB shapes without a `kind` field (its VehicleShapeSpec.kind comment
+   *  says so), so scene.json has no entries for them yet. vehicle-view.ts falls back to a
+   *  per-kind published shape name for those four; the optional entries below are what a
+   *  regenerated manifest would fill in, and they win over the fallback the moment they
+   *  exist. */
   vehicles: {
-    shrike: { source: 'glb' | 'stl' | 'procedural'; shape: string };
-    wildcat: { source: 'glb' | 'stl' | 'procedural'; shape: string };
+    shrike: VehicleShapeEntry;
+    wildcat: VehicleShapeEntry;
+    bomber?: VehicleShapeEntry;
+    havoc?: VehicleShapeEntry;
+    tank?: VehicleShapeEntry;
+    mpb?: VehicleShapeEntry;
   };
 }
 export interface KatabaticAssets {

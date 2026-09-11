@@ -131,6 +131,54 @@ describe('createVehicleView', () => {
     loadSpy.mockRestore();
   });
 
+  it('the four kinds after the Wildcat load their own published shapes without a manifest entry', () => {
+    const loadSpy = vi.spyOn(GLTFLoader.prototype, 'load');
+    const scene = new THREE.Scene();
+    const view = createVehicleView(scene, glbAssets); // scene.json names only shrike/wildcat
+    view.sync([
+      vehicleData({ id: 0, kind: VehicleKind.Bomber }),
+      vehicleData({ id: 1, kind: VehicleKind.Havoc }),
+      vehicleData({ id: 2, kind: VehicleKind.Tank }),
+      vehicleData({ id: 3, kind: VehicleKind.MobilePointBase }),
+    ]);
+    for (const shape of [
+      'vehicle_air_bomber',
+      'vehicle_air_hapc',
+      'vehicle_grav_tank',
+      'vehicle_land_mpbase',
+    ]) {
+      expect(loadSpy).toHaveBeenCalledWith(
+        shapeUrl(shape),
+        expect.any(Function),
+        undefined,
+        expect.any(Function),
+      );
+    }
+    loadSpy.mockRestore();
+  });
+
+  it('a manifest entry for a new kind wins over the published-name fallback', () => {
+    const loadSpy = vi.spyOn(GLTFLoader.prototype, 'load');
+    const scene = new THREE.Scene();
+    const view = createVehicleView(scene, {
+      scene: {
+        vehicles: {
+          shrike: { source: 'glb' as const, shape: 'vehicle_shrike.glb' },
+          wildcat: { source: 'glb' as const, shape: 'vehicle_wildcat.glb' },
+          bomber: { source: 'glb' as const, shape: 'vehicle_bomber_retuned.glb' },
+        },
+      },
+    } as never);
+    view.sync([vehicleData({ kind: VehicleKind.Bomber })]);
+    expect(loadSpy).toHaveBeenCalledWith(
+      shapeUrl('vehicle_bomber_retuned'),
+      expect.any(Function),
+      undefined,
+      expect.any(Function),
+    );
+    loadSpy.mockRestore();
+  });
+
   it('a destroyed vehicle removes its mesh from the scene (mirrors flag-view.ts)', () => {
     const scene = new THREE.Scene();
     const view = createVehicleView(scene, proceduralAssets);

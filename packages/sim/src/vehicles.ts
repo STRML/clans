@@ -8,9 +8,20 @@ import { groundHeightAt } from './ground.js';
 import { sampleTerrain } from './terrain.js';
 import type { PendingFreeId, PlayerInput, Vec3, World } from './types.js';
 
+/** Every kind is a real T2 base-game vehicle script (GameData/base/scripts/vehicles/):
+ *  Shrike vehicle_shrike.cs, Wildcat vehicle_wildcat.cs, Bomber vehicle_bomber.cs, Havoc
+ *  vehicle_havoc.cs, Tank vehicle_tank.cs, MobilePointBase vehicle_mpb.cs. The value is a
+ *  raw wire byte (protocol/handshake.ts's decodeVehicleSpawn, snapshot.ts's writeVehicle),
+ *  so these ids are append-only: adding kinds never needs a protocol version bump, and the
+ *  u8 ceilings are 255 kinds (protocol) and 255 concurrent vehicles (writeU8Counted) --
+ *  VehicleStore's own capacity of 8 is the binding limit long before either. */
 export enum VehicleKind {
   Shrike = 0,
   Wildcat = 1,
+  Bomber = 2,
+  Havoc = 3,
+  Tank = 4,
+  MobilePointBase = 5,
 }
 
 export interface VehicleData {
@@ -28,7 +39,34 @@ export interface VehicleData {
   cameraMaxDist: number;
   cameraOffset: number;
   cameraLag: number;
+  /** The model-origin height above the support surface this kind's own ground collision
+   *  resolves to: the hard floor that catches the hull, and (for the wheeled MPB) the ride
+   *  height the wheels rest at. For the Shrike/Wildcat it is exactly their `checkRadius`,
+   *  which is what this file's single sphere-based ground resolver always used; the two new
+   *  classes need their own number because a sphere radius is not a ride height -- the
+   *  Tank's `checkRadius` (5.5535) sits ABOVE its hover band and would fight the spring
+   *  every tick, and the MPB has to rest on its wheels. See each entry's own comment. */
+  groundContactHeight: number;
 }
+
+// Tank hover band (vehicles/vehicle_tank.cs:274-277). Declared before VEHICLE_DATA because
+// its ground contact height is derived from them; the hover physics below reuses the same
+// constants through HOVER_PARAMS.
+const TANK_STAB_LEN_MIN = 3.25; // vehicles/vehicle_tank.cs:274
+const TANK_STAB_LEN_MAX = 4; // vehicles/vehicle_tank.cs:275
+const TANK_STAB_SPRING = 50; // vehicles/vehicle_tank.cs:276
+const TANK_HOVER_REST_HEIGHT = (TANK_STAB_LEN_MIN + TANK_STAB_LEN_MAX) / 2;
+// Ours: the Tank's ground floor is the spring's own sagged equilibrium under GRAVITY
+// (rest height - GRAVITY / stabSpringConstant = 3.625 - 0.4), i.e. exactly the height the
+// spring holds the craft at when nothing else acts on it, so the hard floor and the spring
+// agree instead of fighting (the Wildcat's floor is below its own equilibrium, so both
+// hover kinds float on the spring and only a hard dive reaches the floor).
+const TANK_GROUND_CONTACT_HEIGHT = TANK_HOVER_REST_HEIGHT - GRAVITY / TANK_STAB_SPRING;
+// Ours, measured from the published model: the MPB's wheels reach 2.83 m below its origin
+// in root space (assets/out/katabatic/shapes/vehicle_land_mpbase.glb, y[-2.83, 2.72]), so
+// the origin has to ride at that height for the wheels to sit on the surface rather than
+// half a hull deep in it. Unlike the hover kinds this is a ride height, not a hover band.
+const MPB_GROUND_REST_HEIGHT = 2.83;
 
 // Spec's Vehicle numbers table, used exactly for every field it gives; every other field
 // cites the real T2 script inline (see the plan's numbers table for line ranges).
@@ -48,6 +86,9 @@ export const VEHICLE_DATA: Record<VehicleKind, VehicleData> = {
     cameraMaxDist: 15, // vehicles/vehicle_shrike.cs:112
     cameraOffset: 2.5, // vehicles/vehicle_shrike.cs:113
     cameraLag: 0.9, // vehicles/vehicle_shrike.cs:114
+    // Unchanged from this file's original sphere-based ground rule (checkRadius as the
+    // resting height): the flyer is self-supporting, so this only ever matters in a crash.
+    groundContactHeight: 5.5, // = checkRadius, vehicles/vehicle_shrike.cs:225
   },
   [VehicleKind.Wildcat]: {
     mass: 400,
@@ -64,6 +105,84 @@ export const VEHICLE_DATA: Record<VehicleKind, VehicleData> = {
     cameraMaxDist: 5.0, // vehicles/vehicle_wildcat.cs:98
     cameraOffset: 0.7, // vehicles/vehicle_wildcat.cs:99
     cameraLag: 0.5, // vehicles/vehicle_wildcat.cs:100
+    // Unchanged from this file's original sphere-based ground rule; sits below the hover
+    // band's own sagged equilibrium (2.333 m), so the spring is what holds the craft.
+    groundContactHeight: 1.7785, // = checkRadius, vehicles/vehicle_wildcat.cs:209
+  },
+  // Thundersword (FlyingVehicleData/BomberFlyer). Weapon turrets, the bomb bay and the
+  // passenger seats are a follow-up slice -- nothing here models them.
+  [VehicleKind.Bomber]: {
+    mass: 350, // vehicles/vehicle_bomber.cs:260
+    maxDamage: 2.8, // vehicles/vehicle_bomber.cs:212
+    maxEnergy: 400, // vehicles/vehicle_bomber.cs:217
+    energyPerDamagePoint: 150, // vehicles/vehicle_bomber.cs:216 (isShielded true, :215)
+    rechargeRate: 0.8, // vehicles/vehicle_bomber.cs:220
+    checkRadius: 7.1895, // vehicles/vehicle_bomber.cs:314
+    minMountDist: 4, // vehicles/vehicle_bomber.cs:300
+    collDamageThresholdVel: 25, // vehicles/vehicle_bomber.cs:272
+    collDamageMultiplier: 0.02, // vehicles/vehicle_bomber.cs:273
+    groundImpactMinSpeed: 20, // vehicles/vehicle_bomber.cs:268
+    groundImpactSpeedDamageScale: 0.06, // vehicles/vehicle_bomber.cs:269
+    cameraMaxDist: 22, // vehicles/vehicle_bomber.cs:205
+    cameraOffset: 5, // vehicles/vehicle_bomber.cs:206
+    cameraLag: 1.0, // vehicles/vehicle_bomber.cs:207
+    groundContactHeight: 7.1895, // = checkRadius; the flyer only touches ground in a crash
+  },
+  // Havoc (FlyingVehicleData/HAPCFlyer). Its turret and the six passenger mount points are
+  // a follow-up slice.
+  [VehicleKind.Havoc]: {
+    mass: 550, // vehicles/vehicle_havoc.cs:122
+    maxDamage: 3.5, // vehicles/vehicle_havoc.cs:73
+    maxEnergy: 550, // vehicles/vehicle_havoc.cs:79
+    energyPerDamagePoint: 200, // vehicles/vehicle_havoc.cs:78 (isShielded true, :76)
+    rechargeRate: 0.8, // vehicles/vehicle_havoc.cs:77
+    checkRadius: 7.8115, // vehicles/vehicle_havoc.cs:176
+    minMountDist: 4, // vehicles/vehicle_havoc.cs:162
+    collDamageThresholdVel: 28, // vehicles/vehicle_havoc.cs:134
+    collDamageMultiplier: 0.02, // vehicles/vehicle_havoc.cs:135
+    groundImpactMinSpeed: 25, // vehicles/vehicle_havoc.cs:130
+    groundImpactSpeedDamageScale: 0.06, // vehicles/vehicle_havoc.cs:131
+    cameraMaxDist: 17, // vehicles/vehicle_havoc.cs:66
+    cameraOffset: 2, // vehicles/vehicle_havoc.cs:67
+    cameraLag: 8.5, // vehicles/vehicle_havoc.cs:68
+    groundContactHeight: 7.8115, // = checkRadius; the flyer only touches ground in a crash
+  },
+  // Beowulf (HoverVehicleData/AssaultVehicle). Its turret/weapons are a follow-up slice.
+  [VehicleKind.Tank]: {
+    mass: 1500, // vehicles/vehicle_tank.cs:243
+    maxDamage: 3.15, // vehicles/vehicle_tank.cs:232
+    maxEnergy: 400, // vehicles/vehicle_tank.cs:238
+    energyPerDamagePoint: 135, // vehicles/vehicle_tank.cs:237 (isShielded true, :235)
+    rechargeRate: 1.0, // vehicles/vehicle_tank.cs:236
+    checkRadius: 5.5535, // vehicles/vehicle_tank.cs:337
+    minMountDist: 4, // vehicles/vehicle_tank.cs:315
+    collDamageThresholdVel: 18, // vehicles/vehicle_tank.cs:259
+    collDamageMultiplier: 0.045, // vehicles/vehicle_tank.cs:260
+    groundImpactMinSpeed: 17, // vehicles/vehicle_tank.cs:255
+    groundImpactSpeedDamageScale: 0.06, // vehicles/vehicle_tank.cs:256
+    cameraMaxDist: 20, // vehicles/vehicle_tank.cs:223
+    cameraOffset: 3, // vehicles/vehicle_tank.cs:224
+    cameraLag: 1.5, // vehicles/vehicle_tank.cs:225
+    groundContactHeight: TANK_GROUND_CONTACT_HEIGHT, // see that constant's own comment
+  },
+  // Jericho (WheeledVehicleData/MobileBaseVehicle). Its deployable turret/station, the
+  // wheeled suspension and the canAbandon/cantTeamSwitch rules are follow-up slices.
+  [VehicleKind.MobilePointBase]: {
+    mass: 2000, // vehicles/vehicle_mpb.cs:150
+    maxDamage: 3.85, // vehicles/vehicle_mpb.cs:193
+    maxEnergy: 600, // vehicles/vehicle_mpb.cs:198
+    energyPerDamagePoint: 125, // vehicles/vehicle_mpb.cs:197 (isShielded true, :196)
+    rechargeRate: 1.0, // vehicles/vehicle_mpb.cs:202
+    checkRadius: 7.5225, // vehicles/vehicle_mpb.cs:246
+    minMountDist: 3, // vehicles/vehicle_mpb.cs:223
+    collDamageThresholdVel: 18, // vehicles/vehicle_mpb.cs:166
+    collDamageMultiplier: 0.07, // vehicles/vehicle_mpb.cs:167
+    groundImpactMinSpeed: 12, // vehicles/vehicle_mpb.cs:162
+    groundImpactSpeedDamageScale: 0.06, // vehicles/vehicle_mpb.cs:163
+    cameraMaxDist: 20, // vehicles/vehicle_mpb.cs:132
+    cameraOffset: 6, // vehicles/vehicle_mpb.cs:133
+    cameraLag: 1.5, // vehicles/vehicle_mpb.cs:134
+    groundContactHeight: MPB_GROUND_REST_HEIGHT, // see that constant's own comment
   },
 };
 
@@ -255,6 +374,20 @@ function padSpawnSupport(world: World, padPos: Vec3): number {
   return deck?.point.y ?? groundHeightAt(world, padPos) ?? padPos.y;
 }
 
+/** How high above the pad's walkable surface each kind's model origin starts. A hover craft
+ *  starts at its own spring's rest height so the spring begins in equilibrium instead of
+ *  popping the craft out of the deck; a flyer only needs clearance, and the two new ones
+ *  use their script's createHoverHeight (the field named for exactly this); the wheeled MPB
+ *  starts on its wheels. The Shrike's flat 2 m is this file's own original value and stays
+ *  pinned, even though vehicle_shrike.cs:144 also authors a createHoverHeight (3). */
+function spawnLiftFor(kind: VehicleKind): number {
+  if (kind === VehicleKind.Shrike) return 2;
+  if (isFlyerKind(kind)) return FLYER_PARAMS[kind].createHoverHeight;
+  if (kind === VehicleKind.Tank) return TANK_HOVER_REST_HEIGHT;
+  if (kind === VehicleKind.MobilePointBase) return MPB_GROUND_REST_HEIGHT;
+  return WILDCAT_HOVER_REST_HEIGHT;
+}
+
 export function spawnVehicleAtPad(world: World, padId: number, kind: VehicleKind): number | null {
   // kind ultimately traces back to a wire byte (protocol/handshake.ts's decodeVehicleSpawn
   // reads a raw u8 with no range check of its own) via server/net.ts's handleVehicleSpawn,
@@ -293,10 +426,7 @@ export function spawnVehicleAtPad(world: World, padId: number, kind: VehicleKind
   // (y 78.3 -> 77.4 over 60 ticks). Probe the deck from just above the pad origin; with
   // no deck overhead-ish, fall back to what the terrain sees, then to the pad origin.
   const support = padSpawnSupport(world, padPos);
-  // The Wildcat spawns exactly at its hover rest height (applyHoverSpring's midpoint), so
-  // the spring starts in equilibrium instead of popping the craft out of the geometry;
-  // the Shrike is self-supporting and only needs clearance above the surface.
-  const lift = kind === VehicleKind.Wildcat ? WILDCAT_HOVER_REST_HEIGHT : 2;
+  const lift = spawnLiftFor(kind);
   vehicles.position.set([padPos.x, support + lift, padPos.z], id * 3);
   vehicles.velocity.set([0, 0, 0], id * 3);
   vehicles.yaw[id] = 0;
@@ -404,20 +534,89 @@ export function vehiclePadAt(world: World, playerId: number): number | null {
   return null;
 }
 
-// --- Shrike flight physics (Task 2) -----------------------------------------------------
-// Real T2 numbers cite vehicles/vehicle_shrike.cs; every field not in the spec's Vehicle
-// numbers table is collected in the plan's "ours" numbers table alongside its citation.
-const SHRIKE_MIN_DRAG = 30;
-const SHRIKE_MANEUVERING_FORCE = 3000; // vehicles/vehicle_shrike.cs:140
-const SHRIKE_VERT_THRUST_MULTIPLE = 3; // vehicles/vehicle_shrike.cs:152
-const SHRIKE_MAX_AUTO_SPEED = 15; // vehicles/vehicle_shrike.cs:131
-const SHRIKE_AUTO_LINEAR_FORCE = 300; // vehicles/vehicle_shrike.cs:132 — ours table
-const SHRIKE_STEERING_FORCE = 1200; // vehicles/vehicle_shrike.cs:141 — ours table
-const SHRIKE_JET_FORCE = 2000;
-const SHRIKE_MIN_JET_ENERGY = 28;
-const SHRIKE_JET_ENERGY_DRAIN = 2.8;
-const SHRIKE_MAX_FORWARD_SPEED = 100; // vehicles/vehicle_shrike.cs:145 — real thrust cutoff,
-// not the spec's Chaingun-style projectile speed cap (see the plan's numbers table).
+// --- Vehicle physics classes -------------------------------------------------------------
+// Each kind runs the model its own real datablock class declares:
+//   FlyingVehicleData (Shrike, Bomber, Havoc) -- thrust along the heading, no passive gravity
+//     (the jets are what hold a flyer up), linear drag, a critically damped heading
+//     controller, the auto-stabilizer below maxAutoSpeed, and the energy afterburner.
+//   HoverVehicleData (Wildcat, Tank) -- a spring-damper holds the craft inside its own
+//     stabLenMin..stabLenMax band above the surface; planar thrust, wheel-free steering, and
+//     a one-shot jump (the Wildcat's jump is this file's own addition -- the real
+//     HoverVehicleData defines no jump at all; the Tank has none).
+//   WheeledVehicleData (MobilePointBase) -- wheels on the surface: torque-limited drive up to
+//     maxWheelSpeed, braking on release, lateral tire grip, and steering whose rate comes
+//     from the script's own maxSteeringAngle at the speed being driven (no turning at rest).
+// Every script field with no counterpart in this simulation is named in the report rather
+// than given an invented meaning here (flyer maxSteeringAngle/autoAngularForce/
+// horizontalSurfaceForce/verticalSurfaceForce/rotationalDrag; hover floatingGravMag/
+// maxSteeringAngle/gyroForce/gyroDamping/normalForce/restorativeForce; the MPB's
+// wheel-by-wheel springs, tire forces and deployables).
+
+/** The flying class's own script forces (FlyingVehicleData in every flyer script). Applied
+ *  as accelerations (force / mass), the same convention armor.ts's runForce/jetForce/
+ *  jumpForce use -- so a flyer's mass changes how much force it takes to reach its own
+ *  thrust cutoff, not how the script numbers were authored. */
+interface FlyerParams {
+  minDrag: number;
+  maneuveringForce: number;
+  vertThrustMultiple: number;
+  maxAutoSpeed: number;
+  autoLinearForce: number;
+  steeringForce: number;
+  jetForce: number;
+  minJetEnergy: number;
+  jetEnergyDrain: number;
+  maxForwardSpeed: number;
+  createHoverHeight: number;
+}
+
+type FlyerKind = VehicleKind.Shrike | VehicleKind.Bomber | VehicleKind.Havoc;
+
+const FLYER_PARAMS: Record<FlyerKind, FlyerParams> = {
+  [VehicleKind.Shrike]: {
+    minDrag: 30, // vehicles/vehicle_shrike.cs:127
+    maneuveringForce: 3000, // vehicles/vehicle_shrike.cs:139
+    vertThrustMultiple: 3, // vehicles/vehicle_shrike.cs:151
+    maxAutoSpeed: 15, // vehicles/vehicle_shrike.cs:130
+    autoLinearForce: 300, // vehicles/vehicle_shrike.cs:132
+    steeringForce: 1200, // vehicles/vehicle_shrike.cs:140
+    jetForce: 2000, // vehicles/vehicle_shrike.cs:148
+    minJetEnergy: 28, // vehicles/vehicle_shrike.cs:149
+    jetEnergyDrain: 2.8, // vehicles/vehicle_shrike.cs:150
+    maxForwardSpeed: 100, // vehicles/vehicle_shrike.cs:145 -- real thrust cutoff
+    createHoverHeight: 3, // vehicles/vehicle_shrike.cs:144 -- NOT used at spawn (see spawnLiftFor)
+  },
+  [VehicleKind.Bomber]: {
+    minDrag: 60, // vehicles/vehicle_bomber.cs:218
+    maneuveringForce: 4700, // vehicles/vehicle_bomber.cs:232
+    vertThrustMultiple: 3, // vehicles/vehicle_bomber.cs:244
+    maxAutoSpeed: 15, // vehicles/vehicle_bomber.cs:223
+    autoLinearForce: 300, // vehicles/vehicle_bomber.cs:225
+    steeringForce: 1100, // vehicles/vehicle_bomber.cs:233
+    jetForce: 3000, // vehicles/vehicle_bomber.cs:241
+    minJetEnergy: 40, // vehicles/vehicle_bomber.cs:242
+    jetEnergyDrain: 3.0, // vehicles/vehicle_bomber.cs:243
+    maxForwardSpeed: 85, // vehicles/vehicle_bomber.cs:238 -- real thrust cutoff
+    createHoverHeight: 3, // vehicles/vehicle_bomber.cs:237
+  },
+  [VehicleKind.Havoc]: {
+    minDrag: 100, // vehicles/vehicle_havoc.cs:80
+    maneuveringForce: 6000, // vehicles/vehicle_havoc.cs:93
+    vertThrustMultiple: 3, // vehicles/vehicle_havoc.cs:105
+    maxAutoSpeed: 10, // vehicles/vehicle_havoc.cs:84
+    autoLinearForce: 450, // vehicles/vehicle_havoc.cs:86
+    steeringForce: 1000, // vehicles/vehicle_havoc.cs:94
+    jetForce: 5000, // vehicles/vehicle_havoc.cs:102
+    minJetEnergy: 55, // vehicles/vehicle_havoc.cs:103
+    jetEnergyDrain: 3.6, // vehicles/vehicle_havoc.cs:104
+    maxForwardSpeed: 71, // vehicles/vehicle_havoc.cs:99 -- real thrust cutoff
+    createHoverHeight: 6, // vehicles/vehicle_havoc.cs:98
+  },
+};
+
+function isFlyerKind(kind: VehicleKind): kind is FlyerKind {
+  return kind === VehicleKind.Shrike || kind === VehicleKind.Bomber || kind === VehicleKind.Havoc;
+}
 
 function headingOf(yaw: number, pitch: number): Vec3 {
   const cp = Math.cos(pitch);
@@ -446,34 +645,37 @@ function normalizeAngle(angle: number): number {
 }
 
 /** Low-speed linear braking. Angular stabilization belongs to the heading controller. */
-function applyShrikeAutoStabilize(
+function applyFlyerAutoStabilize(
   vehicles: VehicleStore,
   id: number,
   speed: number,
   dt: number,
+  data: VehicleData,
+  params: FlyerParams,
 ): void {
-  const mass = VEHICLE_DATA[VehicleKind.Shrike].mass;
   const base = id * 3;
   for (let axis = 0; axis < 3; axis += 1) {
     // Vertical stabilization remains engaged during flight: holding forward or
     // boost must not preserve a dive after the pilot levels the nose.
-    if (axis !== 1 && speed >= SHRIKE_MAX_AUTO_SPEED) continue;
+    if (axis !== 1 && speed >= params.maxAutoSpeed) continue;
     const v = vehicles.velocity[base + axis] ?? 0;
     vehicles.velocity[base + axis] =
-      v - Math.sign(v) * Math.min(Math.abs(v), (SHRIKE_AUTO_LINEAR_FORCE / mass) * dt);
+      v - Math.sign(v) * Math.min(Math.abs(v), (params.autoLinearForce / data.mass) * dt);
   }
 }
 
 /** Critically damped heading controller. The script supplies steering force, not
- * Torque's inertia tensor; these explicit demo rates avoid an underdamped orbit. */
-function applyShrikeSteering(
+ *  Torque's inertia tensor; these explicit demo rates avoid an underdamped orbit. */
+function applyFlyerSteering(
   vehicles: VehicleStore,
   id: number,
   input: PlayerInput,
   dt: number,
+  data: VehicleData,
+  params: FlyerParams,
 ): void {
   const base = id * 3;
-  const stiffness = SHRIKE_STEERING_FORCE / VEHICLE_DATA[VehicleKind.Shrike].mass;
+  const stiffness = params.steeringForce / data.mass;
   const damping = 2 * Math.sqrt(stiffness);
   const targetPitch = Math.max(-1.35, Math.min(1.35, input.pitch));
   const errors = [
@@ -498,16 +700,17 @@ function applyShrikeSteering(
   vehicles.roll[id] = at(vehicles.roll, id) + at(vehicles.angVel, base + 2) * dt;
 }
 
-function applyShrikeThrust(
+function applyFlyerThrust(
   vehicles: VehicleStore,
   id: number,
   input: PlayerInput,
   dt: number,
+  data: VehicleData,
+  params: FlyerParams,
 ): void {
-  const data = VEHICLE_DATA[VehicleKind.Shrike];
   const base = id * 3;
   const heading = headingOf(vehicles.yaw[id] ?? 0, vehicles.pitch[id] ?? 0);
-  const thrust = SHRIKE_MANEUVERING_FORCE / data.mass;
+  const thrust = params.maneuveringForce / data.mass;
   const yaw = at(vehicles.yaw, id);
   vehicles.velocity[base] = at(vehicles.velocity, base) - Math.cos(yaw) * input.moveX * thrust * dt;
   vehicles.velocity[base + 2] =
@@ -515,89 +718,107 @@ function applyShrikeThrust(
   vehicles.velocity[base] = (vehicles.velocity[base] ?? 0) + heading.x * input.moveZ * thrust * dt;
   vehicles.velocity[base + 1] =
     (vehicles.velocity[base + 1] ?? 0) +
-    heading.y * input.moveZ * thrust * dt * SHRIKE_VERT_THRUST_MULTIPLE;
+    heading.y * input.moveZ * thrust * dt * params.vertThrustMultiple;
   vehicles.velocity[base + 2] =
     (vehicles.velocity[base + 2] ?? 0) + heading.z * input.moveZ * thrust * dt;
 }
 
-function applyShrikeJetThrust(
+function applyFlyerJetThrust(
   vehicles: VehicleStore,
   id: number,
   input: PlayerInput,
   dt: number,
+  data: VehicleData,
+  params: FlyerParams,
 ): void {
-  const data = VEHICLE_DATA[VehicleKind.Shrike];
   const base = id * 3;
-  const jet = SHRIKE_JET_FORCE / data.mass;
+  const jet = params.jetForce / data.mass;
   if (input.moveX === 0 && input.moveZ === 0) {
     vehicles.velocity[base + 1] =
-      at(vehicles.velocity, base + 1) + jet * SHRIKE_VERT_THRUST_MULTIPLE * dt;
+      at(vehicles.velocity, base + 1) + jet * params.vertThrustMultiple * dt;
   } else {
     const heading = headingOf(at(vehicles.yaw, id), at(vehicles.pitch, id));
     vehicles.velocity[base] = at(vehicles.velocity, base) + heading.x * jet * dt;
     vehicles.velocity[base + 1] = at(vehicles.velocity, base + 1) + heading.y * jet * dt;
     vehicles.velocity[base + 2] = at(vehicles.velocity, base + 2) + heading.z * jet * dt;
   }
-  vehicles.energy[id] = at(vehicles.energy, id) - SHRIKE_JET_ENERGY_DRAIN;
+  vehicles.energy[id] = at(vehicles.energy, id) - params.jetEnergyDrain;
 }
 
 /** A held jet input that can't afford minJetEnergy is a flat refusal -- no thrust, no drain,
  *  and (unlike letting go of jet) no recharge either, since the player is still holding the
  *  afterburner down; recharge only resumes once jet is released. */
-function applyShrikeAfterburner(
+function applyFlyerAfterburner(
   vehicles: VehicleStore,
   id: number,
   input: PlayerInput,
   dt: number,
+  data: VehicleData,
+  params: FlyerParams,
 ): void {
-  const data = VEHICLE_DATA[VehicleKind.Shrike];
   if (!input.jet) {
     vehicles.energy[id] = Math.min(data.maxEnergy, at(vehicles.energy, id) + data.rechargeRate);
     return;
   }
-  if (at(vehicles.energy, id) < SHRIKE_MIN_JET_ENERGY) return;
-  applyShrikeJetThrust(vehicles, id, input, dt);
+  if (at(vehicles.energy, id) < params.minJetEnergy) return;
+  applyFlyerJetThrust(vehicles, id, input, dt, data, params);
 }
 
-/** Shrikes are self-supporting flyers: retain horizontal drag without passive gravity or lift. */
-function applyShrikeDrag(vehicles: VehicleStore, id: number, dt: number): void {
-  const data = VEHICLE_DATA[VehicleKind.Shrike];
+/** Flyers are self-supporting: retain horizontal drag without passive gravity or lift. */
+function applyFlyerDrag(
+  vehicles: VehicleStore,
+  id: number,
+  dt: number,
+  data: VehicleData,
+  params: FlyerParams,
+): void {
   const base = id * 3;
-  const dragScale = 1 - Math.min(1, (SHRIKE_MIN_DRAG / data.mass) * dt);
+  const dragScale = 1 - Math.min(1, (params.minDrag / data.mass) * dt);
   vehicles.velocity[base] = (vehicles.velocity[base] ?? 0) * dragScale;
   vehicles.velocity[base + 2] = (vehicles.velocity[base + 2] ?? 0) * dragScale;
 }
 
-/** Real thrust cutoff (vehicles/vehicle_shrike.cs:145), not the projectile speed cap the
- *  spec's Chaingun-style table uses elsewhere -- caps the whole velocity vector, matching
- *  Torque's own "thrust stops adding once you're already this fast" rule rather than a
- *  per-axis clamp that would distort the heading. Split out of stepShrike to keep that
- *  function's own complexity under budget. */
-function clampShrikeSpeed(vehicles: VehicleStore, id: number, speed: number): void {
-  if (speed <= SHRIKE_MAX_FORWARD_SPEED) return;
+/** Real thrust cutoff (vehicle_shrike.cs:145 and its two siblings), not a projectile speed
+ *  cap -- caps the whole velocity vector, matching Torque's own "thrust stops adding once
+ *  you're already this fast" rule rather than a per-axis clamp that would distort the
+ *  heading. Split out of stepFlyer to keep that function's own complexity under budget. */
+function clampFlyerSpeed(
+  vehicles: VehicleStore,
+  id: number,
+  speed: number,
+  params: FlyerParams,
+): void {
+  if (speed <= params.maxForwardSpeed) return;
   const base = id * 3;
-  const scale = SHRIKE_MAX_FORWARD_SPEED / speed;
+  const scale = params.maxForwardSpeed / speed;
   vehicles.velocity[base] = at(vehicles.velocity, base) * scale;
   vehicles.velocity[base + 1] = at(vehicles.velocity, base + 1) * scale;
   vehicles.velocity[base + 2] = at(vehicles.velocity, base + 2) * scale;
 }
 
-export function stepShrike(world: World, id: number, input: PlayerInput, dt: number): void {
+export function stepFlyer(
+  world: World,
+  id: number,
+  input: PlayerInput,
+  dt: number,
+  data: VehicleData,
+  params: FlyerParams,
+): void {
   const vehicles = world.vehicles;
   const base = id * 3;
 
-  applyShrikeSteering(vehicles, id, input, dt);
-  applyShrikeThrust(vehicles, id, input, dt);
-  applyShrikeAfterburner(vehicles, id, input, dt);
-  applyShrikeDrag(vehicles, id, dt);
+  applyFlyerSteering(vehicles, id, input, dt, data, params);
+  applyFlyerThrust(vehicles, id, input, dt, data, params);
+  applyFlyerAfterburner(vehicles, id, input, dt, data, params);
+  applyFlyerDrag(vehicles, id, dt, data, params);
 
   const speed = Math.hypot(
     vehicles.velocity[base] ?? 0,
     vehicles.velocity[base + 1] ?? 0,
     vehicles.velocity[base + 2] ?? 0,
   );
-  applyShrikeAutoStabilize(vehicles, id, speed, dt);
-  clampShrikeSpeed(vehicles, id, speed);
+  applyFlyerAutoStabilize(vehicles, id, speed, dt, data, params);
+  clampFlyerSpeed(vehicles, id, speed, params);
 
   vehicles.position[base] = (vehicles.position[base] ?? 0) + (vehicles.velocity[base] ?? 0) * dt;
   vehicles.position[base + 1] =
@@ -606,22 +827,105 @@ export function stepShrike(world: World, id: number, input: PlayerInput, dt: num
     (vehicles.position[base + 2] ?? 0) + (vehicles.velocity[base + 2] ?? 0) * dt;
 }
 
-// --- Wildcat hover physics (Task 3) -----------------------------------------------------
-// Real T2 numbers cite vehicles/vehicle_wildcat.cs; every field not in the spec's Vehicle
-// numbers table is collected in the plan's "ours" numbers table alongside its citation.
+export function stepShrike(world: World, id: number, input: PlayerInput, dt: number): void {
+  stepFlyer(
+    world,
+    id,
+    input,
+    dt,
+    VEHICLE_DATA[VehicleKind.Shrike],
+    FLYER_PARAMS[VehicleKind.Shrike],
+  );
+}
+
+// --- Hover class (Wildcat, Tank) ---------------------------------------------------------
+
+/** The hover class's own script fields (HoverVehicleData in both hover scripts). */
+interface HoverParams {
+  stabLenMin: number;
+  stabLenMax: number;
+  stabSpring: number;
+  stabDamping: number;
+  mainThrust: number;
+  reverseThrust: number;
+  strafeThrust: number;
+  turboFactor: number;
+  brakingForce: number;
+  brakingActivationSpeed: number;
+  steeringForce: number;
+  rollForce: number;
+  gyroDrag: number;
+  /** Ours: the script defines no top speed for either hover craft, and this file's
+   *  accel-direct thrust convention reaches 50+ m/s in two seconds, well past the kind's own
+   *  collDamageThresholdVel/groundImpactMinSpeed -- an uncapped hover craft destroys itself
+   *  on its first terrain bump. Sized under both thresholds unboosted, with boost (turbo
+   *  factor) allowed to approach, not exceed, the collision threshold. */
+  maxSpeed: number;
+  minJetEnergy: number;
+  jetEnergyDrain: number;
+  /** Ours, m/s: no jump exists in either script. The Wildcat's jet-energy-gated hop is the
+   *  shape the player's own jumpForce = 8.3 * mass uses; the Tank has no jump at all. */
+  jumpImpulsePerMass?: number;
+}
+
+type HoverKind = VehicleKind.Wildcat | VehicleKind.Tank;
+
 const WILDCAT_STAB_LEN_MIN = 2.25; // vehicles/vehicle_wildcat.cs:146
 const WILDCAT_STAB_LEN_MAX = 3.75; // vehicles/vehicle_wildcat.cs:147
-const WILDCAT_STAB_SPRING = 30; // vehicles/vehicle_wildcat.cs:148
-const WILDCAT_STAB_DAMPING = 16; // vehicles/vehicle_wildcat.cs:149
-const WILDCAT_MAIN_THRUST = 30; // vehicles/vehicle_wildcat.cs:138
-const WILDCAT_REVERSE_THRUST = 10; // vehicles/vehicle_wildcat.cs:139 — ours table
-const WILDCAT_STRAFE_THRUST = 8; // vehicles/vehicle_wildcat.cs:140 — ours table
-const WILDCAT_TURBO_FACTOR = 1.5; // vehicles/vehicle_wildcat.cs:141
-const WILDCAT_BRAKING_FORCE = 25; // vehicles/vehicle_wildcat.cs:143 — ours table
-const WILDCAT_BRAKING_ACTIVATION_SPEED = 4; // vehicles/vehicle_wildcat.cs:144 — ours table
 // Ours: (stabLenMin + stabLenMax) / 2 -- applyHoverSpring's equilibrium height, shared
 // with spawnVehicleAtPad so a pad spawn starts in spring equilibrium (issue trace).
 const WILDCAT_HOVER_REST_HEIGHT = (WILDCAT_STAB_LEN_MIN + WILDCAT_STAB_LEN_MAX) / 2;
+
+const HOVER_PARAMS: Record<HoverKind, HoverParams> = {
+  [VehicleKind.Wildcat]: {
+    stabLenMin: WILDCAT_STAB_LEN_MIN,
+    stabLenMax: WILDCAT_STAB_LEN_MAX,
+    stabSpring: 30, // vehicles/vehicle_wildcat.cs:148
+    stabDamping: 16, // vehicles/vehicle_wildcat.cs:149
+    mainThrust: 30, // vehicles/vehicle_wildcat.cs:138
+    reverseThrust: 10, // vehicles/vehicle_wildcat.cs:139
+    strafeThrust: 8, // vehicles/vehicle_wildcat.cs:140
+    turboFactor: 1.5, // vehicles/vehicle_wildcat.cs:141
+    brakingForce: 25, // vehicles/vehicle_wildcat.cs:143
+    brakingActivationSpeed: 4, // vehicles/vehicle_wildcat.cs:144
+    // The plan's sketch value (vehicle_wildcat.cs:154's steeringForce, treated as an
+    // acceleration like the rest of this model -- see the class comment above). The earlier
+    // 2.5 retune existed only because the OLD controller damped angVel by GYRO_DRAG/100
+    // (zeta ~ 0.05), where 30 span a 90-degree held turn into a +/-70-degree limit cycle;
+    // under critical damping 30 turns a held 90-degree input around in about a second with
+    // no measurable overshoot (issue trace).
+    steeringForce: 30,
+    rollForce: 15, // vehicles/vehicle_wildcat.cs:155
+    gyroDrag: 16, // spec's Vehicle numbers table
+    maxSpeed: 15, // ours -- see HoverParams.maxSpeed
+    minJetEnergy: 15, // vehicles/vehicle_wildcat.cs:116
+    jetEnergyDrain: 1.3, // vehicles/vehicle_wildcat.cs:117
+    jumpImpulsePerMass: 8.3, // ours -- see HoverParams.jumpImpulsePerMass
+  },
+  [VehicleKind.Tank]: {
+    stabLenMin: TANK_STAB_LEN_MIN,
+    stabLenMax: TANK_STAB_LEN_MAX,
+    stabSpring: TANK_STAB_SPRING,
+    stabDamping: 20, // vehicles/vehicle_tank.cs:277
+    mainThrust: 50, // vehicles/vehicle_tank.cs:266
+    reverseThrust: 40, // vehicles/vehicle_tank.cs:267
+    strafeThrust: 40, // vehicles/vehicle_tank.cs:268
+    turboFactor: 1.7, // vehicles/vehicle_tank.cs:269
+    brakingForce: 25, // vehicles/vehicle_tank.cs:271
+    brakingActivationSpeed: 4, // vehicles/vehicle_tank.cs:272
+    steeringForce: 15, // vehicles/vehicle_tank.cs:282
+    rollForce: 5, // vehicles/vehicle_tank.cs:283
+    gyroDrag: 20, // vehicles/vehicle_tank.cs:279
+    maxSpeed: 13, // ours -- see HoverParams.maxSpeed; under its own 17 m/s impact floor
+    minJetEnergy: 15, // vehicles/vehicle_tank.cs:239
+    jetEnergyDrain: 2.0, // vehicles/vehicle_tank.cs:240
+  },
+};
+
+function isHoverKind(kind: VehicleKind): kind is HoverKind {
+  return kind === VehicleKind.Wildcat || kind === VehicleKind.Tank;
+}
+
 // Ours, metres: only a deck within this window below the craft can be hover support, so
 // high flight never grips a distant floor the way an unbounded deck ray would.
 const HOVER_DECK_WINDOW = 8;
@@ -645,37 +949,6 @@ function hoverSupport(world: World, position: Vec3): number | null {
   return support;
 }
 
-// The plan's sketch value (vehicle_wildcat.cs's steeringForce, treated as an acceleration
-// like the rest of this model). The earlier 2.5 retune existed only because the OLD
-// controller damped angVel by GYRO_DRAG/100 (zeta ~ 0.05), where 30 span a 90-degree held
-// turn into a +/-70-degree limit cycle; under the critical damping below, 30 turns a held
-// 90-degree input around in about a second with no measurable overshoot (issue trace).
-const WILDCAT_STEERING_FORCE = 30;
-const WILDCAT_ROLL_FORCE = 15;
-const WILDCAT_GYRO_DRAG = 16; // spec's Vehicle numbers table
-// Ours: critical damping (c = 2*sqrt(K), zeta = 1) for the yawError -> angVel -> yaw double
-// integrator. The previous form damped angVel by GYRO_DRAG/100 = 0.16/s (zeta ~ 0.05), so a
-// held 90-degree turn overshot the held heading by 77 degrees and then limit-cycled 65
-// degrees UNDER it for the whole measurement window (issue trace) -- the craft would never
-// hold a heading. GYRO_DRAG stays on roll, the cosmetic lean it was being scaled for here.
-const WILDCAT_YAW_DAMPING = 2 * Math.sqrt(WILDCAT_STEERING_FORCE);
-const WILDCAT_MIN_JET_ENERGY = 15;
-const WILDCAT_JET_ENERGY_DRAIN = 1.3;
-// Ours: the spec's own Vehicle numbers table cites a real `dragForce 25/45` this file does
-// not otherwise model (no continuous drag term exists for the Wildcat the way the Shrike's
-// own minDrag/SHRIKE_MAX_FORWARD_SPEED bound its top speed) -- reverse-engineering the exact
-// Torque units behind those two numbers without the engine source produced either a
-// negligible or a crippling drag depending on which convention was assumed, so this is a
-// flat speed cap instead: an unbounded Wildcat under this file's accel-direct thrust
-// convention reaches 50+ m/s within two seconds and destroys itself on the very first terrain
-// bump (collDamageThresholdVel 23 m/s, groundImpactMinSpeed 29 m/s). Sized comfortably under
-// both thresholds unboosted, with boost allowed to approach (not exceed) collDamageThresholdVel
-// -- fast, but a flat-out boosted collision still carries real risk, matching the spec's own
-// "collision damage" row actually mattering during normal play.
-const WILDCAT_MAX_SPEED = 15;
-// Ours: no jump exists in the real script -- see the plan's numbers table and Spec gaps.
-const WILDCAT_JUMP_IMPULSE_PER_MASS = 8.3; // matches the player jumpForce = 8.3 * mass shape
-
 // Applied as direct m/s^2 accelerations, not Newtons divided by mass. Player armor forces
 // (armor.ts's runForce/jetForce/jumpForce) are all literally `coefficient * mass`, so
 // dividing them back by mass recovers the coefficient as a mass-independent acceleration --
@@ -686,7 +959,13 @@ const WILDCAT_JUMP_IMPULSE_PER_MASS = 8.3; // matches the player jumpForce = 8.3
 // gravity) -- a 400 kg craft that can never leave the ground. Treating them as already-an-
 // acceleration instead reproduces the intended feel (a light, snappy scout craft) and is the
 // same order of magnitude as the Shrike's own force-divided-by-mass accelerations (~20 m/s^2).
-function applyHoverSpring(world: World, vehicles: VehicleStore, id: number, dt: number): void {
+function applyHoverSpring(
+  world: World,
+  vehicles: VehicleStore,
+  id: number,
+  dt: number,
+  params: HoverParams,
+): void {
   const base = id * 3;
   const x = at(vehicles.position, base);
   const z = at(vehicles.position, base + 2);
@@ -697,88 +976,97 @@ function applyHoverSpring(world: World, vehicles: VehicleStore, id: number, dt: 
     return;
   }
   const height = at(vehicles.position, base + 1) - ground;
-  const restHeight = (WILDCAT_STAB_LEN_MIN + WILDCAT_STAB_LEN_MAX) / 2;
+  const restHeight = (params.stabLenMin + params.stabLenMax) / 2;
   const compression = restHeight - height;
-  const springAccel = compression * WILDCAT_STAB_SPRING;
-  const dampingAccel = -at(vehicles.velocity, base + 1) * WILDCAT_STAB_DAMPING;
+  const springAccel = compression * params.stabSpring;
+  const dampingAccel = -at(vehicles.velocity, base + 1) * params.stabDamping;
   vehicles.velocity[base + 1] =
     at(vehicles.velocity, base + 1) + (springAccel + dampingAccel) * dt - GRAVITY * dt;
-  vehicles.onGround[id] = height <= WILDCAT_STAB_LEN_MAX ? 1 : 0;
+  vehicles.onGround[id] = height <= params.stabLenMax ? 1 : 0;
 }
 
-function applyWildcatSteering(
+function applyHoverSteering(
   vehicles: VehicleStore,
   id: number,
   input: PlayerInput,
   dt: number,
+  params: HoverParams,
 ): void {
   const base = id * 3;
   const yawError = normalizeAngle(input.yaw - at(vehicles.yaw, id));
+  // Ours: critical damping (c = 2*sqrt(K), zeta = 1) for the yawError -> angVel -> yaw double
+  // integrator. The previous form damped angVel by GYRO_DRAG/100 = 0.16/s (zeta ~ 0.05), so a
+  // held 90-degree turn overshot the held heading by 77 degrees and then limit-cycled 65
+  // degrees UNDER it for the whole measurement window (issue trace) -- the craft would never
+  // hold a heading. gyroDrag stays on roll, the cosmetic lean it was being scaled for here.
+  const damping = 2 * Math.sqrt(params.steeringForce);
   vehicles.angVel[base + 1] =
-    (at(vehicles.angVel, base + 1) + yawError * WILDCAT_STEERING_FORCE * dt) *
-    (1 - Math.min(1, WILDCAT_YAW_DAMPING * dt));
+    (at(vehicles.angVel, base + 1) + yawError * params.steeringForce * dt) *
+    (1 - Math.min(1, damping * dt));
   vehicles.yaw[id] = at(vehicles.yaw, id) + at(vehicles.angVel, base + 1) * dt;
   // Lean into the turn: roll follows yaw rate, restoring toward level via gyroDrag.
-  const dragScale = 1 - Math.min(1, (WILDCAT_GYRO_DRAG / 100) * dt);
+  const dragScale = 1 - Math.min(1, (params.gyroDrag / 100) * dt);
   vehicles.roll[id] =
-    (at(vehicles.roll, id) + at(vehicles.angVel, base + 1) * dt * (WILDCAT_ROLL_FORCE / 100)) *
+    (at(vehicles.roll, id) + at(vehicles.angVel, base + 1) * dt * (params.rollForce / 100)) *
     dragScale;
   vehicles.angVel[base + 1] = at(vehicles.angVel, base + 1) * dragScale;
 }
 
-function wildcatForwardForce(input: PlayerInput, boosting: boolean): number {
-  const base = input.moveZ >= 0 ? WILDCAT_MAIN_THRUST : WILDCAT_REVERSE_THRUST;
-  return boosting ? base * WILDCAT_TURBO_FACTOR : base;
+function hoverForwardForce(input: PlayerInput, boosting: boolean, params: HoverParams): number {
+  const base = input.moveZ >= 0 ? params.mainThrust : params.reverseThrust;
+  return boosting ? base * params.turboFactor : base;
 }
 
 /** Comes to rest via a flat braking force once the driver lets go of both move axes above
- *  brakingActivationSpeed -- split out of applyWildcatThrust to keep that function's own
+ *  brakingActivationSpeed -- split out of applyHoverThrust to keep that function's own
  *  complexity under budget. */
-function applyWildcatBraking(
+function applyHoverBraking(
   vehicles: VehicleStore,
   id: number,
   input: PlayerInput,
   dt: number,
+  params: HoverParams,
 ): void {
   if (input.moveX !== 0 || input.moveZ !== 0) return;
   const base = id * 3;
   const horizSpeed = Math.hypot(at(vehicles.velocity, base), at(vehicles.velocity, base + 2));
-  if (horizSpeed <= WILDCAT_BRAKING_ACTIVATION_SPEED) return;
+  if (horizSpeed <= params.brakingActivationSpeed) return;
   // Bounded decel toward (not past) zero -- a scale-based reduction can't overshoot into
   // reverse the way subtracting a flat delta from each axis independently could.
-  const decel = Math.min(horizSpeed, WILDCAT_BRAKING_FORCE * dt);
+  const decel = Math.min(horizSpeed, params.brakingForce * dt);
   const scale = (horizSpeed - decel) / horizSpeed;
   vehicles.velocity[base] = at(vehicles.velocity, base) * scale;
   vehicles.velocity[base + 2] = at(vehicles.velocity, base + 2) * scale;
 }
 
-function applyWildcatThrust(
+function applyHoverThrust(
   vehicles: VehicleStore,
   id: number,
   input: PlayerInput,
   dt: number,
+  data: VehicleData,
+  params: HoverParams,
 ): void {
   const base = id * 3;
   const heading = headingOf(at(vehicles.yaw, id), 0);
   const right: Vec3 = { x: heading.z, y: 0, z: -heading.x };
-  const boosting = input.jet && at(vehicles.energy, id) >= WILDCAT_MIN_JET_ENERGY;
-  const forwardAccel = wildcatForwardForce(input, boosting);
+  const boosting = input.jet && at(vehicles.energy, id) >= params.minJetEnergy;
+  const forwardAccel = hoverForwardForce(input, boosting, params);
   vehicles.velocity[base] =
     at(vehicles.velocity, base) + heading.x * input.moveZ * forwardAccel * dt;
   vehicles.velocity[base + 2] =
     at(vehicles.velocity, base + 2) + heading.z * input.moveZ * forwardAccel * dt;
   vehicles.velocity[base] =
-    at(vehicles.velocity, base) + right.x * input.moveX * WILDCAT_STRAFE_THRUST * dt;
+    at(vehicles.velocity, base) + right.x * input.moveX * params.strafeThrust * dt;
   vehicles.velocity[base + 2] =
-    at(vehicles.velocity, base + 2) + right.z * input.moveX * WILDCAT_STRAFE_THRUST * dt;
-  if (boosting) vehicles.energy[id] = at(vehicles.energy, id) - WILDCAT_JET_ENERGY_DRAIN;
+    at(vehicles.velocity, base + 2) + right.z * input.moveX * params.strafeThrust * dt;
+  if (boosting) vehicles.energy[id] = at(vehicles.energy, id) - params.jetEnergyDrain;
   else {
-    const data = VEHICLE_DATA[VehicleKind.Wildcat];
     vehicles.energy[id] = Math.min(data.maxEnergy, at(vehicles.energy, id) + data.rechargeRate);
   }
-  applyWildcatBraking(vehicles, id, input, dt);
+  applyHoverBraking(vehicles, id, input, dt, params);
 
-  const cap = boosting ? WILDCAT_MAX_SPEED * WILDCAT_TURBO_FACTOR : WILDCAT_MAX_SPEED;
+  const cap = boosting ? params.maxSpeed * params.turboFactor : params.maxSpeed;
   const horizSpeed = Math.hypot(at(vehicles.velocity, base), at(vehicles.velocity, base + 2));
   if (horizSpeed > cap) {
     const scale = cap / horizSpeed;
@@ -787,31 +1075,241 @@ function applyWildcatThrust(
   }
 }
 
-function applyWildcatJump(vehicles: VehicleStore, id: number, input: PlayerInput): void {
+function applyHoverJump(
+  vehicles: VehicleStore,
+  id: number,
+  input: PlayerInput,
+  params: HoverParams,
+): void {
+  if (params.jumpImpulsePerMass === undefined) return;
   // Edge-triggered on the press, not the hold: `onGround` stays 1 for as long as the hover
-  // spring keeps the Wildcat within its own contact range (applyHoverSpring, below), which is
+  // spring keeps the craft within its own contact range (applyHoverSpring, below), which is
   // easily several ticks in a row while parked or hovering low, not a single-frame window.
   // Without wasJumpHeld, holding jump applied a fresh impulse every one of those ticks.
   const jumpEdge = input.jump && !vehicles.wasJumpHeld[id];
   vehicles.wasJumpHeld[id] = input.jump ? 1 : 0;
   if (!jumpEdge || !vehicles.onGround[id]) return;
-  if (at(vehicles.energy, id) < WILDCAT_MIN_JET_ENERGY) return;
-  vehicles.velocity[id * 3 + 1] = at(vehicles.velocity, id * 3 + 1) + WILDCAT_JUMP_IMPULSE_PER_MASS;
-  vehicles.energy[id] = at(vehicles.energy, id) - WILDCAT_JET_ENERGY_DRAIN;
+  if (at(vehicles.energy, id) < params.minJetEnergy) return;
+  vehicles.velocity[id * 3 + 1] = at(vehicles.velocity, id * 3 + 1) + params.jumpImpulsePerMass;
+  vehicles.energy[id] = at(vehicles.energy, id) - params.jetEnergyDrain;
 }
 
-export function stepWildcat(world: World, id: number, input: PlayerInput, dt: number): void {
+export function stepHover(
+  world: World,
+  id: number,
+  input: PlayerInput,
+  dt: number,
+  data: VehicleData,
+  params: HoverParams,
+): void {
   const vehicles = world.vehicles;
-  applyWildcatSteering(vehicles, id, input, dt);
-  applyWildcatThrust(vehicles, id, input, dt);
-  applyWildcatJump(vehicles, id, input);
-  applyHoverSpring(world, vehicles, id, dt);
+  applyHoverSteering(vehicles, id, input, dt, params);
+  applyHoverThrust(vehicles, id, input, dt, data, params);
+  applyHoverJump(vehicles, id, input, params);
+  applyHoverSpring(world, vehicles, id, dt, params);
   const base = id * 3;
   vehicles.position[base] = at(vehicles.position, base) + at(vehicles.velocity, base) * dt;
   vehicles.position[base + 1] =
     at(vehicles.position, base + 1) + at(vehicles.velocity, base + 1) * dt;
   vehicles.position[base + 2] =
     at(vehicles.position, base + 2) + at(vehicles.velocity, base + 2) * dt;
+}
+
+export function stepWildcat(world: World, id: number, input: PlayerInput, dt: number): void {
+  stepHover(
+    world,
+    id,
+    input,
+    dt,
+    VEHICLE_DATA[VehicleKind.Wildcat],
+    HOVER_PARAMS[VehicleKind.Wildcat],
+  );
+}
+
+// --- Wheeled class (MobilePointBase) -----------------------------------------------------
+// The source's wheeled simulation is Torque's WheeledVehicle: one rigid body plus per-wheel
+// suspension springs (springForce 8000 N/m, springDamping 1300 N.s/m, antiSwayForce), tire
+// contact forces (tireLongitudinalForce 12000, tireLateralForce 3000, tireRadius 1.6) and a
+// staticLoadScale. This file has no rigid-body integrator, so the minimum honest version is
+// a kinematic one: the torque at the wheels becomes a drive acceleration
+// (engineTorque / tireRadius / mass), the script's own maxWheelSpeed is the speed cap, the
+// brake torque becomes the release deceleration, maxSteeringAngle gives the turn rate at the
+// speed being driven, and the hull rests on the ground contact height (the wheels' own
+// measured reach) instead of hanging on six springs. What that deliberately does NOT model:
+// per-wheel spring compression/rebound and load transfer, tire slip curves, and the body's
+// pitch/roll under acceleration -- a wheeled vehicle here is flat, planted and torque-limited.
+interface WheeledParams {
+  engineTorque: number;
+  breakTorque: number;
+  maxWheelSpeed: number;
+  tireRadius: number;
+  maxSteeringAngle: number;
+  tireFriction: number;
+}
+
+const MPB_WHEELED: WheeledParams = {
+  engineTorque: 7.0 * 745, // vehicles/vehicle_mpb.cs:170 -- 5215 N.m
+  breakTorque: 7.0 * 745, // vehicles/vehicle_mpb.cs:171
+  maxWheelSpeed: 20, // vehicles/vehicle_mpb.cs:172
+  tireRadius: 1.6, // vehicles/vehicle_mpb.cs:181
+  maxSteeringAngle: 0.3, // vehicles/vehicle_mpb.cs:139
+  tireFriction: 10.0, // vehicles/vehicle_mpb.cs:182 -- used as a lateral grip rate, see below
+};
+
+/** Ours: the source steers the wheels and lets tire forces turn the body. A kinematic
+ *  bicycle model instead turns at `speed * tan(maxSteeringAngle) / wheelbase`, and the
+ *  wheelbase is the one number this sim has to supply -- twice the script's own tireRadius
+ *  is the wheelbase of the two-axle chassis that radius describes. */
+const MPB_WHEELBASE = MPB_WHEELED.tireRadius * 2;
+
+/** The contact-damage rule both ground paths share: resolveVehicleGround's terrain sphere
+ *  contact below, and the wheeled class's own wheel contact. Same expression it was inline,
+ *  one rule for the two ways a hull can reach the ground. */
+function applyGroundImpactDamage(world: World, id: number, speed: number): void {
+  const data = VEHICLE_DATA[world.vehicles.kind[id] as VehicleKind];
+  if (speed <= data.groundImpactMinSpeed) return;
+  applyVehicleDamage(
+    world,
+    id,
+    (speed - data.groundImpactMinSpeed) * data.groundImpactSpeedDamageScale,
+    -1,
+  );
+}
+
+/** Drive and braking: throttle along the wheel heading, brake torque toward zero on release,
+ *  both capped by maxWheelSpeed. */
+function applyWheeledDrive(
+  vehicles: VehicleStore,
+  id: number,
+  input: PlayerInput,
+  dt: number,
+  data: VehicleData,
+  params: WheeledParams,
+): void {
+  const base = id * 3;
+  const heading = headingOf(at(vehicles.yaw, id), 0);
+  const throttle = Math.max(-1, Math.min(1, input.moveZ));
+  const driveAccel = params.engineTorque / params.tireRadius / data.mass;
+  const brakeAccel = params.breakTorque / params.tireRadius / data.mass;
+  let vx = at(vehicles.velocity, base);
+  let vz = at(vehicles.velocity, base + 2);
+  if (throttle !== 0) {
+    vx += heading.x * throttle * driveAccel * dt;
+    vz += heading.z * throttle * driveAccel * dt;
+  } else {
+    const speed = Math.hypot(vx, vz);
+    const scale = speed > 0 ? Math.max(0, speed - brakeAccel * dt) / speed : 0;
+    vx *= scale;
+    vz *= scale;
+  }
+  // Tires grip: the component of motion across the wheel heading decays at tireFriction
+  // (a rate, ours -- the script's tire forces are per-wheel, which this model has no wheels
+  // to hang them on), so a collision impulse does not leave the base sliding sideways.
+  const forward = vx * heading.x + vz * heading.z;
+  const lateralScale = Math.max(0, 1 - params.tireFriction * dt);
+  const lateralX = (vx - heading.x * forward) * lateralScale;
+  const lateralZ = (vz - heading.z * forward) * lateralScale;
+  const capped = Math.max(-params.maxWheelSpeed, Math.min(params.maxWheelSpeed, forward));
+  vehicles.velocity[base] = heading.x * capped + lateralX;
+  vehicles.velocity[base + 2] = heading.z * capped + lateralZ;
+}
+
+/** Steering: the driver's own look yaw is a target heading, and the wheels can close only
+ *  `speed * tan(maxSteeringAngle) / wheelbase` radians of it per second -- so a stationary
+ *  MPB cannot turn on the spot the way the hover class can, and a fast one turns wide. */
+function applyWheeledSteering(
+  vehicles: VehicleStore,
+  id: number,
+  input: PlayerInput,
+  dt: number,
+  params: WheeledParams,
+): void {
+  const base = id * 3;
+  const heading = headingOf(at(vehicles.yaw, id), 0);
+  const forwardSpeed =
+    at(vehicles.velocity, base) * heading.x + at(vehicles.velocity, base + 2) * heading.z;
+  const maxYawRate = (Math.abs(forwardSpeed) * Math.tan(params.maxSteeringAngle)) / MPB_WHEELBASE;
+  const yawError = normalizeAngle(input.yaw - at(vehicles.yaw, id));
+  const limit = maxYawRate * dt;
+  vehicles.yaw[id] = at(vehicles.yaw, id) + Math.max(-limit, Math.min(limit, yawError));
+}
+
+/** Wheel contact: the hull rides at its own ground contact height above the support surface
+ *  (terrain or a pad deck, the same support the hover spring reads), falls under gravity
+ *  when there is none, and hands the impact speed it absorbed to the shared ground-damage
+ *  rule. onGround reports whether the wheels are within the vehicle's own reach of the
+ *  surface. The whole vertical step lives here -- position and velocity together -- so the
+ *  contact correction is never integrated a second time by the caller. */
+function applyWheeledSuspension(
+  world: World,
+  vehicles: VehicleStore,
+  id: number,
+  dt: number,
+  data: VehicleData,
+): void {
+  const base = id * 3;
+  const position = {
+    x: at(vehicles.position, base),
+    y: at(vehicles.position, base + 1),
+    z: at(vehicles.position, base + 2),
+  };
+  const support = hoverSupport(world, position);
+  if (support === null) {
+    const fall = at(vehicles.velocity, base + 1) - GRAVITY * dt;
+    vehicles.velocity[base + 1] = fall;
+    vehicles.position[base + 1] = position.y + fall * dt;
+    vehicles.onGround[id] = 0;
+    return;
+  }
+  const height = position.y - support;
+  if (height <= data.groundContactHeight) {
+    const impact = Math.max(0, -at(vehicles.velocity, base + 1));
+    vehicles.position[base + 1] = support + data.groundContactHeight;
+    vehicles.velocity[base + 1] = 0;
+    vehicles.onGround[id] = 1;
+    applyGroundImpactDamage(world, id, impact);
+    return;
+  }
+  const fall = at(vehicles.velocity, base + 1) - GRAVITY * dt;
+  vehicles.velocity[base + 1] = fall;
+  vehicles.position[base + 1] = position.y + fall * dt;
+  vehicles.onGround[id] = height <= data.groundContactHeight + data.checkRadius ? 1 : 0;
+}
+
+export function stepWheeled(
+  world: World,
+  id: number,
+  input: PlayerInput,
+  dt: number,
+  data: VehicleData,
+  params: WheeledParams,
+): void {
+  const vehicles = world.vehicles;
+  const base = id * 3;
+  applyWheeledSteering(vehicles, id, input, dt, params);
+  applyWheeledDrive(vehicles, id, input, dt, data, params);
+  vehicles.position[base] = at(vehicles.position, base) + at(vehicles.velocity, base) * dt;
+  vehicles.position[base + 2] =
+    at(vehicles.position, base + 2) + at(vehicles.velocity, base + 2) * dt;
+  applyWheeledSuspension(world, vehicles, id, dt, data);
+}
+
+/** One tick of a vehicle's own class physics, dispatched on its kind. Anything not in
+ *  VEHICLE_DATA cannot reach here: spawnVehicleAtPad and deserializeVehicle both reject
+ *  unknown kinds before a slot is ever activated. */
+export function stepVehiclePhysics(world: World, id: number, input: PlayerInput, dt: number): void {
+  const kind = world.vehicles.kind[id] as VehicleKind;
+  if (isFlyerKind(kind)) {
+    stepFlyer(world, id, input, dt, VEHICLE_DATA[kind], FLYER_PARAMS[kind]);
+    return;
+  }
+  if (isHoverKind(kind)) {
+    stepHover(world, id, input, dt, VEHICLE_DATA[kind], HOVER_PARAMS[kind]);
+    return;
+  }
+  if (kind === VehicleKind.MobilePointBase) {
+    stepWheeled(world, id, input, dt, VEHICLE_DATA[kind], MPB_WHEELED);
+  }
 }
 
 // --- Terrain/interior collision, crash and ground-impact damage (Task 4) ----------------
@@ -912,24 +1410,20 @@ function closingSpeed(motion: Vec3, normal: Vec3): number {
   return Math.max(0, -(motion.x * normal.x + motion.y * normal.y + motion.z * normal.z));
 }
 
+/** Terrain-sphere contact. `groundContactHeight` is the resting height this kind resolves
+ *  to: equal to `checkRadius` for the four flyers/hoverers it always was, and a real ride
+ *  height for the Tank and MPB (see VehicleData.groundContactHeight). */
 function resolveVehicleGround(world: World, id: number, current: Vec3, motion: Vec3): number {
   const vehicles = world.vehicles;
   const data = VEHICLE_DATA[vehicles.kind[id] as VehicleKind];
   const ground = groundHeightAt(world, current);
-  if (ground === null || current.y - data.checkRadius >= ground) return 0;
+  if (ground === null || current.y - data.groundContactHeight >= ground) return 0;
   const terrain = sampleTerrain(world.terrain, current.x, current.z);
   const normal = terrain.empty ? { x: 0, y: 1, z: 0 } : terrain.normal;
-  vehicles.position[id * 3 + 1] = ground + data.checkRadius;
+  vehicles.position[id * 3 + 1] = ground + data.groundContactHeight;
   slideVehicle(world, id, normal);
   const speed = closingSpeed(motion, normal);
-  if (speed > data.groundImpactMinSpeed) {
-    applyVehicleDamage(
-      world,
-      id,
-      (speed - data.groundImpactMinSpeed) * data.groundImpactSpeedDamageScale,
-      -1,
-    );
-  }
+  applyGroundImpactDamage(world, id, speed);
   return speed;
 }
 
@@ -1264,8 +1758,7 @@ function dismountWithoutDamage(world: World, vId: number): void {
 function stepOneVehiclePhysics(world: World, vId: number, input: PlayerInput, dt: number): void {
   const vehicles = world.vehicles;
   const previous = seatPosition(vehicles, vId);
-  if (vehicles.kind[vId] === VehicleKind.Shrike) stepShrike(world, vId, input, dt);
-  else stepWildcat(world, vId, input, dt);
+  stepVehiclePhysics(world, vId, input, dt);
   resolveVehicleCollision(world, vId, previous, dt);
 }
 

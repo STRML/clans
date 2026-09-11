@@ -9,7 +9,7 @@ import {
   type World,
 } from '@clans/sim';
 import type { VehicleSnapshotData } from '@clans/protocol';
-import { type KatabaticAssets } from './assets.js';
+import { type ClientSceneData, type KatabaticAssets, type VehicleShapeEntry } from './assets.js';
 
 export interface VehicleView {
   meshes: Map<number, THREE.Object3D>;
@@ -200,16 +200,55 @@ export function vehicleRenderDataFrom(
 const SHRIKE_COLOR = 0x4488cc;
 const WILDCAT_COLOR = 0xcc8844;
 
+/** The published shape file (and scene.json `vehicles` key) for each kind. The manifest key
+ *  is what packages/assets/src/build.ts's VEHICLE_SHAPES would name the shape as once it
+ *  carries a `kind` for it; the shape name is that build's own outputName, i.e. the file
+ *  already sitting in `shapes/`. Where the manifest has no entry yet (the four new kinds
+ *  today), vehicleAssetFor falls back to this shape name -- see ClientSceneData.vehicles. */
+const VEHICLE_SHAPE: Record<
+  VehicleKind,
+  { key: keyof ClientSceneData['vehicles']; shape: string }
+> = {
+  [VehicleKind.Shrike]: { key: 'shrike', shape: 'vehicle_shrike.glb' },
+  [VehicleKind.Wildcat]: { key: 'wildcat', shape: 'vehicle_wildcat.glb' },
+  [VehicleKind.Bomber]: { key: 'bomber', shape: 'vehicle_air_bomber.glb' },
+  [VehicleKind.Havoc]: { key: 'havoc', shape: 'vehicle_air_hapc.glb' },
+  [VehicleKind.Tank]: { key: 'tank', shape: 'vehicle_grav_tank.glb' },
+  [VehicleKind.MobilePointBase]: { key: 'mpb', shape: 'vehicle_land_mpbase.glb' },
+};
+
+/** Procedural placeholder colour per kind -- used while the real shape loads, or as the
+ *  permanent mesh on a `procedural` tier day. */
+const VEHICLE_PLACEHOLDER_COLOR: Record<VehicleKind, number> = {
+  [VehicleKind.Shrike]: SHRIKE_COLOR,
+  [VehicleKind.Wildcat]: WILDCAT_COLOR,
+  [VehicleKind.Bomber]: 0x8ea0b8,
+  [VehicleKind.Havoc]: 0x74808f,
+  [VehicleKind.Tank]: 0x9aa65c,
+  [VehicleKind.MobilePointBase]: 0xb0a070,
+};
+
+/** Placeholder box size per kind, x/y/z in metres, measured from each published model's own
+ *  root-space bounding box (assets/out/katabatic/shapes/*.glb) so the stand-in reads at the
+ *  right scale rather than as one uniform crate. */
+const VEHICLE_PLACEHOLDER_SIZE: Record<VehicleKind, [number, number, number]> = {
+  [VehicleKind.Shrike]: [5.5, 4.3, 14.2],
+  [VehicleKind.Wildcat]: [1.9, 1.7, 4.1],
+  [VehicleKind.Bomber]: [9.8, 8.2, 17.1],
+  [VehicleKind.Havoc]: [16.2, 14.1, 19.7],
+  [VehicleKind.Tank]: [8.8, 4.4, 14.2],
+  [VehicleKind.MobilePointBase]: [9.9, 5.6, 15.0],
+};
+
 /** A stretched box with two small wing boxes for the Shrike, a flattened box with a
- *  headlight-suggesting front taper for the Wildcat -- simple enough to write directly in
- *  Three.js primitives, no loader involved (M5 plan, Task 13). Used whenever the resolved
- *  shape tier is `procedural` (both real .glb tiers resolved this session, so this is a
- *  genuine fallback path, not the common case), and as the initial placeholder for the
- *  `glb`/`stl` tiers while their real geometry loads in asynchronously. */
+ *  headlight-suggesting front taper for the Wildcat, and a scaled box for the four later
+ *  kinds -- simple enough to write directly in Three.js primitives, no loader involved (M5
+ *  plan, Task 13). Used whenever the resolved shape tier is `procedural`, and as the initial
+ *  placeholder for the `glb`/`stl` tiers while their real geometry loads in
+ *  asynchronously. */
 function proceduralMesh(kind: VehicleKind): THREE.Group {
   const group = new THREE.Group();
-  const color = kind === VehicleKind.Shrike ? SHRIKE_COLOR : WILDCAT_COLOR;
-  const material = new THREE.MeshStandardMaterial({ color });
+  const material = new THREE.MeshStandardMaterial({ color: VEHICLE_PLACEHOLDER_COLOR[kind] });
   if (kind === VehicleKind.Shrike) {
     const body = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.0, 5.5), material);
     group.add(body);
@@ -218,22 +257,28 @@ function proceduralMesh(kind: VehicleKind): THREE.Group {
     leftWing.position.set(0, 0, 0.5);
     const rightWing = leftWing.clone();
     group.add(leftWing, rightWing);
-  } else {
+    return group;
+  }
+  if (kind === VehicleKind.Wildcat) {
     const body = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.8, 3.2), material);
     group.add(body);
     const nose = new THREE.Mesh(new THREE.ConeGeometry(0.6, 1.2, 4), material);
     nose.rotation.x = Math.PI / 2;
     nose.position.set(0, 0, -2.0);
     group.add(nose);
+    return group;
   }
+  const [width, height, length] = VEHICLE_PLACEHOLDER_SIZE[kind];
+  group.add(new THREE.Mesh(new THREE.BoxGeometry(width, height, length), material));
   return group;
 }
 
 function vehicleAssetFor(
   assets: Pick<KatabaticAssets, 'scene'>,
   kind: VehicleKind,
-): { source: 'glb' | 'stl' | 'procedural'; shape: string } {
-  return kind === VehicleKind.Shrike ? assets.scene.vehicles.shrike : assets.scene.vehicles.wildcat;
+): VehicleShapeEntry {
+  const { key, shape } = VEHICLE_SHAPE[kind];
+  return assets.scene.vehicles[key] ?? { source: 'glb', shape };
 }
 
 function createVehicleMesh(assets: Pick<KatabaticAssets, 'scene'>, kind: VehicleKind): THREE.Group {

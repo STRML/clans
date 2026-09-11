@@ -136,3 +136,73 @@ test('spawn a Wildcat, mount, drive, dismount', async ({ page }) => {
   const health = Number(await page.locator('#debug-health').getAttribute('data-value'));
   expect(health).toBeGreaterThan(0);
 });
+
+test('spawn the wheeled Mobile Point Base from the pad menu, mount, drive', async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.goto('/');
+  await page
+    .locator('#debug-stats[data-ready="1"]')
+    .waitFor({ state: 'attached', timeout: 30_000 });
+  await page.locator('#hud[data-ready="1"]').waitFor({ state: 'attached', timeout: 30_000 });
+
+  await page.evaluate(() => window.__clansDebug?.teleportToVehiclePad(1));
+  await page.waitForTimeout(300);
+
+  // The MPB (Jericho) is the last kind in the pad menu and the only one whose class is
+  // wheeled -- ordering it exercises the new menu entry, the per-kind shape load
+  // (vehicle_land_mpbase.glb) and the grounded physics end to end.
+  const mpbButton = page.locator('#vehicle-pad-menu button', { hasText: 'Jericho' });
+  await expect(mpbButton).toBeVisible();
+  await mpbButton.click();
+
+  const mounted = await page.evaluate(() => {
+    // The e2e-only app handle main.ts sets in dev builds (main.ts:31); it has no runtime
+    // shape to narrow, so this is the one unchecked boundary read.
+    const debugWindow = window as unknown as { __app: App };
+    const app = debugWindow.__app;
+    const render = app.renderer.render;
+    app.renderer.render = () => {};
+    try {
+      for (let tick = 0; tick < 210; tick++) app.frame(0.032);
+      return app.world.players.mountedVehicleId[app.playerId];
+    } finally {
+      app.renderer.render = render;
+      app.frame(0);
+    }
+  });
+  expect(mounted).toBeGreaterThanOrEqual(0);
+
+  const hudVehicle = page.locator('#hud-vehicle');
+  const isMounted = async (): Promise<boolean> =>
+    ((await hudVehicle.getAttribute('data-value')) ?? '') !== '';
+  await expect.poll(isMounted).toBe(true);
+
+  // The published model actually landed, not just the procedural stand-in: loadShapeInto
+  // marks the group once the glb resolves (shape-loader.ts sets userData.shapeStatus).
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          // The e2e-only app handle main.ts sets in dev builds (main.ts:31).
+          const debugWindow = window as unknown as { __app: App };
+          const app = debugWindow.__app;
+          const id = app.world.players.mountedVehicleId[app.playerId];
+          const mesh = app.scene.getObjectByName(`vehicle-${String(id)}`);
+          return (mesh?.userData as { shapeStatus?: string }).shapeStatus ?? 'missing';
+        }),
+      { timeout: 15_000 },
+    )
+    .toBe('loaded');
+
+  const restingSpeed = speedOf(await hudVehicle.getAttribute('data-value'));
+  await page.keyboard.down('KeyW');
+  try {
+    await expect
+      .poll(async () => speedOf(await hudVehicle.getAttribute('data-value')), {
+        timeout: 15_000,
+      })
+      .toBeGreaterThan(restingSpeed + 1);
+  } finally {
+    await page.keyboard.up('KeyW');
+  }
+});

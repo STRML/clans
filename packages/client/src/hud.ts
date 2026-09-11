@@ -319,6 +319,20 @@ function createWeaponRack(hud: HTMLElement): {
   return { slots, packCell };
 }
 
+/** The instrument panel's airframe icon per kind. Only two icon images exist in the asset
+ *  output (gui/hud_veh_icon_shrike.png, gui/hud_veh_icon_hoverbike.png), so the four later
+ *  kinds reuse the closest existing silhouette -- the three flyers the Shrike's, the two
+ *  ground/hover craft the Wildcat's -- rather than invent an icon. Per-kind art is a
+ *  follow-up. */
+const VEHICLE_ICON: Record<VehicleKind, string> = {
+  [VehicleKind.Shrike]: 'hud_veh_icon_shrike.png',
+  [VehicleKind.Bomber]: 'hud_veh_icon_shrike.png',
+  [VehicleKind.Havoc]: 'hud_veh_icon_shrike.png',
+  [VehicleKind.Wildcat]: 'hud_veh_icon_hoverbike.png',
+  [VehicleKind.Tank]: 'hud_veh_icon_hoverbike.png',
+  [VehicleKind.MobilePointBase]: 'hud_veh_icon_hoverbike.png',
+};
+
 function updateVehicleInstruments(el: HTMLElement, source: HudSource): void {
   const id = source.world.players.mountedVehicleId[source.playerId] ?? -1;
   if (id === -1) {
@@ -332,7 +346,7 @@ function updateVehicleInstruments(el: HTMLElement, source: HudSource): void {
     base = id * 3;
   const data = VEHICLE_DATA[v.kind[id] as VehicleKind];
   (el.querySelector('.vehicle-icon') as HTMLImageElement).src = assetUrl(
-    `gui/${v.kind[id] === VehicleKind.Wildcat ? 'hud_veh_icon_hoverbike.png' : 'hud_veh_icon_shrike.png'}`,
+    `gui/${VEHICLE_ICON[v.kind[id] as VehicleKind]}`,
   );
   const speed = Math.hypot(v.velocity[base]!, v.velocity[base + 1]!, v.velocity[base + 2]!);
   const altitude = Math.max(

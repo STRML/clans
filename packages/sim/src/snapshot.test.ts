@@ -46,7 +46,9 @@ describe('player snapshots', () => {
       yaw: 0.5,
       energy: 40,
       health: LIGHT_ARMOR.maxDamage,
-      weaponSlot: WeaponId.Blaster,
+      // #55 caps a fresh Light's legacy spawn table at its three slots and drops the Blaster,
+      // so the spawn slot is the first carried weapon (weapons.ts's resetLoadout).
+      weaponSlot: WeaponId.Spinfusor,
       onGround: 1,
       ski: 0,
       respawnSeq: 0,

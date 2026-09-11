@@ -4,9 +4,11 @@ import {
   addPlayer,
   buildInteriorCollider,
   createWorld,
+  deserializeVehicle,
   LIGHT_ARMOR,
   removePlayer,
   serializeActiveVehicles,
+  serializeVehicle,
   stepProjectiles,
   type Heightfield,
   type PlayerInput,
@@ -22,6 +24,7 @@ import {
   requestVehicleAtPad,
   VEHICLE_BUILD_TIME,
   stepShrike,
+  stepVehiclePhysics,
   vehiclePadAt,
   stepVehicles,
   stepWildcat,
@@ -1281,5 +1284,334 @@ describe('vehicle fabrication', () => {
     expect(Array.from(world.players.position.slice(player * 3, player * 3 + 3))).toEqual(
       Array.from(world.vehicles.position.slice(id * 3, id * 3 + 3)),
     );
+  });
+});
+
+// --- The four remaining base kinds (issue #57) -------------------------------------------
+// Bomber (vehicle_bomber.cs, FlyingVehicleData), Havoc (vehicle_havoc.cs, FlyingVehicleData),
+// Tank (vehicle_tank.cs, HoverVehicleData) and MobilePointBase (vehicle_mpb.cs,
+// WheeledVehicleData). Every constant these tests pin is the real script value cited in
+// vehicles.ts's own VEHICLE_DATA/params tables; each motion assertion is written so that
+// swapping in a sibling kind's constant fails it.
+
+const LATER_KINDS = [
+  VehicleKind.Bomber,
+  VehicleKind.Havoc,
+  VehicleKind.Tank,
+  VehicleKind.MobilePointBase,
+] as const;
+
+const DT = 1 / 32;
+
+/** A world with one vehicle of `kind` standing (or hovering) over the flat terrain, the same
+ *  shape shrikeWorld/wildcatWorld use for the two existing kinds. Terrain height 0. */
+function kindWorld(kind: VehicleKind, y: number): { world: World; id: number } {
+  const world = createWorld(flat, 1);
+  world.vehicles = createVehicleStore();
+  world.vehicles.active[0] = 1;
+  world.vehicles.count = 1;
+  world.vehicles.kind[0] = kind;
+  world.vehicles.energy[0] = VEHICLE_DATA[kind].maxEnergy;
+  world.vehicles.position.set([0, y, 0], 0);
+  return { world, id: 0 };
+}
+
+function speedOf(world: World, id: number): number {
+  const base = id * 3;
+  return Math.hypot(
+    world.vehicles.velocity[base] ?? 0,
+    world.vehicles.velocity[base + 1] ?? 0,
+    world.vehicles.velocity[base + 2] ?? 0,
+  );
+}
+
+describe('the four later kinds: spawn, board, wreck', () => {
+  it.each(LATER_KINDS)('%s spawns at a powered pad of its team and takes a pilot', (kind) => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const id = spawnVehicleAtPad(world, padId, kind);
+    expect(id).not.toBeNull();
+    const vId = id as number;
+    expect(world.vehicles.kind[vId]).toBe(kind);
+    expect(world.vehicles.team[vId]).toBe(1);
+    expect(world.vehicles.destroyed[vId]).toBe(0);
+    expect(world.vehicles.damage[vId]).toBe(0);
+    expect(world.vehicles.energy[vId]).toBe(VEHICLE_DATA[kind].maxEnergy);
+    expect(world.vehicles.driverId[vId]).toBe(-1);
+    // Spawned above the pad's walkable surface, not inside it (the lift is per-kind -- see
+    // spawnLiftFor).
+    const y = world.vehicles.position[vId * 3 + 1] ?? 0;
+    expect(y).toBeGreaterThan(0);
+
+    const pilot = addPlayer(world, { x: 5, y, z: 0 }, 1);
+    stepVehicles(world, new Map([[pilot, useInput(true)]]), DT);
+    expect(world.vehicles.driverId[vId]).toBe(pilot);
+    expect(world.players.mountedVehicleId[pilot]).toBe(vId);
+    // Seat-locked to the vehicle's own transform, the contract seatDriver maintains.
+    expect(Array.from(world.players.position.slice(pilot * 3, pilot * 3 + 3))).toEqual(
+      Array.from(world.vehicles.position.slice(vId * 3, vId * 3 + 3)),
+    );
+  });
+
+  it.each(LATER_KINDS)('%s takes damage, is destroyed once, and frees its slot', (kind) => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const id = spawnVehicleAtPad(world, padId, kind) as number;
+    const data = VEHICLE_DATA[kind];
+    // Enough to spend the whole shield and then the hull: energy/energyPerDamagePoint of the
+    // hit is soaked by the shield, the remainder lands on damage (applyVehicleDamage). One
+    // point over maxDamage, because a blow that lands within float rounding of exactly
+    // maxDamage leaves damage a hair under it and does not destroy -- the clamp only fires
+    // when the sum exceeds maxDamage.
+    applyVehicleDamage(
+      world,
+      id,
+      data.maxEnergy / data.energyPerDamagePoint + data.maxDamage + 1,
+      -1,
+    );
+    expect(world.vehicles.energy[id]).toBe(0);
+    expect(world.vehicles.damage[id]).toBeCloseTo(data.maxDamage, 10);
+    expect(world.vehicles.destroyed[id]).toBe(1);
+    expect(world.pendingVehicleDestroyed).toHaveLength(1);
+    expect(world.pendingVehicleDestroyed[0]?.id).toBe(id);
+    expect(world.pendingVehicleDestroyed[0]?.team).toBe(1);
+    // The wreck stays visible for the retention window, then the id is reusable: the same
+    // lifecycle contract the two existing kinds already live under (issue #26).
+    expect(serializeActiveVehicles(world).some((v) => v.id === id && v.destroyed === 1)).toBe(true);
+    for (let tick = 0; tick < 3; tick += 1) stepVehicles(world, new Map(), DT);
+    expect(world.vehicles.active[id]).toBe(0);
+    expect(world.vehicles.freeIds).toContain(id);
+    expect(spawnVehicleAtPad(world, padId, kind)).toBe(id);
+  });
+
+  it.each(LATER_KINDS)('%s survives a snapshot round trip as its own kind (wire byte)', (kind) => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const id = spawnVehicleAtPad(world, padId, kind) as number;
+    const target = createWorld(flat, 1);
+    deserializeVehicle(target, serializeVehicle(world, id));
+    expect(target.vehicles.active[id]).toBe(1);
+    expect(target.vehicles.kind[id]).toBe(kind);
+  });
+
+  it('each kind carries its own script camera parameters', () => {
+    // vehicles/<script>.cs, lines cited in VEHICLE_DATA's own entries.
+    expect(VEHICLE_DATA[VehicleKind.Bomber].cameraMaxDist).toBe(22); // vehicle_bomber.cs:205
+    expect(VEHICLE_DATA[VehicleKind.Bomber].cameraOffset).toBe(5); // vehicle_bomber.cs:206
+    expect(VEHICLE_DATA[VehicleKind.Bomber].cameraLag).toBe(1.0); // vehicle_bomber.cs:207
+    expect(VEHICLE_DATA[VehicleKind.Havoc].cameraMaxDist).toBe(17); // vehicle_havoc.cs:66
+    expect(VEHICLE_DATA[VehicleKind.Havoc].cameraOffset).toBe(2); // vehicle_havoc.cs:67
+    expect(VEHICLE_DATA[VehicleKind.Havoc].cameraLag).toBe(8.5); // vehicle_havoc.cs:68
+    expect(VEHICLE_DATA[VehicleKind.Tank].cameraMaxDist).toBe(20); // vehicle_tank.cs:223
+    expect(VEHICLE_DATA[VehicleKind.Tank].cameraOffset).toBe(3); // vehicle_tank.cs:224
+    expect(VEHICLE_DATA[VehicleKind.Tank].cameraLag).toBe(1.5); // vehicle_tank.cs:225
+    expect(VEHICLE_DATA[VehicleKind.MobilePointBase].cameraMaxDist).toBe(20); // vehicle_mpb.cs:132
+    expect(VEHICLE_DATA[VehicleKind.MobilePointBase].cameraOffset).toBe(6); // vehicle_mpb.cs:133
+    expect(VEHICLE_DATA[VehicleKind.MobilePointBase].cameraLag).toBe(1.5); // vehicle_mpb.cs:134
+  });
+});
+
+describe('flying class: Bomber and Havoc', () => {
+  it.each([
+    // kind, one tick of forward speed. Derived from that flyer's own maneuveringForce/mass,
+    // then its minDrag, then the auto-stabilizer's autoLinearForce/mass -- all three script
+    // numbers (vehicle_bomber.cs:232,218,225; vehicle_havoc.cs:93,80,86).
+    [VehicleKind.Bomber, 0.390609056122449],
+    [VehicleKind.Havoc, 0.31340392561983466],
+  ])('%s accelerates at its own maneuveringForce/mass', (kind, expected) => {
+    const { world, id } = kindWorld(kind, 100);
+    stepVehiclePhysics(world, id, { ...idleInput, moveZ: 1 }, DT);
+    // The Shrike's 3000/150, or the other flyer's pair, both land outside this tolerance.
+    expect(world.vehicles.velocity[id * 3 + 2]).toBeCloseTo(expected, 6);
+  });
+
+  it.each([
+    [VehicleKind.Bomber, 85], // maxForwardSpeed, vehicle_bomber.cs:238
+    [VehicleKind.Havoc, 71], // maxForwardSpeed, vehicle_havoc.cs:99
+  ])('%s thrust stops at its own maxForwardSpeed (%s m/s)', (kind, maxForwardSpeed) => {
+    const { world, id } = kindWorld(kind, 100);
+    world.vehicles.velocity.set([0, 0, 200], id * 3);
+    stepVehiclePhysics(world, id, idleInput, DT);
+    expect(speedOf(world, id)).toBeCloseTo(maxForwardSpeed, 6);
+  });
+
+  it.each([VehicleKind.Bomber, VehicleKind.Havoc])(
+    '%s is self-supporting: an idle one holds altitude with no gravity',
+    (kind) => {
+      const { world, id } = kindWorld(kind, 100);
+      for (let tick = 0; tick < 200; tick += 1) stepVehiclePhysics(world, id, idleInput, DT);
+      expect(world.vehicles.position[id * 3 + 1]).toBeCloseTo(100);
+      expect(world.vehicles.velocity[id * 3 + 1]).toBeCloseTo(0);
+    },
+  );
+
+  it('the Havoc needs more jet energy than the Bomber before its afterburner lights', () => {
+    // minJetEnergy 55 (vehicle_havoc.cs:103) vs 40 (vehicle_bomber.cs:242): the same 50-point
+    // pool refuses the Havoc's afterburner and flies the Bomber's.
+    const havoc = kindWorld(VehicleKind.Havoc, 100);
+    havoc.world.vehicles.energy[havoc.id] = 50;
+    stepVehiclePhysics(havoc.world, havoc.id, { ...idleInput, jet: true }, DT);
+    expect(havoc.world.vehicles.velocity[havoc.id * 3 + 1]).toBe(0);
+
+    const bomber = kindWorld(VehicleKind.Bomber, 100);
+    bomber.world.vehicles.energy[bomber.id] = 50;
+    stepVehiclePhysics(bomber.world, bomber.id, { ...idleInput, jet: true }, DT);
+    expect(bomber.world.vehicles.velocity[bomber.id * 3 + 1]).toBeGreaterThan(0);
+    expect(bomber.world.vehicles.energy[bomber.id]).toBeLessThan(50);
+  });
+});
+
+describe('hover class: Tank', () => {
+  it('settles on its own stab band, not the Wildcat hover height', () => {
+    // stabLenMin 3.25 / stabLenMax 4 / stabSpringConstant 50 (vehicle_tank.cs:274-276), so
+    // the spring's equilibrium sits the Tank at 3.625 - GRAVITY/50 = 3.225 m above terrain.
+    const { world, id } = kindWorld(VehicleKind.Tank, 3.625);
+    for (let tick = 0; tick < 200; tick += 1) stepVehiclePhysics(world, id, idleInput, DT);
+    expect(world.vehicles.position[id * 3 + 1]).toBeCloseTo(3.225, 2);
+    expect(world.vehicles.onGround[id]).toBe(1);
+  });
+
+  it('thrusts at its own mainThrustForce (50 m/s^2), not the Wildcat thrust', () => {
+    const { world, id } = kindWorld(VehicleKind.Tank, 3.625);
+    stepVehiclePhysics(world, id, { ...idleInput, moveZ: 1 }, DT);
+    // The hover class applies its script forces as accelerations directly, so one tick of
+    // mainThrustForce 50 (vehicle_tank.cs:266) is exactly 50 * DT -- the Wildcat's own
+    // mainThrustForce 30 would give 0.9375 instead.
+    expect(world.vehicles.velocity[id * 3 + 2]).toBeCloseTo(50 * DT, 6);
+  });
+
+  it('caps at its own top speed and boosts by turboFactor 1.7', () => {
+    const { world, id } = kindWorld(VehicleKind.Tank, 3.625);
+    world.vehicles.velocity.set([0, 0, 100], id * 3);
+    stepVehiclePhysics(world, id, { ...idleInput, moveZ: 1 }, DT);
+    // Horizontal only: the hover spring is still working vertically at the same time.
+    expect(Math.abs(world.vehicles.velocity[id * 3 + 2] as number)).toBeCloseTo(13, 6);
+    world.vehicles.velocity.set([0, 0, 100], id * 3);
+    stepVehiclePhysics(world, id, { ...idleInput, moveZ: 1, jet: true }, DT);
+    expect(Math.abs(world.vehicles.velocity[id * 3 + 2] as number)).toBeCloseTo(13 * 1.7, 6);
+  });
+
+  it('steers at its own steeringForce, turning a held 90-degree input slower than the Wildcat', () => {
+    const tank = kindWorld(VehicleKind.Tank, 3.625);
+    const wildcat = kindWorld(VehicleKind.Wildcat, 2.75);
+    const target = { ...idleInput, yaw: Math.PI / 2 };
+    for (let tick = 0; tick < 32; tick += 1) {
+      stepVehiclePhysics(tank.world, tank.id, target, DT);
+      stepVehiclePhysics(wildcat.world, wildcat.id, target, DT);
+    }
+    const tankYaw = tank.world.vehicles.yaw[tank.id] ?? 0;
+    const wildcatYaw = wildcat.world.vehicles.yaw[wildcat.id] ?? 0;
+    // steeringForce 15 (vehicle_tank.cs:282) vs the Wildcat's 30: same critical damping
+    // shape, so the Tank's one-second response is measurably the slower of the two, and
+    // neither snaps to the target.
+    expect(tankYaw).toBeGreaterThan(0);
+    expect(tankYaw).toBeLessThan(wildcatYaw);
+    expect(wildcatYaw).toBeLessThan(Math.PI / 2);
+  });
+
+  it('has no jump: a held jump neither lifts it nor drains its boost energy', () => {
+    const { world, id } = kindWorld(VehicleKind.Tank, 3.625);
+    world.vehicles.onGround[id] = 1;
+    world.vehicles.velocity.set([0, 0, 0], id * 3);
+    stepVehiclePhysics(world, id, { ...idleInput, jump: true }, DT);
+    // Only the spring's own sag from the rest height below: no +8.3 impulse, and the
+    // Wildcat's grounded jump would have spent jetEnergyDrain doing it.
+    expect(world.vehicles.velocity[id * 3 + 1]).toBeCloseTo(-20 * DT, 6);
+    expect(world.vehicles.energy[id]).toBe(VEHICLE_DATA[VehicleKind.Tank].maxEnergy);
+  });
+});
+
+describe('wheeled class: MobilePointBase', () => {
+  it('rests on its wheels at the measured ride height instead of hovering', () => {
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world);
+    const id = spawnVehicleAtPad(world, padId, VehicleKind.MobilePointBase) as number;
+    // Spawned at its own ground contact height (the model's wheels reach 2.83 m below the
+    // origin), so the very first tick is already resting contact: no drop, no bounce.
+    const spawnY = world.vehicles.position[id * 3 + 1] as number;
+    expect(spawnY).toBeCloseTo(2.83, 6);
+    for (let tick = 0; tick < 60; tick += 1) stepVehicles(world, new Map(), DT);
+    expect(world.vehicles.position[id * 3 + 1]).toBeCloseTo(spawnY, 6);
+    expect(world.vehicles.onGround[id]).toBe(1);
+    expect(world.vehicles.destroyed[id]).toBe(0);
+    expect(world.vehicles.damage[id]).toBe(0);
+  });
+
+  it('drives at engineTorque/tireRadius/mass, not a hover class thrust', () => {
+    const { world, id } = kindWorld(VehicleKind.MobilePointBase, 2.83);
+    const accel = (7.0 * 745) / 1.6 / 2000; // engineTorque 5215 (mpb:170), tireRadius 1.6 (:181), mass 2000 (:150)
+    for (let tick = 0; tick < 60; tick += 1) {
+      stepVehiclePhysics(world, id, { ...idleInput, moveZ: 1 }, DT);
+    }
+    expect(world.vehicles.velocity[id * 3 + 2]).toBeCloseTo(accel * 60 * DT, 6);
+    // A hover craft thrusting for the same 60 ticks is several times quicker off the line.
+    expect(accel * 60 * DT).toBeLessThan(30 * DT * 60);
+  });
+
+  it('caps at maxWheelSpeed 20 and brakes to a stop when the throttle is released', () => {
+    const { world, id } = kindWorld(VehicleKind.MobilePointBase, 2.83);
+    world.vehicles.velocity.set([0, 0, 50], id * 3);
+    stepVehiclePhysics(world, id, { ...idleInput, moveZ: 1 }, DT);
+    expect(world.vehicles.velocity[id * 3 + 2]).toBeCloseTo(20, 6);
+    // breakTorque 5215 (:171) over the same wheel: 1.63 m/s^2, so a full stop takes 12+ s
+    // from the cap -- 20 s here is comfortably clear of it.
+    for (let tick = 0; tick < 640; tick += 1) stepVehiclePhysics(world, id, idleInput, DT);
+    expect(Math.abs(world.vehicles.velocity[id * 3 + 2] ?? 1)).toBeLessThan(1e-6);
+  });
+
+  it('does not turn on the spot: yaw follows only at speed, at maxSteeringAngle 0.3', () => {
+    const stationary = kindWorld(VehicleKind.MobilePointBase, 2.83);
+    stepVehiclePhysics(stationary.world, stationary.id, { ...idleInput, yaw: 1 }, DT);
+    expect(stationary.world.vehicles.yaw[stationary.id]).toBe(0);
+
+    const moving = kindWorld(VehicleKind.MobilePointBase, 2.83);
+    moving.world.vehicles.velocity.set([0, 0, 20], moving.id * 3);
+    stepVehiclePhysics(moving.world, moving.id, { ...idleInput, moveZ: 1, yaw: 1 }, DT);
+    // speed * tan(maxSteeringAngle) / wheelbase, wheelbase = 2 * tireRadius: the MPB's own
+    // three script numbers (maxSteeringAngle 0.3, :139; tireRadius 1.6, :181). The Tank's
+    // maxSteeringAngle (0.5) or the hover class's wheel-free steering both differ.
+    const expected = (20 * Math.tan(0.3) * DT) / (2 * 1.6);
+    expect(moving.world.vehicles.yaw[moving.id]).toBeCloseTo(expected, 6);
+    expect(moving.world.vehicles.yaw[moving.id]).toBeLessThan(0.1);
+  });
+
+  it('falls under gravity when there is no support under it', () => {
+    const { world, id } = kindWorld(VehicleKind.MobilePointBase, 100);
+    stepVehiclePhysics(world, id, idleInput, DT);
+    expect(world.vehicles.velocity[id * 3 + 1]).toBeLessThan(0);
+    expect(world.vehicles.onGround[id]).toBe(0);
+  });
+
+  it('takes ground-impact damage on a hard landing and none on a soft one', () => {
+    // minImpactSpeed 12 m/s, speedDamageScale 0.06 (vehicle_mpb.cs:162-163). Shield energy is
+    // zeroed so the hit lands on the hull where the assertion can see it.
+    const hard = kindWorld(VehicleKind.MobilePointBase, 2.9);
+    hard.world.vehicles.energy[hard.id] = 0;
+    hard.world.vehicles.velocity.set([0, -25, 0], hard.id * 3);
+    stepVehiclePhysics(hard.world, hard.id, idleInput, DT);
+    stepVehiclePhysics(hard.world, hard.id, idleInput, DT);
+    // 25 m/s plus one tick of gravity, less minImpactSpeed, scaled by 0.06.
+    expect(hard.world.vehicles.damage[hard.id]).toBeCloseTo((25 + 20 * DT - 12) * 0.06, 6);
+    expect(hard.world.vehicles.destroyed[hard.id]).toBe(0);
+
+    const soft = kindWorld(VehicleKind.MobilePointBase, 2.9);
+    soft.world.vehicles.energy[soft.id] = 0;
+    soft.world.vehicles.velocity.set([0, -4, 0], soft.id * 3);
+    stepVehiclePhysics(soft.world, soft.id, idleInput, DT);
+    stepVehiclePhysics(soft.world, soft.id, idleInput, DT);
+    expect(soft.world.vehicles.damage[soft.id]).toBe(0);
+  });
+});
+
+describe('class dispatch: stepVehiclePhysics routes each kind to its own model', () => {
+  it('a Tank falls to its hover band while a Bomber beside it holds altitude', () => {
+    const tank = kindWorld(VehicleKind.Tank, 8);
+    const bomber = kindWorld(VehicleKind.Bomber, 8);
+    for (let tick = 0; tick < 400; tick += 1) {
+      stepVehiclePhysics(tank.world, tank.id, idleInput, DT);
+      stepVehiclePhysics(bomber.world, bomber.id, idleInput, DT);
+    }
+    expect(tank.world.vehicles.position[tank.id * 3 + 1]).toBeCloseTo(3.225, 2);
+    expect(bomber.world.vehicles.position[bomber.id * 3 + 1]).toBeCloseTo(8, 6);
   });
 });

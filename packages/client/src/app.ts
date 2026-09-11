@@ -1538,6 +1538,20 @@ function vehiclePositionAt(store: World['vehicles'], id: number): Vec3 {
   };
 }
 
+/** The engine loop each kind plays. The asset output ships exactly two vehicle engine
+ *  recordings (fx/vehicles/shrike_engine, fx/vehicles/outrider_engine), so the four later
+ *  kinds reuse the closest one -- the three flyers the Shrike's turbine, the hover/ground
+ *  craft the Wildcat's -- the same way the HUD reuses the two airframe icons. Per-kind
+ *  engine recordings are a follow-up. */
+const VEHICLE_ENGINE_LOOP: Record<VehicleKind, 'shrike' | 'wildcat'> = {
+  [VehicleKind.Shrike]: 'shrike',
+  [VehicleKind.Bomber]: 'shrike',
+  [VehicleKind.Havoc]: 'shrike',
+  [VehicleKind.Wildcat]: 'wildcat',
+  [VehicleKind.Tank]: 'wildcat',
+  [VehicleKind.MobilePointBase]: 'wildcat',
+};
+
 /** The vehicles that should be audible right now, keyed by id with their loop kind: none
  *  when disconnected (#56: the prediction world is a stale shell behind a dead socket) and
  *  no destroyed/spawning row. Split out of updateVehicleEngineAudio to keep that function
@@ -1548,7 +1562,7 @@ function liveVehicleKinds(world: World, connected: boolean): Map<number, 'shrike
   const vehicles = world.vehicles;
   for (let id = 0; id < vehicles.count; id++) {
     if (!vehicleEngineActive(world, id)) continue;
-    current.set(id, vehicles.kind[id] === VehicleKind.Shrike ? 'shrike' : 'wildcat');
+    current.set(id, VEHICLE_ENGINE_LOOP[vehicles.kind[id] as VehicleKind]);
   }
   return current;
 }
