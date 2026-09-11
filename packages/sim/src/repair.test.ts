@@ -376,6 +376,45 @@ describe('stepRepairPacks', () => {
     expect(world.turrets.damage[0]).toBe(before);
   });
 
+  it('issue #51 residual: cannot repair a damaged teammate through terrain', () => {
+    // The same wall/geometry pair the base-object and turret through-terrain tests above use.
+    // findDamagedPlayerCandidate was the last candidate search with no line-of-sight gate, so
+    // before this fix the beam healed through a ridge the other two kinds already respected.
+    const world = createWorld(wallAcrossX(10), 1);
+    const healer = addPlayer(world, { x: -4, y: 0, z: 0 }, 1);
+    const hurt = addPlayer(world, { x: 4, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[healer] = 1;
+    applyDamage(world, hurt, 0.3, -1, LIGHT_ARMOR);
+    const before = world.players.damage[hurt];
+    stepRepairPacks(
+      world,
+      new Map([
+        [healer, { ...IDLE, packActive: true, yaw: aimingAt({ x: -4, z: 0 }, { x: 4, z: 0 }) }],
+      ]),
+      FIXED_DT,
+    );
+    expect(world.players.damage[hurt]).toBe(before);
+  });
+
+  it('issue #51 residual: repairs that teammate in the open, so the gate is occlusion only', () => {
+    // Identical healer/target placement on flat terrain: the rejection above must come from
+    // the terrain blocking the beam, not from any range, aim or team change that came with it.
+    const world = createWorld(flat, 1);
+    const healer = addPlayer(world, { x: -4, y: 0, z: 0 }, 1);
+    const hurt = addPlayer(world, { x: 4, y: 0, z: 0 }, 1);
+    world.players.hasRepairPack[healer] = 1;
+    applyDamage(world, hurt, 0.3, -1, LIGHT_ARMOR);
+    const before = world.players.damage[hurt] ?? 0;
+    stepRepairPacks(
+      world,
+      new Map([
+        [healer, { ...IDLE, packActive: true, yaw: aimingAt({ x: -4, z: 0 }, { x: 4, z: 0 }) }],
+      ]),
+      FIXED_DT,
+    );
+    expect(world.players.damage[hurt]).toBeCloseTo(before - REPAIR_RATE);
+  });
+
   it('never reduces damage below zero', () => {
     const world = createWorld(flat, 1);
     const healer = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);

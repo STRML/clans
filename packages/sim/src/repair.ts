@@ -80,11 +80,21 @@ function findDamagedPlayerCandidate(
   origin: Vec3,
   direction: Vec3,
 ): RepairCandidate | null {
+  const healerTeam = world.players.team[healerId] ?? 0;
   let nearest: RepairCandidate | null = null;
   for (let id = 0; id < world.players.count; id += 1) {
     if (id === healerId || !world.players.active[id] || !world.players.alive[id]) continue;
     if ((world.players.damage[id] ?? 0) <= 0) continue;
     const hitbox = playerHitbox(world, id, armorFor(world, id));
+    // Issue #51 residual: player candidates were the last kind that still healed straight
+    // through terrain. findDamagedBaseObjectCandidate and findDamagedTurretCandidate already
+    // gate on this exact helper, whose own contract is "the repair beam uses the same terrain
+    // and interior collision rules as a fired projectile" -- so this extends that established
+    // rule to the final candidate kind rather than inventing a second convention, and keeps
+    // the beam's own source (`packs/repairpack.cs:48`'s DefaultRepairBeam) consistent with
+    // its range citation above. The target point is the ray/sphere hitbox center, so the
+    // beam's endpoint and the aiming test agree exactly as they do in those two searches.
+    if (!hasRepairLineOfSight(world, healerTeam, origin, hitbox.center)) continue;
     nearest = nearerCandidate(
       nearest,
       candidateFromHitbox('player', id, hitbox, origin, direction),
