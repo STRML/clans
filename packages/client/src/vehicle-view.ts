@@ -177,8 +177,9 @@ export class VehicleBuffer {
  * from that id's own latest raw sample (see VehicleBuffer's own doc comment). `mountedId`
  * (the local player's own driven vehicle, or -1) is deliberately excluded and must be
  * supplied by the caller instead reading world.vehicles directly -- the same live,
- * zero-latency source app.ts's placeVehicleCamera already uses, so the mesh the camera is
- * chasing never lags one interpolation delay behind where the camera itself already is.
+ * zero-latency source app.ts's placeVehicleCamera already uses, so the mesh the camera sits on
+ * (first person, its `Eye` node) or trails (the chase end the toggle selects) never lags one
+ * interpolation delay behind where the camera itself already is.
  */
 export function vehicleRenderDataFrom(
   buffers: Map<number, VehicleBuffer>,

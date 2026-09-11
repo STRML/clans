@@ -13,6 +13,7 @@ import {
   FlagState,
   hasLineOfSight,
   VEHICLE_DATA,
+  type VehicleData,
   VehicleKind,
   WeaponId,
   addPlayer,
@@ -117,6 +118,9 @@ import {
 const EYE_HEIGHT = 2.0;
 const FREE_CAM_SPEED = 40;
 const FREE_CAM_FAST = 4;
+/** T2 `GameConnection::mCameraSpeed` (game/gameConnection.cc): the vehicle camera crosses
+ *  its whole first-person-to-chase slider in 0.1 s, which is what one toggle costs. */
+const VEHICLE_CAMERA_SPEED = 10;
 const IDLE: PlayerInput = {
   moveX: 0,
   moveZ: 0,
@@ -166,6 +170,13 @@ export interface App {
   stepOnce: boolean;
   freeCam: boolean;
   freeCamPosition: THREE.Vector3;
+  /** T2's vehicle camera switch (`GameConnection::mFirstPerson`, default true in
+   *  game/gameConnection.cc): true rests the mounted camera on the model's own `Eye` node,
+   *  false at the datablock's chase distance. Session-wide, like the pref it mirrors. */
+  vehicleCameraFirstPerson: boolean;
+  /** The 0..1 slider between those two ends (`GameConnection::mCameraPos`), travelled at
+   *  VEHICLE_CAMERA_SPEED so a toggle animates instead of cutting. */
+  vehicleCameraPos: number;
   godMode: boolean;
   stats: AppStats;
   frame(dtSeconds: number): void;
@@ -274,13 +285,27 @@ function moveFreeCam(app: App, dt: number): void {
   if (app.input.isDown('ControlLeft')) app.freeCamPosition.y -= speed;
 }
 
-/** Shrike uses its authored Eye node; Wildcat keeps a trailing chase camera. */
-function placeVehicleCamera(app: App, vehicleId: number, dt: number): boolean {
+/** Everything the vehicle camera needs from the world and the model, gathered in one place so
+ *  the camera math below stays branch-light: the live pose (`world.vehicles`, never the
+ *  interpolation buffer, so a locally-predicted camera cannot lag the mesh it sits on), the
+ *  script's camera numbers, and the model's authored `Eye` node. Every shipped model has that
+ *  node -- it is the one T2's own first-person end uses -- so the fallback offset exists only
+ *  so a model without one cannot strand the camera. */
+function vehicleCameraSource(
+  app: App,
+  vehicleId: number,
+): {
+  data: VehicleData;
+  position: THREE.Vector3;
+  heading: THREE.Vector3;
+  yaw: number;
+  pitch: number;
+  roll: number;
+  eye: THREE.Vector3;
+} {
   const vehicles = app.world.vehicles;
-  const kind = vehicles.kind[vehicleId] as VehicleKind;
-  const data = VEHICLE_DATA[kind];
   const base = vehicleId * 3;
-  const vehiclePos = new THREE.Vector3(
+  const position = new THREE.Vector3(
     vehicles.position[base] ?? 0,
     vehicles.position[base + 1] ?? 0,
     vehicles.position[base + 2] ?? 0,
@@ -292,27 +317,66 @@ function placeVehicleCamera(app: App, vehicleId: number, dt: number): boolean {
     Math.sin(pitch),
     Math.cos(yaw) * Math.cos(pitch),
   );
-  if (kind === VehicleKind.Shrike) {
-    const mesh = app.scene.getObjectByName(`vehicle-${String(vehicleId)}`);
-    const eye = mesh?.getObjectByName('Eye');
-    if (eye) eye.getWorldPosition(app.camera.position);
-    else app.camera.position.copy(vehiclePos).add(new THREE.Vector3(0, 1.4, 0.5));
-    aimCamera(app.camera, yaw, pitch);
-    app.camera.rotateZ(-(vehicles.roll[vehicleId] ?? 0));
-    return true;
+  const eyeNode = app.scene.getObjectByName(`vehicle-${String(vehicleId)}`)?.getObjectByName('Eye');
+  return {
+    data: VEHICLE_DATA[vehicles.kind[vehicleId] as VehicleKind],
+    position,
+    heading,
+    yaw,
+    pitch,
+    roll: vehicles.roll[vehicleId] ?? 0,
+    eye: eyeNode
+      ? eyeNode.getWorldPosition(new THREE.Vector3())
+      : position.clone().add(new THREE.Vector3(0, 1.4, 0.5)),
+  };
+}
+
+/** T2's vehicle camera switch, read once per frame: the pref picks which end of
+ *  placeVehicleCamera's slider the mounted camera rests at, and the slider itself animates
+ *  the change, so a toggle is never a cut. Harmless while walking -- nothing reads the pref
+ *  unless a vehicle is mounted. */
+function applyCameraToggle(app: App, input: Input): void {
+  if (input.cameraTogglePressedThisFrame()) {
+    app.vehicleCameraFirstPerson = !app.vehicleCameraFirstPerson;
   }
-  const desired = vehiclePos
+}
+
+/**
+ * T2's vehicle camera is one camera on a slider between two authored ends, not two cameras.
+ * `ShapeBase::getCameraTransform` (game/shapeBase.cc) uses the model's `Eye` node at slider
+ * position 0 and, for any position above 0, keeps that same eye orientation while moving the
+ * position back by `(cameraMaxDist - cameraMinDist) * pos` and up by `cameraOffset`;
+ * `GameConnection::getControlCameraTransform` slides the position at `mCameraSpeed`, with
+ * `GameConnection::mFirstPerson` (the `$firstPerson` pref, default true) deciding which end
+ * it rests at. Both shipped datablocks author the other end (Wildcat cameraMaxDist 5.0 /
+ * cameraOffset 0.7, Shrike 15 / 2.5), so this is the source game's own camera. Two engine
+ * extras are not reproduced: the collision ray that shortens the chase when terrain is
+ * behind the vehicle, and the chase queue (`chaseCam`) that delays the tail end, which our
+ * `cameraLag` smoothing stands in for.
+ */
+function placeVehicleCamera(app: App, vehicleId: number, dt: number): boolean {
+  const source = vehicleCameraSource(app, vehicleId);
+  const target = app.vehicleCameraFirstPerson ? 0 : 1;
+  const travel = VEHICLE_CAMERA_SPEED * dt;
+  app.vehicleCameraPos =
+    target > app.vehicleCameraPos
+      ? Math.min(target, app.vehicleCameraPos + travel)
+      : Math.max(target, app.vehicleCameraPos - travel);
+
+  const chase = source.position
     .clone()
-    .addScaledVector(heading, -data.cameraMaxDist)
-    .add(new THREE.Vector3(0, data.cameraOffset, 0));
-  // cameraLag as a per-second smoothing rate: at dt = FIXED_DT (32 ms) this closes
-  // cameraLag's own fraction of the remaining distance each tick, so the Shrike's 0.9 feels
-  // noticeably looser (trails longer) than the Wildcat's 0.5 -- matching the real numbers'
-  // own relative ordering, since neither script exposes the smoothing formula itself, only
-  // the tuning constant (see the plan's numbers table).
-  const t = 1 - Math.pow(1 - data.cameraLag, dt / FIXED_DT);
-  app.camera.position.lerp(desired, t);
-  app.camera.lookAt(vehiclePos);
+    .addScaledVector(source.heading, -source.data.cameraMaxDist)
+    .add(new THREE.Vector3(0, source.data.cameraOffset, 0));
+  // The slider is a straight run between the two ends, and the eye end is exact: the
+  // Shrike's cockpit test pins the camera to that node to the millimetre, so there is nothing
+  // left to smooth once the slider is home. `cameraLag` -- a per-second rate that closes its
+  // own fraction of the remaining distance each 32 ms tick -- only smooths the chase end,
+  // where the engine's chase queue also sits. Neither script exposes the engine's smoothing
+  // formula, only this tuning constant.
+  const t = app.vehicleCameraPos <= 0 ? 1 : 1 - Math.pow(1 - source.data.cameraLag, dt / FIXED_DT);
+  app.camera.position.lerp(source.eye.clone().lerp(chase, app.vehicleCameraPos), t);
+  aimCamera(app.camera, source.yaw, source.pitch);
+  app.camera.rotateZ(-source.roll);
   return true;
 }
 
@@ -1874,6 +1938,8 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     stepOnce: false,
     freeCam: false,
     freeCamPosition: new THREE.Vector3(),
+    vehicleCameraFirstPerson: true,
+    vehicleCameraPos: 0,
     get godMode(): boolean {
       return godModeFlag;
     },
@@ -2050,6 +2116,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
 
       interactionPrompt.update(world, playerId, input.uiOpen || app.freeCam);
       if (app.freeCam) moveFreeCam(app, dtSeconds);
+      applyCameraToggle(app, input);
       placeCamera(app, sky, dtSeconds);
       // Issue #56: listener orientation for the panner graph, and every world-derived
       // loop following the connection (see updateAmbientAudio).

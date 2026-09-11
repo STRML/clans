@@ -377,10 +377,11 @@ describe('vehicleRenderData', () => {
   });
 
   it('draws the locally-mounted vehicle live off world.vehicles, not the (stale) interpolation buffer', () => {
-    // Codex review round 1 (this PR), finding 9: placeVehicleCamera already chases
-    // world.vehicles' own live, zero-latency prediction. Feeding the SAME vehicle's mesh
-    // through the 100 ms-behind interpolation buffer instead would make the mesh the
-    // camera is chasing visibly lag behind where the camera itself already is.
+    // Codex review round 1 (this PR), finding 9: placeVehicleCamera already reads
+    // world.vehicles' own live, zero-latency prediction -- the camera rests on the mounted
+    // model's Eye node, or trails it in the toggled chase view. Feeding the SAME vehicle's
+    // mesh through the 100 ms-behind interpolation buffer instead would make the mesh under
+    // the camera visibly lag behind where the camera itself already is.
     const world = createWorld(flat, 1);
     world.vehicles.active[7] = 1;
     world.vehicles.count = 8;

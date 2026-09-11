@@ -20,6 +20,7 @@ export class Input {
   private wasAnyDigitHeld = false;
   private wasEscapeHeld = false;
   private wasVoiceMenuHeld = false;
+  private wasCameraToggleHeld = false;
 
   constructor(private readonly target: HTMLElement) {}
 
@@ -79,6 +80,7 @@ export class Input {
     this.wasAnyDigitHeld = false;
     this.wasEscapeHeld = false;
     this.wasVoiceMenuHeld = false;
+    this.wasCameraToggleHeld = false;
   }
 
   /** Menus own mouse/keyboard actions until closed; the next canvas click resumes look. */
@@ -152,6 +154,19 @@ export class Input {
     const held = this.isDown('KeyV');
     const pressed = held && !this.wasVoiceMenuHeld;
     this.wasVoiceMenuHeld = held;
+    return pressed;
+  }
+
+  /** Same edge-triggered shape again, for the `X` vehicle-camera toggle. T2's own switch is
+   *  the client-side `$firstPerson` pref (`GameConnection::mFirstPerson`, default true in
+   *  game/gameConnection.cc), not a key in the base scripts our reference set has, so the
+   *  binding is ours and the semantics are T2's: the resting mode is the model's `Eye` node
+   *  and this selects the datablock's chase end. */
+  cameraTogglePressedThisFrame(): boolean {
+    if (this.uiOpen) return false;
+    const held = this.isDown('KeyX');
+    const pressed = held && !this.wasCameraToggleHeld;
+    this.wasCameraToggleHeld = held;
     return pressed;
   }
 
