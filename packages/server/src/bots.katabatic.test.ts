@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   dueForRespawn,
   FlagState,
+  hashWorld,
   LIGHT_ARMOR,
   respawnPlayer,
   stepWorld,
@@ -13,7 +14,6 @@ import {
   createBotManager,
   rebalanceTeams,
   stepBotManager,
-  TARGET_TEAM_SIZE,
   type BotManager,
 } from './bots.js';
 import {
@@ -234,6 +234,15 @@ function respawnDue(world: World, spawns: SceneSpawn[]): void {
 
 const STALL_WINDOW_TICKS = 120;
 
+/** Bots seated per team by default. Every measurement issue #32 has taken is an 8-versus-8
+ *  match, because this harness has always handed createBotManager TARGET_TEAM_SIZE (16) as
+ *  its total bot budget and rebalanceTeams splits that evenly. The project target is 24
+ *  versus 24, so runMatch takes the per-team seat count and this stays the default: the
+ *  three acceptance tests above call it with no size argument and seat 16 bots exactly as
+ *  they always have. Passing N hands createBotManager a budget of 2N and a cap of N, the
+ *  pairing its own `teamSize` doc comment specifies for a 24-versus-24 match. */
+const DEFAULT_BOTS_PER_TEAM = 8;
+
 /** Runs a deterministic headless bot-only match. The per-tick loop mirrors the live
  *  server's responsibilities (net.ts's tick): bot inputs, stepWorld, then the respawn
  *  duty.
@@ -243,15 +252,23 @@ const STALL_WINDOW_TICKS = 120;
  *  return type on purpose: the three acceptance tests above read a plain MatchStats and
  *  must keep doing so, and the telemetry accumulator has to be built from the loaded
  *  world (it sizes its per-flag counters from the flag store), which only exists inside
- *  this function. */
+ *  this function.
+ *
+ *  `botsPerTeam` seats that many bots on each side (2N total budget, N per-team cap);
+ *  it defaults to DEFAULT_BOTS_PER_TEAM, so the acceptance tests above are untouched.
+ *  On the telemetry path this also prints hashWorld of the final world, which is what
+ *  makes a table attributable to one world state: two runs whose fingerprints match
+ *  simulated the same thing, and a table whose fingerprint differs was measured against
+ *  a different tree. */
 async function runMatch(
   seed: number,
   ticks: number,
   telemetryOut?: MatchTelemetry[],
+  botsPerTeam: number = DEFAULT_BOTS_PER_TEAM,
 ): Promise<MatchStats> {
   const { world, spawns } = await loadKatabaticWorld(seed);
   const landmarks = productionLandmarks(world, spawns);
-  const manager = createBotManager(world, spawns, landmarks, TARGET_TEAM_SIZE);
+  const manager = createBotManager(world, spawns, landmarks, botsPerTeam * 2, botsPerTeam);
   rebalanceTeams(manager, world, spawns);
   const board = createOrderBoard();
   const tracker = newTracker();
@@ -271,7 +288,15 @@ async function runMatch(
     if ((t + 1) % STALL_WINDOW_TICKS === 0) trackStallWindow(world, manager, tracker);
     respawnDue(world, spawns);
   }
-  if (telemetry && telemetryOut) telemetryOut.push(finishCarrierTelemetry(telemetry, world));
+  if (telemetry && telemetryOut) {
+    telemetryOut.push(finishCarrierTelemetry(telemetry, world));
+    // Printed only on the telemetry path, so the acceptance tests' output is unchanged.
+    // hashWorld, not the table: a table can be identical by coincidence, the fingerprint
+    // cannot, and it is what ties a run to one world state across the arms of a comparison.
+    console.log(
+      `sim fingerprint: seed ${seed.toString()} ${botsPerTeam.toString()}v${botsPerTeam.toString()} ${hashWorld(world).toString(16)}`,
+    );
+  }
   return tracker.stats;
 }
 
@@ -283,6 +308,12 @@ const MATCH_TICKS = 12000; // Ours: ~6.4 minutes of simulated time -- long enoug
  *  matches x MATCH_TICKS and takes minutes, so a development pass can shorten it without
  *  touching the acceptance window or any behaviour constant. */
 const SWEEP_TICKS = Number(process.env.BOT_TELEMETRY_TICKS ?? MATCH_TICKS);
+
+/** Bots per team for the sweep, so the same four seeds can be measured at the harness's
+ *  historical 8-versus-8 and at the project's 24-versus-24 target without touching a
+ *  single acceptance test. Defaults to the acceptance seating, so an unset environment
+ *  reproduces the sweep exactly as it was. */
+const SWEEP_BOTS_PER_TEAM = Number(process.env.BOT_TELEMETRY_TEAM_SIZE ?? DEFAULT_BOTS_PER_TEAM);
 
 describe('bot-only match on production Katabatic (issue #32)', () => {
   it('sustains combat: multiple kills across the match, on every seed', async () => {
@@ -318,6 +349,32 @@ describe('bot-only match on production Katabatic (issue #32)', () => {
       expect(stats.stallWindows / Math.max(1, stats.botWindowCount)).toBeLessThan(0.2);
     }
   }, 360_000);
+
+  it('gets attackers onto the enemy flag deck at the 24-versus-24 project size too', async () => {
+    // The tests above all run the harness's historical seating: createBotManager's
+    // TARGET_TEAM_SIZE budget of 16 bots, which rebalanceTeams splits 8 v 8. The project's
+    // own match size is 24 v 24, and the seating is the only thing that changes here --
+    // same map, same landmarks, same steering.
+    //
+    // Measured on the frozen tree (BOT_TELEMETRY=1, BOT_TELEMETRY_TEAM_SIZE=24, four
+    // seeds, 12,000 ticks each): 19 flag touches, 370 kills, 24 carrier runs, and BOTH
+    // teams attacking -- which is the point. At 8 v 8 only one team ever takes a flag (the
+    // other flag is Home for all 48,000 sampled ticks) and all 13 carrier deaths are that
+    // one team's; at 24 v 24 each flag is carried for thousands of ticks and the carrier
+    // deaths split 7/14. The one-sided 8 v 8 match is a small-team artefact.
+    //
+    // What is NOT asserted, and would not pass: a capture. At 24 v 24 the pooled sweep
+    // measured 0 captures, 0 runs arriving inside the 2 m capture radius, 0 refused ticks,
+    // and a closest approach of 48 m; 21 of the 24 carrier runs ended in a death, 16 of
+    // them to an enemy at a median 23 m while the carrier ran at its full 15.0 m/s. That
+    // is the open bug (#32), not a bar this test may raise.
+    let totalTouches = 0;
+    for (const seed of [1, 2, 3]) {
+      const stats = await runMatch(seed, MATCH_TICKS, undefined, 24);
+      totalTouches += stats.flagTouches;
+    }
+    expect(totalTouches).toBeGreaterThanOrEqual(1);
+  }, 420_000);
 });
 
 // ---------------------------------------------------------------------------------------
@@ -977,9 +1034,13 @@ describe.skipIf(process.env.BOT_TELEMETRY !== '1')(
   () => {
     it('measures every seed and prints the carrier table', async () => {
       const rows: TableRow[] = [];
+      console.log('');
+      console.log(
+        `match size: ${SWEEP_BOTS_PER_TEAM.toString()} v ${SWEEP_BOTS_PER_TEAM.toString()} (${(SWEEP_BOTS_PER_TEAM * 2).toString()} bots seated), ${SWEEP_TICKS.toString()} ticks x ${TELEMETRY_SEEDS.length.toString()} seeds`,
+      );
       for (const seed of TELEMETRY_SEEDS) {
         const collected: MatchTelemetry[] = [];
-        const stats = await runMatch(seed, SWEEP_TICKS, collected);
+        const stats = await runMatch(seed, SWEEP_TICKS, collected, SWEEP_BOTS_PER_TEAM);
         const telemetry = collected[0];
         if (!telemetry) throw new Error(`no telemetry collected for seed ${String(seed)}`);
         assertTelemetryWellFormed(telemetry, stats);
