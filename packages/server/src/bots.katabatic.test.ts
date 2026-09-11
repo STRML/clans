@@ -9,11 +9,18 @@ import {
   type Vec3,
   type World,
 } from '@clans/sim';
-import { createBotManager, rebalanceTeams, stepBotManager, TARGET_TEAM_SIZE } from './bots.js';
+import {
+  createBotManager,
+  rebalanceTeams,
+  stepBotManager,
+  TARGET_TEAM_SIZE,
+  type BotManager,
+} from './bots.js';
 import {
   createCarrierTelemetry,
   finishCarrierTelemetry,
   sampleCarrierTelemetry,
+  type CarrierEscortSample,
   type CarrierRun,
   type CarrierRunEnd,
   type CarrierDeathContext,
@@ -77,6 +84,16 @@ interface MatchStats {
   flagTouches: number;
   stallWindows: number;
   botWindowCount: number;
+  /** Landmarks the waypoint graph was built from -- the production set or a subset. */
+  landmarks: number;
+  /** The same 120-tick displacement-stall windows as `stallWindows`/`botWindowCount`,
+   *  split by whether the bot was carrying a flag at the end of the window. This is the
+   *  control for the carrier route-stall measure: it answers "do bots in general stall on
+   *  this graph" with the same instrument for both populations. */
+  carrierWindowCount: number;
+  carrierStallWindows: number;
+  otherWindowCount: number;
+  otherStallWindows: number;
 }
 
 /** Runs a deterministic headless bot-only match. The per-tick loop mirrors the live
@@ -94,7 +111,19 @@ interface MatchTracker {
 
 function newTracker(): MatchTracker {
   return {
-    stats: { ticks: 0, kills: 0, captures: 0, flagTouches: 0, stallWindows: 0, botWindowCount: 0 },
+    stats: {
+      ticks: 0,
+      kills: 0,
+      captures: 0,
+      flagTouches: 0,
+      stallWindows: 0,
+      botWindowCount: 0,
+      landmarks: 0,
+      carrierWindowCount: 0,
+      carrierStallWindows: 0,
+      otherWindowCount: 0,
+      otherStallWindows: 0,
+    },
     lastScore: new Map(),
     lastFlagSig: [-1, -1],
     lastPos: new Map(),
@@ -105,11 +134,7 @@ function newTracker(): MatchTracker {
 /** Per-bot score deltas and rolling per-window displacement. +10 is a kill
  *  (damage.ts's scoreForDeath); +20 touch / +30 capture are flag events counted from
  *  the flag store so the tallies cannot blur. */
-function trackBots(
-  world: World,
-  manager: ReturnType<typeof createBotManager>,
-  tracker: MatchTracker,
-): void {
+function trackBots(world: World, manager: BotManager, tracker: MatchTracker): void {
   for (const id of manager.botIds) {
     const b = id * 3;
     const score = world.players.score[id] ?? 0;
@@ -149,14 +174,27 @@ function trackFlags(world: World, tracker: MatchTracker): void {
   tracker.stats.captures = ((world.teamScores[1] ?? 0) + (world.teamScores[2] ?? 0)) / 100;
 }
 
+/** True while this player id is the recorded carrier of a Carried flag. The role split
+ *  below is what turns the whole-population stall rate into a control: carriers and
+ *  everyone else are measured by the same instrument in the same match. */
+function isCarryingFlag(world: World, id: number): boolean {
+  for (let flagId = 0; flagId < world.flags.team.length; flagId += 1) {
+    if (world.flags.carrierId[flagId] === id && world.flags.state[flagId] === FlagState.Carried) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Windowed stall accounting: near-zero displacement while alive. Defenders holding
  *  their flag stand displace little too, but that population is small (25% of bots)
  *  and constant across seeds, so the stall TOTAL still isolates navigation health: the
  *  historical runs this test replaces produced 40-90+ stall windows per 10k ticks from
- *  wedged bots alone. */
+ *  wedged bots alone. The carrier/other split below is the telemetry sweep's control:
+ *  the same windows, counted separately for the bots that were carrying a flag. */
 function trackStallWindow(
   world: World,
-  manager: ReturnType<typeof createBotManager>,
+  manager: BotManager,
   tracker: MatchTracker,
 ): void {
   const STALL_MIN_DISPLACEMENT_M = 2;
@@ -165,7 +203,15 @@ function trackStallWindow(
     tracker.windowDisplacement.set(id, 0);
     if (world.players.alive[id] !== 1) continue;
     tracker.stats.botWindowCount += 1;
-    if (moved < STALL_MIN_DISPLACEMENT_M) tracker.stats.stallWindows += 1;
+    const stalled = moved < STALL_MIN_DISPLACEMENT_M;
+    if (stalled) tracker.stats.stallWindows += 1;
+    if (isCarryingFlag(world, id)) {
+      tracker.stats.carrierWindowCount += 1;
+      if (stalled) tracker.stats.carrierStallWindows += 1;
+    } else {
+      tracker.stats.otherWindowCount += 1;
+      if (stalled) tracker.stats.otherStallWindows += 1;
+    }
   }
 }
 
@@ -204,15 +250,12 @@ async function runMatch(
   telemetryOut?: MatchTelemetry[],
 ): Promise<MatchStats> {
   const { world, spawns } = await loadKatabaticWorld(seed);
-  const manager = createBotManager(
-    world,
-    spawns,
-    productionLandmarks(world, spawns),
-    TARGET_TEAM_SIZE,
-  );
+  const landmarks = productionLandmarks(world, spawns);
+  const manager = createBotManager(world, spawns, landmarks, TARGET_TEAM_SIZE);
   rebalanceTeams(manager, world, spawns);
   const board = createOrderBoard();
   const tracker = newTracker();
+  tracker.stats.landmarks = landmarks.length;
   const telemetry = telemetryOut ? createCarrierTelemetry(world) : null;
   for (let t = 0; t < ticks; t += 1) {
     if (world.gameOver) break;
@@ -235,6 +278,11 @@ async function runMatch(
 const MATCH_TICKS = 12000; // Ours: ~6.4 minutes of simulated time -- long enough for
 // multiple flag runs each way at a ~10 m/s ski; the M2 bots-under-tick-budget bench
 // already proves the 5000-tick shape runs in budget, so this only scales the window.
+
+/** The sweep's own tick count, overridable for iteration only: the full sweep is four
+ *  matches x MATCH_TICKS and takes minutes, so a development pass can shorten it without
+ *  touching the acceptance window or any behaviour constant. */
+const SWEEP_TICKS = Number(process.env.BOT_TELEMETRY_TICKS ?? MATCH_TICKS);
 
 describe('bot-only match on production Katabatic (issue #32)', () => {
   it('sustains combat: multiple kills across the match, on every seed', async () => {
@@ -349,6 +397,8 @@ function mergeTelemetry(matches: MatchTelemetry[]): MatchTelemetry {
     capturesPerTeam: [0, 0],
     flagStateTicks: [],
     bothFlagsCarriedTicks: 0,
+    carrierTicks: 0,
+    carrierStallTicks: 0,
   };
   for (const match of matches) {
     merged.sampledTicks += match.sampledTicks;
@@ -358,6 +408,8 @@ function mergeTelemetry(matches: MatchTelemetry[]): MatchTelemetry {
     merged.capturesPerTeam[0] += match.capturesPerTeam[0];
     merged.capturesPerTeam[1] += match.capturesPerTeam[1];
     merged.bothFlagsCarriedTicks += match.bothFlagsCarriedTicks;
+    merged.carrierTicks += match.carrierTicks;
+    merged.carrierStallTicks += match.carrierStallTicks;
     match.flagStateTicks.forEach((share, index) => {
       const total = merged.flagStateTicks[index] ?? {
         team: share.team,
@@ -477,6 +529,383 @@ function printCarrierDeathTable(rows: TableRow[]): void {
   for (const row of rows) console.log(deathCells(row).join(' | '));
 }
 
+/** Median of the values rounded to `digits`, or '-' when there is nothing to average.
+ *  Distinct from the shared `median` above, which returns 0 for an empty set -- in a table
+ *  cell that 0 would read as a measurement. */
+function medianCell(values: number[], digits = 0): string {
+  if (values.length === 0) return '-';
+  return median(values).toFixed(digits);
+}
+
+/** "hits/total" as a whole percent, or '-' when the denominator is zero. */
+function percentCell(hits: number, total: number): string {
+  if (total === 0) return '-';
+  return `${Math.round((hits / total) * 100).toString()}%`;
+}
+
+/** Median, then max, of a value list; '-' when empty. */
+function medianMaxCell(values: number[], digits = 0): string {
+  if (values.length === 0) return '-';
+  return `${median(values).toFixed(digits)}/${Math.max(...values).toFixed(digits)}`;
+}
+
+/** Every ending the telemetry can record, with deaths split by killer relation: an
+ *  end-reason distribution, not just the death tally. A run that never dies and never
+ *  captures is invisible to the acceptance counters, so it is counted here explicitly. */
+function runEndCells(row: TableRow): string[] {
+  const runs = row.telemetry.runs;
+  const deaths = runs.filter((run) => run.endReason === 'died');
+  const byRelation = (relation: KillerRelation): number =>
+    deaths.filter((run) => run.death?.killerRelation === relation).length;
+  const returned = runs.filter((run) => run.endReason === 'flag returned').length;
+  const matchEnd = runs.filter((run) => run.endReason === 'matchEnd').length;
+  return [
+    row.label,
+    String(runs.length),
+    String(runs.filter((run) => run.endReason === 'captured').length),
+    KILLER_RELATIONS.map((relation) => String(byRelation(relation))).join('/'),
+    String(returned),
+    String(matchEnd),
+    String(returned + matchEnd),
+    String(row.telemetry.carrierTicks),
+    String(row.telemetry.carrierStallTicks),
+    percentCell(row.telemetry.carrierStallTicks, row.telemetry.carrierTicks),
+  ];
+}
+
+function printRunEndTable(rows: TableRow[]): void {
+  const header = [
+    'seed',
+    'runs',
+    'captured',
+    'died enemy/teammate/self/unattributed',
+    'dropped/returned',
+    'still running at sweep end',
+    'ended w/o death or capture',
+    'carrier ticks',
+    'carrier stall ticks',
+    'carrier stall share',
+  ];
+  console.log('');
+  console.log('run endings: every ending the telemetry records, deaths split by credited side');
+  console.log(
+    'legend: carrier stall ticks = ticks a carrier held the flag with a full 60-tick window and no',
+  );
+  console.log(
+    '        net progress toward its own stand (see the stall table below for the control).',
+  );
+  console.log(header.join(' | '));
+  for (const row of rows) console.log(runEndCells(row).join(' | '));
+}
+
+/** Run shape and pace, plus the leg split: away = pickup to the farthest excursion from
+ *  the carrier's own stand, home = everything after. */
+function runShapeCells(row: TableRow): string[] {
+  const runs = row.telemetry.runs;
+  const endedHome = runs.filter((run) => run.endLeg === 'home').length;
+  return [
+    row.label,
+    String(runs.length),
+    medianCell(runs.map((run) => run.runTicks)),
+    medianCell(runs.map((run) => run.distanceM)),
+    medianCell(
+      runs.map((run) => run.meanSpeedMps),
+      1,
+    ),
+    medianCell(
+      runs.map((run) => run.p90SpeedMps),
+      1,
+    ),
+    medianCell(runs.map((run) => run.pickupStandDistanceM)),
+    medianCell(runs.map((run) => run.endStandDistanceM)),
+    `${endedHome.toString()}/${(runs.length - endedHome).toString()}`,
+    medianCell(runs.map((run) => run.legs.away.ticks)),
+    medianCell(runs.map((run) => run.legs.home.ticks)),
+    medianCell(runs.map((run) => run.legs.away.distanceM)),
+    medianCell(runs.map((run) => run.legs.home.distanceM)),
+    medianCell(
+      runs.map((run) => run.legs.away.meanSpeedMps),
+      1,
+    ),
+    medianCell(
+      runs.map((run) => run.legs.home.meanSpeedMps),
+      1,
+    ),
+  ];
+}
+
+function printRunShapeTable(rows: TableRow[]): void {
+  const header = [
+    'seed',
+    'runs',
+    'duration med (ticks)',
+    'distance med (m)',
+    'mean speed med (m/s)',
+    'p90 speed med (m/s)',
+    'pickup dist med (m)',
+    'end dist med (m)',
+    'ended home/away',
+    'away ticks med',
+    'home ticks med',
+    'away dist med (m)',
+    'home dist med (m)',
+    'away speed med',
+    'home speed med',
+  ];
+  console.log('');
+  console.log('run shape and legs: how far each run got, how fast, and where it turned');
+  console.log(
+    'legend: pickup/end dist = metres from the carrier own stand at pickup and at the end;',
+  );
+  console.log(
+    '        away = pickup to the run farthest point, home = after it; speeds are 3D per-tick displacement / FIXED_DT.',
+  );
+  console.log(header.join(' | '));
+  for (const row of rows) console.log(runShapeCells(row).join(' | '));
+}
+
+/** Sample-weighted "nobody within 100 m" share, with the share of samples where the
+ *  carrier had no live teammate AT ALL in parentheses: an escort that is alive but far and
+ *  an escort that does not exist need different fixes. */
+function escortAbsentCell(samples: CarrierEscortSample[]): string {
+  const total = samples.reduce((sum, sample) => sum + sample.samples, 0);
+  if (total === 0) return '-';
+  const absent = samples.reduce((sum, sample) => sum + sample.absentFraction * sample.samples, 0);
+  const none = samples.reduce(
+    (sum, sample) => sum + sample.noTeammateFraction * sample.samples,
+    0,
+  );
+  return `${Math.round((absent / total) * 100).toString()}% (${Math.round((none / total) * 100).toString()}% none)`;
+}
+
+function escortMedian(samples: CarrierEscortSample[]): string {
+  return medianCell(
+    samples.map((sample) => sample.medianM).filter((value): value is number => value !== null),
+  );
+}
+
+/** Escort presence over time, whole-run and per leg: the median nearest live teammate at
+ *  the 60-tick cadence, and the share of samples with nobody within 100 m. */
+function escortCells(row: TableRow): string[] {
+  const runs = row.telemetry.runs;
+  const away = runs.map((run) => run.legs.away.escort);
+  const home = runs.map((run) => run.legs.home.escort);
+  const whole = runs.map((run) => run.escort);
+  return [
+    row.label,
+    String(runs.length),
+    escortMedian(whole),
+    escortAbsentCell(whole),
+    escortMedian(away),
+    escortAbsentCell(away),
+    escortMedian(home),
+    escortAbsentCell(home),
+  ];
+}
+
+function printEscortTable(rows: TableRow[]): void {
+  const header = [
+    'seed',
+    'runs',
+    'escort med (m)',
+    'no teammate within 100m (none alive)',
+    'away escort med (m)',
+    'away no teammate (none alive)',
+    'home escort med (m)',
+    'home no teammate (none alive)',
+  ];
+  console.log('');
+  console.log('escort presence over time: nearest LIVE teammate every 60 ticks, median and absent share');
+  console.log(
+    'legend: "no teammate" = share of samples with no live teammate within 100 m, and in parentheses the share with',
+  );
+  console.log(
+    '        NO live teammate alive anywhere -- an escort that is far versus an escort that does not exist.',
+  );
+  console.log(header.join(' | '));
+  for (const row of rows) console.log(escortCells(row).join(' | '));
+}
+
+/** Encounters and energy: whether the carrier was moving when contact happened, and what
+ *  it had left in the tank when the run ended. */
+function encounterCells(row: TableRow): string[] {
+  const runs = row.telemetry.runs;
+  const encounterSpeeds = runs.flatMap((run) => run.encounterSpeedsMps);
+  const died = runs.filter((run) => run.endReason === 'died');
+  const surviving = runs.filter(
+    (run) => run.endReason !== 'died' && run.endReason !== 'captured',
+  );
+  const runTicks = runs.reduce((sum, run) => sum + run.runTicks, 0);
+  const nearTicks = runs.reduce((sum, run) => sum + run.enemyNearTicks, 0);
+  return [
+    row.label,
+    String(runs.reduce((sum, run) => sum + run.encounterCount, 0)),
+    `${runs.filter((run) => run.encounterCount > 0).length.toString()}/${runs.length.toString()}`,
+    `${nearTicks.toString()} (${percentCell(nearTicks, runTicks)})`,
+    medianCell(encounterSpeeds, 1),
+    medianCell(
+      runs.map((run) => run.meanSpeedMps),
+      1,
+    ),
+    medianCell(
+      runs.map((run) => run.startEnergy),
+      1,
+    ),
+    medianCell(
+      surviving.map((run) => run.endEnergy),
+      1,
+    ),
+    medianCell(
+      died.map((run) => run.endEnergy),
+      1,
+    ),
+    medianCell(
+      surviving.map((run) => run.endEnergy),
+      1,
+    ),
+    medianCell(
+      runs.map((run) => run.endHealthFraction * 100),
+    ),
+  ];
+}
+
+function printEncounterTable(rows: TableRow[]): void {
+  const header = [
+    'seed',
+    'encounters',
+    'runs with an encounter',
+    'ticks with enemy within 50m (share of carrier ticks)',
+    'speed at encounter med (m/s)',
+    'run mean speed med (m/s)',
+    'start energy med',
+    'end energy med (all)',
+    'end energy med (died)',
+    'end energy med (no death/capture)',
+    'end health med (%)',
+  ];
+  console.log('');
+  console.log('encounters and energy: an encounter is an enemy crossing inside 50 m');
+  console.log(
+    'legend: speed at encounter = the carrier own per-tick speed on the tick each episode began (0 on the pickup tick);',
+  );
+  console.log(
+    '        exposure = every tick with a live enemy inside 50 m, which a long chase shows even though the episode count does not.',
+  );
+  console.log(header.join(' | '));
+  for (const row of rows) console.log(encounterCells(row).join(' | '));
+}
+
+/** Runs that ended WITHOUT a death or a capture -- the population a kill/touch/capture
+ *  tally cannot see: whether they were stalled, standing, and next to base geometry. */
+function stallCells(row: TableRow): string[] {
+  const runs = row.telemetry.runs.filter(
+    (run) => run.endReason !== 'died' && run.endReason !== 'captured',
+  );
+  const interior = runs
+    .map((run) => run.endRoute.interiorDistanceM)
+    .filter((value) => Number.isFinite(value));
+  const stats = row.stats;
+  return [
+    row.label,
+    String(runs.length),
+    medianMaxCell(
+      runs.map((run) => run.endRoute.ticksSinceProgress),
+    ),
+    `${runs.reduce((sum, run) => sum + run.endRoute.stalledTicks, 0).toString()}`,
+    percentCell(runs.filter((run) => run.endRoute.onGround).length, runs.length),
+    medianMaxCell(interior),
+    medianCell(
+      runs.map((run) => run.endRoute.speedMps),
+      1,
+    ),
+    `${stats.stallWindows.toString()}/${stats.botWindowCount.toString()}`,
+    percentCell(stats.carrierStallWindows, stats.carrierWindowCount),
+    percentCell(stats.otherStallWindows, stats.otherWindowCount),
+  ];
+}
+
+/** Where the carrier was when its run ended: on the enemy deck right after the take, or
+ *  out in the open on the way home. Splits deaths by distance to the enemy stand (the
+ *  pickup point) against distance to its own. */
+function deathPlaceCells(row: TableRow): string[] {
+  const deaths = row.telemetry.runs.filter((run) => run.endReason === 'died');
+  const nearEnemy = deaths.filter((run) => run.endEnemyStandDistanceM <= 25).length;
+  const midEnemy = deaths.filter(
+    (run) => run.endEnemyStandDistanceM > 25 && run.endEnemyStandDistanceM <= 100,
+  ).length;
+  const farEnemy = deaths.length - nearEnemy - midEnemy;
+  return [
+    row.label,
+    String(deaths.length),
+    medianCell(deaths.map((run) => run.endStandDistanceM)),
+    medianCell(deaths.map((run) => run.endEnemyStandDistanceM)),
+    `${nearEnemy.toString()}/${midEnemy.toString()}/${farEnemy.toString()}`,
+    medianMaxCell(
+      deaths.map((run) => run.endRoute.speedMps),
+      1,
+    ),
+    medianMaxCell(
+      deaths.map((run) => run.endRoute.velocityMps),
+      1,
+    ),
+    medianCell(deaths.map((run) => run.endRoute.ticksSinceProgress)),
+  ];
+}
+
+function printDeathPlaceTable(rows: TableRow[]): void {
+  const header = [
+    'seed',
+    'deaths',
+    'dist to own stand med (m)',
+    'dist to enemy stand med (m)',
+    'deaths <25m / 25-100m / >100m from the enemy stand',
+    'end speed med/max (m/s)',
+    'end velocity med/max (m/s)',
+    'ticks since route progress med',
+  ];
+  console.log('');
+  console.log('where the carrier died: on the enemy deck right after the take, or out in the open');
+  console.log(
+    'legend: enemy stand = the stand the carried flag belongs to, i.e. where a clean pickup happened;',
+  );
+  console.log(
+    '        end speed = committed per-tick displacement / FIXED_DT; end velocity = the player store own velocity magnitude that tick.',
+  );
+  console.log(header.join(' | '));
+  for (const row of rows) console.log(deathPlaceCells(row).join(' | '));
+}
+
+function printStallTable(rows: TableRow[]): void {
+  const header = [
+    'seed',
+    'ends w/o death or capture',
+    'ticks since progress med/max',
+    'stall ticks (route)',
+    'onGround',
+    'interior dist med/max (m)',
+    'end speed med (m/s)',
+    'all-bot 120t stall windows',
+    'carrier window stall rate',
+    'non-carrier window stall rate',
+  ];
+  console.log('');
+  console.log('ending without a death or a capture: route progress, ground contact, base geometry');
+  console.log(
+    'legend: ticks since progress = ticks since the run last came PROGRESS_MIN_M closer to its own stand;',
+  );
+  console.log(
+    '        stall ticks = run ticks inside a 60-tick window with no such progress; interior dist = metres to the nearest',
+  );
+  console.log(
+    '        interior collider AABB (Infinity excluded); the last two columns are the same 120-tick displacement',
+  );
+  console.log(
+    '        stall window for every bot alive, split by whether it was carrying a flag -- the population control.',
+  );
+  console.log(header.join(' | '));
+  for (const row of rows) console.log(stallCells(row).join(' | '));
+}
+
 function printTelemetryTable(rows: TableRow[]): void {
   const header = [
     'seed',
@@ -550,7 +979,7 @@ describe.skipIf(process.env.BOT_TELEMETRY !== '1')(
       const rows: TableRow[] = [];
       for (const seed of TELEMETRY_SEEDS) {
         const collected: MatchTelemetry[] = [];
-        const stats = await runMatch(seed, MATCH_TICKS, collected);
+        const stats = await runMatch(seed, SWEEP_TICKS, collected);
         const telemetry = collected[0];
         if (!telemetry) throw new Error(`no telemetry collected for seed ${String(seed)}`);
         assertTelemetryWellFormed(telemetry, stats);
@@ -558,17 +987,44 @@ describe.skipIf(process.env.BOT_TELEMETRY !== '1')(
       }
       printTelemetryTable(rows);
       const pooled = mergeTelemetry(rows.map((row) => row.telemetry));
+      const sum = (pick: (stats: MatchStats) => number): number =>
+        rows.reduce((total, row) => total + pick(row.stats), 0);
       const stats = {
         ticks: pooled.sampledTicks,
-        kills: rows.reduce((sum, row) => sum + row.stats.kills, 0),
-        captures: rows.reduce((sum, row) => sum + row.stats.captures, 0),
-        flagTouches: rows.reduce((sum, row) => sum + row.stats.flagTouches, 0),
-        stallWindows: 0,
-        botWindowCount: 0,
+        kills: sum((s) => s.kills),
+        captures: sum((s) => s.captures),
+        flagTouches: sum((s) => s.flagTouches),
+        stallWindows: sum((s) => s.stallWindows),
+        botWindowCount: sum((s) => s.botWindowCount),
+        landmarks: rows[0]?.stats.landmarks ?? 0,
+        carrierWindowCount: sum((s) => s.carrierWindowCount),
+        carrierStallWindows: sum((s) => s.carrierStallWindows),
+        otherWindowCount: sum((s) => s.otherWindowCount),
+        otherStallWindows: sum((s) => s.otherStallWindows),
       };
-      console.log(tableCells({ label: 'ALL', stats, telemetry: pooled }).join(' | '));
+      const pooledRow: TableRow = { label: 'ALL', stats, telemetry: pooled };
+      console.log(tableCells(pooledRow).join(' | '));
       printCarrierDeathTable(rows);
-      console.log(deathCells({ label: 'ALL', stats, telemetry: pooled }).join(' | '));
+      console.log(deathCells(pooledRow).join(' | '));
+      // The waypoint graph's landmark set, printed because it decides what the runs above
+      // can possibly be: runMatch builds it with productionLandmarks (spawns + flag stands
+      // + every base object), the set the deployed server uses.
+      console.log('');
+      console.log(
+        `waypoint landmarks: production set (spawns + flag stands + base objects) = ${stats.landmarks.toString()} per seed; seeds ${TELEMETRY_SEEDS.join('/')}`,
+      );
+      printRunEndTable(rows);
+      console.log(runEndCells(pooledRow).join(' | '));
+      printRunShapeTable(rows);
+      console.log(runShapeCells(pooledRow).join(' | '));
+      printEscortTable(rows);
+      console.log(escortCells(pooledRow).join(' | '));
+      printEncounterTable(rows);
+      console.log(encounterCells(pooledRow).join(' | '));
+      printDeathPlaceTable(rows);
+      console.log(deathPlaceCells(pooledRow).join(' | '));
+      printStallTable(rows);
+      console.log(stallCells(pooledRow).join(' | '));
     }, 900_000);
   },
 );

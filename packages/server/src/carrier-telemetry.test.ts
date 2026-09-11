@@ -3,6 +3,7 @@ import {
   addPlayer,
   applyDamage,
   armorFor,
+  buildInteriorCollider,
   createFlags,
   createWorld,
   FIXED_DT,
@@ -257,6 +258,11 @@ describe('carrier telemetry', () => {
     // 500 m, not the corpse's 30 m: a dead teammate is not an escort.
     expect(run.closestTeammateM).toBe(500);
     expect(run.death).toBeNull();
+    // Far, but not nobody: the one alive teammate is outside the 100 m envelope, and the
+    // two absence classes must not be conflated.
+    expect(run.escort.medianM).toBe(500);
+    expect(run.escort.absentFraction).toBe(1);
+    expect(run.escort.noTeammateFraction).toBe(0);
   });
 
   it('reports no closest teammate at all for a carrier who has none', () => {
@@ -301,6 +307,156 @@ describe('carrier telemetry', () => {
     expect(chippedRun.endReason).toBe('died');
     expect(chippedRun.endDamage).toBeCloseTo(0.05, 6);
     expect(chippedRun.endDamage).toBeLessThan(LIGHT_ARMOR.maxDamage);
+  });
+
+  it('records the run shape: distance, pace, leg split, escort cadence and the end route', () => {
+    const world = flagWorld();
+    const carrier = addPlayer(world, TEAM_2_STAND, 1);
+    const telemetry = createCarrierTelemetry(world);
+
+    advance(world, telemetry); // pickup tick at the enemy stand, 200 m from home
+    for (const x of [96, 92, 88, 84, 80]) {
+      world.players.position.set([x, 0, 0], carrier * 3);
+      advance(world, telemetry);
+    }
+    const run = runAt(finishCarrierTelemetry(telemetry, world), 0);
+
+    expect(run.runTicks).toBe(6);
+    // 4 m a tick over the five moving ticks; the pickup tick itself displaces nothing.
+    expect(run.distanceM).toBe(20);
+    expect(run.meanSpeedMps).toBeCloseTo(20 / (6 * FIXED_DT), 6);
+    expect(run.p90SpeedMps).toBeCloseTo(4 / FIXED_DT, 6);
+    // Picked up at the enemy stand (200 m from home), ended 180 m out.
+    expect(run.pickupStandDistanceM).toBe(200);
+    expect(run.endStandDistanceM).toBe(180);
+    // ...and 20 m from the enemy stand the take happened at (x = +100).
+    expect(run.endEnemyStandDistanceM).toBe(20);
+    // The farthest point was the pickup itself, so exactly one tick is "away".
+    expect(run.turnTick).toBe(run.pickupTick);
+    expect(run.endLeg).toBe('home');
+    expect(run.legs.away.ticks).toBe(1);
+    expect(run.legs.away.distanceM).toBe(0);
+    expect(run.legs.home.ticks).toBe(5);
+    expect(run.legs.home.distanceM).toBe(20);
+    expect(run.legs.home.meanSpeedMps).toBeCloseTo(4 / FIXED_DT, 6);
+    // The escort cadence samples the pickup tick and nothing else inside six ticks.
+    expect(run.escort.samples).toBe(1);
+    // A carrier with no live teammate has no escort distance, and that is "absent", not
+    // "not measured": the median is null and the absence share is 1.
+    expect(run.escort.medianM).toBeNull();
+    expect(run.escort.absentFraction).toBe(1);
+    expect(run.escort.noTeammateFraction).toBe(1);
+    expect(run.escort).toEqual(run.legs.away.escort);
+    expect(run.encounterCount).toBe(0);
+    expect(run.encounterSpeedsMps).toEqual([]);
+    expect(run.startEnergy).toBe(LIGHT_ARMOR.maxEnergy);
+    // Making ground on the final tick: no stall, no ticks since progress.
+    expect(run.endRoute.ticksSinceProgress).toBe(0);
+    expect(run.endRoute.stalledTicks).toBe(0);
+    expect(run.endRoute.speedMps).toBeCloseTo(4 / FIXED_DT, 6);
+    // The store's own velocity is untouched by these hand-set moves (no stepWorld), while
+    // the committed displacement still says 4 m: the two fields are independent on purpose.
+    expect(run.endRoute.velocityMps).toBe(0);
+    expect(run.endRoute.interiorDistanceM).toBe(Infinity); // this world has no interiors
+  });
+
+  it('counts enemy encounters as rising edges and records the carrier speed at each', () => {
+    const world = flagWorld();
+    const carrier = addPlayer(world, TEAM_2_STAND, 1);
+    const enemy = addPlayer(world, { x: 60, y: 0, z: 0 }, 2); // 40 m: inside the 50 m envelope
+    const telemetry = createCarrierTelemetry(world);
+
+    advance(world, telemetry); // encounter 1 begins on the pickup tick itself
+    world.players.position.set([90, 0, 0], carrier * 3); // 30 m: still inside, no new edge
+    advance(world, telemetry);
+    world.players.position.set([80, 0, 0], carrier * 3);
+    world.players.position.set([10, 0, 0], enemy * 3); // 70 m: outside again
+    advance(world, telemetry);
+    world.players.position.set([70, 0, 0], carrier * 3);
+    world.players.position.set([60, 0, 0], enemy * 3); // 10 m: encounter 2 begins
+    advance(world, telemetry);
+
+    const run = runAt(finishCarrierTelemetry(telemetry, world), 0);
+    expect(run.encounterCount).toBe(2);
+    // Exposure counts ticks, not episodes: the pickup tick, the next tick, and the tick
+    // that started the second encounter were all inside 50 m.
+    expect(run.enemyNearTicks).toBe(3);
+    // The pickup tick has no previous sample, so its recorded speed is zero; the second
+    // encounter carries that tick's own 10 m of displacement.
+    expect(run.encounterSpeedsMps[0]).toBe(0);
+    expect(run.encounterSpeedsMps[1]).toBeCloseTo(10 / FIXED_DT, 6);
+    // One encounter each side of the turn: the pickup tick is the farthest point.
+    expect(run.legs.away.encounters).toBe(1);
+    expect(run.legs.home.encounters).toBe(1);
+  });
+
+  it('measures net route stall, which the bots own displacement check cannot see', () => {
+    const world = flagWorld();
+    const carrier = addPlayer(world, TEAM_2_STAND, 1);
+    world.players.onGround[carrier] = 1;
+    const telemetry = createCarrierTelemetry(world);
+
+    advance(world, telemetry); // pickup at x=100
+    // Wall-grinding: 16 m of lateral motion every tick, and never one metre closer to home.
+    for (let i = 0; i < 100; i += 1) {
+      world.players.position.set([100, 0, i % 2 === 0 ? 8 : -8], carrier * 3);
+      advance(world, telemetry);
+    }
+    const run = runAt(finishCarrierTelemetry(telemetry, world), 0);
+
+    expect(run.runTicks).toBe(101);
+    // The body moved (and started on the far side of the stand, so its distance only ever
+    // grows), so a displacement-based stuck check would pass it -- this run makes no ground.
+    expect(run.endRoute.ticksSinceProgress).toBe(100);
+    expect(run.endRoute.stalledTicks).toBeGreaterThan(30);
+    expect(run.endRoute.stalledTicks).toBeLessThan(60);
+    expect(run.endRoute.speedMps).toBeCloseTo(16 / FIXED_DT, 6);
+    expect(run.endRoute.onGround).toBe(true);
+  });
+
+  it('splits a mid-field recovery into away and home legs at the farthest point', () => {
+    const world = flagWorld();
+    const carrier = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const telemetry = createCarrierTelemetry(world);
+    // The dropped-enemy-flag shape: taken where it lies, 100 m from the carrier's own stand.
+    world.flags.state[1] = FlagState.Carried;
+    world.flags.carrierId[1] = carrier;
+
+    advance(world, telemetry); // pickup at x=0
+    for (const x of [20, 10, -10, -50]) {
+      world.players.position.set([x, 0, 0], carrier * 3);
+      advance(world, telemetry);
+    }
+    const run = runAt(finishCarrierTelemetry(telemetry, world), 0);
+
+    // Farthest excursion is x=+20 (index 1): indices 0-1 away, 2-4 home.
+    expect(run.turnTick).toBe(run.pickupTick + 1);
+    expect(run.endLeg).toBe('home');
+    expect(run.legs.away.ticks).toBe(2);
+    expect(run.legs.away.distanceM).toBe(20);
+    expect(run.legs.home.ticks).toBe(3);
+    expect(run.legs.home.distanceM).toBe(70);
+    expect(run.pickupStandDistanceM).toBe(100);
+    expect(run.endStandDistanceM).toBe(50);
+  });
+
+  it('measures the distance to the nearest interior collider from the sim own bounds', () => {
+    const world = flagWorld();
+    const carrier = addPlayer(world, TEAM_2_STAND, 1);
+    world.interiors.push(
+      buildInteriorCollider(
+        { positions: new Float32Array([0, 0, 0, 10, 0, 0, 0, 0, 10]) },
+        { position: { x: 0, y: 0, z: 0 }, rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 } },
+      ),
+    );
+    const telemetry = createCarrierTelemetry(world);
+
+    advance(world, telemetry);
+    world.players.position.set([30, 0, 5], carrier * 3); // 20 m out in x from a 0..10 box
+    advance(world, telemetry);
+
+    const run = runAt(finishCarrierTelemetry(telemetry, world), 0);
+    expect(run.endRoute.interiorDistanceM).toBe(20);
   });
 
   it('closes a run still in progress as matchEnd on the final tick', () => {
