@@ -243,6 +243,16 @@ export interface VehicleSnapshotData {
   damage: number;
   destroyed: 0 | 1;
   driverId: number;
+  /** The second crew seat (mount node 1), or -1. Real T2 vehicles carry up to
+   *  `numMountPoints` crew (Bomber 3, Havoc 6, Tank 2, MPB 1 -- see VehicleData's own
+   *  per-kind citations), but this sim's wire carries exactly one passenger seat: the
+   *  protocol's own contract for this slice keeps PROTOCOL_VERSION at 11 and every new
+   *  field optional, so a variable-length seat list (or a fixed six) would either need a
+   *  version bump or a snapshot field whose size changes per vehicle. The extra nodes stay
+   *  data-only (`VehicleData.numMountPoints`/`protectedMountPoints`) and the report names
+   *  them as the deliberate gap. Optional like `spawnTime`/`reservedPilotId` above, and
+   *  written unconditionally by the codec. */
+  passengerId?: number;
   padId: number;
   spawnTime?: number;
   reservedPilotId?: number;
@@ -274,6 +284,7 @@ export function serializeVehicle(world: World, id: number): VehicleSnapshotData 
     damage: num(v.damage, id),
     destroyed: bit(v.destroyed, id),
     driverId: num(v.driverId, id),
+    ...(v.passengerId[id]! !== -1 ? { passengerId: v.passengerId[id] } : {}),
     padId: num(v.padId, id),
     weaponTimer: num(v.weaponTimer, id),
     ...(v.spawnTime[id]! > 0
@@ -327,6 +338,7 @@ export function deserializeVehicle(world: World, data: VehicleSnapshotData): voi
   v.damage[data.id] = data.damage;
   v.destroyed[data.id] = data.destroyed;
   v.driverId[data.id] = data.driverId;
+  v.passengerId[data.id] = data.passengerId ?? -1;
   v.padId[data.id] = data.padId;
   v.weaponTimer[data.id] = data.weaponTimer;
   v.spawnTime[data.id] = data.spawnTime ?? 0;

@@ -6,6 +6,7 @@ import { GRAVITY } from './movement.js';
 import { nextRandom } from './random.js';
 import { groundHeightAt } from './ground.js';
 import { sampleTerrain } from './terrain.js';
+import { ProjectileType } from './weapons.js';
 import type { PendingFreeId, PlayerInput, Vec3, World } from './types.js';
 
 /** Every kind is a real T2 base-game vehicle script (GameData/base/scripts/vehicles/):
@@ -23,6 +24,334 @@ export enum VehicleKind {
   Tank = 4,
   MobilePointBase = 5,
 }
+
+/** Which one of a vehicle's own mounted weapons a shot came from (issue #57's second half).
+ *  The value travels as a raw byte on the projectile wire (ProjectileStore.weaponId, offset
+ *  by projectiles.ts's VEHICLE_WEAPON_ID_OFFSET = 150), so these ids are append-only exactly
+ *  like VehicleKind's. One id per real T2 datablock; the Shrike's blaster keeps the numbers
+ *  SHRIKE_BLASTER_DATA has carried since M5. */
+export enum VehicleWeaponId {
+  ShrikeBlaster = 0,
+  AssaultChaingun = 1,
+  AssaultMortar = 2,
+  BomberTurretGun = 3,
+  BomberBomb = 4,
+}
+
+/** One mounted weapon's own datablock numbers, shaped like turrets.ts's TurretBarrelData so
+ *  projectiles.ts can treat a vehicle weapon exactly like a barrel. Every field cites its own
+ *  script line in VEHICLE_WEAPON_DATA below; fields the script does not author are marked
+ *  "ours" there. */
+export interface VehicleWeaponData {
+  projectile: ProjectileType;
+  speed: number;
+  velInherit: number;
+  directDamage: number;
+  radiusDamage: number;
+  radius: number;
+  kickback: number;
+  /** Seconds between shots while the trigger is held (T2's own Fire-state timeout). */
+  fireTime: number;
+  /** Seconds of forced pause after a shot (T2's Reload-state timeout). Folded into the held
+   *  cadence for a weapon whose Fire state transitions to Reload (see repeatsWhileHeld), and
+   *  what a released trigger waits out. */
+  reloadTime: number;
+  /** The script's own `stateTransitionOnTimeout[Fire]`: `"Fire"` means the barrel keeps firing
+   *  while the trigger is held (the Tank's chaingun, vehicle_tank.cs:502) so the held cadence
+   *  is fireTime alone; `"Reload"` means every shot is followed by the Reload state (the
+   *  mortar :626, the Bomber's gun :502-503 and bomb :706), so the held cadence is
+   *  fireTime + reloadTime. */
+  repeatsWhileHeld: boolean;
+  lifetime: number;
+  /** Grenade-type ordnance only (AssaultMortar, BomberBomb): T2 GrenadeProjectileData. */
+  drag: number;
+  elasticity: number;
+  armTime: number;
+  /** Energy spent from the VEHICLE's own pool per shot -- the real scripts set both
+   *  `useMountEnergy` and `useCapacitor` on every turret barrel and `inheritEnergyFromMount`
+   *  on every turret base (vehicle_tank.cs:433,594; vehicle_bomber.cs:458,690) -- with
+   *  `minEnergy` as the floor below which the trigger dry-fires instead of shooting. */
+  minEnergy: number;
+  /** The barrel's own range where the script authors one (attackRadius); 0 = unused. */
+  attackRadius: number;
+}
+
+/** The local-space muzzle offset a barrel image's own T2 `mountPoint` selects, in metres
+ *  from the turret's own origin. OURS: the published asset set carries no converted
+ *  Tank/Bomber turret barrel models (the scripts name turret_tank_barrelchain.dts,
+ *  turret_tank_barrelmortar.dts, turret_belly_barrell.dts and the like, none of which are in
+ *  assets/out), so there is no model to measure these against. They exist to keep the
+ *  script's own node indices load-bearing rather than decorative: entry 1 (the Tank's right
+ *  chaingun barrel, vehicle_tank.cs:449 mountPoint 1) sits beside entry 0 (the centre mortar
+ *  barrel, :587 mountPoint 0), which is exactly the right/centre relationship the two real
+ *  barrel models have. 10 is the vehicle-frame bomb-bay node, whose real offset is authored
+ *  by the script and carried in each spec's own `offset` instead (vehicle_bomber.cs:684). */
+export const TURRET_MUZZLE_OFFSETS: Readonly<Record<number, Vec3>> = {
+  0: { x: 0, y: 0.25, z: 1.6 },
+  1: { x: 0.7, y: 0.25, z: 1.6 },
+  2: { x: 0, y: 0.1, z: 1.0 },
+  3: { x: 0, y: 0.1, z: 1.2 },
+  10: { x: 0, y: 0, z: 0 },
+};
+
+/** Real positions of the published models' own mount nodes, measured in each model's root
+ *  space (assets/out/katabatic/shapes/*.glb, node translations composed down the scene
+ *  graph) -- the same models vehicle-view.ts renders, so a muzzle computed from one of these
+ *  lands where the model's own mount socket is drawn. Node 10 is the turret socket on both
+ *  armed vehicles (vehicle.cs:419 and :465 mount their turret objects there) and the
+ *  blaster's own mountPoint on the Shrike (:252). The MPB's entries are its deployed
+ *  station/turret slots: vehicle.cs:851 mounts the station at node 2 and :866 the turret at
+ *  node 1. Kinds with no mounted node of interest are absent. */
+export const VEHICLE_MOUNT_OFFSETS: Readonly<Record<VehicleKind, Readonly<Record<number, Vec3>>>> =
+  {
+    [VehicleKind.Shrike]: { 10: { x: 0, y: -0.808, z: 2.123 } },
+    [VehicleKind.Wildcat]: {},
+    [VehicleKind.Bomber]: {
+      1: { x: 0, y: 0.539, z: 2.571 },
+      10: { x: 0.01, y: -0.647, z: 1.634 },
+    },
+    [VehicleKind.Havoc]: {},
+    [VehicleKind.Tank]: { 10: { x: 0, y: 3.035, z: -1.5 } },
+    [VehicleKind.MobilePointBase]: {
+      1: { x: 0, y: 1.897, z: 1.583 },
+      2: { x: 0, y: -1.875, z: -8.662 },
+    },
+  };
+
+/** One weapon a kind mounts. `mountNode` and `barrelNode` are the script's own two node
+ *  indices; `seat` says which crew position pulls the trigger. */
+export interface VehicleWeaponSpec {
+  weapon: VehicleWeaponId;
+  /** The VEHICLE node the weapon's turret/mount hangs on (vehicle.cs's own
+   *  `mountObject(%turret, 10)`, vehicle_shrike.cs:252's `mountPoint = 10`). */
+  mountNode: number;
+  /** The barrel image's own T2 `mountPoint`, selecting TURRET_MUZZLE_OFFSETS' local entry:
+   *  Tank chaingun 1 (vehicle_tank.cs:449), Tank mortar 0 (:587), Bomber gun barrels 0 and 1
+   *  (vehicle_bomber.cs:470, :569), Bomber bomb bay 10 (:685). */
+  barrelNode: number;
+  /** The barrel image's own authored `offset`, when the script gives one; zero otherwise. */
+  offset: Vec3;
+  /** 0 = the pilot fires it, 1 = the passenger. Both armed vehicles' turrets are manned from
+   *  node 1 -- the Tank's turreteer (vehicle.cs:701) and the Bomber's bombardier (:601)
+   *  -- while the Shrike's blaster belongs to its single pilot. */
+  seat: 0 | 1;
+  /** False only for the Shrike. Its shot has always originated at the hull origin since M5
+   *  and its own kill-credit test fires along the hull heading through a target placed on
+   *  that line; moving the origin to the wingtip (1.93 -0.52 0.044 from Mount10, the real
+   *  authored offset) would divert it sideways. The spec still records the node and the
+   *  authored offset, and the report names this deliberate deviation. */
+  atMountNode: boolean;
+}
+
+const NO_WEAPONS: readonly VehicleWeaponSpec[] = [];
+const NO_OFFSET: Vec3 = { x: 0, y: 0, z: 0 };
+
+/** Shrike blaster: fired by the pilot, and the one weapon this sim has carried since M5.
+ *  Real cadence is T2's `fireTimeout = 125` (vehicle_shrike.cs:263); playtest tuning asks
+ *  for 200 ms between shots (see SHRIKE_BLASTER_DATA's own comment), which is unchanged. */
+const SHRIKE_WEAPONS: readonly VehicleWeaponSpec[] = [
+  {
+    weapon: VehicleWeaponId.ShrikeBlaster,
+    mountNode: 10, // vehicle_shrike.cs:252
+    barrelNode: 10,
+    offset: { x: 1.93, y: -0.52, z: 0.044 }, // vehicle_shrike.cs:254
+    seat: 0,
+    atMountNode: false, // see VehicleWeaponSpec.atMountNode
+  },
+];
+
+/** Tank (Beowulf): one `AssaultPlasmaTurret` at vehicle node 10 with `numWeapons = 2`
+ *  (vehicle_tank.cs:412-436), manned from the turreteer seat (vehicle.cs:701-731). */
+const TANK_WEAPONS: readonly VehicleWeaponSpec[] = [
+  {
+    weapon: VehicleWeaponId.AssaultChaingun,
+    mountNode: 10, // vehicle.cs:465
+    barrelNode: 1, // vehicle_tank.cs:449
+    offset: NO_OFFSET,
+    seat: 1,
+    atMountNode: true,
+  },
+  {
+    weapon: VehicleWeaponId.AssaultMortar,
+    mountNode: 10, // vehicle.cs:465
+    barrelNode: 0, // vehicle_tank.cs:587
+    offset: NO_OFFSET,
+    seat: 1,
+    atMountNode: true,
+  },
+];
+
+/** Bomber (Thundersword): the belly turret at vehicle node 10 (vehicle.cs:410-428,
+ *  `numWeapons = 3`) with its paired gun `Fire1`/`Fire2` states collapsed to one weapon
+ *  slot, plus the bomb bay the bombardier also mans (vehicle.cs:601-650). */
+const BOMBER_WEAPONS: readonly VehicleWeaponSpec[] = [
+  {
+    weapon: VehicleWeaponId.BomberTurretGun,
+    mountNode: 10, // vehicle.cs:419
+    barrelNode: 0, // vehicle_bomber.cs:470
+    offset: NO_OFFSET,
+    seat: 1,
+    atMountNode: true,
+  },
+  {
+    weapon: VehicleWeaponId.BomberBomb,
+    mountNode: 10, // vehicle.cs:419
+    barrelNode: 10, // vehicle_bomber.cs:685
+    offset: { x: 2, y: -4, z: -0.5 }, // vehicle_bomber.cs:684 (the right-hand bomb image)
+    seat: 1,
+    atMountNode: true,
+  },
+];
+
+/** A pending Shrike-blaster shot, drained by projectiles.ts's spawnVehicleShot the same tick
+ *  stepVehicles produces it -- exactly parallel to TurretFireEvent/spawnTurretShot (M4). */
+export interface VehicleFireEvent {
+  vehicleId: number;
+  team: number;
+  origin: Vec3;
+  direction: Vec3;
+  velocity: Vec3;
+  /** Which of the firing vehicle's own weapons produced this shot. Optional so the event
+   *  shape M5 established still validates; a missing value means the Shrike blaster, the
+   *  only vehicle weapon that existed then (projectiles.ts's spawnVehicleShot defaults it
+   *  the same way). */
+  weapon?: VehicleWeaponId;
+  /** The T2 mount node the shot left from (VehicleWeaponSpec.mountNode), carried so the
+   *  event names its own geometry and a test can assert it without re-deriving the table. */
+  mountNode?: number;
+  /** The driving player credited when this shot destroys something (issue #57 kill
+   *  attribution): tryFireShrikeBlaster always sets it, since it only fires piloted.
+   *  Optional so partial/older event shapes stay valid -- projectiles.ts's
+   *  spawnVehicleShot materializes a missing ownerId as -1, the same unattributed
+   *  convention turret shots already use, and destruction scoring (applyVehicleKillScore)
+   *  credits nobody for -1. */
+  ownerId?: number;
+}
+
+export const SHRIKE_BLASTER_DATA = {
+  directDamage: 0.125, // weapons/chaingun.cs:503
+  speed: 425, // weapons/chaingun.cs:512
+  lifetime: 1, // weapons/chaingun.cs:516 (lifetimeMS 1000)
+  // T2's fireTimeout is 125 ms. Playtest tuning requests 200 ms between shots; this
+  // remains one authoritative shot stream because barrel alternation is presentation-only.
+  fireInterval: 0.2,
+  minEnergy: 5, // vehicles/vehicle_shrike.cs:261-262
+};
+
+/** Every vehicle weapon's own numbers, projectiles.ts's single source of truth for a
+ *  vehicle-fired shot exactly as TURRET_BARREL_DATA is for a turret-fired one. Indexed by
+ *  VehicleWeaponId, i.e. the wire's own id space once offset by 150. */
+export const VEHICLE_WEAPON_DATA: Record<VehicleWeaponId, VehicleWeaponData> = {
+  // weapons/chaingun.cs:503-516 plus the Shrike's own energy cost -- the existing M5 weapon,
+  // restated here so every vehicle weapon lives in one table. Its projectile type stays
+  // `VehicleLaser` (weapons.ts's own ProjectileType member for exactly this bolt): the client
+  // draws a Shrike bolt differently from a player Blaster bolt, and projectiles.ts resolves
+  // both VehicleLaser and Tracer same-tick.
+  [VehicleWeaponId.ShrikeBlaster]: {
+    projectile: ProjectileType.VehicleLaser,
+    speed: SHRIKE_BLASTER_DATA.speed,
+    velInherit: 1.0, // weapons/chaingun.cs:514
+    directDamage: SHRIKE_BLASTER_DATA.directDamage,
+    radiusDamage: 0,
+    radius: 0,
+    kickback: 0,
+    fireTime: SHRIKE_BLASTER_DATA.fireInterval,
+    reloadTime: 0,
+    repeatsWhileHeld: true, // vehicle_shrike.cs:291 loops Fire -> checkState -> Fire
+    lifetime: SHRIKE_BLASTER_DATA.lifetime,
+    drag: 0,
+    elasticity: 0,
+    armTime: 0,
+    minEnergy: SHRIKE_BLASTER_DATA.minEnergy,
+    attackRadius: 0,
+  },
+  // TracerProjectileData(AssaultChaingunBullet), vehicle_tank.cs:361-401, and its barrel
+  // AssaultPlasmaTurretBarrel, vehicle_tank.cs:446-509.
+  [VehicleWeaponId.AssaultChaingun]: {
+    projectile: ProjectileType.Tracer,
+    speed: 425, // :374 dryVelocity
+    velInherit: 1.0, // :376
+    directDamage: 0.16, // :366
+    radiusDamage: 0,
+    radius: 0,
+    kickback: 0,
+    fireTime: 0.1, // :501 Fire-state timeout
+    reloadTime: 0.1, // :508 Reload-state timeout
+    repeatsWhileHeld: true, // :502 stateTransitionOnTimeout[3] = "Fire"
+    lifetime: 3, // :378 lifetimeMS 3000
+    drag: 0,
+    elasticity: 0.0, // not a grenade; see the mortar for the grenade fields
+    armTime: 0,
+    minEnergy: 15.0, // :466
+    attackRadius: 75, // :474
+  },
+  // GrenadeProjectileData(AssaultMortar), vehicle_tank.cs:552-577, and its barrel
+  // AssaultMortarTurretBarrel, vehicle_tank.cs:584-641.
+  [VehicleWeaponId.AssaultMortar]: {
+    projectile: ProjectileType.Grenade,
+    speed: 65, // :572 muzzleVelocity
+    velInherit: 1.0, // :565
+    directDamage: 0.0, // :556
+    radiusDamage: 1.0, // :558 indirectDamage
+    radius: 25.0, // :559 damageRadius
+    kickback: 2500, // :561 kickBackStrength
+    fireTime: 1.0, // :627 Fire-state timeout
+    reloadTime: 1.0, // :636 Reload-state timeout
+    repeatsWhileHeld: false, // :626 stateTransitionOnTimeout[3] = "Reload"
+    lifetime: 5, // ours: the script authors no lifetimeMS for a grenade; the same 5 s this
+    // sim's own Mortar round uses (weapons.ts WEAPON_DATA[WeaponId.Mortar]) keeps the two
+    // shells in the same family.
+    drag: 0.1, // :573
+    elasticity: 0.0, // :569 grenadeElasticity
+    armTime: 0.25, // :571 armingDelayMS 250
+    minEnergy: 77.0, // :596
+    attackRadius: 75, // :605
+  },
+  // LinearFlareProjectileData(BomberFusionBolt), vehicle_bomber.cs:408-435, and its barrel
+  // BomberTurretBarrel, vehicle_bomber.cs:467-563. The barrel's twin `Fire1`/`Fire2` states
+  // (:503, :541) alternate the left and right barrels at one shared 0.13 s cadence; this
+  // sim's single shot stream uses that cadence, the same call the Shrike's own 125 ms
+  // fireTimeout got when barrel alternation was declared presentation-only.
+  [VehicleWeaponId.BomberTurretGun]: {
+    projectile: ProjectileType.Linear,
+    speed: 200.0, // :415 dryVelocity
+    velInherit: 1.0, // :417
+    directDamage: 0.35, // :409
+    radiusDamage: 0,
+    radius: 0,
+    kickback: 0,
+    fireTime: 0.13, // :503
+    reloadTime: 0.1, // :513
+    repeatsWhileHeld: false, // :502 stateTransitionOnTimeout[2] = "Reload1"
+    lifetime: 3, // :419 lifetimeMS 3000
+    drag: 0,
+    elasticity: 0,
+    armTime: 0,
+    minEnergy: 16.0, // :479
+    attackRadius: 75, // :488
+  },
+  // BombProjectileData(BomberBomb), vehicle_bomber.cs:629-654, and its image
+  // BomberBombImage, vehicle_bomber.cs:681-767.
+  [VehicleWeaponId.BomberBomb]: {
+    projectile: ProjectileType.Grenade,
+    speed: 0.1, // :646 muzzleVelocity -- the bomb is DROPPED, not thrown
+    velInherit: 1.0, // :641
+    directDamage: 0.0, // :633
+    radiusDamage: 1.1, // :635 indirectDamage
+    radius: 30, // :636 damageRadius
+    kickback: 2500, // :638 kickBackStrength
+    fireTime: 0.32, // :707 Fire1-state timeout (Fire2's :744 is identical)
+    reloadTime: 0.1, // :716
+    repeatsWhileHeld: false, // :706 stateTransitionOnTimeout[2] = "Reload1"
+    lifetime: 10, // ours: the script authors no lifetimeMS; a 2 s-armed bomb dropped from a
+    // Bomber's own ceiling needs to stay alive until it reaches the ground.
+    drag: 0.3, // :647
+    elasticity: 0.25, // :643 grenadeElasticity
+    armTime: 2.0, // :645 armingDelayMS 2000
+    minEnergy: 53.0, // :694
+    attackRadius: 0,
+  },
+};
 
 export interface VehicleData {
   mass: number;
@@ -47,6 +376,38 @@ export interface VehicleData {
    *  Tank's `checkRadius` (5.5535) sits ABOVE its hover band and would fight the spring
    *  every tick, and the MPB has to rest on its wheels. See each entry's own comment. */
   groundContactHeight: number;
+  /** Real T2 `numMountPoints`: total crew seats, node 0 the pilot. Every script cites its
+   *  own line (vehicle_shrike.cs:116 = 1, vehicle_wildcat.cs:101 = 1,
+   *  vehicle_bomber.cs:203 = 3, vehicle_havoc.cs:92 = 6, vehicle_tank.cs:228 = 2,
+   *  vehicle_mpb.cs:132 = 1). This sim carries seats 0 and 1 on the wire (see
+   *  VehicleSnapshotData.passengerId); a kind's higher nodes stay data-only and are named
+   *  in the report. */
+  numMountPoints: number;
+  /** Real T2 `isProtectedMountPoint[n]`, one flag per node, same order. Its one rule
+   *  (player.cs:2681-2732, `Armor::damageObject`): damage aimed at a crew member sitting in
+   *  a protected node is redirected onto the vehicle instead -- the crewman is not hurt.
+   *  Every node of all six kinds is protected in the scripts, so a boarded player is never
+   *  individually hittable while aboard in this sim either. */
+  protectedMountPoints: readonly boolean[];
+  /** Real T2 `multipassenger`. False for the Shrike (vehicle_shrike.cs:105) and the Wildcat
+   *  (unset -- the datablock lacks the field; vehicle_wildcat.cs:107's `lightOnly = 1` is
+   *  the unrelated armor gate), true for the Bomber (:201), Havoc (:88), Tank (:226) and
+   *  false for the MPB (:130 -- it is a single-seat vehicle despite being a "base"). */
+  multipassenger: boolean;
+  /** Real T2 `cantAbandon` (vehicle_mpb.cs:135). Its one rule (vehicle.cs:1325-1347,
+   *  `vehicleAbandonTimeOut`): a vehicle left crewless after its pilot mounts somewhere else
+   *  is deleted 15 s later -- unless this flag is set, in which case it persists. */
+  cantAbandon: boolean;
+  /** Real T2 `cantTeamSwitch` (vehicle_mpb.cs:136). Its one rule (player.cs:2115-2124,
+   *  `Armor::onMount`): mounting a vehicle re-teams its sensors to the mounting player's own
+   *  group -- unless this flag is set. This sim has no per-vehicle sensor group; the closest
+   *  faithful enforcement of "this vehicle is never handed to the other team" is refusing a
+   *  pilot whose team does not match the vehicle's own (see mountNearestVehicle). */
+  cantTeamSwitch: boolean;
+  /** Every weapon this kind mounts, pilot- or passenger-fired. The Shrike's blaster is the
+   *  equipment spec entry 0; the Wildcat mounts nothing, matching vehicle_wildcat.cs's
+   *  weapons section being empty. */
+  weapons: readonly VehicleWeaponSpec[];
 }
 
 // Tank hover band (vehicles/vehicle_tank.cs:274-277). Declared before VEHICLE_DATA because
@@ -89,6 +450,12 @@ export const VEHICLE_DATA: Record<VehicleKind, VehicleData> = {
     // Unchanged from this file's original sphere-based ground rule (checkRadius as the
     // resting height): the flyer is self-supporting, so this only ever matters in a crash.
     groundContactHeight: 5.5, // = checkRadius, vehicles/vehicle_shrike.cs:225
+    numMountPoints: 1, // vehicles/vehicle_shrike.cs:116
+    protectedMountPoints: [true], // vehicles/vehicle_shrike.cs:117
+    multipassenger: false, // vehicles/vehicle_shrike.cs:105
+    cantAbandon: false, // unset in the script: this vehicle despawns when abandoned
+    cantTeamSwitch: false, // unset in the script
+    weapons: SHRIKE_WEAPONS, // vehicles/vehicle_shrike.cs:333-345 (ScoutChaingun image)
   },
   [VehicleKind.Wildcat]: {
     mass: 400,
@@ -108,9 +475,14 @@ export const VEHICLE_DATA: Record<VehicleKind, VehicleData> = {
     // Unchanged from this file's original sphere-based ground rule; sits below the hover
     // band's own sagged equilibrium (2.333 m), so the spring is what holds the craft.
     groundContactHeight: 1.7785, // = checkRadius, vehicles/vehicle_wildcat.cs:209
+    numMountPoints: 1, // vehicles/vehicle_wildcat.cs:101
+    protectedMountPoints: [true], // vehicles/vehicle_wildcat.cs:102
+    multipassenger: false, // unset in the script (a single-seat grav cycle)
+    cantAbandon: false, // unset in the script
+    cantTeamSwitch: false, // unset in the script
+    weapons: NO_WEAPONS, // vehicle_wildcat.cs has an empty WEAPONS section
   },
-  // Thundersword (FlyingVehicleData/BomberFlyer). Weapon turrets, the bomb bay and the
-  // passenger seats are a follow-up slice -- nothing here models them.
+  // Thundersword (FlyingVehicleData/BomberFlyer).
   [VehicleKind.Bomber]: {
     mass: 350, // vehicles/vehicle_bomber.cs:260
     maxDamage: 2.8, // vehicles/vehicle_bomber.cs:212
@@ -127,9 +499,14 @@ export const VEHICLE_DATA: Record<VehicleKind, VehicleData> = {
     cameraOffset: 5, // vehicles/vehicle_bomber.cs:206
     cameraLag: 1.0, // vehicles/vehicle_bomber.cs:207
     groundContactHeight: 7.1895, // = checkRadius; the flyer only touches ground in a crash
+    numMountPoints: 3, // vehicles/vehicle_bomber.cs:196
+    protectedMountPoints: [true, true, true], // vehicles/vehicle_bomber.cs:197-199
+    multipassenger: true, // vehicles/vehicle_bomber.cs:182
+    cantAbandon: false, // unset in the script
+    cantTeamSwitch: false, // unset in the script
+    weapons: BOMBER_WEAPONS, // belly turret + bomb bay, vehicle_bomber.cs:439-767
   },
-  // Havoc (FlyingVehicleData/HAPCFlyer). Its turret and the six passenger mount points are
-  // a follow-up slice.
+  // Havoc (FlyingVehicleData/HAPCFlyer).
   [VehicleKind.Havoc]: {
     mass: 550, // vehicles/vehicle_havoc.cs:122
     maxDamage: 3.5, // vehicles/vehicle_havoc.cs:73
@@ -146,8 +523,19 @@ export const VEHICLE_DATA: Record<VehicleKind, VehicleData> = {
     cameraOffset: 2, // vehicles/vehicle_havoc.cs:67
     cameraLag: 8.5, // vehicles/vehicle_havoc.cs:68
     groundContactHeight: 7.8115, // = checkRadius; the flyer only touches ground in a crash
+    numMountPoints: 6, // vehicles/vehicle_havoc.cs:57
+    protectedMountPoints: [true, true, true, true, true, true], // vehicles/vehicle_havoc.cs:58-63
+    multipassenger: true, // vehicles/vehicle_havoc.cs:46
+    cantAbandon: false, // unset in the script
+    cantTeamSwitch: false, // unset in the script
+    // vehicle_havoc.cs's own WEAPONS section is EMPTY: both the base script
+    // (GameData/base/scripts/vehicles/vehicle_havoc.cs, 6,299 bytes) and the classic one end
+    // at that header with no datablock after it, and a repo-wide search for a HAPC turret
+    // finds none -- the heavy transport is unarmed in T2. HAPCFlyer::onAdd mounts no image
+    // either (vehicle.cs:445-453: it only schedules its "activate" thread).
+    weapons: NO_WEAPONS,
   },
-  // Beowulf (HoverVehicleData/AssaultVehicle). Its turret/weapons are a follow-up slice.
+  // Beowulf (HoverVehicleData/AssaultVehicle).
   [VehicleKind.Tank]: {
     mass: 1500, // vehicles/vehicle_tank.cs:243
     maxDamage: 3.15, // vehicles/vehicle_tank.cs:232
@@ -164,9 +552,14 @@ export const VEHICLE_DATA: Record<VehicleKind, VehicleData> = {
     cameraOffset: 3, // vehicles/vehicle_tank.cs:224
     cameraLag: 1.5, // vehicles/vehicle_tank.cs:225
     groundContactHeight: TANK_GROUND_CONTACT_HEIGHT, // see that constant's own comment
+    numMountPoints: 2, // vehicles/vehicle_tank.cs:225
+    protectedMountPoints: [true, true], // vehicles/vehicle_tank.cs:226-227
+    multipassenger: true, // vehicles/vehicle_tank.cs:211
+    cantAbandon: false, // unset in the script
+    cantTeamSwitch: false, // unset in the script
+    weapons: TANK_WEAPONS, // AssaultPlasmaTurret: chaingun + mortar, vehicle_tank.cs:412-641
   },
-  // Jericho (WheeledVehicleData/MobileBaseVehicle). Its deployable turret/station, the
-  // wheeled suspension and the canAbandon/cantTeamSwitch rules are follow-up slices.
+  // Jericho (WheeledVehicleData/MobileBaseVehicle).
   [VehicleKind.MobilePointBase]: {
     mass: 2000, // vehicles/vehicle_mpb.cs:150
     maxDamage: 3.85, // vehicles/vehicle_mpb.cs:193
@@ -183,6 +576,14 @@ export const VEHICLE_DATA: Record<VehicleKind, VehicleData> = {
     cameraOffset: 6, // vehicles/vehicle_mpb.cs:133
     cameraLag: 1.5, // vehicles/vehicle_mpb.cs:134
     groundContactHeight: MPB_GROUND_REST_HEIGHT, // see that constant's own comment
+    numMountPoints: 1, // vehicles/vehicle_mpb.cs:132
+    protectedMountPoints: [true], // vehicles/vehicle_mpb.cs:133
+    multipassenger: false, // vehicles/vehicle_mpb.cs:130
+    cantAbandon: true, // vehicles/vehicle_mpb.cs:135
+    cantTeamSwitch: true, // vehicles/vehicle_mpb.cs:136
+    // The hull itself mounts nothing: its whole armament arrives with the deployed
+    // MobileTurretBase below (vehicle.cs:860-869).
+    weapons: NO_WEAPONS,
   },
 };
 
@@ -203,10 +604,37 @@ export interface VehicleStore {
   damage: Float64Array;
   destroyed: Uint8Array;
   driverId: Int16Array; // -1 = unpiloted
+  /** Seat 1 (mount node 1): the gunner/bombardier or an ordinary passenger, -1 when empty.
+   *  Kinds whose numMountPoints is 1 never use it. See VehicleData.numMountPoints for why
+   *  nodes 2+ are data-only in this sim. */
+  passengerId: Int16Array;
+  /** The last player to hold this vehicle's pilot seat (real T2 `%vehicle.lastPilot`,
+   *  vehicle.cs:1337). Kept after a dismount because real T2's abandonment rule is keyed on
+   *  it: a pilot who leaves and then mounts a DIFFERENT vehicle arms this one's 15 s
+   *  abandon timer (player.cs:2101-2105), and `vehicleAbandonTimeOut` (vehicle.cs:1325)
+   *  deletes the vehicle unless its data sets cantAbandon. */
+  lastPilotId: Int16Array;
+  /** Seconds until this abandoned vehicle is deleted; -1 = no timer armed. */
+  abandonTimer: Float64Array;
+  /** Seconds until an un-crewed MPB deploys; -1 = no deploy pending. Real T2 schedules
+   *  `deployVehicle` 500 ms after the pilot dismounts (vehicle.cs:813-824), which then waits
+   *  for the hull to stop moving (vehicle.cs:832). */
+  deployTimer: Float64Array;
+  /** 1 once the MPB's station and turret are up (real T2 `%obj.deployed`). */
+  deployed: Uint8Array;
+  /** The deployed station's BaseObjectStore id, -1 when none: reused across deploy cycles so
+   *  repeated deploys never consume another slot of the fixed-capacity base-object store. */
+  stationObjectId: Int16Array;
+  /** The deployed turret's TurretStore id, -1 when none (same reuse rationale). */
+  turretId: Int16Array;
   padId: Int16Array; // originating BaseObjectStore id, -1 if none
   spawnTime: Float64Array; // seconds until fabrication and automatic boarding complete
   reservedPilotId: Int16Array;
-  weaponTimer: Float64Array; // Shrike blaster cooldown; unused by Wildcat
+  weaponTimer: Float64Array; // primary weapon cooldown; unused by the Wildcat
+  /** Secondary weapon cooldown (a kind's weapons[1], i.e. the Tank's mortar and the
+   *  Bomber's bombs); unused by every single-weapon kind. Kept off the wire -- see
+   *  snapshot.ts's VehicleSnapshotData.weaponTimer comment. */
+  weaponTimerAlt: Float64Array;
   onGround: Uint8Array;
   // Codex review round 1 (this PR), finding 8: the Wildcat's own jump was level-triggered
   // on `input.jump` with no edge detection, so holding the key applied a fresh impulse every
@@ -251,10 +679,18 @@ export function createVehicleStore(capacity = VEHICLE_CAPACITY): VehicleStore {
     damage: new Float64Array(capacity),
     destroyed: new Uint8Array(capacity),
     driverId: new Int16Array(capacity).fill(-1),
+    passengerId: new Int16Array(capacity).fill(-1),
+    lastPilotId: new Int16Array(capacity).fill(-1),
+    abandonTimer: new Float64Array(capacity).fill(-1),
+    deployTimer: new Float64Array(capacity).fill(-1),
+    deployed: new Uint8Array(capacity),
+    stationObjectId: new Int16Array(capacity).fill(-1),
+    turretId: new Int16Array(capacity).fill(-1),
     padId: new Int16Array(capacity).fill(-1),
     spawnTime: new Float64Array(capacity),
     reservedPilotId: new Int16Array(capacity).fill(-1),
     weaponTimer: new Float64Array(capacity),
+    weaponTimerAlt: new Float64Array(capacity),
     onGround: new Uint8Array(capacity),
     lastAttackerId: new Int16Array(capacity).fill(-1),
     wasJumpHeld: new Uint8Array(capacity),
@@ -438,10 +874,22 @@ export function spawnVehicleAtPad(world: World, padId: number, kind: VehicleKind
   vehicles.destroyed[id] = 0;
   vehicles.lastAttackerId[id] = -1;
   vehicles.driverId[id] = -1;
+  vehicles.passengerId[id] = -1;
+  vehicles.lastPilotId[id] = -1;
+  vehicles.abandonTimer[id] = -1;
+  vehicles.deployTimer[id] = -1;
+  vehicles.deployed[id] = 0;
+  // A reused id must not inherit the previous occupant's deployed objects: release them
+  // before the slot's own ids are cleared (the objects themselves are removed lazily, see
+  // teardownMobilePointBase).
+  teardownMobilePointBase(world, id);
+  vehicles.stationObjectId[id] = -1;
+  vehicles.turretId[id] = -1;
   vehicles.padId[id] = padId;
   vehicles.spawnTime[id] = 0;
   vehicles.reservedPilotId[id] = -1;
   vehicles.weaponTimer[id] = 0;
+  vehicles.weaponTimerAlt[id] = 0;
   vehicles.onGround[id] = 0;
   vehicles.wasJumpHeld[id] = 0;
   return id;
@@ -494,9 +942,8 @@ function stepVehicleBuild(world: World, id: number, dt: number): boolean {
     v.reservedPilotId[id] = -1;
   if (v.spawnTime[id] === 0 && v.reservedPilotId[id] !== -1) {
     if (world.players.mountedVehicleId[pilot] === -1) {
-      v.driverId[id] = pilot;
-      world.players.mountedVehicleId[pilot] = id;
-      seatDriver(world, id, pilot);
+      seatCrewMember(world, id, pilot, 0);
+      seatCrew(world, id);
     }
     v.reservedPilotId[id] = -1;
   }
@@ -1634,8 +2081,16 @@ function resolveVehiclePlayerContacts(
   return impact;
 }
 
-// --- Mount/dismount, seat position, weapon takeover (Task 5) ----------------------------
+// --- Mount/dismount, crew seats, seat position, weapon takeover (Task 5) -----------------
 
+/** Where a crew member sits: the vehicle origin for BOTH seats. Real T2 parents each player
+ *  to its own mount node (`Mount0`, `Mount1` -- measured in the published models at
+ *  (0, 0.539, 2.571) and the like, VEHICLE_MOUNT_OFFSETS), but this sim has always
+ *  seat-locked the pilot to the hull origin and its camera/HUD code is built on that; a
+ *  second seat differing only by a few metres of local offset would move the passenger's
+ *  authoritative hitbox without any consumer of it. Both crew therefore share the hull
+ *  origin, which is also what keeps a mounted player's position exactly the vehicle's own
+ *  position for projectiles.ts's mount-point protection checks. */
 function seatPosition(vehicles: VehicleStore, id: number): Vec3 {
   const base = id * 3;
   return {
@@ -1661,28 +2116,68 @@ function idleVehicleInput(): PlayerInput {
   };
 }
 
-/** The id of the nearest active, non-destroyed, unoccupied vehicle within its own
- *  minMountDist of the player, or null. Shared by mountNearestVehicle (the actual mount,
- *  server/sim-side) and the client-facing nearbyUnoccupiedVehicle export below (so app.ts
- *  can decide whether pressing E is even mount-relevant before sending the `use` wire bit --
- *  M5 plan, Global Constraints: "a held E near an unoccupied vehicle... additionally sends
- *  use: true"). */
-function findUnoccupiedVehicleInRange(world: World, playerId: number): number | null {
+/** Which crew node a player occupies in `vId`, or -1. Both seats are addressed by node index
+ *  (0 = pilot, 1 = passenger), which is what VehicleData.protectedMountPoints is indexed by
+ *  and what projectiles.ts needs to apply the protected-mount rule. */
+function crewSeatOf(world: World, vId: number, playerId: number): number {
+  const vehicles = world.vehicles;
+  if (playerId < 0) return -1;
+  if ((vehicles.driverId[vId] ?? -1) === playerId) return 0;
+  if ((vehicles.passengerId[vId] ?? -1) === playerId) return 1;
+  return -1;
+}
+
+/** Issue #57 follow-up: is `playerId` riding in a seat its own kind marks protected
+ *  (VehicleData.protectedMountPoints)? This is real T2's `isProtectedMountPoint` rule --
+ *  damage aimed at a crewman in a protected node is redirected onto the vehicle
+ *  (player.cs:2681-2732) -- and projectiles.ts reads it to decide whether a mounted player
+ *  is a hittable target at all. Every node of every kind is protected in the scripts, so the
+ *  observable M5 behavior ("a mounted player is never directly hittable") is unchanged; the
+ *  flag is what decides it now instead of a hardcoded "every mounted player". */
+export function isProtectedSeat(world: World, playerId: number): boolean {
+  const vId = world.players.mountedVehicleId[playerId] ?? -1;
+  if (vId < 0 || vId >= world.vehicles.count) return false;
+  const seat = crewSeatOf(world, vId, playerId);
+  if (seat < 0) return false;
+  const data = VEHICLE_DATA[world.vehicles.kind[vId] as VehicleKind];
+  return data.protectedMountPoints[seat] === true;
+}
+
+/** The first free crew node on `vId` for a player of `team`, or -1 when the vehicle is full,
+ *  under construction, destroyed, or refuses this player. Two rules decide refusal:
+ *  - `cantTeamSwitch` (vehicle_mpb.cs:136, enforced at player.cs:2115-2124): the vehicle is
+ *    never handed to the other team, so a pilot whose team differs is turned away.
+ *  - seats beyond node 1 are data-only in this sim (numMountPoints 3 and 6 on the Bomber and
+ *    Havoc exist in the scripts but not on the wire -- see VehicleSnapshotData.passengerId),
+ *    so only node 1 is ever offered. */
+function firstFreeSeat(world: World, vId: number, team: number): number {
+  const vehicles = world.vehicles;
+  const data = VEHICLE_DATA[vehicles.kind[vId] as VehicleKind];
+  if (data.cantTeamSwitch && (vehicles.team[vId] ?? -1) !== team) return -1;
+  if ((vehicles.driverId[vId] ?? -1) === -1) return 0;
+  if (data.numMountPoints > 1 && (vehicles.passengerId[vId] ?? -1) === -1) return 1;
+  return -1;
+}
+
+/** The id of the nearest active, non-destroyed vehicle within its own minMountDist of the
+ *  player that has a free seat this player may take, or null. Shared by mountNearestVehicle
+ *  (the actual mount, server/sim-side) and the client-facing canSendVehicleUse export below
+ *  (so app.ts can decide whether pressing E is even mount-relevant before sending the `use`
+ *  wire bit -- M5 plan, Global Constraints). */
+function findMountableVehicleInRange(world: World, playerId: number): number | null {
   const vehicles = world.vehicles;
   const pBase = playerId * 3;
+  const team = world.players.team[playerId] ?? 0;
   const playerPos: Vec3 = {
     x: at(world.players.position, pBase),
     y: at(world.players.position, pBase + 1),
     z: at(world.players.position, pBase + 2),
   };
   for (let vId = 0; vId < vehicles.count; vId += 1) {
-    if (
-      !vehicles.active[vId] ||
-      vehicles.destroyed[vId] ||
-      vehicles.spawnTime[vId]! > 0 ||
-      vehicles.driverId[vId] !== -1
-    )
+    if (!vehicles.active[vId] || vehicles.destroyed[vId] || vehicles.spawnTime[vId]! > 0) {
       continue;
+    }
+    if (firstFreeSeat(world, vId, team) === -1) continue;
     const data = VEHICLE_DATA[vehicles.kind[vId] as VehicleKind];
     const vPos = seatPosition(vehicles, vId);
     const dist = Math.hypot(playerPos.x - vPos.x, playerPos.y - vPos.y, playerPos.z - vPos.z);
@@ -1691,25 +2186,78 @@ function findUnoccupiedVehicleInRange(world: World, playerId: number): number | 
   return null;
 }
 
-/** Nearest-in-range-and-unoccupied wins; the caller (stepVehicles) resolves failure-matrix
- *  row 13 (two players racing for the same vehicle the same tick) just by iterating player
- *  ids in ascending order and mounting one at a time -- once this claims a vehicle, a later
- *  id in that same pass already sees `driverId` set and skips it. */
-function mountNearestVehicle(world: World, playerId: number): void {
-  const vId = findUnoccupiedVehicleInRange(world, playerId);
-  if (vId === null) return;
-  world.vehicles.driverId[vId] = playerId;
+/** Arms the real T2 abandonment timer on every vehicle this player last piloted other than
+ *  `exceptVId` (player.cs:2101-2105: mounting a DIFFERENT vehicle schedules
+ *  `vehicleAbandonTimeOut` 15 s out on the one left behind, and clears its `lastPilot`).
+ *  VehicleData.cantAbandon's own kind is exempt later, at the timer's own expiry. */
+function armAbandonTimers(world: World, playerId: number, exceptVId: number): void {
+  const vehicles = world.vehicles;
+  for (let vId = 0; vId < vehicles.count; vId += 1) {
+    if (vId === exceptVId || vehicles.lastPilotId[vId] !== playerId) continue;
+    vehicles.lastPilotId[vId] = -1;
+    if (vehicles.active[vId] && !vehicles.destroyed[vId]) {
+      vehicles.abandonTimer[vId] = VEHICLE_ABANDON_SECONDS;
+    }
+  }
+}
+
+/** Puts `playerId` in `seat` of `vId` and records the T2 bookkeeping that goes with it. */
+function seatCrewMember(world: World, vId: number, playerId: number, seat: number): void {
+  const vehicles = world.vehicles;
+  if (seat === 0) {
+    armAbandonTimers(world, playerId, vId);
+    vehicles.driverId[vId] = playerId;
+    vehicles.lastPilotId[vId] = playerId; // real T2 `%vehicle.lastPilot = %obj` (player.cs:2112)
+  } else {
+    vehicles.passengerId[vId] = playerId;
+  }
+  // Any crew aboard cancels the abandonment timer (vehicle.cs:1327 rejects a vehicle with
+  // `lastPilot` set, and player.cs:2111 clears `abandon` on mount).
+  vehicles.abandonTimer[vId] = -1;
   world.players.mountedVehicleId[playerId] = vId;
+}
+
+/** Nearest-mountable wins; the caller (stepVehicles) resolves failure-matrix row 13 (two
+ *  players racing for the same vehicle the same tick) just by iterating player ids in
+ *  ascending order and mounting one at a time -- once this claims a seat, a later id in that
+ *  same pass already sees it taken and skips it. */
+function mountNearestVehicle(world: World, playerId: number): void {
+  const vId = findMountableVehicleInRange(world, playerId);
+  if (vId === null) return;
+  const team = world.players.team[playerId] ?? 0;
+  const seat = firstFreeSeat(world, vId, team);
+  if (seat === -1) return;
+  // Re-mounting a deployed MPB takes it down again: real T2 undeploys in
+  // `MobileBaseVehicle::playerMounted` (vehicle.cs:752-792) before the pilot climbs in.
+  if (seat === 0 && world.vehicles.deployed[vId]) undeployMobilePointBase(world, vId);
+  seatCrewMember(world, vId, playerId, seat);
 }
 
 /** Client-facing: is there any reason for a fresh `E` press to be sent as the wire-level
  *  `use` bit rather than staying a purely local menu toggle? True while already mounted
- *  (so a press can dismount) or while an unoccupied vehicle sits within mount range. Ours --
- *  not itself one of Task 1's exports, but app.ts (Task 14) needs exactly this decision and
- *  it belongs in sim, matching vehiclePadAt's own precedent (Task 13). */
+ *  (so a press can dismount) or while a mountable vehicle sits within mount range. Ours --
+ *  app.ts (Task 14) needs exactly this decision and it belongs in sim, matching
+ *  vehiclePadAt's own precedent (Task 13). */
 export function canSendVehicleUse(world: World, playerId: number): boolean {
   if ((world.players.mountedVehicleId[playerId] ?? -1) !== -1) return true;
-  return findUnoccupiedVehicleInRange(world, playerId) !== null;
+  return findMountableVehicleInRange(world, playerId) !== null;
+}
+
+/** Leaves the vehicle this player is riding, whichever seat that is. A pilot leaving an MPB
+ *  starts its deployment delay (real T2 `MobileBaseVehicle::playerDismounted` schedules
+ *  `deployVehicle` 500 ms out, vehicle.cs:813-820); a passenger leaving never does. */
+function dismountSeat(world: World, playerId: number, vId: number): void {
+  const vehicles = world.vehicles;
+  const seat = crewSeatOf(world, vId, playerId);
+  if (seat === 0) {
+    vehicles.driverId[vId] = -1;
+    if (vehicles.kind[vId] === VehicleKind.MobilePointBase && !vehicles.deployed[vId]) {
+      vehicles.deployTimer[vId] = MPB_DEPLOY_DELAY_SECONDS;
+    }
+  } else if (seat === 1) {
+    vehicles.passengerId[vId] = -1;
+  }
+  world.players.mountedVehicleId[playerId] = -1;
 }
 
 function tryMountOrDismount(world: World, playerId: number, input: PlayerInput): void {
@@ -1718,12 +2266,12 @@ function tryMountOrDismount(world: World, playerId: number, input: PlayerInput):
   const blocked = (players.wasUseHeld[playerId]! & 2) !== 0;
   const edge = input.use && !wasHeld;
   players.wasUseHeld[playerId] = input.use ? 1 : 0;
-  const currentVehicle = players.mountedVehicleId[playerId] ?? -1;
+  const mountedId = players.mountedVehicleId[playerId] ?? -1;
+  const currentVehicle = mountedId >= 0 && mountedId < world.vehicles.count ? mountedId : -1;
   if (currentVehicle !== -1) {
     if (!edge) return;
     players.wasUseHeld[playerId] = 3; // Block automatic reboarding until leaving contact.
-    world.vehicles.driverId[currentVehicle] = -1;
-    players.mountedVehicleId[playerId] = -1;
+    dismountSeat(world, playerId, currentVehicle);
     // While mounted, movement.ts's own guard skips stepPlayer entirely for this id, so
     // onGround/wasGrounded/ski never got refreshed the whole time it was driving -- they're
     // still whatever they were the instant before mounting. A dismount can land the player
@@ -1738,21 +2286,30 @@ function tryMountOrDismount(world: World, playerId: number, input: PlayerInput):
     players.wasJumpHeld[playerId] = 0;
     return;
   }
-  if (blocked && findUnoccupiedVehicleInRange(world, playerId) !== null && !edge) {
+  if (blocked && findMountableVehicleInRange(world, playerId) !== null && !edge) {
     players.wasUseHeld[playerId] = input.use ? 3 : 2;
     return;
   }
   mountNearestVehicle(world, playerId);
 }
 
-/** Failure matrix row 5's dismount half: a pad-respawn (or Task 7's own destruction path)
- *  marks `destroyed` first and leaves the actual unmount/no-damage handling to this, called
- *  from stepVehicles's per-vehicle pass every tick a destroyed vehicle still has a driver. */
+/** Failure matrix row 5's dismount half plus issue #57's crew rule: a pad-respawn (or the
+ *  destruction path) marks `destroyed` first and leaves the actual unmount handling to this,
+ *  called from stepVehicles's per-vehicle pass. EVERY seat is cleared, not just the pilot --
+ *  real T2 kicks the whole crew out on removal (`VehicleData::onRemove`, vehicle.cs:54-68,
+ *  and the destruction path's own doDismount loop at :255-266). */
 function dismountWithoutDamage(world: World, vId: number): void {
-  const driverId = world.vehicles.driverId[vId] ?? -1;
-  if (driverId === -1) return;
-  world.players.mountedVehicleId[driverId] = -1;
-  world.vehicles.driverId[vId] = -1;
+  const vehicles = world.vehicles;
+  const driverId = vehicles.driverId[vId] ?? -1;
+  if (driverId !== -1) {
+    world.players.mountedVehicleId[driverId] = -1;
+    vehicles.driverId[vId] = -1;
+  }
+  const passengerId = vehicles.passengerId[vId] ?? -1;
+  if (passengerId !== -1) {
+    if (world.players.active[passengerId]) world.players.mountedVehicleId[passengerId] = -1;
+    vehicles.passengerId[vId] = -1;
+  }
 }
 
 function stepOneVehiclePhysics(world: World, vId: number, input: PlayerInput, dt: number): void {
@@ -1762,88 +2319,158 @@ function stepOneVehiclePhysics(world: World, vId: number, input: PlayerInput, dt
   resolveVehicleCollision(world, vId, previous, dt);
 }
 
-// --- Shrike blaster (Task 6) --------------------------------------------------------------
+// --- Vehicle armament (Task 6, extended by issue #57's second half) -----------------------
 
-/** A pending Shrike-blaster shot, drained by projectiles.ts's spawnVehicleShot the same tick
- *  stepVehicles produces it -- exactly parallel to TurretFireEvent/spawnTurretShot (M4). */
-export interface VehicleFireEvent {
-  vehicleId: number;
-  team: number;
-  origin: Vec3;
-  direction: Vec3;
-  velocity: Vec3;
-  /** The driving player credited when this shot destroys something (issue #57 kill
-   *  attribution): tryFireShrikeBlaster always sets it, since it only fires piloted.
-   *  Optional so partial/older event shapes stay valid -- projectiles.ts's
-   *  spawnVehicleShot materializes a missing ownerId as -1, the same unattributed
-   *  convention turret shots already use, and destruction scoring (applyVehicleKillScore)
-   *  credits nobody for -1. */
-  ownerId?: number;
+/** Rotates a vehicle-local offset into world space. The client orients a vehicle mesh with
+ *  `rotation.set(-pitch, yaw, roll, 'YXZ')` (vehicle-view.ts's placeVehicleMesh), so the
+ *  same yaw-about-Y then -pitch-about-X composition maps a local muzzle offset onto the
+ *  world; roll is ignored, which is what keeps a muzzle position a few centimetres off for a
+ *  rolling hull without needing a full basis. Verified against `headingOf`, whose local
+ *  (0, 0, 1) is exactly this transform's own (sin yaw cos pitch, sin pitch, cos yaw cos
+ *  pitch). */
+function localOffsetToWorld(offset: Vec3, yaw: number, pitch: number): Vec3 {
+  const cy = Math.cos(yaw);
+  const sy = Math.sin(yaw);
+  const cp = Math.cos(pitch);
+  const sp = Math.sin(pitch);
+  const x1 = offset.x * cy + offset.z * sy;
+  const z1 = -offset.x * sy + offset.z * cy;
+  return { x: x1, y: offset.y * cp + z1 * sp, z: -offset.y * sp + z1 * cp };
 }
-export const SHRIKE_BLASTER_DATA = {
-  directDamage: 0.125, // weapons/chaingun.cs:503
-  speed: 425, // weapons/chaingun.cs:512
-  lifetime: 1, // weapons/chaingun.cs:516 (lifetimeMS 1000)
-  // T2's fireTimeout is 125 ms. Playtest tuning requests 200 ms between shots; this
-  // remains one authoritative shot stream because barrel alternation is presentation-only.
-  fireInterval: 0.2,
-  minEnergy: 5, // vehicles/vehicle_shrike.cs:255-256
-};
 
-/** Only the Shrike has a weapon (the Wildcat defines none, matching vehicle_wildcat.cs and
- *  the spec's own Vehicle numbers table) -- reads the driver's own `fire` input directly,
- *  since a mounted player's own weapon system is inert (weapons.ts's stepOnePlayer guard). */
-function tryFireShrikeBlaster(world: World, vId: number, input: PlayerInput, dt: number): void {
+/** The world position a spec's shot leaves from: the vehicle origin plus its own mount
+ *  node's measured offset, the barrel image's turret-local offset, and any authored
+ *  `offset` the script gives (the bomb bay's). See VehicleWeaponSpec.atMountNode for the one
+ *  kind that deliberately fires from the hull origin instead. */
+function weaponMuzzlePosition(world: World, vId: number, spec: VehicleWeaponSpec): Vec3 {
   const vehicles = world.vehicles;
-  let remaining = at(vehicles.weaponTimer, vId) - dt;
-  if (!input.fire) {
-    vehicles.weaponTimer[vId] = Math.max(0, remaining);
-    return;
-  }
-  while (remaining <= TIMER_EPSILON && at(vehicles.energy, vId) >= SHRIKE_BLASTER_DATA.minEnergy) {
-    remaining += SHRIKE_BLASTER_DATA.fireInterval;
-    vehicles.energy[vId] = at(vehicles.energy, vId) - SHRIKE_BLASTER_DATA.minEnergy;
-    const direction = headingOf(at(vehicles.yaw, vId), at(vehicles.pitch, vId));
-    const base = vId * 3;
-    const origin: Vec3 = {
-      x: at(vehicles.position, base),
-      y: at(vehicles.position, base + 1),
-      z: at(vehicles.position, base + 2),
-    };
-    const velocity: Vec3 = {
+  const base = vId * 3;
+  if (!spec.atMountNode) return seatPosition(vehicles, vId);
+  const kind = vehicles.kind[vId] as VehicleKind;
+  const node = VEHICLE_MOUNT_OFFSETS[kind][spec.mountNode] ?? NO_OFFSET;
+  const barrel = TURRET_MUZZLE_OFFSETS[spec.barrelNode] ?? NO_OFFSET;
+  const local: Vec3 = {
+    x: node.x + barrel.x + spec.offset.x,
+    y: node.y + barrel.y + spec.offset.y,
+    z: node.z + barrel.z + spec.offset.z,
+  };
+  const world3 = localOffsetToWorld(local, at(vehicles.yaw, vId), at(vehicles.pitch, vId));
+  return {
+    x: at(vehicles.position, base) + world3.x,
+    y: at(vehicles.position, base + 1) + world3.y,
+    z: at(vehicles.position, base + 2) + world3.z,
+  };
+}
+
+/** Queues one shot for a spec's own weapon. `shooter` aims it: a pilot-fired weapon uses the
+ *  hull's heading (the M5 Shrike behavior, unchanged), a gunner-fired one the gunner's own
+ *  look angle -- real T2 puts the turreteer/bombardier's client in control of the turret
+ *  object outright (vehicle.cs:601-650, :701-745). */
+function emitVehicleShot(
+  world: World,
+  vId: number,
+  spec: VehicleWeaponSpec,
+  shooterId: number,
+  aim: { yaw: number; pitch: number },
+): void {
+  const vehicles = world.vehicles;
+  const base = vId * 3;
+  world.pendingVehicleFireEvents.push({
+    vehicleId: vId,
+    weapon: spec.weapon,
+    mountNode: spec.mountNode,
+    team: at(vehicles.team, vId),
+    origin: weaponMuzzlePosition(world, vId, spec),
+    direction: headingOf(aim.yaw, aim.pitch),
+    velocity: {
       x: at(vehicles.velocity, base),
       y: at(vehicles.velocity, base + 1),
       z: at(vehicles.velocity, base + 2),
-    };
-    world.pendingVehicleFireEvents.push({
-      vehicleId: vId,
-      team: at(vehicles.team, vId),
-      origin,
-      direction,
-      velocity,
-      // StepOneVehicle only calls this for a seated, live driver, so driverId is the
-      // roadkill/kill-credit attacker for anything this shot destroys (issue #57).
-      ownerId: at(vehicles.driverId, vId),
-    });
+    },
+    // The player who pulled the trigger, so anything this shot destroys credits them
+    // (issue #57's kill attribution); stepOneVehicle only ever calls this for a live crew
+    // member.
+    ownerId: shooterId,
+  });
+}
+
+/** One weapon's own tick: held trigger -> shot(s) spaced by the weapon's real Fire-state
+ *  timeout, each spending its own energy out of the vehicle's pool (T2's useMountEnergy) and
+ *  refused below minEnergy. Identical in shape to the M5 Shrike blaster loop, which this
+ *  replaces for every kind. */
+function stepOneVehicleWeapon(
+  world: World,
+  vId: number,
+  spec: VehicleWeaponSpec,
+  index: number,
+  inputs: ReadonlyMap<number, PlayerInput>,
+  dt: number,
+): void {
+  const vehicles = world.vehicles;
+  const seatId =
+    spec.seat === 0 ? (vehicles.driverId[vId] ?? -1) : (vehicles.passengerId[vId] ?? -1);
+  if (!driverIsLive(world, seatId)) return;
+  const data = VEHICLE_WEAPON_DATA[spec.weapon];
+  const input = inputs.get(seatId) ?? idleVehicleInput();
+  // The script's own held-trigger cadence: a Fire state that loops back to itself (the Tank's
+  // chaingun, :502) repeats every fireTime, while one that hands off to Reload (the mortar,
+  // the Bomber's gun and bomb) pays both timeouts per shot.
+  const cadence = data.fireTime + (data.repeatsWhileHeld ? 0 : data.reloadTime);
+  // The first spec uses `weaponTimer` (the only slot the wire carries, snapshot.ts), the
+  // second `weaponTimerAlt` -- see VehicleStore.weaponTimerAlt.
+  const timer = index === 0 ? vehicles.weaponTimer : vehicles.weaponTimerAlt;
+  let remaining = at(timer, vId) - dt;
+  // The primary trigger is `fire`; a kind's second weapon hangs off `altFire` (the Tank's
+  // mortar and the Bomber's bombs). Real T2 instead cycles `selectedWeapon` with a weapon-
+  // switch key; this sim's two fire bits are the closest existing input pair and need no new
+  // wire bit (protocol stays at version 11).
+  const trigger = index === 0 ? input.fire : input.altFire;
+  if (!trigger) {
+    timer[vId] = Math.max(0, remaining);
+    return;
   }
-  vehicles.weaponTimer[vId] = Math.max(0, remaining);
+  const aim =
+    spec.seat === 0
+      ? { yaw: at(vehicles.yaw, vId), pitch: at(vehicles.pitch, vId) }
+      : { yaw: input.yaw, pitch: input.pitch };
+  while (remaining <= TIMER_EPSILON && at(vehicles.energy, vId) >= data.minEnergy) {
+    remaining += cadence;
+    vehicles.energy[vId] = at(vehicles.energy, vId) - data.minEnergy;
+    emitVehicleShot(world, vId, spec, seatId, aim);
+  }
+  timer[vId] = Math.max(0, remaining);
 }
 
-function seatDriver(world: World, vId: number, driverId: number): void {
-  if (driverId === -1 || !world.players.active[driverId]) return;
-  const seat = seatPosition(world.vehicles, vId);
-  const base = driverId * 3;
-  world.players.position.set([seat.x, seat.y, seat.z], base);
-  world.players.velocity.set([0, 0, 0], base);
+/** Every weapon the kind mounts, in spec order. Reads each firing crew member's own input
+ *  directly, since a mounted player's own weapon system is inert (weapons.ts's stepOnePlayer
+ *  guard) -- the vehicle is their weapon. */
+function tryFireVehicleWeapons(
+  world: World,
+  vId: number,
+  inputs: ReadonlyMap<number, PlayerInput>,
+  dt: number,
+): void {
+  const specs = VEHICLE_DATA[world.vehicles.kind[vId] as VehicleKind].weapons;
+  for (let index = 0; index < specs.length; index += 1) {
+    const spec = specs[index];
+    if (spec) stepOneVehicleWeapon(world, vId, spec, index, inputs, dt);
+  }
 }
 
-/** The system `stepWorld` calls (Task 9) between stepWeapons and stepTurrets. Resolves this
- *  tick's mount/dismount requests, then steps every active vehicle's physics -- piloted or
- *  not, matching a real T2 vehicle idling at its pad -- and seat-locks its driver's position
- *  to the vehicle's own transform. */
-/** One active, non-destroyed vehicle's whole tick: physics, the Shrike blaster (piloted
- *  only), and seat-locking its driver -- split out of stepVehicles to keep that function's
- *  own complexity under budget. */
+/** Locks every crew member's authoritative position to the vehicle's own transform. Both
+ *  seats sit at the hull origin; each occupant's own velocity is zeroed so a dismount
+ *  inherits the vehicle's motion rather than a stale walking velocity. */
+function seatCrew(world: World, vId: number): void {
+  const vehicles = world.vehicles;
+  const seat = seatPosition(vehicles, vId);
+  for (const playerId of [vehicles.driverId[vId] ?? -1, vehicles.passengerId[vId] ?? -1]) {
+    if (playerId === -1 || !world.players.active[playerId]) continue;
+    const base = playerId * 3;
+    world.players.position.set([seat.x, seat.y, seat.z], base);
+    world.players.velocity.set([0, 0, 0], base);
+  }
+}
+
 /** True if `vId`'s current driver should keep driving this tick -- false only when the
  *  driver's own PlayerStore row explicitly says dead (`active === 1 && alive === 0`).
  *  Codex review round 2 (this PR), finding 2 (P2/P1 hardening): under this milestone's own
@@ -1870,6 +2497,18 @@ function driverIsLive(world: World, driverId: number): boolean {
   return world.players.alive[driverId] === 1;
 }
 
+/** Drops any crew member whose own PlayerStore row says dead, on both seats: the seat's own
+ *  id clears so the vehicle does not keep claiming an occupant that is gone. */
+function dropDeadCrew(world: World, vId: number): void {
+  for (const seat of [0, 1] as const) {
+    const id = seat === 0 ? (world.vehicles.driverId[vId] ?? -1) : (world.vehicles.passengerId[vId] ?? -1);
+    if (id === -1 || driverIsLive(world, id)) continue;
+    world.players.mountedVehicleId[id] = -1;
+    if (seat === 0) world.vehicles.driverId[vId] = -1;
+    else world.vehicles.passengerId[vId] = -1;
+  }
+}
+
 function stepOneVehicle(
   world: World,
   vId: number,
@@ -1878,34 +2517,24 @@ function stepOneVehicle(
 ): void {
   const vehicles = world.vehicles;
   if (stepVehicleBuild(world, vId, dt)) return;
-  let driverId = vehicles.driverId[vId] ?? -1;
-  if (driverId !== -1 && !driverIsLive(world, driverId)) {
-    // Self-heals a mount relationship a dead/removed driver left dangling on the vehicle's
-    // own side (world.players.mountedVehicleId may already be clear -- see driverIsLive's
-    // own comment -- but this makes the fix correct even if some future path kills a
-    // mounted player without going through ejectPilot).
-    world.players.mountedVehicleId[driverId] = -1;
-    vehicles.driverId[vId] = -1;
-    driverId = -1;
-  }
+  dropDeadCrew(world, vId);
+  const driverId = vehicles.driverId[vId] ?? -1;
   const input =
     driverId !== -1
       ? (inputs.get(driverId) ?? idleVehicleInput())
       : { ...idleVehicleInput(), yaw: at(vehicles.yaw, vId), pitch: at(vehicles.pitch, vId) };
   stepOneVehiclePhysics(world, vId, input, dt);
+  stepMobilePointBaseDeploy(world, vId, dt);
   // stepOneVehiclePhysics can destroy this vehicle via collision damage (resolveVehicleCollision
-  // -> applyVehicleDamage), which ejects the pilot and clears vehicles.driverId[vId] to -1. Using
-  // the driverId captured BEFORE physics for either of the two calls below would fire the weapon
-  // from an already-destroyed vehicle, or -- worse -- re-seat the just-ejected pilot straight back
-  // onto the wreck and zero the ejection impulse seatDriver's own velocity reset just applied,
-  // silently undoing "crash destruction ejects the pilot" the whole way ejectPilot exists to
-  // guarantee. Re-reading the current driver after physics makes both calls agree with whatever
-  // ejectPilot actually did this tick.
-  const currentDriverId = vehicles.driverId[vId] ?? -1;
-  if (vehicles.kind[vId] === VehicleKind.Shrike && currentDriverId !== -1) {
-    tryFireShrikeBlaster(world, vId, input, dt);
-  }
-  seatDriver(world, vId, currentDriverId);
+  // -> applyVehicleDamage), which ejects the crew and clears the seats to -1. Using the ids
+  // captured BEFORE physics would fire a weapon from an already-destroyed vehicle, or -- worse
+  // -- re-seat a just-ejected pilot straight back onto the wreck and zero the ejection impulse
+  // seatCrew's own velocity reset just applied, silently undoing "crash destruction ejects the
+  // pilot" the whole way ejectCrew exists to guarantee. Re-reading the seats after physics
+  // makes every call below agree with whatever the destruction path actually did this tick.
+  if (vehicles.destroyed[vId]) return;
+  tryFireVehicleWeapons(world, vId, inputs, dt);
+  seatCrew(world, vId);
 }
 
 export function stepVehicles(
@@ -1936,5 +2565,197 @@ export function stepVehicles(
       continue;
     }
     stepOneVehicle(world, vId, inputs, dt);
+    stepVehicleAbandonment(world, vId, dt);
   }
 }
+
+// --- Vehicle abandonment (real T2's vehicleAbandonTimeOut) --------------------------------
+
+/** Real (vehicle.cs:1334): `schedule(15000, ..."vehicleAbandonTimeOut")`. */
+export const VEHICLE_ABANDON_SECONDS = 15;
+
+/** One tick of the abandonment timer armed by armAbandonTimers. Expiry applies the real
+ *  rule's one branch: a vehicle whose data sets cantAbandon is left alone (the MPB is the
+ *  only kind that does -- vehicle_mpb.cs:135, so a deployed forward base is never reclaimed
+ *  just because nobody is sitting in it), while every other kind is removed. Removal here
+ *  reuses the store's own destroyed/free path rather than inventing a second teardown, so
+ *  every existing consumer (snapshots, the id-reuse delay, the client's explosion FX) sees
+ *  exactly the removal it already understands; the real script instead fades the hull out and
+ *  deletes it, which this sim has no non-damage deletion path for. */
+function stepVehicleAbandonment(world: World, vId: number, dt: number): void {
+  const vehicles = world.vehicles;
+  const remaining = vehicles.abandonTimer[vId] ?? -1;
+  if (remaining < 0) return;
+  const next = remaining - dt;
+  if (next > 0) {
+    vehicles.abandonTimer[vId] = next;
+    return;
+  }
+  vehicles.abandonTimer[vId] = -1;
+  if (VEHICLE_DATA[vehicles.kind[vId] as VehicleKind].cantAbandon) return;
+  destroyAbandonedVehicle(world, vId);
+}
+
+function destroyAbandonedVehicle(world: World, vId: number): void {
+  const vehicles = world.vehicles;
+  if (vehicles.destroyed[vId]) return;
+  vehicles.destroyed[vId] = 1;
+  queueVehicleIdFree(vehicles, vId);
+  const base = vId * 3;
+  world.pendingVehicleDestroyed.push({
+    id: vId,
+    position: {
+      x: at(vehicles.position, base),
+      y: at(vehicles.position, base + 1),
+      z: at(vehicles.position, base + 2),
+    },
+    team: at(vehicles.team, vId),
+  });
+}
+
+// --- Mobile Point Base deployment (real T2's vehicleDeploy/undeploy) -----------------------
+
+/** Real (vehicle.cs:815): `%obj.schedule(500, "deployVehicle", %data, %player)`. */
+export const MPB_DEPLOY_DELAY_SECONDS = 0.5;
+/** Real (vehicle.cs:832): deployment waits for `VectorLen(%obj.getVelocity()) <= 0.1`. */
+const MPB_DEPLOY_MAX_SPEED = 0.1;
+
+/** One tick of an un-crewed MPB's deployment delay: countdown, then the real velocity gate,
+ *  retried every tick until the hull has stopped. Once deployed it also keeps the station's
+ *  self-powered bit lit (see keepDeployedStationPowered). */
+function stepMobilePointBaseDeploy(world: World, vId: number, dt: number): void {
+  const vehicles = world.vehicles;
+  if (vehicles.deployed[vId]) {
+    keepDeployedStationPowered(world, vId);
+    return;
+  }
+  const remaining = vehicles.deployTimer[vId] ?? -1;
+  if (remaining < 0) return;
+  const next = remaining - dt;
+  vehicles.deployTimer[vId] = next > 0 ? next : 0;
+  if (next > 0) return;
+  const base = vId * 3;
+  const speed = Math.hypot(
+    at(vehicles.velocity, base),
+    at(vehicles.velocity, base + 1),
+    at(vehicles.velocity, base + 2),
+  );
+  if (speed > MPB_DEPLOY_MAX_SPEED) return;
+  deployMobilePointBase(world, vId);
+}
+
+/** The station's world position: the vehicle's own Mount2 node (vehicle.cs:851 mounts the
+ *  MobileInvStation there), which the published model measures at (0, -1.875, -8.662) -- the
+ *  rear bay, matching the six `stationPoints` the script raycasts for terrain clearance
+ *  (vehicle_mpb.cs:148-153). */
+const MPB_STATION_MOUNT_NODE = 2;
+
+/** World position of one of a vehicle's own mount nodes, from VEHICLE_MOUNT_OFFSETS' measured
+ *  model data and the hull's own yaw/pitch. Exported because turrets.ts places and re-places a
+ *  vehicle-mounted turret with exactly this transform, so the two modules can never disagree
+ *  about where Mount1 is. */
+export function vehicleMountPosition(world: World, vId: number, node: number): Vec3 {
+  const vehicles = world.vehicles;
+  const base = vId * 3;
+  const local = VEHICLE_MOUNT_OFFSETS[vehicles.kind[vId] as VehicleKind][node] ?? NO_OFFSET;
+  const world3 = localOffsetToWorld(local, at(vehicles.yaw, vId), at(vehicles.pitch, vId));
+  return {
+    x: at(vehicles.position, base) + world3.x,
+    y: at(vehicles.position, base + 1) + world3.y,
+    z: at(vehicles.position, base + 2) + world3.z,
+  };
+}
+
+/** Real T2's `MobileBaseVehicle::vehicleDeploy` (vehicle.cs:830-933), minus what this sim
+ *  cannot express: it creates the MobileInvStation at the vehicle's own Mount2 node and the
+ *  MobileTurretBase at Mount1, both self-powered, both on the vehicle's team. The real
+ *  script additionally spawns a `DeployedBeacon` and opens a `defaultTeamSlowFieldBare` force
+ *  field, and swaps the vehicle's sensor data to the MPBDeployedSensor jammer -- this sim has
+ *  no beacon, no slow field and no sensor/jamming model at all, so those are named in the
+ *  report rather than faked.
+ *
+ *  The station is remembered on the vehicle and revived rather than re-created on a later
+ *  deploy: the base-object store has a fixed capacity and no free list, so a fresh slot per
+ *  deploy cycle would leak capacity for the rest of the match. The turret is raised by
+ *  turrets.ts from this same `deployed` flag -- each store's rows stay its own module's to
+ *  write -- and its id lives on `turretId`. */
+function deployMobilePointBase(world: World, vId: number): void {
+  const vehicles = world.vehicles;
+  if (vehicles.deployed[vId]) return;
+  const position = vehicleMountPosition(world, vId, MPB_STATION_MOUNT_NODE);
+  vehicles.stationObjectId[vId] = placeDeployedStation(world, vId, position);
+  vehicles.deployed[vId] = 1;
+  vehicles.deployTimer[vId] = -1;
+}
+
+/** Real T2 `MobileBaseVehicle::playerMounted`'s undeploy branch (vehicle.cs:762-792) plus the
+ *  `onEndSequence` teardown that follows it (:935-952): the station and turret both go away.
+ *  Both stores express "gone" as their own destroyed flag, which is what every consumer
+ *  (power, station use, repair, snapshots) already filters on. */
+function undeployMobilePointBase(world: World, vId: number): void {
+  const vehicles = world.vehicles;
+  if (!vehicles.deployed[vId]) return;
+  const stationId = vehicles.stationObjectId[vId] ?? -1;
+  if (stationId >= 0) {
+    world.baseObjects.destroyed[stationId] = 1;
+    world.baseObjects.powered[stationId] = 0;
+  }
+  vehicles.deployed[vId] = 0; // turrets.ts's own stepVehicleTurrets retires the turret row
+  vehicles.deployTimer[vId] = -1;
+}
+
+/** Full teardown for an id being handed to a new vehicle: the wreck's deployed station and
+ *  turret are released AND forgotten, so a reused vehicle id can never revive the previous
+ *  occupant's objects (turrets.ts sees the cleared `deployed` flag on its next step and drops
+ *  the mounted turret row before anything can observe it). */
+function teardownMobilePointBase(world: World, vId: number): void {
+  const vehicles = world.vehicles;
+  if ((vehicles.stationObjectId[vId] ?? -1) < 0 && !vehicles.deployed[vId]) return;
+  undeployMobilePointBase(world, vId);
+  vehicles.stationObjectId[vId] = -1;
+  vehicles.turretId[vId] = -1;
+}
+
+/** Places (or revives) the deployed station base object: a real inventory station -- the
+ *  script's own MobileInvStation is the mobile member of the same station.cs family and
+ *  `doesRepair = true`, and this sim's StationInventory is what stationAt/stationMenu already
+ *  serve loadouts from, so a deployed MPB is a working forward resupply point rather than a
+ *  second, parallel station concept. Two deliberate deviations from the script's own
+ *  MobileInvStation are named in the report: it holds the static station's own numbers
+ *  (rechargeRate 0.35 rather than 0.256, and a 1.0 damage pool rather than the mobile
+ *  datablock's absent maxDamage), and this sim's base-object store has no per-instance data to
+ *  carry the difference. */
+function placeDeployedStation(world: World, vId: number, position: Vec3): number {
+  const store = world.baseObjects;
+  const vehicles = world.vehicles;
+  let id = vehicles.stationObjectId[vId] ?? -1;
+  if (id < 0) {
+    if (store.count >= store.kind.length) return -1; // Store full: deploy without a station.
+    id = store.count;
+    store.count += 1;
+  }
+  store.kind[id] = BaseObjectKind.StationInventory;
+  store.team[id] = at(vehicles.team, vId);
+  store.position.set([position.x, position.y, position.z], id * 3);
+  store.usePosition.set([position.x, position.y, position.z], id * 3);
+  store.damage[id] = 0;
+  store.destroyed[id] = 0;
+  store.energy[id] = 0;
+  store.powered[id] = 1; // vehicle.cs:853 `setSelfPowered()`; re-asserted every tick below.
+  return id;
+}
+
+/** Real T2 gives the deployed station `setSelfPowered()` (vehicle.cs:853), so it must not go
+ *  dark with its team's generator the way a static StationInventory does (stepPower's own
+ *  needsPower rule). Re-asserted here, from the vehicle's own flag, rather than by giving
+ *  StationInventory a second set of numbers. */
+function keepDeployedStationPowered(world: World, vId: number): void {
+  const stationId = world.vehicles.stationObjectId[vId] ?? -1;
+  if (stationId >= 0 && world.baseObjects.destroyed[stationId] === 0) {
+    world.baseObjects.powered[stationId] = 1;
+  }
+}
+
+
+
+

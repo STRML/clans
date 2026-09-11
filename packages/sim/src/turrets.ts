@@ -2,11 +2,16 @@ import { teamHasPower } from './baseObjects.js';
 import type { PlayerHitbox } from './damage.js';
 import { segmentBlockedByInteriors } from './occlusion.js';
 import { sampleTerrain } from './terrain.js';
+import { vehicleMountPosition, applyVehicleDamage } from './vehicles.js';
 import { ProjectileType } from './weapons.js';
 import type { Vec3, World } from './types.js';
 
 const LOS_MARCH_STEP = 0.5; // Ours — matches projectiles.ts's own TERRAIN_MARCH_STEP.
 const TURRET_EYE_HEIGHT = 2; // Ours — see this plan's "ours" numbers table.
+/** The vehicle node a deployed MPB turret is mounted on: real T2's
+ *  `%obj.mountObject(%obj.turret, 1)` (vehicle.cs:866), whose measured model position lives in
+ *  vehicles.ts's VEHICLE_MOUNT_OFFSETS[MobilePointBase][1]. */
+export const MPB_TURRET_MOUNT_NODE = 1;
 
 /** Marches the segment from `from` to `to` at a fixed step and blocks line of sight the
  *  instant a sampled point's terrain height is at or above the segment's own interpolated
@@ -46,10 +51,18 @@ export enum TurretBarrelId {
   PlasmaBarrelLarge = 0,
   AABarrelLarge = 1,
   SentryTurretBarrel = 2,
+  /** The Mobile Point Base's own deployed turret barrel: `TurretImageData(MissileBarrelLarge)`
+   *  mounted on the `MobileTurretBase` the MPB raises when it deploys (vehicle.cs:869 mounts
+   *  `MissileBarrelLarge` on the new turret). Append-only, like the other id enums: the value
+   *  is a raw byte on the projectile/impact wire via TURRET_WEAPON_ID_OFFSET. */
+  MissileBarrelLarge = 3,
 }
 export enum TurretBaseId {
   Large = 0,
   Sentry = 1,
+  /** `TurretData(MobileTurretBase)` (vehicle_mpb.cs:277-305): the deployed MPB turret's own
+   *  base, whose health, angles and sensor radius differ from both stationary bases. */
+  Mobile = 2,
 }
 export enum TurretState {
   Ready = 0,
@@ -70,9 +83,20 @@ export interface TurretBarrelData {
   lifetime: number;
   attackRadius: number;
   /** AABarrelLarge only: the real T2 barrel is a vehicle-seeking weapon
-   *  (`isSeeker = true`, `aaBarrelLarge.cs:176-183`). No vehicle exists until milestone 5,
+   *  (`isSeeker = true`, `aaBarrelLarge.cs:176-183`). No vehicle existed until milestone 5,
    *  so this barrel never acquires a target this milestone — see this plan's "ours" table. */
   vehiclesOnly?: boolean;
+  /** True for a barrel whose projectile homes (`isSeeker = true`): the AA barrel
+   *  (aaBarrelLarge.cs:181) and the MPB's MissileBarrelLarge (missileBarrelLarge.cs:150).
+   *  Generalizes what used to be an AABarrelLarge-only check in isSeekerMissile below. */
+  isSeeker?: boolean;
+  /** Seconds the launched missile flies straight while its seeker locks (the script's own
+   *  `seekTime`): 1.0 on both seeker barrels (aaBarrelLarge.cs:183, missileBarrelLarge.cs:152). */
+  seekTime?: number;
+  /** Rad/s of homing turn. Real T2 authors `turningSpeed = 90.0` deg/s on the missile
+   *  barrel (missileBarrelLarge.cs:167); the AA barrel authors no such field, so its own
+   *  value stays this file's original "ours" pick. */
+  seekTurnRate?: number;
 }
 export interface TurretBaseData {
   maxHealth: number;
@@ -121,6 +145,9 @@ export const TURRET_BARREL_DATA: Record<TurretBarrelId, TurretBarrelData> = {
     lifetime: 3,
     attackRadius: 200,
     vehiclesOnly: true,
+    isSeeker: true,
+    seekTime: 1.0, // aaBarrelLarge.cs:183
+    seekTurnRate: 4.5, // ours -- see the AA_SEEK comments further down this file
   },
   // turrets/sentryTurret.cs:92-227. Spec: 0.1 direct at 200 m/s, 0.13 s fire, 0.40 s reload.
   [TurretBarrelId.SentryTurretBarrel]: {
@@ -135,6 +162,32 @@ export const TURRET_BARREL_DATA: Record<TurretBarrelId, TurretBarrelData> = {
     reloadTime: 0.4,
     lifetime: 3,
     attackRadius: 60,
+  },
+  // turrets/missileBarrelLarge.cs:130-217 (TurretImageData) + :80-127
+  // (SeekerProjectileData TurretMissile). The MPB's deployed turret mounts this barrel
+  // (vehicle.cs:869). Every number is the script's own: muzzleVelocity 80, indirectDamage
+  // 1.0, damageRadius 4, kickBackStrength 2500, fireEnergy/minEnergy 60 (spent from the
+  // VEHICLE's pool -- `inheritEnergyFromMount`, vehicle_mpb.cs:293), Fire-state timeout 0.3,
+  // Reload-state timeout 3.5, attackRadius 250, isSeeker/seekRadius/seekTime 1.0 and
+  // turningSpeed 90 deg/s. `vehiclesOnly` follows from minSeekHeat 0.6 (:156, :169): the
+  // missile's own seeker only locks hot (vehicle) targets, which is exactly what this sim's
+  // vehiclesOnly gate expresses.
+  [TurretBarrelId.MissileBarrelLarge]: {
+    projectile: ProjectileType.Tracer,
+    speed: 80.0, // :165 muzzleVelocity
+    velInherit: 0.2, // :157 velInheritFactor
+    directDamage: 0,
+    radiusDamage: 1.0, // :91 indirectDamage
+    radius: 4.0, // :92 damageRadius
+    kickback: 2500, // :94 kickBackStrength
+    fireTime: 0.3, // :182 Fire-state timeout
+    reloadTime: 3.5, // :197 Reload-state timeout
+    lifetime: 20, // :164 lifetimeMS 20000
+    attackRadius: 250, // :199
+    vehiclesOnly: true,
+    isSeeker: true,
+    seekTime: 1.0, // :152
+    seekTurnRate: Math.PI / 2, // :167 turningSpeed 90 deg/s
   },
 };
 
@@ -164,12 +217,33 @@ export const TURRET_BASE_DATA: Record<TurretBaseId, TurretBaseData> = {
     thetaMax: 175,
     sensorRadius: 60,
   },
+  // vehicle_mpb.cs:277-305 (TurretData MobileTurretBase) + :268-275 (MPBTurretMissileSensor).
+  // maxHealth 3.85 is `MobileBaseVehicle.maxDamage` (:286, the vehicle's own :193), the angle
+  // band is thetaMin 15 / thetaMax 140 (:289-290), energyPerDamagePoint 33 (:292) and the
+  // sensor radius is 200 (:298 = MPBTurretMissileSensor.detectRadius, :274). maxEnergy is 0
+  // because the base sets `inheritEnergyFromMount = true` (:293) -- the deployed turret has no
+  // shield pool of its own, and applyTurretDamage forwards a mounted turret's damage to the
+  // vehicle that owns it, whose own energy pool is the shield. disabledDamage and
+  // rechargeRate are ours: the datablock authors neither (no `disabledLevel`, no
+  // `capacitorRechargeRate` -- that field belongs to the Tank/Bomber turrets instead), so the
+  // disabled fraction reuses TurretBaseLarge's own 0.6 of max health and the recharge is 0.
+  [TurretBaseId.Mobile]: {
+    maxHealth: 3.85,
+    disabledDamage: 2.31,
+    maxEnergy: 0,
+    energyPerDamagePoint: 33,
+    rechargeRate: 0,
+    thetaMin: 15,
+    thetaMax: 140,
+    sensorRadius: 200,
+  },
 };
 
 const BASE_FOR_BARREL: Record<TurretBarrelId, TurretBaseId> = {
   [TurretBarrelId.PlasmaBarrelLarge]: TurretBaseId.Large,
   [TurretBarrelId.AABarrelLarge]: TurretBaseId.Large,
   [TurretBarrelId.SentryTurretBarrel]: TurretBaseId.Sentry,
+  [TurretBarrelId.MissileBarrelLarge]: TurretBaseId.Mobile,
 };
 
 export function baseFor(barrel: TurretBarrelId): TurretBaseData {
@@ -203,6 +277,18 @@ export interface TurretStore {
   targetKind: Uint8Array;
   state: Uint8Array;
   timer: Float64Array;
+  /** The VehicleStore id this turret is mounted on, or -1 for a stationary map turret. A
+   *  mounted turret is the Mobile Point Base's deployed `MobileTurretBase`: its position is
+   *  derived from the vehicle every time it is read (turretPosition), it is powered by the
+   *  vehicle itself rather than the team grid, and damage against it is forwarded to the
+   *  vehicle that owns it (`inheritEnergyFromMount`, vehicle_mpb.cs:293). Simulation-relevant
+   *  (it decides which store a later tick's position/damage reads from), so hashWorld mixes it
+   *  -- see mixTurrets. */
+  mountVehicleId: Int16Array;
+  /** The vehicle node the turret sits on, used with vehicles.ts's vehicleMountPosition: 1,
+   *  the node real T2 mounts the new turret object on (`%obj.mountObject(%obj.turret, 1)`,
+   *  vehicle.cs:866). Only meaningful while mountVehicleId >= 0. */
+  mountNode: Uint8Array;
 }
 const TURRET_CAPACITY = 16; // Ours: Katabatic's real count is 6; headroom for other maps.
 
@@ -220,6 +306,8 @@ export function createEmptyTurrets(): TurretStore {
     targetKind: new Uint8Array(TURRET_CAPACITY),
     state: new Uint8Array(TURRET_CAPACITY),
     timer: new Float64Array(TURRET_CAPACITY),
+    mountVehicleId: new Int16Array(TURRET_CAPACITY).fill(-1),
+    mountNode: new Uint8Array(TURRET_CAPACITY),
   };
 }
 
@@ -241,12 +329,109 @@ export function createTurrets(
     store.targetKind[id] = 0;
     store.state[id] = TurretState.Ready;
     store.timer[id] = 0;
+    store.mountVehicleId[id] = -1; // Every map placement is stationary.
+    store.mountNode[id] = 0;
     store.count = Math.max(store.count, id + 1);
   });
 }
 
+/** Raises (or revives) the deployed `MobileTurretBase` a vehicle's own `deployed` flag asks
+ *  for, at the vehicle's Mount1 node (vehicle.cs:866) on its team, self-powered
+ *  (vehicle.cs:867), with its damage level copied from the vehicle (vehicle.cs:865 --
+ *  `MobileBaseVehicle::onDamage` then keeps the two in step, which this sim gets for free by
+ *  forwarding mounted-turret damage the other way, see applyTurretDamage). The turret's id is
+ *  remembered on the vehicle so a later deploy revives the same slot: the store's capacity is
+ *  a fixed 16 and Katabatic already uses 6, so a fresh slot per deploy cycle would exhaust it. */
+function raiseDeployedTurret(world: World, vId: number): void {
+  const vehicles = world.vehicles;
+  const store = world.turrets;
+  let id = vehicles.turretId[vId] ?? -1;
+  if (id < 0) {
+    if (store.count >= TURRET_CAPACITY) return; // Store full: deploy the station alone.
+    id = store.count;
+    store.count += 1;
+    vehicles.turretId[vId] = id;
+  }
+  const position = vehicleMountPosition(world, vId, MPB_TURRET_MOUNT_NODE);
+  store.barrel[id] = TurretBarrelId.MissileBarrelLarge;
+  store.team[id] = vehicles.team[vId] ?? 0;
+  store.position.set([position.x, position.y, position.z], id * 3);
+  store.damage[id] = vehicles.damage[vId] ?? 0;
+  store.destroyed[id] = 0;
+  store.energy[id] = baseFor(TurretBarrelId.MissileBarrelLarge).maxEnergy;
+  store.powered[id] = 1;
+  store.targetId[id] = -1;
+  store.targetKind[id] = 0;
+  store.state[id] = TurretState.Ready;
+  store.timer[id] = 0;
+  store.mountVehicleId[id] = vId;
+  store.mountNode[id] = MPB_TURRET_MOUNT_NODE;
+  vehicles.turretId[vId] = id;
+}
+
+/** One tick's upkeep for an already-raised deployed turret: follow the hull it rides on, stay
+ *  self-powered, and mirror the vehicle's own damage level (vehicle.cs:865). Deliberately
+ *  does NOT touch state/timer/target -- those are the firing cycle's own, and resetting them
+ *  every tick would fire without cadence. */
+function refreshDeployedTurret(world: World, vId: number, id: number): void {
+  const vehicles = world.vehicles;
+  const store = world.turrets;
+  const position = vehicleMountPosition(world, vId, MPB_TURRET_MOUNT_NODE);
+  store.position.set([position.x, position.y, position.z], id * 3);
+  store.team[id] = vehicles.team[vId] ?? 0;
+  store.damage[id] = vehicles.damage[vId] ?? 0;
+  store.powered[id] = 1;
+}
+
+/** Lowers the turret again (undeploy, or a destroyed/removed vehicle). Its row is marked
+ *  destroyed -- the same "gone" every other consumer already filters on -- and detached from
+ *  the vehicle, but its allocated slot stays on `turretId` so the next deploy revives it
+ *  instead of consuming another of the store's 16. */
+function retireDeployedTurret(world: World, vId: number): void {
+  const vehicles = world.vehicles;
+  const id = vehicles.turretId[vId] ?? -1;
+  if (id < 0) return;
+  const store = world.turrets;
+  if (store.mountVehicleId[id] !== vId) return; // Already lowered.
+  store.destroyed[id] = 1;
+  store.powered[id] = 0;
+  store.targetId[id] = -1;
+  store.mountVehicleId[id] = -1;
+}
+
+/** Keeps the vehicle-mounted turret rows in step with their vehicles' own `deployed` flags:
+ *  raised while deployed, retired the moment that flag clears or the vehicle is gone. Called
+ *  at the top of stepTurrets, so a retired turret is never stepped, never positioned on a
+ *  reused vehicle id and never observed by a snapshot -- the flag is the single source of
+ *  truth, and vehicles.ts never has to write this store's rows itself (it only clears
+ *  `turretId`, which forgets the slot when a vehicle id is recycled). */
+function stepVehicleTurrets(world: World): void {
+  const vehicles = world.vehicles;
+  const store = world.turrets;
+  for (let vId = 0; vId < vehicles.count; vId += 1) {
+    const id = vehicles.turretId[vId] ?? -1;
+    const deployed =
+      vehicles.active[vId] === 1 && vehicles.destroyed[vId] === 0 && vehicles.deployed[vId] === 1;
+    if (!deployed) {
+      if (id >= 0) retireDeployedTurret(world, vId);
+      continue;
+    }
+    if (id < 0 || (store.mountVehicleId[id] ?? -1) !== vId) raiseDeployedTurret(world, vId);
+    else refreshDeployedTurret(world, vId, id);
+  }
+}
+
 export function applyTurretDamage(world: World, id: number, amount: number): void {
   const store = world.turrets;
+  // A vehicle-mounted turret has no shield or health pool of its own: `MobileTurretBase`
+  // sets `inheritEnergyFromMount` (vehicle_mpb.cs:293) and the real script keeps its damage in
+  // step with the vehicle's own (`MobileBaseVehicle::onDamage` copies the vehicle's level onto
+  // the turret, vehicle.cs:127-132), so every hit on the deployed turret is a hit on the MPB.
+  const mountedOn = store.mountVehicleId[id] ?? -1;
+  if (mountedOn >= 0) {
+    applyVehicleDamage(world, mountedOn, amount, -1);
+    return;
+  }
   const data = baseFor(store.barrel[id] as TurretBarrelId);
   if (amount <= 0 || store.destroyed[id]) return;
   const energy = store.energy[id] ?? 0;
@@ -301,13 +486,17 @@ export function applyTurretSnapshot(
   if (data.targetKind !== undefined) store.targetKind[data.id] = data.targetKind;
 }
 
-/** Mirrors `baseObjects.ts`'s `stepPower`, but turrets are always `needsPower: true` (a
- *  turret has no power-independent counterpart the way a generator does), so this is a
- *  straight team-power lookup with no branch. */
+/** Mirrors `baseObjects.ts`'s `stepPower`, but a stationary turret is always
+ *  `needsPower: true` (a turret has no power-independent counterpart the way a generator
+ *  does), so this is a straight team-power lookup with no branch. A vehicle-mounted turret is
+ *  skipped outright: real T2 calls `setSelfPowered()` on the deployed MPB turret
+ *  (vehicle.cs:867), so its power comes from the vehicle that carries it -- stepVehicleTurrets
+ *  keeps raising it at 1 while that vehicle is alive and deployed. */
 export function stepTurretPower(world: World): void {
   const store = world.turrets;
   const teamPower = new Map<number, boolean>();
   for (let id = 0; id < store.count; id += 1) {
+    if ((store.mountVehicleId[id] ?? -1) >= 0) continue;
     const team = store.team[id] ?? 0;
     if (!teamPower.has(team)) teamPower.set(team, teamHasPower(world, team));
     store.powered[id] = teamPower.get(team) ? 1 : 0;
@@ -318,7 +507,14 @@ function distance(ax: number, ay: number, az: number, bx: number, by: number, bz
   return Math.hypot(ax - bx, ay - by, az - bz);
 }
 
-function turretPosition(store: TurretStore, id: number): Vec3 {
+/** A turret's position this tick: its own store row for a stationary map turret, and for a
+ *  vehicle-mounted one the vehicle's Mount1 node, recomputed from the hull's live transform
+ *  every call -- the deployed MPB turret rides its vehicle, so a stored position would go
+ *  stale the moment the vehicle moved. */
+function turretPosition(world: World, id: number): Vec3 {
+  const store = world.turrets;
+  const mountedOn = store.mountVehicleId[id] ?? -1;
+  if (mountedOn >= 0) return vehicleMountPosition(world, mountedOn, store.mountNode[id] ?? 0);
   const base = id * 3;
   return {
     x: store.position[base] ?? 0,
@@ -412,7 +608,7 @@ function acquireTarget(world: World, id: number): number {
   const store = world.turrets;
   const barrelId = store.barrel[id] as TurretBarrelId;
   const range = engagementRange(barrelId);
-  const pos = turretPosition(store, id);
+  const pos = turretPosition(world, id);
   const eye = turretEye(pos);
   const team = store.team[id] ?? 0;
   if (TURRET_BARREL_DATA[barrelId].vehiclesOnly) {
@@ -441,7 +637,7 @@ function targetStillValid(world: World, id: number): boolean {
     : world.players.active[targetId] === 1 && world.players.alive[targetId] === 1;
   if (!stillExists) return false;
   const barrelId = store.barrel[id] as TurretBarrelId;
-  const pos = turretPosition(store, id);
+  const pos = turretPosition(world, id);
   const target = isVehicle ? vehiclePoint(world, targetId) : playerPoint(world, targetId);
   const d = distance(pos.x, pos.y, pos.z, target.x, target.y, target.z);
   return (
@@ -481,7 +677,7 @@ function fireAt(world: World, id: number): void {
   const store = world.turrets;
   const barrelId = store.barrel[id] as TurretBarrelId;
   const barrel = TURRET_BARREL_DATA[barrelId];
-  const pos = turretPosition(store, id);
+  const pos = turretPosition(world, id);
   const targetId = store.targetId[id] ?? -1;
   const target =
     store.targetKind[id] === 1 ? vehiclePoint(world, targetId) : playerPoint(world, targetId);
@@ -512,34 +708,35 @@ function stepOneTurret(world: World, id: number, dt: number): void {
   else advanceFireCycle(world, id, dt);
 }
 
-// --- AA seeker guidance (issue #57) ---------------------------------------------------------
+// --- Turret missile guidance (issue #57) ----------------------------------------------------
 
 const SEEKER_FIXED_DT = 32 / 1000; // matches damage.ts/projectiles.ts's own tick constant
-/** Real (turrets/aaBarrelLarge.cs:181-184): `isSeeker = true` with `seekTime = 1.0` -- a
- *  launched missile flies straight this long while the seeker locks on, then homes. */
-const AA_SEEK_TIME = 1.0;
-const AA_SEEK_TICKS = Math.round(AA_SEEK_TIME / SEEKER_FIXED_DT);
-/** Ours, rad/s: the homing turn rate. The script's remaining seeker fields are
- *  acquisition-side and already satisfied by this sim's shape -- seekRadius 200 is the
- *  barrel's own attackRadius (the gate nearestVehicleTarget applies), maxSeekAngle
- *  6 degrees holds at launch by construction (fireAt aims the shot exactly at the locked
- *  target), and minSeekHeat 0.6 stands in as the barrel's vehiclesOnly targeting (vehicles
- *  are the only hot targets it ever acquires). The engine's homing turn rate itself is not
- *  in the script; 4.5 rad/s turns a 150 m/s shot inside a ~33 m radius -- tight enough to
- *  run down a crossing Shrike at the Large base's 80 m sensor range, loose enough that a
- *  point-blank crossing target still draws a visible pursuit arc instead of snapping onto
- *  it (the WILDCAT_STEERING_FORCE precedent: an untuned value is either flaccid or twitchy). */
+/** Ours, rad/s: the AA barrel's homing turn rate, used when a barrel authors none. The
+ *  script's remaining seeker fields are acquisition-side and already satisfied by this sim's
+ *  shape -- seekRadius 200 is the barrel's own attackRadius (the gate nearestVehicleTarget
+ *  applies), maxSeekAngle 6 degrees holds at launch by construction (fireAt aims the shot
+ *  exactly at the locked target), and minSeekHeat 0.6 stands in as the barrel's vehiclesOnly
+ *  targeting (vehicles are the only hot targets it ever acquires). The engine's homing turn
+ *  rate itself is not in aaBarrelLarge.cs; 4.5 rad/s turns a 150 m/s shot inside a ~33 m
+ *  radius -- tight enough to run down a crossing Shrike at the Large base's 80 m sensor range,
+ *  loose enough that a point-blank crossing target still draws a visible pursuit arc instead
+ *  of snapping onto it (the WILDCAT_STEERING_FORCE precedent: an untuned value is either
+ *  flaccid or twitchy). The MPB's MissileBarrelLarge DOES author one (`turningSpeed = 90
+ *  deg/s`, missileBarrelLarge.cs:167), carried in TURRET_BARREL_DATA and preferred over this. */
 const AA_SEEK_TURN_RATE = 4.5;
 
-/** True while this projectile is one of this turret store's own AA missiles: any live shot
- *  whose sourceTurretId still names an AABarrelLarge. Matching on the firing turret's own
- *  barrel (instead of projectiles.ts's weaponId offset arithmetic) keeps seeker
- *  identification inside the turret data that defines the barrel. */
-function isAASeeker(world: World, id: number): boolean {
+/** True while this projectile is one of this turret store's own homing missiles: any live shot
+ *  whose sourceTurretId still names a turret whose own barrel declares `isSeeker`. Matching on
+ *  the firing turret's barrel (instead of projectiles.ts's weaponId offset arithmetic) keeps
+ *  seeker identification inside the turret data that defines the barrel -- now for both the AA
+ *  barrel and the MPB's deployed MissileBarrelLarge. */
+function isSeekerMissile(world: World, id: number): boolean {
   const store = world.projectiles;
   if (!store.active[id]) return false;
   const turretId = store.sourceTurretId[id] ?? -1;
-  return turretId >= 0 && world.turrets.barrel[turretId] === TurretBarrelId.AABarrelLarge;
+  if (turretId < 0) return false;
+  const barrel = TURRET_BARREL_DATA[world.turrets.barrel[turretId] as TurretBarrelId];
+  return barrel.isSeeker === true;
 }
 
 /** The locked vehicle target this seeker's own turret currently holds, or null once that
@@ -555,10 +752,16 @@ function seekerTargetPoint(world: World, turretId: number): Vec3 | null {
   return vehiclePoint(world, store.targetId[turretId]!);
 }
 
-/** Rotates `velocity` toward `target` by at most AA_SEEK_TURN_RATE * dt, preserving speed --
+/** Rotates `velocity` toward `target` by at most `maxTurn * dt` radians, preserving speed --
  *  a seeker re-aims, it does not accelerate. Returns the steered velocity rather than
  *  writing the store, so stepOneSeeker owns the write. */
-function steerToward(velocity: Vec3, position: Vec3, target: Vec3, dt: number): Vec3 {
+function steerToward(
+  velocity: Vec3,
+  position: Vec3,
+  target: Vec3,
+  dt: number,
+  maxTurn: number,
+): Vec3 {
   const speed = Math.hypot(velocity.x, velocity.y, velocity.z);
   const dx = target.x - position.x;
   const dy = target.y - position.y;
@@ -575,7 +778,7 @@ function steerToward(velocity: Vec3, position: Vec3, target: Vec3, dt: number): 
   const sin = Math.hypot(axis.x, axis.y, axis.z);
   const cos = current.x * desired.x + current.y * desired.y + current.z * desired.z;
   if (sin <= 0) return velocity; // aligned (done), or exactly anti-parallel with no axis
-  const turn = Math.min(Math.atan2(sin, cos), AA_SEEK_TURN_RATE * dt);
+  const turn = Math.min(Math.atan2(sin, cos), maxTurn * dt);
   const k = { x: axis.x / sin, y: axis.y / sin, z: axis.z / sin };
   // Rodrigues rotation of the unit heading around `k` by `turn`, scaled back to `speed`.
   const c = Math.cos(turn);
@@ -611,11 +814,23 @@ function vecAt(arr: Float64Array, base: number): Vec3 {
  *  stepping stepProjectiles directly. */
 function stepOneSeeker(world: World, id: number, dt: number): void {
   const store = world.projectiles;
-  if ((store.expiresAtTick[id] ?? 0) < AA_SEEK_TICKS) return;
-  const target = seekerTargetPoint(world, store.sourceTurretId[id] ?? -1);
+  const turretId = store.sourceTurretId[id] ?? -1;
+  const barrel = TURRET_BARREL_DATA[world.turrets.barrel[turretId] as TurretBarrelId];
+  // A launched missile flies straight for its own barrel's `seekTime` while the seeker locks
+  // on, then homes (aaBarrelLarge.cs:181-184 and missileBarrelLarge.cs:150-152 both set 1.0 s).
+  if ((store.expiresAtTick[id] ?? 0) < Math.round((barrel.seekTime ?? 0) / SEEKER_FIXED_DT)) {
+    return;
+  }
+  const target = seekerTargetPoint(world, turretId);
   if (!target) return;
   const base = id * 3;
-  const steered = steerToward(vecAt(store.velocity, base), vecAt(store.position, base), target, dt);
+  const steered = steerToward(
+    vecAt(store.velocity, base),
+    vecAt(store.position, base),
+    target,
+    dt,
+    barrel.seekTurnRate ?? AA_SEEK_TURN_RATE,
+  );
   store.velocity[base] = steered.x;
   store.velocity[base + 1] = steered.y;
   store.velocity[base + 2] = steered.z;
@@ -624,19 +839,20 @@ function stepOneSeeker(world: World, id: number, dt: number): void {
 /** Runs after this tick's own acquisition/firing pass (stepOneTurret per turret) and
  *  before stepProjectiles -- stepWorld calls stepTurrets there, so the steered velocity is
  *  what this same tick's tracer integration actually flies, with no guidance latency. */
-function stepAASeekers(world: World, dt: number): void {
+function stepSeekerMissiles(world: World, dt: number): void {
   const store = world.projectiles;
   for (let id = 0; id < store.count; id += 1) {
-    if (!isAASeeker(world, id)) continue;
+    if (!isSeekerMissile(world, id)) continue;
     stepOneSeeker(world, id, dt);
   }
 }
 
 export function stepTurrets(world: World, dt: number): void {
+  stepVehicleTurrets(world);
   stepTurretPower(world);
   world.pendingTurretFireEvents = [];
   for (let id = 0; id < world.turrets.count; id += 1) stepOneTurret(world, id, dt);
-  stepAASeekers(world, dt);
+  stepSeekerMissiles(world, dt);
 }
 
 // --- Collision shape (issue #54) -------------------------------------------------------------
@@ -765,6 +981,18 @@ export const TURRET_HIT_SHAPE_DATA: Record<TurretBarrelId, TurretHitShapeData> =
     head: null,
     barrel: null,
     bound: { centerY: 0.065, radius: 0.7079 },
+  },
+  // The deployed MPB turret's own source models (`turret_base_mpb.dts` and
+  // `turret_missile_large.dts`, vehicle_mpb.cs:281 / missileBarrelLarge.cs:139) are NOT part
+  // of the settled asset set under assets/out, so there is nothing measured to publish here.
+  // It borrows the Large pedestal's own measured volumes -- the same TurretData-family base
+  // plus barrel layout -- which is the closest published geometry; the report names this as
+  // the collision-shape approximation for the deployed turret.
+  [TurretBarrelId.MissileBarrelLarge]: {
+    pedestal: { y0: -0.001, y1: 1.327, radius: 2.355 },
+    head: { y0: 0.354, y1: 2.219, radius: 1.314 },
+    barrel: null,
+    bound: { centerY: 0.663, radius: 2.4468 },
   },
 };
 

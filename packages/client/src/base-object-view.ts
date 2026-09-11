@@ -173,9 +173,17 @@ function addTurretMesh(
   } else {
     prepareTurretPresentation(mesh, barrel);
   }
+  const barrelShape =
+    assets.scene.shapesForTurretBarrel[placement.barrel] ??
+    // The deployed MPB turret's own barrel (MissileBarrelLarge, sources
+    // turret_missile_large.dts) has no converted model in the settled asset set, so it draws
+    // the AA barrel's own published GLB -- the closest silhouette of the two committed large
+    // barrels (turret_aa_large.glb). Never reached for the three map-placed barrels, whose
+    // rows scene.json always carries.
+    assets.scene.shapesForTurretBarrel[1];
   loadShapeInto(
     barrel,
-    assets.scene.shapesForTurretBarrel[placement.barrel],
+    barrelShape,
     placement.barrel === 2 ? Math.PI : 0,
     (loaded, clips) => addTurretAnimations(mesh, loaded, clips),
   );

@@ -4,6 +4,7 @@ import {
   ProjectileType,
   TURRET_WEAPON_ID_OFFSET,
   TurretBarrelId,
+  VEHICLE_WEAPON_ID_OFFSET,
   WeaponId,
   WeaponState,
   type ProjectileImpact,
@@ -279,14 +280,23 @@ export function projectileImpactCue(
       ? { sound: 'mortar-explode', profile: EXPLOSION }
       : { sound: 'grenade-explode', profile: WEAPON_EXPLOSION };
   }
-  // weaponId rides the wire raw: turret barrels sit at TURRET_WEAPON_ID_OFFSET, and the
-  // Shrike's 150 is handled above by type because it has no row of its own either.
+  // weaponId rides the wire raw: turret barrels sit at TURRET_WEAPON_ID_OFFSET, vehicle
+  // weapons one range above that (VEHICLE_WEAPON_ID_OFFSET), and the Shrike's 150 is handled
+  // above by type because it has no row of its own either.
   const sound =
     impact.type === ProjectileType.VehicleLaser
       ? WEAPON_IMPACT[WeaponId.Blaster]
-      : impact.weaponId >= TURRET_WEAPON_ID_OFFSET
-        ? TURRET_IMPACT[impact.weaponId - TURRET_WEAPON_ID_OFFSET]
-        : WEAPON_IMPACT[impact.weaponId as WeaponId];
+      : impact.weaponId >= VEHICLE_WEAPON_ID_OFFSET
+        ? // Vehicle-fired gun rounds (the Tank's AssaultChaingun, the Bomber's fusion bolt)
+          // reuse the handheld Chaingun's own impact recording: the Tank's round IS the
+          // chaingun family (vehicle_tank.cs:361's TracerProjectileData), and the Bomber's
+          // bolt (vehicle_bomber.cs:412 `sound = BlasterProjectileSound`) is close enough to
+          // the Blaster that either sample reads correctly. Vehicle ordnance (the mortar, the
+          // bombs) never reaches here -- Grenade-type records were resolved above.
+          WEAPON_IMPACT[WeaponId.Chaingun]
+        : impact.weaponId >= TURRET_WEAPON_ID_OFFSET
+          ? TURRET_IMPACT[impact.weaponId - TURRET_WEAPON_ID_OFFSET]
+          : WEAPON_IMPACT[impact.weaponId as WeaponId];
   return sound ? { sound: sound[0], profile: sound[1] } : null;
 }
 

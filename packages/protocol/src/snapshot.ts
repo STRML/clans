@@ -558,6 +558,15 @@ function writeVehicle(cursor: Cursor, v: VehicleSnapshotData): void {
   writeU8(cursor, vehicleStatusByte(v));
   writeF32(cursor, v.spawnTime ?? 0);
   writeI16(cursor, v.reservedPilotId ?? -1);
+  // Second crew seat (issue #57 follow-up): the optional `passengerId` field, written
+  // unconditionally with -1 for "no passenger" exactly like the two optional fields above.
+  // Appended at the record's own end. PROTOCOL_VERSION stays 11 per this slice's explicit
+  // contract: both ends ship from this monorepo in lockstep, so no supported peer is ever
+  // one field behind -- the exact situation messages.ts's own comment says a bump exists to
+  // catch, and the one case where the contract overrides it. A wider seat list (the Bomber's
+  // 3 and Havoc's 6 mount points) is deliberately NOT carried: see sim/snapshot.ts's
+  // VehicleSnapshotData.passengerId comment.
+  writeI16(cursor, v.passengerId ?? -1);
 }
 function readVehicle(cursor: Cursor): VehicleSnapshotData {
   const id = readU16(cursor);
@@ -603,6 +612,7 @@ function readVehicle(cursor: Cursor): VehicleSnapshotData {
   const wasJumpHeld = (status & 2 ? 1 : 0) as 0 | 1;
   const spawnTime = readF32(cursor);
   const reservedPilotId = readI16(cursor);
+  const passengerId = readI16(cursor);
   assertFinite([spawnTime]);
   return {
     id,
@@ -627,13 +637,15 @@ function readVehicle(cursor: Cursor): VehicleSnapshotData {
     padId,
     weaponTimer,
     ...(spawnTime > 0 ? { spawnTime, reservedPilotId } : {}),
+    ...(passengerId !== -1 ? { passengerId } : {}),
     onGround,
     wasJumpHeld,
   };
 }
 // id, kind, team, 14 f32 fields (x/y/z, vx/vy/vz, yaw/pitch/roll, angVelYaw/Pitch/Roll,
-// energy, damage), destroyed, driverId i16, padId i16, weaponTimer f32, status byte.
-const VEHICLE_BYTES = 2 + 1 + 1 + 4 * 14 + 1 + 2 + 2 + 4 + 1 + 4 + 2;
+// energy, damage), destroyed, driverId i16, padId i16, weaponTimer f32, status byte,
+// spawnTime f32, reservedPilotId i16, passengerId i16.
+const VEHICLE_BYTES = 2 + 1 + 1 + 4 * 14 + 1 + 2 + 2 + 4 + 1 + 4 + 2 + 2;
 
 function writeBot(cursor: Cursor, b: BotDebugSnapshotData): void {
   writeU16(cursor, b.playerId);

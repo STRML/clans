@@ -204,6 +204,12 @@ function mixTurrets(hash: number, world: World): number {
     // by the client's presentation, never round-tripped into a World), which puts it in the
     // same carve-out class hashWorld's POLICY comment already grants expiresAtTick.
     h = mix(h, num(store.timer, id));
+    // Issue #57's second half: which vehicle (if any) this turret is mounted on, and the node
+    // it rides. Both decide where a later tick's shots originate and who takes its damage, so
+    // they are exactly the class of state mixTurrets shipped missing `timer` without (issue
+    // #13) -- see that field's own comment.
+    h = mix(h, num(store.mountVehicleId, id));
+    h = mix(h, num(store.mountNode, id));
   }
   return h;
 }
@@ -249,6 +255,20 @@ function mixVehicle(hash: number, vehicles: World['vehicles'], id: number): numb
   // except for who will be credited when this vehicle dies MUST hash differently, since
   // applyVehicleKillScore diverges their players.score the tick the vehicle is destroyed.
   h = mix(h, num(vehicles.lastAttackerId, id));
+  // Issue #57's second half: the second crew seat, the vehicle's own abandonment timer
+  // (whichever way it resolves, one world despawns the hull and the other keeps it), the
+  // Mobile Point Base's deployment state and the two deployed-object ids it revives (they
+  // decide which base-object/turret rows a later deploy writes), the last pilot its abandon
+  // rule is keyed on, and the second weapon slot's cooldown. Every one of these decides what
+  // a future tick does, so mixVehicle's own "deliberately exhaustive" rule applies.
+  h = mix(h, num(vehicles.passengerId, id));
+  h = mix(h, num(vehicles.lastPilotId, id));
+  h = mix(h, num(vehicles.abandonTimer, id));
+  h = mix(h, num(vehicles.deployTimer, id));
+  h = mix(h, num(vehicles.deployed, id));
+  h = mix(h, num(vehicles.stationObjectId, id));
+  h = mix(h, num(vehicles.turretId, id));
+  h = mix(h, num(vehicles.weaponTimerAlt, id));
   return h;
 }
 

@@ -32,9 +32,11 @@ import {
 } from './turrets.js';
 import {
   applyVehicleDamage,
-  SHRIKE_BLASTER_DATA,
+  isProtectedSeat,
   VEHICLE_DATA,
+  VEHICLE_WEAPON_DATA,
   VehicleKind,
+  VehicleWeaponId,
   type VehicleFireEvent,
 } from './vehicles.js';
 import {
@@ -195,20 +197,28 @@ function pointAlongSegment(previous: Vec3, current: Vec3, distance: number): Vec
  *  shot -- shared by the direct-hit, grenade-contact, and hitscan target searches so the
  *  "skip inactive/dead/self" rule lives in exactly one place.
  *
- *  A MOUNTED player is never a valid target (M5): their position is seat-locked to their
- *  vehicle's own transform (vehicles.ts's stepVehicles), so without this exclusion a shot
- *  would test both the vehicle's own hit-sphere (nearestStructureHitFrom, now vehicle-aware)
- *  AND the tiny player hitbox sitting at that exact same point -- and since a player hitbox
- *  is far smaller than a vehicle's checkRadius, findDirectHitFrom would almost always win the
- *  nearestOfThree race with a shorter distance, landing every hit on the PILOT directly and
- *  bypassing the vehicle's shield/health pool entirely. Real T2 has no separate pilot hitbox
- *  while mounted; only the vehicle can be shot. */
+ *  A mounted player in a PROTECTED seat is never a valid target (issue #57 follow-up): their
+ *  position is seat-locked to their vehicle's own transform (vehicles.ts's stepVehicles), so
+ *  without this exclusion a shot would test both the vehicle's own hit-sphere
+ *  (nearestStructureHitFrom, now vehicle-aware) AND the tiny player hitbox sitting at that
+ *  exact same point -- and since a player hitbox is far smaller than a vehicle's
+ *  checkRadius, findDirectHitFrom would almost always win the nearestOfThree race with a
+ *  shorter distance, landing every hit on the PILOT directly and bypassing the vehicle's
+ *  shield/health pool entirely. Real T2 has no separate pilot hitbox while mounted; only the
+ *  vehicle can be shot.
+ *
+ *  That exclusion is exactly the script's own `isProtectedMountPoint` rule
+ *  (player.cs:2681-2732: damage to a crewman in a protected node is redirected onto the
+ *  vehicle), so it is applied per seat now instead of to every mounted player: a seat its own
+ *  kind does NOT mark protected is hittable normally. Every seat of every kind is protected in
+ *  the scripts, so nothing observable changes for the vehicles that exist -- but the rule is
+ *  the data's, not a blanket. */
 function isValidTarget(world: World, playerId: number, ownerId: number): boolean {
   return (
     world.players.active[playerId] === 1 &&
     world.players.alive[playerId] === 1 &&
     playerId !== ownerId &&
-    world.players.mountedVehicleId[playerId] === -1
+    !isProtectedSeat(world, playerId)
   );
 }
 
@@ -350,13 +360,12 @@ function explode(
 ): void {
   for (let id = 0; id < world.players.count; id += 1) {
     if (!world.players.active[id] || !world.players.alive[id]) continue;
-    // Same mounted-player exclusion as isValidTarget's own comment explains for direct hits:
-    // a mounted player's position is seat-locked to their vehicle's transform, so splash that
-    // reaches the vehicle (explodeVehicles, below) would ALSO land on the pilot's own hitbox
-    // sitting at that identical point, double-dipping one hit into damage against both the
-    // vehicle's shield/health pool and the pilot's, when real T2 has no separate pilot hitbox
-    // while mounted at all.
-    if (world.players.mountedVehicleId[id] !== -1) continue;
+    // Same protected-seat rule as isValidTarget's own comment explains for direct hits: a
+    // crewman in a protected mount node is not individually hittable -- splash that reaches
+    // the vehicle (explodeVehicles, below) damages it instead, and real T2 has no separate
+    // pilot hitbox while mounted at all. A crewman in an unprotected node takes the splash
+    // like anyone else (no kind in the scripts has one; the rule is the data's).
+    if (isProtectedSeat(world, id)) continue;
     const armor = armorFor(world, id);
     const hitbox = playerHitbox(world, id, armor);
     const dx = hitbox.center.x - point.x,
@@ -780,30 +789,18 @@ const NO_HIT: HitResult = { hitPlayerId: -1, hitPoint: null };
  *  0-4) and turret barrels (`TurretBarrelId`, 0-2); this offset keeps the two ranges from
  *  colliding on the wire. */
 export const TURRET_WEAPON_ID_OFFSET = 100;
-/** Same collision-avoidance offset, one range over, for the Shrike blaster -- the only
- *  vehicle weapon this milestone ships (the Wildcat has none), so a single sentinel value is
- *  enough; a second vehicle weapon would need its own small enum the way TurretBarrelId has. */
-const VEHICLE_WEAPON_ID_OFFSET = 150;
-/** `dataForStoredWeapon`'s vehicle-weapon case, shaped like `TurretBarrelData` (not a fourth
- *  union member) since every field `stepLinearOrTracer`/`resolveImpact` read off it already
- *  exists on that interface. Sourced from `SHRIKE_BLASTER_DATA` (vehicles.ts) so the fire
- *  cadence/damage/speed numbers stay defined in exactly one place. */
-const SHRIKE_BLASTER_PROJECTILE_DATA: TurretBarrelData = {
-  projectile: ProjectileType.Tracer,
-  speed: SHRIKE_BLASTER_DATA.speed,
-  velInherit: 1.0, // weapons/chaingun.cs:514 -- full inheritance, already baked into spawnVehicleShot
-  directDamage: SHRIKE_BLASTER_DATA.directDamage,
-  radiusDamage: 0,
-  radius: 0,
-  kickback: 0,
-  fireTime: SHRIKE_BLASTER_DATA.fireInterval,
-  reloadTime: 0,
-  lifetime: SHRIKE_BLASTER_DATA.lifetime,
-  attackRadius: 0, // unused for a driver-fired shot; fire cadence is weaponTimer, not range
-};
+/** Same collision-avoidance offset, one range over, for the vehicle weapons: stored id 150 +
+ *  VehicleWeaponId. `dataForStoredWeapon` and `ordnanceFor` both resolve the range by
+ *  subtraction, so adding a weapon kind extends it without touching either lookup. Exported
+ *  for the client's own weapon-id-range checks (audio.ts's impact cues), exactly like
+ *  TURRET_WEAPON_ID_OFFSET above. */
+export const VEHICLE_WEAPON_ID_OFFSET = 150;
 
 function dataForStoredWeapon(weaponId: number): WeaponData | TurretBarrelData {
-  if (weaponId === VEHICLE_WEAPON_ID_OFFSET) return SHRIKE_BLASTER_PROJECTILE_DATA;
+  if (weaponId >= VEHICLE_WEAPON_ID_OFFSET) {
+    // Structurally a TurretBarrelData plus the ordnance fields -- see VehicleWeaponData.
+    return VEHICLE_WEAPON_DATA[(weaponId - VEHICLE_WEAPON_ID_OFFSET) as VehicleWeaponId];
+  }
   return weaponId >= TURRET_WEAPON_ID_OFFSET
     ? TURRET_BARREL_DATA[(weaponId - TURRET_WEAPON_ID_OFFSET) as TurretBarrelId]
     : WEAPON_DATA[weaponId as WeaponId];
@@ -912,21 +909,48 @@ function stepLinearOrTracer(world: World, id: number, dt: number): HitResult {
   return NO_HIT;
 }
 
-function grenadeArmTicks(isMortar: boolean): number {
-  return Math.round(
-    (isMortar ? (WEAPON_DATA[WeaponId.Mortar].armTime ?? 0) : GRENADE_DATA.armTime) / FIXED_DT,
-  );
-}
-function grenadeLifetimeTicks(isMortar: boolean): number {
-  return Math.round(
-    (isMortar ? WEAPON_DATA[WeaponId.Mortar].lifetime : GRENADE_DATA.lifetime) / FIXED_DT,
-  );
+/** The ordnance numbers a stored grenade-type projectile flies on. `resolveImpact` only
+ *  needs ImpactData's own four fields, and the flight needs the four optional ones --
+ *  every source object (the hand grenade's GRENADE_DATA, the player mortar's WEAPON_DATA
+ *  row, and each vehicle weapon's VEHICLE_WEAPON_DATA row) supplies all of them. Returning
+ *  the shared table object itself, never a copy, keeps this allocation-free per tick. */
+type OrdnanceData = ImpactData & {
+  armTime?: number;
+  lifetime?: number;
+  drag?: number;
+  elasticity?: number;
+};
+
+/** Which ordnance datablock a stored Grenade-type projectile belongs to, by its own weapon
+ *  id: the vehicle range by offset (the Tank's mortar, the Bomber's bombs), the player
+ *  Mortar's own row, else the hand grenade's. The hand grenade is what a thrown `altFire`
+ *  produces (weapons.ts pushes it with the Spinfusor's weaponId, the value
+ *  `spawnFromEvent`'s isAltFire branch never reads), which is why this is keyed on the
+ *  Stored id and not on the fire event. */
+function ordnanceFor(weaponId: number): OrdnanceData {
+  if (weaponId >= VEHICLE_WEAPON_ID_OFFSET) {
+    return VEHICLE_WEAPON_DATA[(weaponId - VEHICLE_WEAPON_ID_OFFSET) as VehicleWeaponId];
+  }
+  return weaponId === WeaponId.Mortar ? WEAPON_DATA[WeaponId.Mortar] : GRENADE_DATA;
 }
 
-function integrateGrenade(store: ProjectileStore, id: number, dt: number): Vec3 {
+function grenadeArmTicks(data: OrdnanceData): number {
+  return Math.round((data.armTime ?? 0) / FIXED_DT);
+}
+
+function grenadeLifetimeTicks(data: OrdnanceData): number {
+  return Math.round((data.lifetime ?? 0) / FIXED_DT);
+}
+
+function integrateGrenade(
+  store: ProjectileStore,
+  id: number,
+  dt: number,
+  data: OrdnanceData,
+): Vec3 {
   const base = id * 3;
   const velocity = readVec3(store.velocity, base);
-  const drag = Math.max(0, 1 - GRENADE_DATA.drag * dt);
+  const drag = Math.max(0, 1 - (data.drag ?? 0) * dt);
   const nextVelocity: Vec3 = {
     x: velocity.x * drag,
     y: velocity.y - GRAVITY * dt,
@@ -949,9 +973,9 @@ function armGrenadeIfDue(
   store: ProjectileStore,
   id: number,
   elapsed: number,
-  isMortar: boolean,
+  data: OrdnanceData,
 ): void {
-  if (!store.armed[id] && elapsed >= grenadeArmTicks(isMortar)) store.armed[id] = 1;
+  if (!store.armed[id] && elapsed >= grenadeArmTicks(data)) store.armed[id] = 1;
 }
 
 /** Detonates an armed grenade whose lifetime just ran out with nothing else triggering it,
@@ -1002,15 +1026,17 @@ function grenadeContactThisTick(
 function stepGrenade(world: World, id: number, dt: number): void {
   const store = world.projectiles;
   const previous = readVec3(store.position, id * 3);
-  const current = integrateGrenade(store, id, dt);
-  const isMortar = store.weaponId[id] === WeaponId.Mortar;
+  // The stored weapon decides every flight number: the hand grenade and the player Mortar as
+  // before, and now the Tank's AssaultMortar / the Bomber's bombs through the vehicle range
+  // (vehicles.ts's VEHICLE_WEAPON_DATA, each field cited to its own script line).
+  const data = ordnanceFor(store.weaponId[id] ?? 0);
+  const current = integrateGrenade(store, id, dt, data);
   const elapsed = (store.expiresAtTick[id] ?? 0) + 1;
   store.expiresAtTick[id] = elapsed;
-  armGrenadeIfDue(store, id, elapsed, isMortar);
+  armGrenadeIfDue(store, id, elapsed, data);
 
   const terrainHit = worldHitAlongSegment(world, previous, current, store.team[id] ?? 0);
   const armed = store.armed[id] === 1;
-  const data: ImpactData = isMortar ? WEAPON_DATA[WeaponId.Mortar] : GRENADE_DATA;
   const contact = grenadeContactThisTick(world, id, previous, current, armed, terrainHit);
   if (contact) {
     // An armed grenade's contact resolution: Direct when the nearer contact was a player,
@@ -1026,9 +1052,9 @@ function stepGrenade(world: World, id: number, dt: number): void {
     // puff at the contact point while the projectile keeps flying under its new velocity.
     recordImpact(world, id, terrainHit.point, ProjectileImpactReason.Bounce);
     writeVec3(store.position, id * 3, terrainHit.point);
-    bounce(world, id, bounceNormalFor(terrainHit), GRENADE_DATA.elasticity);
+    bounce(world, id, bounceNormalFor(terrainHit), data.elasticity ?? 0);
   }
-  if (elapsed >= grenadeLifetimeTicks(isMortar))
+  if (elapsed >= grenadeLifetimeTicks(data))
     finalizeGrenadeLifetime(world, id, data, current, armed);
 }
 
@@ -1359,38 +1385,47 @@ function spawnPendingTurretShots(world: World, dt: number): void {
   for (const event of world.pendingTurretFireEvents) spawnTurretShot(world, event, dt);
 }
 
-/** Materializes one Shrike-blaster shot (Task 6's `stepVehicles`/`tryFireShrikeBlaster`) as a
- *  real projectile — the vehicle-fired sibling of `spawnTurretShot`, same no-ammo shape.
- *  `ownerId` comes straight from the event — the driving player, so a blaster-destroyed
- *  vehicle credits its killer through applyVehicleKillScore (issue #57); older/partial
- *  event shapes without one materialize as -1, matching spawnTurretShot's own unattributed
- *  convention. `team` also comes from the event, not a player lookup. Velocity
- *  inherits the firing vehicle's own velocity at full strength (`velInheritFactor = 1.0`,
- *  `weapons/chaingun.cs:514`), unlike the player Chaingun's own lower inheritance. A Tracer
- *  shot resolves same-tick, exactly like spawnTurretShot's own AA-barrel case. */
+/** Materializes one vehicle weapon's shot (vehicles.ts's stepOneVehicleWeapon) as a real
+ *  projectile -- the vehicle-fired sibling of `spawnTurretShot`, same no-ammo shape (a full
+ *  store just drops the shot; there is no ammo to refund). The event's own `weapon` selects
+ *  every number from VEHICLE_WEAPON_DATA, exactly as a TurretFireEvent's barrel selectts
+ *  TURRET_BARREL_DATA, so the Shrike blaster, the Tank's chaingun and mortar and the Bomber's
+ *  turret gun and bombs all flow through this one function.
+ *
+ *  `ownerId` comes straight from the event -- the crew member who pulled the trigger, so a
+ *  vehicle-destroying shot credits its killer through applyVehicleKillScore (issue #57);
+ *  older/partial event shapes without one materialize as -1, matching spawnTurretShot's own
+ *  unattributed convention. `team` also comes from the event, not a player lookup. Velocity
+ *  inherits the firing vehicle's own velocity by the weapon's own `velInherit` (the Shrike
+ *  blaster's 1.0, the mortar's 1.0, the bomb's 1.0 -- its real velInheritFactor). A Tracer
+ *  shot resolves same-tick, exactly like spawnTurretShot's own AA-barrel case; a Grenade
+ *  ordnance round (the mortar, the bombs) waits out the normal one-tick spawn latency and
+ *  arms on its own script's arming delay. */
 function spawnVehicleShot(world: World, event: VehicleFireEvent, dt: number): void {
   const id = allocate(world.projectiles);
-  if (id === null) return; // A vehicle has no ammo to refund — a full store just drops the shot.
+  if (id === null) return;
   const store = world.projectiles;
-  // The firing driver, for kill attribution -- see VehicleFireEvent.ownerId's own comment.
+  const weaponId = event.weapon ?? VehicleWeaponId.ShrikeBlaster;
+  const data = VEHICLE_WEAPON_DATA[weaponId];
+  // The firing driver/gunner, for kill attribution -- see VehicleFireEvent.ownerId.
   store.ownerId[id] = event.ownerId ?? -1;
-  store.type[id] = ProjectileType.VehicleLaser;
-  store.weaponId[id] = VEHICLE_WEAPON_ID_OFFSET;
+  store.type[id] = data.projectile;
+  store.weaponId[id] = VEHICLE_WEAPON_ID_OFFSET + weaponId;
   store.team[id] = event.team;
   store.sourceTurretId[id] = -1;
   // Excludes the firing vehicle from its own shot's structure hit-test — same reason
   // sourceTurretId excludes a turret from its own shot; see that field's own comment.
   store.sourceVehicleId[id] = event.vehicleId;
   store.position.set([event.origin.x, event.origin.y, event.origin.z], id * 3);
-  store.velocity.set(
-    [
-      event.direction.x * SHRIKE_BLASTER_DATA.speed + event.velocity.x,
-      event.direction.y * SHRIKE_BLASTER_DATA.speed + event.velocity.y,
-      event.direction.z * SHRIKE_BLASTER_DATA.speed + event.velocity.z,
-    ],
-    id * 3,
-  );
-  stepLinearOrTracer(world, id, dt);
+  const velocity = velocityFor(event.direction, data.speed, event.velocity, data.velInherit);
+  store.velocity.set([velocity.x, velocity.y, velocity.z], id * 3);
+  // Both same-tick-resolving vehicle weapon types: the Shrike's VehicleLaser bolt (the type
+  // it has carried since M5, which the client draws distinctly from a player Blaster bolt) and
+  // an ordinary Tracer. A Grenade round (the mortar, the bombs) waits out the normal one-tick
+  // spawn latency, exactly like spawnStored's own mortar.
+  if (data.projectile === ProjectileType.Tracer || data.projectile === ProjectileType.VehicleLaser) {
+    stepLinearOrTracer(world, id, dt);
+  }
 }
 
 /** Drains `world.pendingVehicleFireEvents` (Task 5's `stepVehicles` already ran this same
