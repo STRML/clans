@@ -699,7 +699,8 @@ export interface TurretHitShapeData {
  *   Sleeve       x ±0.3819  y 1.4375..2.2179  z -1.0417..0.2566  (intact top 2.2179)
  *   BaseWingL/R  x 0.4492..1.3162  y -0.0001..1.1802  z 0.5510..2.4015 -> r 2.7385
  *   Mount0 (the barrel socket) sits at (0, 1.8265, -0.4001); the head's yaw joint (DumTurn)
- *   sits at (0, 0.7608, 0.6989), so the socket swings on a 1.0994 m radius about it.
+ *   sits at (0, 0.7608, 0.6989), so the socket swings on a 1.0990 m radius about it, i.e.
+ *   0.4001 to 1.7979 m from the placement axis as the head turns.
  * `turret_fusion_large.glb`, mounted on that socket (its Mountpoint is at (0, 0.3499, 0)):
  *   its Muzzlepoint lands at (0, 1.8427, 1.3571), 1.7573 m out along the barrel axis, while the
  *   intact barrel nodes span -0.5029..0.8937 along that axis with a 0.4363 m maximum
@@ -729,16 +730,16 @@ export interface TurretHitShapeData {
  * call site passes today, so they are reported rather than guessed at:
  *  - The base wings reach r 2.7385, 0.384 m past the pedestal cylinder. The sphere this
  *    replaces missed them by 0.739 m, so this is still the tighter of the two.
- *  - The barrel capsule sits in the placement's own frame, so a head yawed away from it (up to
- *    1.7994 m of socket travel about the joint above) or a barrel pitched anywhere in the
- *    base's own 15..140 deg theta band can leave it: measured over that whole band about the
- *    elevation joint (DumElevate, at y 1.8246), the drawn barrel mesh reaches y 2.6402, its
- *    Muzzlepoint -- the fired extension's tip -- 3.0010, and the horizontal radius grows to
- *    1.3572. Covering every yaw instead measures r 2.4939 about the placement axis: a cylinder
- *    over the head's own 0.354..2.218 m band alone is 36.4 m3, more than this entire shape's
- *    34.653 m3, and it would block shots that visibly pass beside the barrel. The authored
- *    frame is the pose the client relaxes to (turret-mount.ts's `relaxTowardRest`) and the
- *    frame every other turret constant in this file already uses.
+ *  - The barrel capsule sits in the placement's own frame, so a head yawed away from it (the
+ *    socket swings 0.4001..1.7979 m from the placement axis about the joint above) or a barrel
+ *    pitched anywhere in the base's own 15..140 deg theta band can leave it: measured over that
+ *    whole band about the elevation joint (DumElevate, at y 1.8246), the drawn barrel mesh
+ *    reaches y 2.6402, its Muzzlepoint -- the fired extension's tip -- 3.0010, and the
+ *    horizontal radius grows to 1.3572. Covering every yaw instead measures r 2.4939 about the
+ *    placement axis: a cylinder over the head's own 0.354..2.218 m band alone is 36.4 m3, more
+ *    than this entire shape's 34.653 m3, and it would block shots that visibly pass beside the
+ *    barrel. The authored frame is the pose the client relaxes to (turret-mount.ts's
+ *    `relaxTowardRest`) and the frame every other turret constant in this file already uses.
  */
 export const TURRET_HIT_SHAPE_DATA: Record<TurretBarrelId, TurretHitShapeData> = {
   // The pedestal cylinder is BaseMain's circumscribed radius (its widest intact part), rounded
