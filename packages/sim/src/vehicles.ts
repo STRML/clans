@@ -241,6 +241,20 @@ function padSpawnTeam(world: World, padId: number): number | null {
   return team;
 }
 
+/** The surface a pad spawn should sit above: the pad's deck when one covers it (probed
+ *  down from just above the pad origin -- on real Katabatic the svpad deck top sits 2.3 m
+ *  ABOVE the pad object's y), else whatever the terrain answers, else the pad origin.
+ *  Split out of spawnVehicleAtPad to keep that function's own complexity under budget. */
+function padSpawnSupport(world: World, padPos: Vec3): number {
+  const deck = raycastInteriors(
+    world.interiors,
+    { x: padPos.x, y: padPos.y + 6, z: padPos.z },
+    { x: 0, y: -1, z: 0 },
+    16,
+  );
+  return deck?.point.y ?? groundHeightAt(world, padPos) ?? padPos.y;
+}
+
 export function spawnVehicleAtPad(world: World, padId: number, kind: VehicleKind): number | null {
   // kind ultimately traces back to a wire byte (protocol/handshake.ts's decodeVehicleSpawn
   // reads a raw u8 with no range check of its own) via server/net.ts's handleVehicleSpawn,
@@ -271,7 +285,19 @@ export function spawnVehicleAtPad(world: World, padId: number, kind: VehicleKind
   vehicles.active[id] = 1;
   vehicles.kind[id] = kind;
   vehicles.team[id] = team;
-  vehicles.position.set([padPos.x, padPos.y + 2, padPos.z], id * 3);
+  // Spawn at rest height above the pad's actual WALKABLE surface, not a flat offset from
+  // the pad object's own origin: on real Katabatic the svpad deck top sits 2.3 m above the
+  // pad object's y (measured issue trace: pad y 77.80, deck 80.10), so the old
+  // padPos.y + 2 placed the Wildcat 0.3 m INSIDE the deck mesh, which then shoved the
+  // craft sideways off the pad while the hover spring dragged it down through the deck
+  // (y 78.3 -> 77.4 over 60 ticks). Probe the deck from just above the pad origin; with
+  // no deck overhead-ish, fall back to what the terrain sees, then to the pad origin.
+  const support = padSpawnSupport(world, padPos);
+  // The Wildcat spawns exactly at its hover rest height (applyHoverSpring's midpoint), so
+  // the spring starts in equilibrium instead of popping the craft out of the geometry;
+  // the Shrike is self-supporting and only needs clearance above the surface.
+  const lift = kind === VehicleKind.Wildcat ? WILDCAT_HOVER_REST_HEIGHT : 2;
+  vehicles.position.set([padPos.x, support + lift, padPos.z], id * 3);
   vehicles.velocity.set([0, 0, 0], id * 3);
   vehicles.yaw[id] = 0;
   vehicles.pitch[id] = 0;
@@ -593,13 +619,46 @@ const WILDCAT_STRAFE_THRUST = 8; // vehicles/vehicle_wildcat.cs:140 — ours tab
 const WILDCAT_TURBO_FACTOR = 1.5; // vehicles/vehicle_wildcat.cs:141
 const WILDCAT_BRAKING_FORCE = 25; // vehicles/vehicle_wildcat.cs:143 — ours table
 const WILDCAT_BRAKING_ACTIVATION_SPEED = 4; // vehicles/vehicle_wildcat.cs:144 — ours table
-// Not in the plan's own numbers table despite appearing in its code sketch -- an
-// undisclosed "ours" value (see the PR body). Tuned low: at the per-radian-error steering
-// model this file uses (see normalizeAngle's own comment), the plan's original 30 produced
-// an unplayably twitchy turn once divided against a realistic error range.
-const WILDCAT_STEERING_FORCE = 2.5;
+// Ours: (stabLenMin + stabLenMax) / 2 -- applyHoverSpring's equilibrium height, shared
+// with spawnVehicleAtPad so a pad spawn starts in spring equilibrium (issue trace).
+const WILDCAT_HOVER_REST_HEIGHT = (WILDCAT_STAB_LEN_MIN + WILDCAT_STAB_LEN_MAX) / 2;
+// Ours, metres: only a deck within this window below the craft can be hover support, so
+// high flight never grips a distant floor the way an unbounded deck ray would.
+const HOVER_DECK_WINDOW = 8;
+
+/** Highest surface below the craft: terrain, or an interior deck standing on top of it.
+ *  groundHeightAt answers terrain-FIRST and never sees a deck standing on non-empty
+ *  terrain -- the real Katabatic pads sit on solid ground with their walkable deck 5 m up
+ *  (measured: terrain 75.07, deck 80.10), which pinned the hover spring 5 m under the
+ *  deck and dragged every pad spawn down through it. The ray starts at the craft's own
+ *  center, so it reports exactly the surface the spring should hold the craft over. */
+function hoverSupport(world: World, position: Vec3): number | null {
+  const terrain = sampleTerrain(world.terrain, position.x, position.z);
+  let support = terrain.empty ? null : terrain.height;
+  const deck = raycastInteriors(
+    world.interiors,
+    position,
+    { x: 0, y: -1, z: 0 },
+    HOVER_DECK_WINDOW,
+  );
+  if (deck) support = support === null ? deck.point.y : Math.max(support, deck.point.y);
+  return support;
+}
+
+// The plan's sketch value (vehicle_wildcat.cs's steeringForce, treated as an acceleration
+// like the rest of this model). The earlier 2.5 retune existed only because the OLD
+// controller damped angVel by GYRO_DRAG/100 (zeta ~ 0.05), where 30 span a 90-degree held
+// turn into a +/-70-degree limit cycle; under the critical damping below, 30 turns a held
+// 90-degree input around in about a second with no measurable overshoot (issue trace).
+const WILDCAT_STEERING_FORCE = 30;
 const WILDCAT_ROLL_FORCE = 15;
 const WILDCAT_GYRO_DRAG = 16; // spec's Vehicle numbers table
+// Ours: critical damping (c = 2*sqrt(K), zeta = 1) for the yawError -> angVel -> yaw double
+// integrator. The previous form damped angVel by GYRO_DRAG/100 = 0.16/s (zeta ~ 0.05), so a
+// held 90-degree turn overshot the held heading by 77 degrees and then limit-cycled 65
+// degrees UNDER it for the whole measurement window (issue trace) -- the craft would never
+// hold a heading. GYRO_DRAG stays on roll, the cosmetic lean it was being scaled for here.
+const WILDCAT_YAW_DAMPING = 2 * Math.sqrt(WILDCAT_STEERING_FORCE);
 const WILDCAT_MIN_JET_ENERGY = 15;
 const WILDCAT_JET_ENERGY_DRAIN = 1.3;
 // Ours: the spec's own Vehicle numbers table cites a real `dragForce 25/45` this file does
@@ -631,7 +690,7 @@ function applyHoverSpring(world: World, vehicles: VehicleStore, id: number, dt: 
   const base = id * 3;
   const x = at(vehicles.position, base);
   const z = at(vehicles.position, base + 2);
-  const ground = groundHeightAt(world, { x, y: at(vehicles.position, base + 1), z });
+  const ground = hoverSupport(world, { x, y: at(vehicles.position, base + 1), z });
   if (ground === null) {
     vehicles.velocity[base + 1] = at(vehicles.velocity, base + 1) - GRAVITY * dt;
     vehicles.onGround[id] = 0;
@@ -656,7 +715,8 @@ function applyWildcatSteering(
   const base = id * 3;
   const yawError = normalizeAngle(input.yaw - at(vehicles.yaw, id));
   vehicles.angVel[base + 1] =
-    at(vehicles.angVel, base + 1) + yawError * WILDCAT_STEERING_FORCE * dt;
+    (at(vehicles.angVel, base + 1) + yawError * WILDCAT_STEERING_FORCE * dt) *
+    (1 - Math.min(1, WILDCAT_YAW_DAMPING * dt));
   vehicles.yaw[id] = at(vehicles.yaw, id) + at(vehicles.angVel, base + 1) * dt;
   // Lean into the turn: roll follows yaw rate, restoring toward level via gyroDrag.
   const dragScale = 1 - Math.min(1, (WILDCAT_GYRO_DRAG / 100) * dt);
@@ -964,7 +1024,11 @@ interface PlayerContact {
  *  reads that as a fresh collision -- a perpetual micro-bounce that never settles (caught
  *  by e2e/vehicles.spec.ts's three-identical-position poll). A pad-idle vehicle in Torque
  *  likewise produces no collision response against an overlapping player; only the
- *  vehicle's own motion generates one. */
+ *  vehicle's own motion generates one. The threshold is LOAD-BEARING, not cosmetic: a
+ *  vehicle at rest never has exactly zero per-tick motion (applyWildcatBraking early-returns
+ *  below 4 m/s so residual coast speed persists, and applyHoverSpring converges
+ *  asymptotically), so a `> 0` gate would keep micro-shoving forever and the exact-equality
+ *  settle poll would never pass. Do not "simplify" this to zero. */
 const VEHICLE_STRIKE_MIN_CLOSING = 0.5;
 
 /** Overlap test plus closing speed for one pedestrian player against `vId`'s hit sphere, or

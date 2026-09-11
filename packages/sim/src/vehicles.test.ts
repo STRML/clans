@@ -118,6 +118,36 @@ describe('spawnVehicleAtPad', () => {
     expect(world.vehicles.active[first]).toBe(1);
     expect(world.vehicles.destroyed[first]).toBe(1);
   });
+
+  it('spawns a Wildcat at hover rest height above the pad deck, not inside it (user report)', () => {
+    // The real Katabatic pads sit on SOLID terrain with their walkable svpad deck metres
+    // above the pad object's origin (measured: pad y 77.80, deck top 80.10, terrain
+    // 75.07). The old padPos.y + 2 placed the craft inside the deck mesh and the hover
+    // spring -- which saw only the terrain -- dragged it down through and off the pad.
+    const world = createWorld(flat, 1);
+    const padId = poweredPad(world); // pad at (5, 0, 0)
+    world.interiors = [
+      buildInteriorCollider(
+        {
+          positions: new Float32Array([
+            -50, 3, -50, 50, 3, 50, 50, 3, -50, -50, 3, -50, -50, 3, 50, 50, 3, 50,
+          ]),
+        },
+        { position: { x: 0, y: 0, z: 0 }, rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 } },
+      ),
+    ];
+    const id = spawnVehicleAtPad(world, padId, VehicleKind.Wildcat) as number;
+    // Deck top at y=3, hover rest height 3.0: spawn 6.0, sphere bottom 4.22 clear of the mesh.
+    expect(world.vehicles.position[id * 3 + 1]).toBeCloseTo(6, 1);
+    for (let tick = 0; tick < 60; tick += 1) stepVehicles(world, new Map(), 1 / 32);
+    // The spring holds the craft ON the deck (equilibrium sags 0.667 m under gravity, inside
+    // the 2.25-3.75 stab band) instead of being dragged through it or popped sideways off.
+    const y = world.vehicles.position[id * 3 + 1] as number;
+    expect(y).toBeGreaterThan(3 + 2.25);
+    expect(y).toBeLessThan(3 + 3.75);
+    expect(world.vehicles.destroyed[id]).toBe(0);
+    expect(world.vehicles.damage[id]).toBe(0);
+  });
 });
 
 describe('vehicleCapForTeam / activeVehicleCountForTeam', () => {
@@ -395,6 +425,23 @@ describe('stepWildcat', () => {
     // spike layered on top of tick 1's impulse.
     const afterHolding = world.vehicles.velocity[id * 3 + 1] ?? 0;
     expect(afterHolding).toBeLessThan(afterFirstTick + 8.3);
+  });
+
+  it('a held 90-degree steering input settles on the heading without overshoot or wobble (user report)', () => {
+    // The pre-fix controller damped angVel by GYRO_DRAG/100 (zeta ~ 0.05): a held 90-degree
+    // turn overshot the target by 77 degrees and then limit-cycled 65 degrees UNDER it, so
+    // the craft never held a heading. Critical damping (c = 2*sqrt(K)) must both hold the
+    // turn to within a degree and end parked on the target heading.
+    const { world, id } = wildcatWorld();
+    world.vehicles.velocity.set([0, 0, 15], id * 3);
+    const target = Math.PI / 2;
+    let peak = 0;
+    for (let tick = 1; tick <= 600; tick += 1) {
+      stepWildcat(world, id, { ...idleInput, moveZ: 1, yaw: target }, 1 / 32);
+      peak = Math.max(peak, world.vehicles.yaw[id] ?? 0);
+    }
+    expect(peak).toBeLessThanOrEqual(target + 0.02);
+    expect(world.vehicles.yaw[id] ?? 0).toBeGreaterThan(target - 0.005);
   });
 });
 
