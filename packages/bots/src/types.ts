@@ -47,6 +47,14 @@ export interface BotRuntimeState {
   engagedTargetId: number; // -1 = none
   stuckBaselinePosition: { x: number; z: number };
   stuckBaselineTick: number;
+  /** Issue #32 net-progress window: the smallest distance to the current waypoint seen
+   *  since the target was acquired. steering.ts's classifyTargetProgress reports real
+   *  progress only when the fresh distance beats this by STUCK_MIN_PROGRESS, so a bot
+   *  orbiting its waypoint (re-approaching on every lap) cannot pay the stall window off
+   *  with a per-window delta -- the same running-best rule the carrier telemetry's own
+   *  stall measure uses. Kept apart from stuckBaselinePosition, whose absolute-change
+   *  comparison in checkStuck has its own exported contract. */
+  stuckBestDistance: number;
   /** Codex review round 3, finding (P1): consecutive stuck detections against the same
    *  waypoint, without an intervening real waypoint reached. The coarse graph's edges
    *  carry no terrain/collision awareness (Task 2's own explicit scope), so a repath from
@@ -127,6 +135,13 @@ export interface BotRuntimeState {
    *  when it is not staging. Decision-layer state with no world-side equivalent: the sim
    *  records no flag-pickup tick, and the bounded wait is exactly this clock. */
   carrierStageSinceTick: number;
+  /** Issue #32 launch cohesion: true once the carrier's staging wait has ended -- company
+   *  arrived, the give-up expired, or the carrier was already past the stage line -- so it
+   *  walks the home leg and does not walk back. Cleared wherever carrierStageSinceTick is
+   *  (decideGoal, on any tick the bot is not carrying). Without it the give-up branch
+   *  re-armed the clock on the very next call and the launch lasted one tick: measured as
+   *  115 home<->stage goal flips in a single 6527-tick run. */
+  carrierStageLaunched: boolean;
   /** Issue #32: which side (-1 left / +1 right) the last stuck-skip fallback offset its
    *  escape goal to. Consecutive skips alternate sides -- re-ramming the same wall from the
    *  same side on every skip is exactly the "repath recomputes the identical unreachable
@@ -153,6 +168,7 @@ export function createBotRuntimeState(
     engagedTargetId: -1,
     stuckBaselinePosition: { x: 0, z: 0 },
     stuckBaselineTick: 0,
+    stuckBestDistance: 0,
     stuckTargetKey: '',
     stuckStreak: 0,
     avoidDeflectionDeg: 0,
@@ -166,6 +182,7 @@ export function createBotRuntimeState(
     pocketTicks: 0,
     pocketBaseGap: 0,
     carrierStageSinceTick: -1,
+    carrierStageLaunched: false,
     lastSteerPosition: null,
     stuckSkipSide: 1,
     random: { value: seed || 1 },

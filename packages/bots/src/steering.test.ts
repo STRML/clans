@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { addPlayer, createWorld, LIGHT_ARMOR, type Heightfield } from '@clans/sim';
+import {
+  addPlayer,
+  buildInteriorCollider,
+  createWorld,
+  LIGHT_ARMOR,
+  type Heightfield,
+} from '@clans/sim';
 import {
   checkStuck,
   STUCK_CHECK_TICKS,
@@ -75,6 +81,79 @@ describe('checkStuck', () => {
   });
 });
 
+describe('steerToward net-progress stall detection (issue #32)', () => {
+  it('arms the escape for a bot orbiting its waypoint without closing the gap, where the absolute-distance window never fired', () => {
+    // The measured carrier shape: in a production seed-1 match (BOT_TELEMETRY=1) carrier 11
+    // held one graph node as its target for 3020 ticks -- closest approach 3.5 m, last
+    // sample 37.5 m -- circling it in a ~35 m pocket while closing 19 m of a 995 m route
+    // and travelling 2886 m. The old window compared the scalar distance against its
+    // baseline with Math.hypot, so a lap that swings the radius by more than a metre read
+    // as progress every window and the streak never left 0 (0 escape fires in the run).
+    const world = createWorld(flat, 1);
+    const graph = buildWaypointGraph([{ position: { x: 0, y: 0, z: 0 }, label: 'a' }]);
+    const runtime = createBotRuntimeState(1, BotRole.Attacker, 1);
+    const goal = { x: 0, y: 0, z: 0 };
+    const stuckPosition = { x: 0, y: 0, z: 0 };
+    // One lap per window, radius swinging 15 m -> 30 m -> 15 m: every window changes the
+    // scalar distance by ~15 m (the old metric's idea of progress) while the running best
+    // is never beaten after the first approach.
+    let escaped = false;
+    const ticks = STUCK_CHECK_TICKS * (STUCK_SKIP_THRESHOLD + 3);
+    for (let t = 0; t <= ticks; t += 1) {
+      world.tick = t;
+      const radius = 22.5 + 7.5 * Math.sin((t / STUCK_CHECK_TICKS) * Math.PI * 2);
+      steerToward(
+        graph,
+        world,
+        1,
+        runtime,
+        1,
+        goal,
+        'goal:a',
+        { x: stuckPosition.x, y: 0, z: radius },
+        LIGHT_ARMOR,
+        60,
+      );
+      if (runtime.path.length === 2) escaped = true;
+    }
+    expect(escaped).toBe(true);
+  });
+
+  it('does not fire while the gap keeps coming down, however slowly the route turns', () => {
+    // The other half of the contract: net progress is a shrinking gap, so a bot that keeps
+    // closing ground toward its waypoint must never be flagged -- a false positive here
+    // would fabricate a lateral escape mid-route. Position steps 0.5 m per tick toward the
+    // target, well under STUCK_MIN_PROGRESS per window only in aggregate: the running best
+    // improves every tick.
+    const world = createWorld(flat, 1);
+    const graph = buildWaypointGraph([
+      { position: { x: 0, y: 0, z: 0 }, label: 'a' },
+      { position: { x: 0, y: 0, z: 400 }, label: 'b' },
+    ]);
+    const runtime = createBotRuntimeState(1, BotRole.Attacker, 1);
+    const goal = { x: 0, y: 0, z: 400 };
+    for (let t = 0; t <= STUCK_CHECK_TICKS * (STUCK_SKIP_THRESHOLD + 2); t += 1) {
+      world.tick = t;
+      steerToward(
+        graph,
+        world,
+        1,
+        runtime,
+        1,
+        goal,
+        'goal:b',
+        { x: 0, y: 0, z: -4000 + t * 0.5 },
+        LIGHT_ARMOR,
+        60,
+      );
+      expect(runtime.stuckStreak).toBe(0);
+    }
+    // Still on the graph route: the escape fabricates exactly two points, so a route of
+    // three or more is proof the ladder never armed.
+    expect(runtime.path.length).toBeGreaterThan(2);
+  });
+});
+
 describe('steerToward stuck-skip (Codex review round 3, P1)', () => {
   it('after STUCK_SKIP_THRESHOLD consecutive stalls, escapes along a perpendicular offset before re-approaching the goal instead of steering straight into the same wall (#32)', () => {
     const world = createWorld(flat, 1);
@@ -124,6 +203,47 @@ describe('steerToward stuck-skip (Codex review round 3, P1)', () => {
 
     expect(runtime.path.length).toBe(2); // escape point + the real goal, not a one-point suicide run
     expect(runtime.path[1]).toEqual({ x: goal.x, z: goal.z });
+  });
+
+  it('refuses to fabricate an escape whose run to the goal crosses a wall, leaving the graph route alone', () => {
+    // The escape is the only path steering writes itself, so it carries the same interior
+    // check the graph's own edges do. Measured before the gate existed: armed by the
+    // net-progress window, the unvalidated rung fired 10-22 times per 6000-tick match and
+    // bots spent 583-900 ticks walking those straight lines toward goals up to a kilometre
+    // away -- in the matched pair the first flag pickup slipped from ticks
+    // 2413/2734/2777/2347 to 5586/5860/3203/never. Falling back to skipping the wedged
+    // waypoint measured just as costly (5661/never/4475/3055); leaving the route alone
+    // cost nothing (2465/3277/2692/3386), so a blocked escape does not touch the path.
+    const world = createWorld(flat, 1);
+    const graph = buildWaypointGraph([
+      { position: { x: 0, y: 0, z: 0 }, label: 'a' },
+      { position: { x: 50, y: 0, z: 0 }, label: 'b' },
+      { position: { x: 100, y: 0, z: 0 }, label: 'c' },
+    ]);
+    // A wall at x = 50 spanning z -40..-4 (y 0..10): the escape's sideways step
+    // (0,0,0) -> (0,0,-12) clears it, but the straight run from there to (100,0,0) crosses
+    // it at z ~= -6.
+    world.interiors = [
+      buildInteriorCollider(
+        {
+          positions: new Float32Array([
+            50, 0, -40, 50, 10, -40, 50, 10, -4, 50, 0, -40, 50, 10, -4, 50, 0, -4,
+          ]),
+        },
+        { position: { x: 0, y: 0, z: 0 }, rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 } },
+      ),
+    ];
+    const runtime = createBotRuntimeState(1, BotRole.Attacker, 1);
+    const stuckPosition = { x: 0, y: 0, z: 0 };
+    const goal = { x: 100, y: 0, z: 0 };
+    for (let t = 0; t <= STUCK_CHECK_TICKS * STUCK_SKIP_THRESHOLD; t += 1) {
+      world.tick = t;
+      steerToward(graph, world, 1, runtime, 1, goal, 'goal:c', stuckPosition, LIGHT_ARMOR, 60);
+    }
+    // Still a graph route (which always ends at the literal goal), not the fabricated
+    // offset -> goal pair.
+    expect(runtime.path.length).toBeGreaterThan(2);
+    expect(runtime.path[runtime.path.length - 1]?.x).toBe(100);
   });
 });
 

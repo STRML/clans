@@ -328,6 +328,18 @@ function carrierStageGoal(
   const remaining = Math.hypot(me.x - home.x, me.z - home.z);
   const route = Math.hypot(home.x - enemy.x, home.z - enemy.z);
   const stageRemaining = Math.hypot(stage.x - home.x, stage.z - home.z);
+  // Issue #32: the launch is ONE WAY. Every branch below that ends the wait sets the
+  // latch, and the latch is cleared only when the bot stops carrying (decideGoal) -- a
+  // fresh take stages again. Without it the give-up branch below launched the carrier for
+  // exactly one tick: the next call found `carrierStageSinceTick < 0` and re-armed the
+  // clock against the same stage point, so the carrier was back at the stage goal one tick
+  // later and the 100-tick wait could never actually fire. Measured on a production seed-1
+  // match: carrier 11 flipped `home:1` <-> `stage:1` 115 times in 6527 ticks (58 up, 57
+  // back) and spent 3020 ticks shuttling around one graph node 3.5-44 m away, closing 19 m
+  // of a 995 m route while travelling 2886 m. A company count that crosses
+  // CARRIER_STAGE_TEAMMATES and back is the other source of the same flip: the escort
+  // formation hovers at a median 51 m, so the gate chattered around the threshold.
+  if (runtime.carrierStageLaunched) return null;
   // Enemy half only, and never backwards. The first guard is the gate's own scope: the
   // crossing this delays is the long one, and a carrier that is already on its own half has
   // committed to it (on a map whose stands are barely farther apart than the staging
@@ -335,10 +347,12 @@ function carrierStageGoal(
   // The second is the no-backtrack rule above.
   if (remaining <= route / 2 || remaining <= stageRemaining) {
     runtime.carrierStageSinceTick = -1;
+    runtime.carrierStageLaunched = true;
     return null;
   }
   if (teammatesNearCarrier(world, runtime) >= CARRIER_STAGE_TEAMMATES) {
     runtime.carrierStageSinceTick = -1;
+    runtime.carrierStageLaunched = true;
     return null;
   }
   if (
@@ -346,6 +360,7 @@ function carrierStageGoal(
     world.tick - runtime.carrierStageSinceTick >= CARRIER_STAGE_WAIT_TICKS
   ) {
     runtime.carrierStageSinceTick = -1;
+    runtime.carrierStageLaunched = true;
     return null;
   }
   if (runtime.carrierStageSinceTick < 0) runtime.carrierStageSinceTick = world.tick;
@@ -893,8 +908,10 @@ export function decideGoal(
   if (isCarryingEnemyFlag(world, runtime.playerId)) return carrierHomeGoal(world, runtime, team);
   // Issue #32 launch cohesion: the staging clock exists only while the carry does. Cleared
   // here, on every tick the bot is not carrying, so a fresh take can never inherit the
-  // previous run's elapsed wait and launch on its first tick (carrierStageGoal).
+  // previous run's elapsed wait and launch on its first tick (carrierStageGoal). The launch
+  // latch is cleared with it -- a later take stages on its own merits.
   runtime.carrierStageSinceTick = -1;
+  runtime.carrierStageLaunched = false;
   return runtime.role === BotRole.Attacker
     ? decideAttackerGoal(world, runtime)
     : decideDefenderGoal(world, runtime);

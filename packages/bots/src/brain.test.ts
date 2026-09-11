@@ -810,6 +810,42 @@ describe('launch cohesion (issue #32)', () => {
     expect(runtime.carrierStageSinceTick).toBe(world.tick);
   });
 
+  it('the launch sticks: company that leaves again does not send the carrier back to the rendezvous', () => {
+    // Measured failure this pins: on a production seed-1 match carrier 11 flipped
+    // `home:1` <-> `stage:1` 115 times in 6527 ticks (58 up, 57 back) and spent 3020 ticks
+    // shuttling around one graph node 3.5-44 m away. The escort formation hovers at a
+    // median 51 m, so the company count chattered across CARRIER_STAGE_TEAMMATES and every
+    // crossing re-armed the wait and swapped the goal key -- each swap repaths steering
+    // from index 0 and resets the stuck baseline, so the ladder could never count three
+    // consecutive stalls either.
+    const world = createWorld(flat, 1);
+    longMapFlags(world);
+    const bot = takeEnemyFlag(world, { x: 400, y: 0, z: 0 });
+    const mateA = addPlayer(world, { x: 380, y: 0, z: 0 }, 1);
+    addPlayer(world, { x: 400, y: 0, z: 60 }, 1);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    expect(decideGoal(world, runtime, null).key).toBe('home:0'); // two mates: launch
+    world.players.alive[mateA] = 0; // company melts away again
+    world.tick += 1;
+    expect(decideGoal(world, runtime, null).key).toBe('home:0');
+  });
+
+  it('the give-up launch does not re-arm on the next tick', () => {
+    // The one-tick launch: the expiry branch returned null but left carrierStageSinceTick
+    // at -1, so the very next call re-armed the clock against the same stage point and the
+    // carrier was back at the rendezvous. The 100-tick wait could therefore never actually
+    // end a staging carrier's wait absent company.
+    const world = createWorld(flat, 1);
+    longMapFlags(world);
+    world.tick = CARRIER_STAGE_WAIT_TICKS * 2;
+    const bot = takeEnemyFlag(world, { x: 400, y: 0, z: 0 });
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    runtime.carrierStageSinceTick = world.tick - CARRIER_STAGE_WAIT_TICKS;
+    expect(decideGoal(world, runtime, null).key).toBe('home:0');
+    world.tick += 1;
+    expect(decideGoal(world, runtime, null).key).toBe('home:0');
+  });
+
   it('a carrier already past the stage line walks home rather than turning back to the rendezvous', () => {
     // Walking backwards off its own route is the documented carrier failure; the stage point
     // is only ever offered while the carrier is still on the enemy side of it.

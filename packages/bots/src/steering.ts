@@ -7,7 +7,7 @@ import {
   type Vec3,
   type World,
 } from '@clans/sim';
-import { findPath, nearestNode, type WaypointGraph } from './waypoints.js';
+import { findPath, nearestNode, segmentClearOfInteriors, type WaypointGraph } from './waypoints.js';
 import type { BotRuntimeState } from './types.js';
 
 export const WAYPOINT_REACHED_RADIUS = 4; // Ours.
@@ -216,6 +216,39 @@ export function slopeAssist(
   return { jump: false, jet: false };
 }
 
+/** Issue #32 net-progress verdict for one target, using the carrier telemetry's own stall
+ *  definition (PROGRESS_MIN_M / STALL_CHECK_TICKS in
+ *  packages/server/src/carrier-telemetry.ts): `progress` when the bot has just brought its
+ *  distance-to-target down by STUCK_MIN_PROGRESS from its running best, `stalled` when a
+ *  full STUCK_CHECK_TICKS window has passed with no such improvement, `waiting` while a
+ *  window is still open. Tracking the running BEST, not a per-window delta, is the whole
+ *  point: a bot orbiting a waypoint at a fixed radius re-approaches it every lap, so the
+ *  per-window delta keeps showing "progress" and the ladder never arms.
+ *
+ *  The measurement that forced this: in a production seed-1 match (12k ticks,
+ *  BOT_TELEMETRY=1) carrier 11 held one target for 3020 ticks -- closest approach 3.5 m,
+ *  last sample 37.5 m, i.e. it orbited the node in a ~35 m pocket -- while closing 19 m of
+ *  a 995 m route and travelling 2886 m; the stuck streak never left 0 because 705 of its
+ *  2794 windows changed the scalar distance by more than a metre. A running-best baseline
+ *  freezes the moment the bot stops getting closer, so the orbit's laps cannot pay the
+ *  window off. */
+export type TargetProgress = 'progress' | 'waiting' | 'stalled';
+
+export function classifyTargetProgress(
+  runtime: BotRuntimeState,
+  world: Pick<World, 'tick'>,
+  distanceToTarget: number,
+): TargetProgress {
+  if (distanceToTarget <= runtime.stuckBestDistance - STUCK_MIN_PROGRESS) {
+    runtime.stuckBestDistance = distanceToTarget;
+    runtime.stuckBaselineTick = world.tick;
+    return 'progress';
+  }
+  if (world.tick - runtime.stuckBaselineTick < STUCK_CHECK_TICKS) return 'waiting';
+  runtime.stuckBaselineTick = world.tick;
+  return 'stalled';
+}
+
 /** Resets (and reports false) whenever the goal changed since the last check -- a fresh
  *  goal always gets a fresh baseline, never inherits a stale one from a previous, now-
  *  abandoned goal. Reports true, and immediately resets its own baseline to the CURRENT
@@ -346,11 +379,10 @@ function handleStuck(
   // area (real Katabatic terrain -- a step, a slope, a doorway threshold) can satisfy
   // every STUCK_CHECK_TICKS window without ever getting closer to its actual target.
   // Verified directly against a real production run: a bot sat within a few meters of its
-  // target for 20,000 ticks (640 s) with checkStuck never once reporting stuck. Feeding
-  // checkStuck the scalar distance-to-target instead of the real world position reuses its
-  // exact existing, already-tested progress-window logic to measure what actually matters
-  // -- "did the gap to the current waypoint shrink" -- without changing its signature or
-  // its own unit tests at all.
+  // target for 20,000 ticks (640 s) with checkStuck never once reporting stuck. Measuring
+  // the SCALAR distance to the current waypoint fixes that, but only if the window asks
+  // whether the gap SHRANK: checkStuck's absolute-change comparison still counts a radial
+  // oscillation as progress (see checkNetProgress for the 3020-tick measured carrier).
   const target = runtime.path[runtime.pathIndex];
   if (!target) return false;
   const distanceToTarget = Math.hypot(currentPosition.x - target.x, currentPosition.z - target.z);
@@ -368,18 +400,22 @@ function handleStuck(
     // misread the change itself as a burst of progress.
     runtime.stuckTargetKey = targetKey;
     runtime.stuckBaselineTick = world.tick;
-    runtime.stuckBaselinePosition = { x: distanceToTarget, z: 0 };
+    runtime.stuckBestDistance = distanceToTarget;
     runtime.stuckStreak = 0;
     return false;
   }
-  const elapsed = world.tick - runtime.stuckBaselineTick;
-  if (!checkStuck(runtime, world, { x: distanceToTarget, y: 0, z: 0 })) {
-    // A false result before the next check window is not progress. Resetting here erased
-    // the streak on the tick immediately after every detected stall, so the configured
-    // consecutive-stall threshold was unreachable during normal per-tick stepping.
-    // checkStuck resets its baseline only after a completed window; that is the one case
-    // where false means the bot made enough progress and should earn a fresh streak.
-    if (elapsed >= STUCK_CHECK_TICKS) runtime.stuckStreak = 0;
+  // Issue #32: the progress window measures NET progress against the running best -- did
+  // the gap to the current waypoint actually come down -- not whether the scalar distance
+  // changed at all. The measured carrier that held one target for 3020 ticks orbited it at
+  // a radius swinging 3.5-44 m, which the old absolute-change test read as continuous
+  // progress.
+  const verdict = classifyTargetProgress(runtime, world, distanceToTarget);
+  if (verdict !== 'stalled') {
+    // 'waiting' means the current window is still open -- not progress, so the streak
+    // stands. 'progress' means the bot closed a metre of real ground and earns a fresh
+    // streak; resetting on the tick after every detected stall instead is what made the
+    // configured consecutive-stall threshold unreachable during per-tick stepping.
+    if (verdict === 'progress') runtime.stuckStreak = 0;
     return false;
   }
   runtime.stuckStreak += 1;
@@ -399,18 +435,36 @@ function handleStuck(
     // Left normal of the approach direction (right-handed y-up), scaled by side.
     const offsetX = (-toGoalZ / approachLength) * STUCK_ESCAPE_OFFSET_M * runtime.stuckSkipSide;
     const offsetZ = (toGoalX / approachLength) * STUCK_ESCAPE_OFFSET_M * runtime.stuckSkipSide;
-    runtime.path = [
-      { x: currentPosition.x + offsetX, z: currentPosition.z + offsetZ },
-      { x: goalPosition.x, z: goalPosition.z },
-    ];
-    runtime.pathIndex = 0;
+    const offset = { x: currentPosition.x + offsetX, z: currentPosition.z + offsetZ };
+    if (escapeLegsClear(world, currentPosition, offset, goalPosition)) {
+      runtime.path = [
+        { x: offset.x, z: offset.z },
+        { x: goalPosition.x, z: goalPosition.z },
+      ];
+      runtime.pathIndex = 0;
+      runtime.stuckStreak = 0;
+      // Forces the next call's target-change check above to reset the baseline fresh
+      // rather than comparing against the OLD target's distance: the escape path starts
+      // from a different point and a different first waypoint, so the old baseline's
+      // distance says nothing about the escape's progress.
+      runtime.stuckTargetKey = '';
+      return true;
+    }
+    // Issue #32: the fabricated escape is a straight line the graph would never accept, so
+    // it is checked against the graph's own interior raycast before it is committed. The
+    // measurement that forced both the check and this fallback: armed for the first time by
+    // the net-progress window, the UNVALIDATED rung fired 10-22 times per 6000-tick match
+    // and bots spent 583-900 ticks walking those lines toward goals up to a kilometre away
+    // -- in the matched pair the first flag pickup slipped from ticks 2413/2734/2777/2347
+    // to 5586/5860/3203/never. Skipping the wedged waypoint instead was just as costly
+    // (5661/never/4475/3055): dropping a route node on the walk to the flag deck costs more
+    // route than the stall it skips. Leaving the route alone costs nothing measurable
+    // (2465/3277/2692/3386, the same as no top rung at all) while the validated escape
+    // still fires 5-10 times a match. The next window probes the opposite side, since
+    // stuckSkipSide alternates at the top of this branch, so both faces are tried while the
+    // bot keeps walking the graph.
     runtime.stuckStreak = 0;
-    // Forces the next call's target-change check above to reset the baseline fresh
-    // rather than comparing against the OLD target's distance: the escape path starts
-    // from a different point and a different first waypoint, so the old baseline's
-    // distance says nothing about the escape's progress.
-    runtime.stuckTargetKey = '';
-    return true;
+    return false;
   }
   runtime.goalKey = null; // forces ensurePath to repath from the bot's actual position next call
   ensurePath(graph, world, team, runtime, currentPosition, goalPosition, goalKey);
@@ -423,6 +477,31 @@ function handleStuck(
   // recomputed route legally converges through a DIFFERENT relay chain (#32's graph):
   // a different chain ending at the same waypoint is still the same target.
   return true;
+}
+
+/** Issue #32: are BOTH legs of the fabricated escape clear of interior geometry -- the
+ *  sideways step out of the pocket and the straight run to the goal? The graph validates
+ *  every edge and the findPath final leg with `segmentClearOfInteriors` (waypoints.ts);
+ *  the escape is the one path steering writes itself, so it gets the same test before it
+ *  is committed. The offset point's height comes from the terrain under it rather than the
+ *  bot's own feet, since the sideways step can leave a deck lip. Empty interiors (the flat
+ *  unit-test worlds) are trivially clear, so the pinned escape shape is unchanged there. */
+function escapeLegsClear(
+  world: World,
+  from: Vec3,
+  offset: { x: number; z: number },
+  goal: Vec3,
+): boolean {
+  const ground = sampleTerrain(world.terrain, offset.x, offset.z);
+  const offsetPoint = {
+    x: offset.x,
+    y: ground.empty ? from.y : (ground.height ?? from.y),
+    z: offset.z,
+  };
+  return (
+    segmentClearOfInteriors(world.interiors, from, offsetPoint) &&
+    segmentClearOfInteriors(world.interiors, offsetPoint, goal)
+  );
 }
 
 /** Result of the per-tick pinning ladder: whether this tick's jump is a hurdle jump,
