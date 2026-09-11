@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { addPlayer, createFlags, createWorld, FlagState, type Heightfield } from '@clans/sim';
 import { BotRole } from '@clans/bots';
-import { createBotManager, joinableTeam, rebalanceTeams, TARGET_TEAM_SIZE } from './bots.js';
+import {
+  createBotManager,
+  joinableTeam,
+  rebalanceTeams,
+  TARGET_TEAM_SIZE,
+  type BotManager,
+} from './bots.js';
 import { teamCount, type SceneSpawn } from './world.js';
 
 const flat: Heightfield = {
@@ -150,5 +156,38 @@ describe('joinableTeam', () => {
     expect(teamCount(world, 1)).toBe(TARGET_TEAM_SIZE);
     expect(teamCount(world, 2)).toBe(TARGET_TEAM_SIZE);
     expect(manager.botIds.size).toBe(0);
+  });
+});
+
+describe('bot RNG seeding (issue #32)', () => {
+  /** Each bot's own stream seed, in the manager's insertion (join) order. This is the
+   *  whole of bot randomness: createBotRuntimeState stores it and combat.ts's aim jitter
+   *  is the only consumer. */
+  function botStreamSeeds(manager: BotManager): number[] {
+    return [...manager.runtimes.values()].map((runtime) => runtime.random.value);
+  }
+
+  it('seeds the manager from the world seed, so different seeds are different bot streams', () => {
+    const first = createBotManager(createWorld(flat, 1, 64), spawns, [], 4);
+    const second = createBotManager(createWorld(flat, 2, 64), spawns, [], 4);
+
+    expect(first.nextSeed).not.toBe(second.nextSeed);
+    // Not just the counter: every bot's own stream differs between the two seeds, which is
+    // what makes the acceptance sweep's seeds three genuinely different matches instead of
+    // one match run three times.
+    expect(botStreamSeeds(first)).not.toEqual(botStreamSeeds(second));
+    expect(botStreamSeeds(first)).toHaveLength(4);
+  });
+
+  it('keeps the per-bot increment, so bots differ from each other within one match', () => {
+    const manager = createBotManager(createWorld(flat, 7, 64), spawns, [], 8);
+    const seeds = botStreamSeeds(manager);
+    expect(new Set(seeds).size).toBe(seeds.length);
+  });
+
+  it('is fully deterministic for a fixed seed', () => {
+    expect(botStreamSeeds(createBotManager(createWorld(flat, 5, 64), spawns, [], 4))).toEqual(
+      botStreamSeeds(createBotManager(createWorld(flat, 5, 64), spawns, [], 4)),
+    );
   });
 });

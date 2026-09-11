@@ -167,7 +167,20 @@ export function createBotManager(
     // zero kills/captures, bots wedged against shed walls).
     graph: buildWaypointGraph(landmarks, world),
     maxBots,
-    nextSeed: 0,
+    // Issue #32 seed truth: bot randomness must come from the WORLD's seed, or the
+    // acceptance sweep's `[1, 2, 3]` is one scenario run three times. This used to start at
+    // a hardcoded 0 and only ever increment per join, which made every seed's manager stream
+    // identical -- bot RNG (combat.ts's aim jitter, its only consumer) was therefore
+    // seed-independent, and the three "different" matches were bit-for-bit the same match.
+    // `world.random.value` IS the seed createWorld was built with, before any tick consumes
+    // a draw, and in a vehicle-less bot match nothing else ever draws from it (vehicles.ts's
+    // destruction scatter is the stream's only other consumer in the whole sim).
+    //
+    // The per-bot `+= 1` in addBotToTeam stays on top of this, so bots still differ from
+    // each other inside one match -- and because an xorshift stream advanced by one draw is
+    // a different stream, seed S and seed S+1 disagree from the first jitter draw. A fixed
+    // seed remains fully deterministic: same world seed, same manager stream, same match.
+    nextSeed: world.random.value,
   };
   rebalanceTeams(manager, world, spawns);
   return manager;
