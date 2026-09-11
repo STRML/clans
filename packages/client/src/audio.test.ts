@@ -4,13 +4,16 @@ import {
   footstepCue,
   OCCLUSION_ATTENUATION,
   projectileImpactCue,
+  SOUND_FILE,
 } from './audio.js';
 import type { FootstepSurface } from './audio.js';
 import {
   ArmorId,
   ProjectileImpactReason,
   ProjectileType,
+  TurretBarrelId,
   WeaponId,
+  WeaponState,
   type ProjectileImpact,
   type Vec3,
 } from '@clans/sim';
@@ -27,6 +30,9 @@ interface FakeAudioNode {
   disconnect: Mock;
   start: Mock;
   stop: Mock;
+  /** Set by the engine when it plays a decoded sample; engineWithSamples tags it with the URL
+   *  it was fetched from, so a test can assert which recording a cue chose. */
+  buffer?: { name?: string };
   gain: FakeGainParam;
   frequency: { value: number; setValueAtTime: Mock; exponentialRampToValueAtTime: Mock };
   type: string;
@@ -102,16 +108,24 @@ async function engineWithSamples(occlusionAt?: (position: Vec3) => boolean, posi
   const ctx = fakeAudioContext();
   vi.stubGlobal(
     'fetch',
-    vi.fn(() =>
+    vi.fn((input: string) =>
       Promise.resolve({
         ok: true,
         status: 200,
-        arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
+        arrayBuffer: () => Promise.resolve(new TextEncoder().encode(input).buffer),
       }),
     ),
   );
   Object.assign(ctx, {
-    decodeAudioData: vi.fn(() => Promise.resolve({ duration: 1 } as unknown as AudioBuffer)),
+    // The fake decoder carries the fetched URL through, so `_sources[i].buffer.name` names the
+    // recording a cue actually played -- the file name is the whole contract with the asset
+    // manifest, and asserting it is what the acceptance means by "assert the mapping".
+    decodeAudioData: vi.fn((bytes: ArrayBuffer) =>
+      Promise.resolve({
+        duration: 1,
+        name: new TextDecoder().decode(new Uint8Array(bytes)),
+      } as unknown as AudioBuffer),
+    ),
   });
   // exactOptionalPropertyTypes: AudioLike's optional props accept absence, not undefined,
   // so the spread form is the honest construction.
@@ -135,6 +149,13 @@ function impactRecord(overrides: Partial<ProjectileImpact> = {}): ProjectileImpa
     seq: 1,
     ...overrides,
   };
+}
+
+/** The recording a cue played, as the URL the engine fetched it from: engineWithSamples tags
+ *  each decoded buffer with that URL, so this asserts the cue -> file mapping rather than just
+ *  counting nodes. */
+function sourceNames(ctx: { _sources: FakeAudioNode[] }): Array<string | undefined> {
+  return ctx._sources.map((source) => source.buffer?.name);
 }
 
 describe('createAudioEngine', () => {
@@ -199,9 +220,9 @@ describe('createAudioEngine', () => {
   });
 
   // Issue #51: the repair beam's dedicated loop. These follow the exact setJetting loop
-  // assertions above -- the engine never fabricates an oscillator while the (volume-less,
-  // t2-mapper) sample is unavailable, and repeated start calls reuse one pending loop.
-  it('setRepairBeam does not synthesize an oscillator while the sample is unavailable', () => {
+  // assertions above -- the engine never fabricates an oscillator while the original sample is
+  // still undecoded, and repeated start calls reuse one pending loop.
+  it('does not synthesize an oscillator before the beam sample decodes', () => {
     const ctx = fakeAudioContext();
     const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
     engine.setRepairBeam(0, true);
@@ -382,8 +403,10 @@ describe('projectileImpactCue (#52 residual)', () => {
     ).toBe('mortar-explode');
   });
 
-  it('sends non-mortar grenades to the generic weapon-explosion recording', () => {
-    // The alt-fire grenade rides the firing weapon's id; there is no hand-grenade sample.
+  it('sends non-mortar grenades to the hand grenade\'s own detonation recording', () => {
+    // The alt-fire grenade rides the firing weapon's id; GrenadeExplosionSound is
+    // fx/weapons/grenade_explode (grenadeLauncher.cs:77-83), which HandGrenadeExplosion
+    // carries as its soundProfile (grenade.cs:180).
     expect(
       projectileImpactCue(
         impactRecord({
@@ -392,11 +415,47 @@ describe('projectileImpactCue (#52 residual)', () => {
           reason: ProjectileImpactReason.World,
         }),
       )?.sound,
-    ).toBe('mortar-explode');
+    ).toBe('grenade-explode');
+    expect(
+      projectileImpactCue(
+        impactRecord({
+          weaponId: WeaponId.Chaingun,
+          type: ProjectileType.Grenade,
+          reason: ProjectileImpactReason.Direct,
+        }),
+      )?.sound,
+    ).toBe('grenade-explode');
   });
 
-  it('leaves turret shots silent (no committed impact recording)', () => {
+  it('maps each turret barrel to the recording its own script commits', () => {
+    // Barrels ride the wire at projectiles.ts's TURRET_WEAPON_ID_OFFSET (100).
+    const expectations: Array<[TurretBarrelId, string]> = [
+      [TurretBarrelId.PlasmaBarrelLarge, 'turret-plasma-impact'],
+      [TurretBarrelId.AABarrelLarge, 'blaster-impact'],
+      [TurretBarrelId.SentryTurretBarrel, 'turret-sentry-impact'],
+    ];
+    for (const [barrel, sound] of expectations) {
+      const weaponId = barrel + 100;
+      expect(projectileImpactCue(impactRecord({ weaponId }))?.sound).toBe(sound);
+      expect(
+        projectileImpactCue(impactRecord({ weaponId, reason: ProjectileImpactReason.World }))
+          ?.sound,
+      ).toBe(sound);
+    }
+  });
+
+  it('leaves an id with no committed impact recording silent', () => {
+    // 151 is one past the Shrike's own offset: no WEAPON_DATA row and no turret barrel.
     expect(projectileImpactCue(impactRecord({ weaponId: 151 }))).toBeNull();
+    // A turret bolt that merely outlives its lifetime is a removal, not a detonation.
+    expect(
+      projectileImpactCue(
+        impactRecord({
+          weaponId: TurretBarrelId.SentryTurretBarrel + 100,
+          reason: ProjectileImpactReason.Timeout,
+        }),
+      ),
+    ).toBeNull();
   });
 });
 
@@ -490,19 +549,34 @@ describe('terrain occlusion (#56)', () => {
 });
 
 describe('footstep variants (#56)', () => {
-  it('resolves every armor/surface pair to the one committed footstep recording', () => {
-    const surfaces: FootstepSurface[] = ['terrain', 'interior'];
-    for (const armor of [ArmorId.Light, ArmorId.Medium, ArmorId.Heavy]) {
-      for (const surface of surfaces) {
-        expect(footstepCue(armor, surface)).toBe('armor-footstep');
-      }
+  it('resolves each armor/surface pair to that armor\'s own committed recording', () => {
+    // player.cs gives every armor its own L/R footstep set; terrain takes the `soft` take and
+    // interior the `metal` one (the two T2 surface classes our FootstepSurface collapses).
+    const expectations: Array<[ArmorId, FootstepSurface, string]> = [
+      [ArmorId.Light, 'terrain', 'armor-footstep'],
+      [ArmorId.Light, 'interior', 'armor-footstep'],
+      [ArmorId.Medium, 'terrain', 'medium-footstep'],
+      [ArmorId.Medium, 'interior', 'medium-footstep-metal'],
+      [ArmorId.Heavy, 'terrain', 'heavy-footstep'],
+      [ArmorId.Heavy, 'interior', 'heavy-footstep-metal'],
+    ];
+    for (const [armor, surface, sound] of expectations) {
+      expect(footstepCue(armor, surface)).toBe(sound);
     }
   });
 
-  it('plays the committed sample, never a synthesis, for whatever armor the app passes', async () => {
+  it('plays each armor/surface recording it names, never a synthesis', async () => {
     const { ctx, engine } = await engineWithSamples();
+    engine.footstep({ x: 0, y: 0, z: 0 }, { armor: ArmorId.Light, surface: 'terrain' });
+    engine.footstep({ x: 0, y: 0, z: 0 }, { armor: ArmorId.Medium, surface: 'terrain' });
+    engine.footstep({ x: 0, y: 0, z: 0 }, { armor: ArmorId.Medium, surface: 'interior' });
     engine.footstep({ x: 0, y: 0, z: 0 }, { armor: ArmorId.Heavy, surface: 'interior' });
-    expect(ctx._sources).toHaveLength(1);
+    expect(sourceNames(ctx)).toEqual([
+      '/katabatic/audio/armor-footstep.m4a',
+      '/katabatic/audio/medium-footstep.m4a',
+      '/katabatic/audio/medium-footstep-metal.m4a',
+      '/katabatic/audio/heavy-footstep-metal.m4a',
+    ]);
     expect(ctx.createOscillator).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
@@ -540,5 +614,130 @@ describe('loop stop lifecycle (#56)', () => {
     engine.setGeneratorHum(0, { x: 1, y: 0, z: 0 }, false);
     expect(ctx._sources[0]?.stop).toHaveBeenCalledTimes(1);
     vi.unstubAllGlobals();
+  });
+});
+
+/** Issue #51: the beam loop now has a committed recording, and the pack toggle has its own
+ *  one-shot. Both are pinned by the recording they play, not just by node counts, because the
+ *  whole defect was that the loop resolved to a file the assets step never published. */
+describe('repair pack audio (#51)', () => {
+  it("plays the beam loop from the pack script's own Repair recording", async () => {
+    const { ctx, engine } = await engineWithSamples();
+    engine.setRepairBeam(0, true);
+    expect(sourceNames(ctx)).toEqual(['/katabatic/audio/repair-beam.m4a']);
+    engine.setRepairBeam(0, false);
+    expect(ctx._sources[0]?.stop).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+  });
+
+  it('plays the pack Activate one-shot once per toggle, not once per frame', async () => {
+    const { ctx, engine } = await engineWithSamples();
+    engine.setRepairPack(0, true);
+    expect(sourceNames(ctx)).toEqual(['/katabatic/audio/repair-activate.m4a']);
+    engine.setRepairPack(0, true);
+    expect(ctx._sources).toHaveLength(1);
+    engine.setRepairPack(0, false);
+    engine.setRepairPack(0, true);
+    expect(sourceNames(ctx)).toEqual([
+      '/katabatic/audio/repair-activate.m4a',
+      '/katabatic/audio/repair-activate.m4a',
+    ]);
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps the beam loop and the activate one-shot on different recordings', async () => {
+    const { ctx, engine } = await engineWithSamples();
+    engine.setRepairPack(0, true);
+    engine.setRepairBeam(0, true);
+    expect(sourceNames(ctx)).toEqual([
+      '/katabatic/audio/repair-activate.m4a',
+      '/katabatic/audio/repair-beam.m4a',
+    ]);
+    vi.unstubAllGlobals();
+  });
+});
+
+/** Issue #56: chaingun.cs hangs one recording on each image state (Activate, Spinup, Spindown
+ *  and EmptySpindown). The sim exposes weaponState rather than those transitions, so the
+ *  engine edge-detects; these pin the transitions the sim actually produces. */
+describe('chaingun state cues (#56)', () => {
+  it("plays Activate, Spinup and Spindown in the script's own order", async () => {
+    const { ctx, engine } = await engineWithSamples();
+    const cue = (state: WeaponState): void => engine.setChaingunState(0, WeaponId.Chaingun, state);
+    cue(WeaponState.Ready); // the slot just became the Chaingun: mount
+    cue(WeaponState.SpinUp); // trigger down
+    cue(WeaponState.SpinUp); // still spinning
+    cue(WeaponState.Firing); // firing: the per-shot one-shots own this state
+    cue(WeaponState.Ready); // trigger up
+    expect(sourceNames(ctx)).toEqual([
+      '/katabatic/audio/chaingun-activate.m4a',
+      '/katabatic/audio/chaingun-spinup.m4a',
+      '/katabatic/audio/chaingun-spindown.m4a',
+    ]);
+    vi.unstubAllGlobals();
+  });
+
+  it('plays SpinDown on EmptySpindown too (the same stateSound[6] recording)', async () => {
+    const { ctx, engine } = await engineWithSamples();
+    const cue = (state: WeaponState): void => engine.setChaingunState(0, WeaponId.Chaingun, state);
+    cue(WeaponState.Ready);
+    cue(WeaponState.SpinUp);
+    cue(WeaponState.Firing);
+    cue(WeaponState.NoAmmo);
+    expect(sourceNames(ctx)).toEqual([
+      '/katabatic/audio/chaingun-activate.m4a',
+      '/katabatic/audio/chaingun-spinup.m4a',
+      '/katabatic/audio/chaingun-spindown.m4a',
+    ]);
+    vi.unstubAllGlobals();
+  });
+
+  it('never plays a chaingun state cue while another weapon is selected', async () => {
+    const { ctx, engine } = await engineWithSamples();
+    engine.setChaingunState(0, WeaponId.Blaster, WeaponState.Ready);
+    engine.setChaingunState(0, WeaponId.Spinfusor, WeaponState.Firing);
+    engine.setChaingunState(0, WeaponId.Blaster, WeaponState.Ready);
+    expect(ctx._sources).toHaveLength(0);
+    vi.unstubAllGlobals();
+  });
+
+  it('plays the mount recording once per switch back to the Chaingun', async () => {
+    const { ctx, engine } = await engineWithSamples();
+    engine.setChaingunState(0, WeaponId.Chaingun, WeaponState.Ready);
+    engine.setChaingunState(0, WeaponId.Blaster, WeaponState.Ready);
+    engine.setChaingunState(0, WeaponId.Chaingun, WeaponState.Ready);
+    expect(sourceNames(ctx)).toEqual([
+      '/katabatic/audio/chaingun-activate.m4a',
+      '/katabatic/audio/chaingun-activate.m4a',
+    ]);
+    vi.unstubAllGlobals();
+  });
+});
+
+/** Issues #51 and #56 both shipped cues whose only defect was a file name the asset manifest
+ *  never listed: the engine fetches `<BASE_URL>katabatic/audio/<file>` and warns once when it
+ *  404s, so the cue is simply mute. Pinning each new cue to the exact file it must find is the
+ *  client half of that contract; `packages/assets/src/audio-sources.ts` is the other half, and
+ *  the asset step's output directory is the end-to-end proof. */
+describe('cue -> committed recording mapping (#51, #56)', () => {
+  it('names the manifest file for every recording this issue pair adds', () => {
+    const expectations: Array<[keyof typeof SOUND_FILE, string]> = [
+      ['repair-beam', 'repair-beam.m4a'],
+      ['repair-activate', 'repair-activate.m4a'],
+      ['chaingun-activate', 'chaingun-activate.m4a'],
+      ['chaingun-spinup', 'chaingun-spinup.m4a'],
+      ['chaingun-spindown', 'chaingun-spindown.m4a'],
+      ['grenade-explode', 'grenade-explode.m4a'],
+      ['turret-sentry-impact', 'turret-sentry-impact.m4a'],
+      ['turret-plasma-impact', 'turret-plasma-impact.m4a'],
+      ['medium-footstep', 'medium-footstep.m4a'],
+      ['medium-footstep-metal', 'medium-footstep-metal.m4a'],
+      ['heavy-footstep', 'heavy-footstep.m4a'],
+      ['heavy-footstep-metal', 'heavy-footstep-metal.m4a'],
+    ];
+    for (const [sound, file] of expectations) expect(SOUND_FILE[sound]).toBe(file);
+    // A copy-pasted row would make one cue play another's recording while every assertion
+    // above still passed, so the table must also stay one-file-per-cue.
+    expect(new Set(Object.values(SOUND_FILE)).size).toBe(Object.keys(SOUND_FILE).length);
   });
 });

@@ -2,7 +2,10 @@ import {
   ArmorId,
   ProjectileImpactReason,
   ProjectileType,
+  TURRET_WEAPON_ID_OFFSET,
+  TurretBarrelId,
   WeaponId,
+  WeaponState,
   type ProjectileImpact,
   type Vec3,
 } from '@clans/sim';
@@ -46,18 +49,28 @@ type SoundId =
   | 'armor-thrust'
   | 'armor-ski-soft'
   | 'armor-footstep'
+  | 'medium-footstep'
+  | 'medium-footstep-metal'
+  | 'heavy-footstep'
+  | 'heavy-footstep-metal'
   | 'station-hum'
   | 'generator-hum'
   | 'inventory-pad-on'
   | 'vehicle-screen-on'
   | 'vehicle-screen-off'
   | 'station-denied'
+  | 'turret-sentry-impact'
+  | 'turret-plasma-impact'
   | 'spinfusor-fire'
   | 'chaingun-fire'
+  | 'chaingun-activate'
+  | 'chaingun-spinup'
+  | 'chaingun-spindown'
   | 'mortar-fire'
   | 'sniper-fire'
   | 'blaster-fire'
   | 'mortar-explode'
+  | 'grenade-explode'
   | 'spinfusor-impact'
   | 'spinfusor-projectile'
   | 'mortar-projectile'
@@ -77,12 +90,13 @@ type SoundId =
   | 'outrider-engine'
   | 'shrike-engine'
   | 'shrike-blaster'
-  // Issue #51: the Repair Pack beam's own loop. The t2-mapper audio.vl2 volume this repo
-  // samples everything else from carries no repair-beam sample, so until
-  // katabatic/audio/repair-beam.m4a is added to packages/assets the entry loads like every
-  // other sample (warn-once fetch failure) and stays silent -- never a synthesized
-  // substitute, per this module's own test suite.
+  // Issue #51: the Repair Pack's own two recordings. `repair-beam` is the beam loop --
+  // repairpack.cs's RepairPackFireSound (`fx/packs/repair_use`, CloseLooping3d) on the repair
+  // gun's Repair state (`stateSound[4]`) -- and `repair-activate` is the pack Activate state's
+  // one-shot (RepairPackActivateSound, `fx/packs/packs.repairPackOn`, `stateSound[1]`). Both
+  // are committed in packages/assets/src/audio-sources.ts under these exact names.
   | 'repair-beam'
+  | 'repair-activate'
   | 'voice-target-destroyed'
   | 'voice-flag-take'
   | 'voice-thanks'
@@ -93,29 +107,43 @@ type SoundId =
   | 'voice-no'
   | 'voice-nice';
 
-/** Original audio.vl2 samples copied by packages/assets. */
-const SOUND_FILE: Record<SoundId, string> = {
+/** Original audio.vl2 samples copied by packages/assets. Exported so the test suite can pin
+ *  every cue to the file packages/assets/src/audio-sources.ts must publish under
+ *  `<BASE_URL>katabatic/audio/` -- a cue whose file is not in that manifest is silent, which
+ *  is exactly how the repair beam stayed mute (issue #51). */
+export const SOUND_FILE: Record<SoundId, string> = {
   'armor-thrust': 'armor-thrust.m4a',
   'armor-ski-soft': 'armor-ski-soft.m4a',
   'armor-footstep': 'armor-footstep.m4a',
+  'medium-footstep': 'medium-footstep.m4a',
+  'medium-footstep-metal': 'medium-footstep-metal.m4a',
+  'heavy-footstep': 'heavy-footstep.m4a',
+  'heavy-footstep-metal': 'heavy-footstep-metal.m4a',
   'station-hum': 'station-hum.m4a',
   'generator-hum': 'generator-hum.m4a',
   'inventory-pad-on': 'inventory-pad-on.m4a',
   'vehicle-screen-on': 'vehicle-screen-on.m4a',
   'vehicle-screen-off': 'vehicle-screen-off.m4a',
   'station-denied': 'station-denied.m4a',
+  'turret-sentry-impact': 'turret-sentry-impact.m4a',
+  'turret-plasma-impact': 'turret-plasma-impact.m4a',
   'spinfusor-fire': 'spinfusor-fire.m4a',
   'chaingun-fire': 'chaingun-fire.m4a',
+  'chaingun-activate': 'chaingun-activate.m4a',
+  'chaingun-spinup': 'chaingun-spinup.m4a',
+  'chaingun-spindown': 'chaingun-spindown.m4a',
   'mortar-fire': 'mortar-fire.m4a',
   'sniper-fire': 'sniper-fire.m4a',
   'blaster-fire': 'blaster-fire.m4a',
   'mortar-explode': 'mortar-explode.m4a',
+  'grenade-explode': 'grenade-explode.m4a',
   'spinfusor-impact': 'spinfusor-impact.m4a',
   'spinfusor-projectile': 'spinfusor-projectile.m4a',
   'mortar-projectile': 'mortar-projectile.m4a',
   'blaster-impact': 'blaster-impact.m4a',
   'blaster-projectile': 'blaster-projectile.m4a',
   'repair-beam': 'repair-beam.m4a',
+  'repair-activate': 'repair-activate.m4a',
   'chaingun-impact': 'chaingun-impact.m4a',
   'chaingun-projectile': 'chaingun-projectile.m4a',
   'sniper-impact': 'sniper-impact.m4a',
@@ -175,29 +203,44 @@ const WEAPON_IMPACT: Partial<Record<WeaponId, [SoundId, Profile]>> = {
   [WeaponId.LaserRifle]: ['sniper-impact', CLOSEST],
   [WeaponId.Blaster]: ['blaster-impact', CLOSEST],
 };
-/** Issue #56, stated plainly: the t2-mapper volume commits no chaingun spin-up/spin-down
- *  recording and no continuous fire-loop sample (only the per-shot chaingun_fire one-shot),
- *  so the sim's WeaponState.SpinUp phase and "spin/fire/stop loop timing" have no original
- *  sample to play and stay silent rather than getting an invented oscillator loop. Fire
- *  stays the per-shot one-shots WEAPON_PROFILE maps. */
-/** Issue #56 footstep variants. The t2-mapper audio.vl2 volume commits exactly one footstep
- *  recording -- light armor's light_LF_soft (audio-sources.ts) -- and none for interior
- *  surfaces or the medium/heavy armors, so every armor/surface row resolves to that same
- *  committed sample and the approved footstep feel is unchanged for every behavior. This
- *  table is the whole variant policy: when a real recording lands in the manifest, its row
- *  changes here and nowhere else. A missing row would silence the cue -- never synthesize
- *  a substitute. */
+/** Issue #56 Chaingun state cues. The base script hangs its own recording on each image state
+ *  -- chaingun.cs's ChaingunSwitchSound on Activate, ChaingunSpinupSound on Spinup and
+ *  ChaingunSpinDownSound on Spindown/EmptySpindown -- and all three are committed in
+ *  audio-sources.ts. The sim keeps a WeaponState, not a transition log, so setChaingunState
+ *  edge-detects these itself; Fire keeps playing the per-shot one-shot WEAPON_PROFILE maps,
+ *  which is the recording's own type (AudioDefaultLooping3d) minus the continuous loop this
+ *  milestone still does not drive. */
+/** Issue #56 footstep variants. All three armour rows now resolve to that armour's own
+ *  committed recordings -- `_soft` for terrain, `_metal` for interiors, the two T2 surface
+ *  classes this game's FootstepSurface collapses to -- with the light row deliberately
+ *  unchanged (light_LF_soft) so the approved feel of the default armour is untouched. This
+ *  table is the whole variant policy: a surface class we do not distinguish would have to add
+ *  its own row here, and a missing row would silence the cue -- never synthesize a
+ *  substitute. */
 export type FootstepSurface = 'terrain' | 'interior';
 const FOOTSTEP_CUES: Record<ArmorId, Record<FootstepSurface, SoundId>> = {
   [ArmorId.Light]: { terrain: 'armor-footstep', interior: 'armor-footstep' },
-  [ArmorId.Medium]: { terrain: 'armor-footstep', interior: 'armor-footstep' },
-  [ArmorId.Heavy]: { terrain: 'armor-footstep', interior: 'armor-footstep' },
+  [ArmorId.Medium]: { terrain: 'medium-footstep', interior: 'medium-footstep-metal' },
+  [ArmorId.Heavy]: { terrain: 'heavy-footstep', interior: 'heavy-footstep-metal' },
 };
-/** The footstep sample for an armor/surface pair; every pair shares the one committed
- *  recording today (see FOOTSTEP_CUES). */
+/** The footstep sample for an armor/surface pair: each armour's own two committed recordings
+ *  (see FOOTSTEP_CUES). */
 export function footstepCue(armor: ArmorId, surface: FootstepSurface): SoundId {
   return FOOTSTEP_CUES[armor][surface];
 }
+/** Base turrets fire with a barrel id offset out of WEAPON_DATA's range (projectiles.ts's
+ *  TURRET_WEAPON_ID_OFFSET), so their detonations need this table instead of WEAPON_IMPACT.
+ *  Each row is the recording the barrel's own script hangs on its projectile explosion, with
+ *  the profile its AudioProfile description names: SentryTurretExpSound is AudioClosest3d
+ *  (sentryTurret.cs:32-36), PlasmaBarrelExpSound is AudioExplosion3d
+ *  (plasmaBarrelLarge.cs:44-48), and the AA barrel declares no recording of its own --
+ *  aaBarrelLarge.cs:121 reuses the Blaster's `blasterExpSound` ->
+ *  `fx/weapons/blaster_impact.wav` (blaster.cs:48-51). */
+const TURRET_IMPACT: Partial<Record<number, [SoundId, Profile]>> = {
+  [TurretBarrelId.PlasmaBarrelLarge]: ['turret-plasma-impact', EXPLOSION],
+  [TurretBarrelId.AABarrelLarge]: ['blaster-impact', CLOSEST],
+  [TurretBarrelId.SentryTurretBarrel]: ['turret-sentry-impact', CLOSEST],
+};
 /** Issue #52 residual: the one audio cue an authoritative impact record deserves, keyed on
  *  the record's own weapon and reason -- the exact semantics impactEffectFor renders
  *  visually, so what you hear always agrees with what you see:
@@ -209,35 +252,41 @@ export function footstepCue(armor: ArmorId, surface: FootstepSurface): SoundId {
  *  - A Grenade-type record is an explosive body. Mortar shells are grenade-type with their
  *    own WEAPON_IMPACT row (its EXPLOSION audible range with it); any other grenade is an
  *    alt-fire throw riding the firing weapon's id -- playing THAT weapon's impact sample
- *    would pass a disc/bullet detonation off as the grenade's -- so both get the volume's
- *    one generic weapon-explosion recording: no dedicated hand-grenade sample is committed.
+ *    would pass a disc/bullet detonation off as the grenade's -- so it gets the hand
+ *    grenade's own recording, `fx/weapons/grenade_explode` (GrenadeExplosionSound,
+ *    grenadeLauncher.cs:77-83, which HandGrenadeExplosion carries as its soundProfile,
+ *    grenade.cs:180), at the generic weapon-explosion range.
  *  - VehicleLaser records carry the Shrike's offset weapon id (150, no WEAPON_DATA row, so
  *    no impact recording); the handheld Blaster bolt's impact sample stands in, the same
  *    mapping the old disappearance path used.
- *  - Turret shots carry their own offset weapon ids and have no committed impact
- *    recordings; they stay silent rather than inventing one.
+ *  - Turret shots carry their barrel ids at TURRET_WEAPON_ID_OFFSET and resolve through
+ *    TURRET_IMPACT; a barrel with no committed recording stays silent rather than inventing
+ *    one.
  *
  *  A bounce is a real contact, so it plays the weapon's own impact sample (no dedicated
  *  ricochet recording is committed) while the projectile keeps flying. */
 export function projectileImpactCue(
   impact: ProjectileImpact,
 ): { sound: SoundId; profile: Profile } | null {
-  if (impact.reason === ProjectileImpactReason.Timeout) {
-    return impact.type === ProjectileType.Grenade
-      ? { sound: 'mortar-explode', profile: EXPLOSION }
-      : null;
+  if (
+    impact.reason === ProjectileImpactReason.Timeout &&
+    impact.type !== ProjectileType.Grenade
+  ) {
+    return null;
   }
   if (impact.type === ProjectileType.Grenade) {
-    return {
-      sound: 'mortar-explode',
-      profile: impact.weaponId === WeaponId.Mortar ? EXPLOSION : WEAPON_EXPLOSION,
-    };
+    return impact.weaponId === WeaponId.Mortar
+      ? { sound: 'mortar-explode', profile: EXPLOSION }
+      : { sound: 'grenade-explode', profile: WEAPON_EXPLOSION };
   }
-  // weaponId rides the wire raw; offset ids (Shrike 150+, turret 151+) simply find no row.
+  // weaponId rides the wire raw: turret barrels sit at TURRET_WEAPON_ID_OFFSET, and the
+  // Shrike's 150 is handled above by type because it has no row of its own either.
   const sound =
     impact.type === ProjectileType.VehicleLaser
       ? WEAPON_IMPACT[WeaponId.Blaster]
-      : WEAPON_IMPACT[impact.weaponId as WeaponId];
+      : impact.weaponId >= TURRET_WEAPON_ID_OFFSET
+        ? TURRET_IMPACT[impact.weaponId - TURRET_WEAPON_ID_OFFSET]
+        : WEAPON_IMPACT[impact.weaponId as WeaponId];
   return sound ? { sound: sound[0], profile: sound[1] } : null;
 }
 
@@ -252,6 +301,12 @@ function levelAt(ear: Vec3 | undefined, position: Vec3 | undefined, profile: Pro
 
 export interface AudioEngine {
   weaponFire(weaponId: WeaponId, position: Vec3): void;
+  /** Issue #56 Chaingun state cues. The sim exposes weaponSlot/weaponState, not the state
+   *  transitions the T2 image has, so this edge-detects them: the mount one-shot when the
+   *  slot becomes the Chaingun, spin-up on entering SpinUp, spin-down on leaving
+   *  SpinUp/Firing. Cues are keyed per player because the engine, like setSkiing, owns the
+   *  edge state across frames. */
+  setChaingunState(id: number, slot: number, state: WeaponState): void;
   /** Issue #52 residual: the authoritative impact record's own cue, selected per weapon and
    *  reason by projectileImpactCue. Exactly-once is the caller's contract -- the same one
    *  spawnProjectileImpacts documents for the visual path. */
@@ -275,6 +330,11 @@ export interface AudioEngine {
    *  loop. Start = the beam went live, stop = it released for any reason (release, occlusion,
    *  range, depletion, death, menu), so the audio cue tracks the beam's lifecycle 1:1. */
   setRepairBeam(id: number, active: boolean): void;
+  /** Issue #51: the pack's own Activate recording (RepairPackImage's stateSound[1]), which
+   *  fires on the toggle that mounts the repair gun -- a different moment from the beam going
+   *  live, so a menu opening or a drained pool (both of which stop the beam) must not replay
+   *  it. Rising-edge only, like setSkiing. */
+  setRepairPack(id: number, active: boolean): void;
   setStationHum(id: number, position: Vec3, active: boolean): void;
   setGeneratorHum(id: number, position: Vec3, active: boolean): void;
   setVehicleEngine(id: number, kind: 'wildcat' | 'shrike', position: Vec3, active: boolean): void;
@@ -304,6 +364,8 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
   master.connect(context.destination);
   const loops = new Map<string, Loop>();
   const skiing = new Set<number>();
+  const armedPacks = new Set<number>();
+  const chaingunStates = new Map<number, { slot: number; state: WeaponState }>();
   const oneShots = new Set<AudioBufferSourceNode>();
   const buffers = new Map<SoundId, AudioBuffer>();
   const loads = new Map<SoundId, Promise<void>>();
@@ -431,6 +493,28 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
       const sound = WEAPON_PROFILE[weapon];
       if (sound) play(sound[0], sound[1], position);
     },
+    // The base script's own state sounds (chaingun.cs stateSound[0], [3], [5]/[6]). Mount and
+    // spin cues are the local player's own weapon, so they play at full level like the jet and
+    // repair loops rather than through a panner.
+    setChaingunState: (id, slot, state) => {
+      const previous = chaingunStates.get(id);
+      chaingunStates.set(id, { slot, state });
+      if (slot !== WeaponId.Chaingun) return;
+      if (previous?.slot !== WeaponId.Chaingun) {
+        play('chaingun-activate', CLOSEST);
+        return;
+      }
+      if (state === WeaponState.SpinUp && previous.state !== WeaponState.SpinUp) {
+        play('chaingun-spinup', CLOSEST);
+        return;
+      }
+      // EmptySpindown carries the same recording as Spindown, so any exit from the spin
+      // thread counts, ammo gone or not.
+      const spun =
+        previous.state === WeaponState.SpinUp || previous.state === WeaponState.Firing;
+      const stillSpinning = state === WeaponState.SpinUp || state === WeaponState.Firing;
+      if (spun && !stillSpinning) play('chaingun-spindown', CLOSEST);
+    },
     projectileImpact: (impact) => {
       const cue = projectileImpactCue(impact);
       if (cue) play(cue.sound, cue.profile, { x: impact.x, y: impact.y, z: impact.z });
@@ -473,11 +557,18 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
         position,
       ),
     // Issue #51: the Repair Pack beam's loop, keyed per player like the jet loop and CLOSE
-    // like it -- the local player's own beam sits at the listener. loop()'s pending-start
-    // queue means a start before the sample decodes still fires once it lands, while a
-    // missing sample stays a silent pending loop rather than a synthesized substitute.
+    // like it -- the local player's own beam sits at the listener. The recording is committed
+    // as repair-beam.m4a (repairpack.cs's RepairPackFireSound); loop()'s pending-start queue
+    // means a start before it decodes still fires once it lands, and a failed fetch would
+    // leave a silent pending loop rather than a synthesized substitute.
     setRepairBeam: (id, active) =>
       setLoop(loops, `repair:${String(id)}`, active, () => loop('repair-beam', CLOSE)),
+    setRepairPack: (id, active) => {
+      if (active && !armedPacks.has(id)) {
+        armedPacks.add(id);
+        play('repair-activate', CLOSEST);
+      } else if (!active) armedPacks.delete(id);
+    },
     setStationHum: (id, position, active) =>
       setSpatialLoop(`station:${String(id)}`, 'station-hum', CLOSE, position, active),
     setGeneratorHum: (id, position, active) =>
@@ -516,6 +607,8 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
       for (const loop of loops.values()) loop.stop();
       loops.clear();
       skiing.clear();
+      armedPacks.clear();
+      chaingunStates.clear();
       for (const source of oneShots) source.stop();
       oneShots.clear();
       master.disconnect();

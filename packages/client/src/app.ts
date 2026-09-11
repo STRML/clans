@@ -16,6 +16,7 @@ import {
   type VehicleData,
   VehicleKind,
   WeaponId,
+  WeaponState,
   addPlayer,
   canSendVehicleUse,
   createBaseObjects,
@@ -2115,6 +2116,15 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         audio,
         repairStatus,
       );
+      // Issue #51: the pack's own Activate recording follows the pack toggle, not the beam --
+      // a menu opening or a drained pool stops the beam without un-activating the pack, so
+      // those gates must not replay it. The engine edge-detects, so this is safe per frame.
+      audio.setRepairPack(
+        playerId,
+        world.players.hasRepairPack[playerId] === 1 &&
+          world.players.alive[playerId] === 1 &&
+          currentInput.packActive,
+      );
 
       interactionPrompt.update(world, playerId, input.uiOpen || app.freeCam);
       if (app.freeCam) moveFreeCam(app, dtSeconds);
@@ -2132,6 +2142,13 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       );
       renderer.render(scene, camera);
       weaponModel.sync(world, playerId, app.freeCam, weaponAnimationDelta(app, dtSeconds));
+      // Issue #56: the Chaingun's own state recordings follow the same simulated state the
+      // viewmodel just read, one frame, one source of truth.
+      audio.setChaingunState(
+        playerId,
+        world.players.weaponSlot[playerId] ?? -1,
+        world.players.weaponState[playerId] ?? WeaponState.Ready,
+      );
       weaponModel.render(renderer, camera.aspect);
       app.stats.frameMs = performance.now() - frameStart;
       updateFps(app, frameStart, fps);
