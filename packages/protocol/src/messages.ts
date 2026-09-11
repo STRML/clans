@@ -67,9 +67,12 @@ export const PROTOCOL_VERSION = 11;
 export enum WelcomeStatus {
   Ok = 0,
   VersionMismatch = 1,
-  /** Issue #31: join refused -- no team under TARGET_TEAM_SIZE can take another human, so the
-   *  client must pick the alternate team or wait. Byte-compatible addition: every client
-   *  already treats any non-Ok status as a refusal, so no protocol version bump. */
+  /** Issue #31: join refused -- no team under the server's per-team seat cap can take
+   *  another human, so the client must pick the alternate team or wait. That cap is the
+   *  server's own `--team-size` (TARGET_TEAM_SIZE, the spec's 16 versus 16, by default;
+   *  raised for a larger match), never a wire constant -- a refusal is a refusal at any
+   *  cap. Byte-compatible addition: every client already treats any non-Ok status as a
+   *  refusal, so no protocol version bump. */
   TeamFull = 2,
 }
 
@@ -224,6 +227,16 @@ export const MAX_SNAPSHOT_VEHICLES = 255; // Matches @clans/sim's VehicleStore c
 // fix every u8 extras count (vehicles here, flags/baseObjects/turrets at their own tighter
 // MAX ceilings above) is guard-thrown at write time instead of silently wrapping, so 255
 // stays the real ceiling, not just a round number. See snapshot.ts's writeExtras.
-export const MAX_SNAPSHOT_BOTS = 32; // Ours -- TARGET_TEAM_SIZE * 2 (M6's own "ours" numbers table).
+// One entry per currently-active bot in WorldExtras.bots (buildExtras filters runtimes by
+// players.active, so the array can never outnumber active players), so the honest bound is
+// the roster capacity, not any one milestone's match size: WORLD_CAPACITY is 64 seats (32 v
+// 32), which covers the 24 v 24 target's 48 bots with 16 seats of headroom. The wire count
+// is a single u8 (writeU8Counted in snapshot.ts writes it, readExtras reads it back with
+// readU8), so raising this is a validation change only -- the bytes and PROTOCOL_VERSION are
+// unchanged. It stays at the roster capacity rather than at the u8 maximum so the decode
+// guard keeps real rejection power: a bound of 255 would accept any count the field can
+// carry (a 200-bot count is impossible in a 64-seat world), and a bound of 256 would let the
+// write side encode a 256-entry array as a wrapped 0 count and silently drop the block.
+export const MAX_SNAPSHOT_BOTS = 64;
 export const MAX_SNAPSHOT_ORDERS = 2; // Ours -- one active order per team, no queue.
 export const VOICE_LINE_COUNT = 9; // Ours -- see M7 plan's "ours" numbers table.

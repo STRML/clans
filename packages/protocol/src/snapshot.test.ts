@@ -17,7 +17,7 @@ import {
   type PlayerSnapshotData,
   type World,
 } from '@clans/sim';
-import { bytesOf, createWriter, writeU16, writeU32, writeU8 } from './codec.js';
+import { bytesOf, createWriter, writeF32, writeU16, writeU32, writeU8 } from './codec.js';
 import {
   MAX_SNAPSHOT_BASE_OBJECTS,
   MAX_SNAPSHOT_BOTS,
@@ -223,6 +223,24 @@ describe('snapshot codec', () => {
     expect(decoded.timeRemainingS).toBeCloseTo(723.4, 1);
     expect(decoded.gameOverReason).toBe(0);
     expect(decoded.bots).toEqual(bots);
+  });
+
+  it('round-trips a full 48-bot (24 v 24) extras payload -- the match size the target roster seats', () => {
+    // 24 v 24 is 48 bots, so MAX_SNAPSHOT_BOTS has to cover a full match rather than only
+    // M6's 16 v 16: at 32 this encode threw RangeError, which crashed the server on the
+    // very first snapshot of a real 48-bot seating. The count is one u8 on the wire, so 48
+    // has to survive as a single byte and come back with every entry, in order.
+    const bots: BotDebugSnapshotData[] = Array.from({ length: 48 }, (_, i) => ({
+      playerId: i,
+      state: i % 3,
+    }));
+    const decoded = decodeSnapshot(
+      encodeSnapshot(1, 0, 0, [], null, { ...emptyExtras(), bots }),
+      null,
+    );
+    expect(decoded.bots).toHaveLength(48);
+    expect(decoded.bots).toEqual(bots);
+    expect(decoded.bots[47]).toEqual({ playerId: 47, state: 2 });
   });
 
   it('throws at encode time when the bots array exceeds MAX_SNAPSHOT_BOTS', () => {
@@ -968,6 +986,36 @@ describe('snapshot wire fixes (issues #14/#24/#15/#16/#25)', () => {
     writeU16(cursor, 0); // projectile count
     writeU8(cursor, 255); // declared flag count: above MAX_SNAPSHOT_FLAGS, wraps nothing
     writeU8(cursor, 0); // base-object count, present so misalignment would be observable
+    expect(() => decodeSnapshot(bytesOf(cursor), null)).toThrow(RangeError);
+  });
+
+  it('rejects a hostile frame declaring an implausible bot count instead of reading a truncated bot block (issue #16)', () => {
+    // Same framing as the hostile flag-count test above, but the implausible u8 lands in
+    // the bot count -- read after the trailing scalars, so a decoder that returned zero
+    // bots would then read the order count out of what was meant to be bot payload.
+    // MAX_SNAPSHOT_BOTS has to stay far enough below 256 for this guard to mean anything:
+    // at 255 the only wire value it could reject is 255 itself, and 256 would wrap the
+    // write side to a 0 count that silently drops the whole block.
+    const cursor = createWriter(40);
+    writeU8(cursor, MessageType.Snapshot);
+    writeU32(cursor, 1);
+    writeU32(cursor, 0);
+    writeU32(cursor, 0);
+    writeU32(cursor, 0);
+    writeU8(cursor, 0); // flags: full, not delta
+    writeU16(cursor, 0); // player count
+    writeU16(cursor, 0); // projectile count
+    writeU8(cursor, 0); // flag count
+    writeU8(cursor, 0); // base-object count
+    writeU8(cursor, 0); // turret count
+    writeU8(cursor, 0); // vehicle count
+    writeU16(cursor, 0); // teamScores[0]
+    writeU16(cursor, 0); // teamScores[1]
+    writeU8(cursor, 0); // gameOver
+    writeU8(cursor, 0); // winnerTeam
+    writeF32(cursor, 0); // timeRemainingS
+    writeU8(cursor, 0); // gameOverReason
+    writeU8(cursor, 255); // declared bot count: above MAX_SNAPSHOT_BOTS, no bot data follows
     expect(() => decodeSnapshot(bytesOf(cursor), null)).toThrow(RangeError);
   });
 
