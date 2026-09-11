@@ -1000,18 +1000,21 @@ describe('defender duty split (issue #32)', () => {
  *  the predicates, because the predicate tests cannot catch a missing call site -- the
  *  failure this wave was one integration line away from shipping with no test at all.
  *
- *  The fire-discipline property is stronger than "does not shoot", because an aim solution
- *  is also a steering command: brain.ts composes `yaw = aiming ? combat.yaw :
- *  move.headingYaw`, so a carrier that engages a distant enemy walks toward it. The
- *  assertion that matters is the heading, so both tests below check the heading, and the
- *  control case differs only in whether the bot carries the flag. */
+ *  What is pinned here is the state the ablation left behind: the escort-priority swap is
+ *  wired through decideCombat, and the carrier's trigger backstop holds past the envelope
+ *  while the carrier still engages. The decision-layer gate on a carrier's engagement was
+ *  measured to cost 35 kills for zero arrivals and was removed, so the control case here
+ *  differs from the carrier case only in the trigger, not in whether the bot aims. */
 describe('carrier fire discipline and escort priority through decideCombat (issue #32)', () => {
   const LANDMARKS = [
     { position: { x: -100, y: 0, z: 0 }, label: 'homeFlag' },
     { position: { x: 100, y: 0, z: 0 }, label: 'enemyFlag' },
   ];
 
-  it('a carrying bot heading home holds fire at range and keeps its route heading', () => {
+  it('a carrying bot keeps its trigger down at range through combat.ts, even while engaged', () => {
+    // The decision layer deliberately no longer gates a carrier's engagement (an ablation
+    // measured 35 kills lost for no arrivals), so what survives is combat.ts's trigger-level
+    // backstop: the carrier engages and aims, and its weapon stays down past the envelope.
     const world = createWorld(flat, 1);
     setupFlags(world);
     const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
@@ -1022,8 +1025,7 @@ describe('carrier fire discipline and escort priority through decideCombat (issu
     const graph = buildWaypointGraph(LANDMARKS);
     const input = stepBot(world, graph, runtime, null);
     expect(input.fire).toBe(false);
-    // Route home is toward -x; aiming at the enemy (straight +z) would put sin(yaw) at ~0.
-    expect(Math.sin(input.yaw)).toBeLessThan(-0.5);
+    expect(decideCombat(world, runtime).aiming).toBe(true); // engaged, but not shooting
   });
 
   it('the same bot without the flag engages the identical enemy', () => {

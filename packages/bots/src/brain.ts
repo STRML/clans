@@ -12,13 +12,7 @@ import {
   type World,
 } from '@clans/sim';
 import { OrderKind, type TeamOrder } from '@clans/protocol';
-import {
-  aimAndFire,
-  aimAtPoint,
-  carrierHoldsFireOn,
-  carrierHoldsFireOnPoint,
-  selectCombatTarget,
-} from './combat.js';
+import { aimAndFire, aimAtPoint, carrierHoldsFireOnPoint, selectCombatTarget } from './combat.js';
 import {
   CARRIER_THREAT_RADIUS_M,
   findAttackableTurret,
@@ -237,16 +231,16 @@ export const CARRIER_STAGE_RADIUS_M = 120; // Ours, meters.
 export const CARRIER_STAGE_FROM_ENEMY_M = 200; // Ours, meters.
 
 /** Issue #32 launch cohesion: how long the carrier stages for company before it launches
- *  alone (the give-up). Long enough for the trailing attack wave to close a real gap -- the
- *  regroup comment's own measurement has the wave trailing the carrier by 100-400 m at a
- *  ~10 m/s run, so 600 ticks (~19 s) is the tail of "a body 150 m out arrives" and
- *  deliberately short of the ~40 s the farthest straggler would need: the gate is there to
- *  pick up the nearest bodies, not to reassemble the team. Short enough that the wait
- *  cannot become the new dead end (a parked carrier is bot-time the harness's stall-window
- *  gate, under 0.2 per seed, is measuring) nor throw away a live capture window (a third of
- *  the 45 s the enemy flag's own return timer needs before a dropped flag comes home by
- *  itself). */
-export const CARRIER_STAGE_WAIT_TICKS = 600; // Ours, ticks (~19 s at 32 ms/tick).
+ *  alone (the give-up). 600 ticks (~19 s) was the original pick, sized from the trailing
+ *  wave's own 100-400 m gap; the ablation study on this wave measured what it actually
+ *  bought, and it was not arrivals: both flags sat carried for 38% of every match (18199 of
+ *  48000 sampled ticks) with the 600-tick wait against 21.6% with the wait disabled, for 53
+ *  fewer kills and eight fewer carrier deaths -- and zero extra arrivals either way. A short
+ *  wait keeps the intent (pick up the bodies already close) without parking the flag in
+ *  midfield: 100 ticks (~3 s) is about what a body inside CARRIER_STAGE_RADIUS_M needs to
+ *  close the last few metres, and it is a twentieth of the 45 s the enemy flag's own return
+ *  timer runs for, so it cannot throw away a live capture window. */
+export const CARRIER_STAGE_WAIT_TICKS = 100; // Ours, ticks (~3 s at 32 ms/tick).
 
 /** Issue #32 launch cohesion, escort side: below this horizontal speed the carrier counts
  *  as standing still, which for a carrier means it is staging for company (or wedged --
@@ -970,14 +964,18 @@ function isOutsideDefendLeash(world: World, runtime: BotRuntimeState, targetId: 
  *  Issue #32 escort priority and carrier fire discipline (the COMBAT slice, wired here):
  *  the player branch takes combat.ts's selectCombatTarget, which swaps a nearest-enemy
  *  pick for the enemy threatening the teammate carrier whenever this bot is escorting
- *  one; both branches are then gated by combat.ts's carrier hold-fire envelope. A bot
- *  carrying the flag therefore returns `aiming: false` at range rather than turning onto
- *  a distant shooter, and that reaches further than the trigger: the caller composes
- *  `yaw = aiming ? combat.yaw : move.headingYaw`, so an aim solution IS a steering
- *  command, and a carrier that "aims" at a distant enemy walks off its own route. The
- *  fall-through deliberately reports `aiming: false` (not a synthesized yaw) for the same
- *  reason -- a stale yaw would freeze the carrier on a fixed bearing while the route
- *  turns underneath it. */
+ *  one, and the turret branch is gated by combat.ts's carrier hold-fire envelope so a
+ *  carrying bot never pivots onto a structure it will not shoot. The player branch is
+ *  deliberately NOT gated here: an ablation over four seeds measured that gating it cost
+ *  35 kills (69 against 104 with the gate removed) and bought nothing -- zero extra
+ *  carrier arrivals, zero refused ticks, and a flat both-flags share -- by keeping
+ *  carriers out of fights they could win. What remains is combat.ts's trigger-level
+ *  backstop, which holds a carrier's fire beyond CARRIER_FIRE_RANGE_M while letting it
+ *  keep engaging: an aim solution is also a steering command (the caller composes
+ *  `yaw = aiming ? combat.yaw : move.headingYaw`), so the backstop is about the route the
+ *  carrier walks, and the fall-through reports `aiming: false` rather than a synthesized
+ *  yaw -- a stale yaw would freeze the carrier on a fixed bearing while the route turned
+ *  underneath it. */
 export function decideCombat(
   world: World,
   runtime: BotRuntimeState,
@@ -990,11 +988,7 @@ export function decideCombat(
   aiming: boolean;
 } {
   const targetId = selectCombatTarget(world, runtime.playerId);
-  if (
-    targetId !== null &&
-    !carrierHoldsFireOn(world, runtime.playerId, targetId) &&
-    !isOutsideDefendLeash(world, runtime, targetId)
-  ) {
+  if (targetId !== null && !isOutsideDefendLeash(world, runtime, targetId)) {
     const { yaw, pitch, fire, weaponId } = aimAndFire(world, runtime, runtime.playerId, targetId);
     return { yaw, pitch, fire, targetId, weaponId, aiming: true };
   }
