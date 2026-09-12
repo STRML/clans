@@ -403,7 +403,7 @@ describe('projectileImpactCue (#52 residual)', () => {
     ).toBe('mortar-explode');
   });
 
-  it('sends non-mortar grenades to the hand grenade\'s own detonation recording', () => {
+  it("sends non-mortar grenades to the hand grenade's own detonation recording", () => {
     // The alt-fire grenade rides the firing weapon's id; GrenadeExplosionSound is
     // fx/weapons/grenade_explode (grenadeLauncher.cs:77-83), which HandGrenadeExplosion
     // carries as its soundProfile (grenade.cs:180).
@@ -445,8 +445,12 @@ describe('projectileImpactCue (#52 residual)', () => {
   });
 
   it('leaves an id with no committed impact recording silent', () => {
-    // 151 is one past the Shrike's own offset: no WEAPON_DATA row and no turret barrel.
-    expect(projectileImpactCue(impactRecord({ weaponId: 151 }))).toBeNull();
+    // The id has to be one no table claims. 151 was that id until the vehicle weapons landed
+    // at VEHICLE_WEAPON_ID_OFFSET = 150 (projectiles.ts), which made it the Tank's chaingun;
+    // the offsets are append-only by design, so an unknown id now has to sit above every
+    // assigned range rather than between two of them. 4096 is above both the turret barrels
+    // (100+) and the vehicle weapons (150+) with room for either set to grow.
+    expect(projectileImpactCue(impactRecord({ weaponId: 4096 }))).toBeNull();
     // A turret bolt that merely outlives its lifetime is a removal, not a detonation.
     expect(
       projectileImpactCue(
@@ -549,7 +553,7 @@ describe('terrain occlusion (#56)', () => {
 });
 
 describe('footstep variants (#56)', () => {
-  it('resolves each armor/surface pair to that armor\'s own committed recording', () => {
+  it("resolves each armor/surface pair to that armor's own committed recording", () => {
     // player.cs gives every armor its own L/R footstep set; terrain takes the `soft` take and
     // interior the `metal` one (the two T2 surface classes our FootstepSurface collapses).
     const expectations: Array<[ArmorId, FootstepSurface, string]> = [

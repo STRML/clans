@@ -34,14 +34,21 @@ rerun in this audit. GitHub issue numbers below refer to
    sizes showed (one flag never taken in 48,000 ticks) disappears at 24v24, where both flags
    are carried and both sides lose carriers.
 
-   Three carrier-side levers are measured and **closed**, each with the number that killed it:
+   Four carrier-side levers are measured and **closed**, each with the number that killed it:
    a lateral dodge (target size: closest approach 48 to 85 m, enemy-caused deaths 16 to 18,
    minus 14% kills), a tighter escort station (escort distance 38 to 37 m, deaths flat, closest
-   approach 48 to 268 m), and letting the carrier ski for speed (home leg 14.6 to 18.4 m/s and
-   exposure 1296 to 1011 ticks, but kills 370 to 257 and closest approach 48 to 264 m). The
-   number behind all three: at the death tick the nearest live teammate is a median **209 m
-   behind the carrier** while the team is at full strength, so the carrier is killed by the
-   first enemy that reaches it, alone, with its help behind it. Re-run the telemetry before
+   approach 48 to 268 m), letting the carrier ski for speed (home leg 14.6 to 18.4 m/s and
+   exposure 1296 to 1011 ticks, but kills 370 to 257 and closest approach 48 to 264 m), and a
+   fourth, decisive one: **carrier rally**, where a threatened carrier turns back onto its
+   nearest teammate. It met its precondition -- 13 of 21 threatened runs closed to within 25 m
+   of a teammate -- and **12 of those 13 carriers died anyway**, while kills fell 370 to 341 and
+   the closest approach went 48 to 204 m. Meeting the help does not save the carrier, so the
+   help is not a combat asset.
+
+   The number behind all four: at the death tick the nearest live teammate is a median **209 m
+   behind the carrier** while the team is at full strength, and the carrier is killed by the
+   first enemy that reaches it, a median 23 m away, at 15 m/s. Every lever that tried to move
+   the carrier, its speed or its company failed the same way. Re-run the telemetry before
    theorizing, and read the wave section below before changing any carrier policy.
 2. **Wildcat bugs (user report, 2026-09-10): closed.** Pad spawn and steering were fixed and
    measured in `1e26db4`; the camera followed in `c9e729f`, which gives the Wildcat T2's own
@@ -110,8 +117,9 @@ pass** (`env -u CI node_modules/.bin/playwright test`). Protocol stays **11**.
 | `78ad7bf`, `90f4d94`, `7ad5feb` | A `.dts` shape reader, the four missing vehicle models built from source, and the four vehicles as full kinds (#57) |
 
 Measured and **reverted**, with the numbers that killed each: the carrier lateral dodge, the
-tighter escort station, and carrier ski speed (see Start here item 1). Also reverted on
-evidence in the earlier wave: launch staging and the decision-layer hold-fire gate.
+tighter escort station, carrier ski speed, and carrier rally (which met its precondition and
+still lost the carrier -- see Start here item 1). Also reverted on evidence in the earlier
+wave: launch staging and the decision-layer hold-fire gate.
 
 ### The asset pipeline was fetching dead URLs
 

@@ -4,11 +4,13 @@ import {
   ProjectileType,
   TURRET_WEAPON_ID_OFFSET,
   TurretBarrelId,
+  VEHICLE_WEAPON_DATA,
   VEHICLE_WEAPON_ID_OFFSET,
   WeaponId,
   WeaponState,
   type ProjectileImpact,
   type Vec3,
+  type VehicleWeaponId,
 } from '@clans/sim';
 
 // T2 AudioProfile volume is 1.0. This only leaves mix headroom.
@@ -269,10 +271,7 @@ const TURRET_IMPACT: Partial<Record<number, [SoundId, Profile]>> = {
 export function projectileImpactCue(
   impact: ProjectileImpact,
 ): { sound: SoundId; profile: Profile } | null {
-  if (
-    impact.reason === ProjectileImpactReason.Timeout &&
-    impact.type !== ProjectileType.Grenade
-  ) {
+  if (impact.reason === ProjectileImpactReason.Timeout && impact.type !== ProjectileType.Grenade) {
     return null;
   }
   if (impact.type === ProjectileType.Grenade) {
@@ -280,24 +279,36 @@ export function projectileImpactCue(
       ? { sound: 'mortar-explode', profile: EXPLOSION }
       : { sound: 'grenade-explode', profile: WEAPON_EXPLOSION };
   }
-  // weaponId rides the wire raw: turret barrels sit at TURRET_WEAPON_ID_OFFSET, vehicle
-  // weapons one range above that (VEHICLE_WEAPON_ID_OFFSET), and the Shrike's 150 is handled
-  // above by type because it has no row of its own either.
-  const sound =
-    impact.type === ProjectileType.VehicleLaser
-      ? WEAPON_IMPACT[WeaponId.Blaster]
-      : impact.weaponId >= VEHICLE_WEAPON_ID_OFFSET
-        ? // Vehicle-fired gun rounds (the Tank's AssaultChaingun, the Bomber's fusion bolt)
-          // reuse the handheld Chaingun's own impact recording: the Tank's round IS the
-          // chaingun family (vehicle_tank.cs:361's TracerProjectileData), and the Bomber's
-          // bolt (vehicle_bomber.cs:412 `sound = BlasterProjectileSound`) is close enough to
-          // the Blaster that either sample reads correctly. Vehicle ordnance (the mortar, the
-          // bombs) never reaches here -- Grenade-type records were resolved above.
-          WEAPON_IMPACT[WeaponId.Chaingun]
-        : impact.weaponId >= TURRET_WEAPON_ID_OFFSET
-          ? TURRET_IMPACT[impact.weaponId - TURRET_WEAPON_ID_OFFSET]
-          : WEAPON_IMPACT[impact.weaponId as WeaponId];
+  const sound = impactSoundFor(impact);
   return sound ? { sound: sound[0], profile: sound[1] } : null;
+}
+
+/** The impact recording for an impact's stored weapon id, or undefined when no table claims
+ *  it. `weaponId` rides the wire raw: turret barrels sit at `TURRET_WEAPON_ID_OFFSET`, vehicle
+ *  weapons one range above that at `VEHICLE_WEAPON_ID_OFFSET`, and the Shrike's own bolt is
+ *  handled by type before this because it has no handheld counterpart to borrow from.
+ *
+ *  The vehicle range is bounded by its own table rather than by `>= offset` alone: the offsets
+ *  are append-only (vehicles.ts), so a raw id can be one this client has no row for, and an id
+ *  above the last row has no recording. Borrowing the chaingun's sample for it is what a
+ *  `>= offset` test does, and it makes every unknown id sound like a gun round. */
+function impactSoundFor(impact: ProjectileImpact): readonly [SoundId, Profile] | undefined {
+  if (impact.type === ProjectileType.VehicleLaser) return WEAPON_IMPACT[WeaponId.Blaster];
+  if (impact.weaponId >= VEHICLE_WEAPON_ID_OFFSET) {
+    // Vehicle-fired gun rounds (the Tank's AssaultChaingun, the Bomber's fusion bolt) reuse
+    // the handheld Chaingun's own impact recording: the Tank's round IS the chaingun family
+    // (vehicle_tank.cs:361's TracerProjectileData), and the Bomber's bolt
+    // (vehicle_bomber.cs:412 `sound = BlasterProjectileSound`) is close enough to the Blaster
+    // that either sample reads correctly. Vehicle ordnance (the mortar, the bombs) never
+    // reaches here -- Grenade-type records were resolved above.
+    const row =
+      VEHICLE_WEAPON_DATA[(impact.weaponId - VEHICLE_WEAPON_ID_OFFSET) as VehicleWeaponId];
+    return row ? WEAPON_IMPACT[WeaponId.Chaingun] : undefined;
+  }
+  if (impact.weaponId >= TURRET_WEAPON_ID_OFFSET) {
+    return TURRET_IMPACT[impact.weaponId - TURRET_WEAPON_ID_OFFSET];
+  }
+  return WEAPON_IMPACT[impact.weaponId as WeaponId];
 }
 
 function levelAt(ear: Vec3 | undefined, position: Vec3 | undefined, profile: Profile): number {
@@ -520,8 +531,7 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
       }
       // EmptySpindown carries the same recording as Spindown, so any exit from the spin
       // thread counts, ammo gone or not.
-      const spun =
-        previous.state === WeaponState.SpinUp || previous.state === WeaponState.Firing;
+      const spun = previous.state === WeaponState.SpinUp || previous.state === WeaponState.Firing;
       const stillSpinning = state === WeaponState.SpinUp || state === WeaponState.Firing;
       if (spun && !stillSpinning) play('chaingun-spindown', CLOSEST);
     },
