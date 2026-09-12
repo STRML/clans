@@ -7,8 +7,13 @@ test('number-key order animates the pad and wings, then seats the purchaser at t
   await page.goto('/');
   await page.locator('#debug-stats[data-ready="1"]').waitFor({ state: 'attached' });
   await page.evaluate(() => window.__clansDebug?.teleportToVehiclePad(1));
+  // The order is the SOURCE's own pad order, not ours: `vehicles/serverVehicleHud.cs` lists
+  // the Wildcat first ("GRAV CYCLE"), then the Tank, the MPB, the Shrike ("SCOUT FLIER"), the
+  // Bomber and the Havoc, and the digit keys follow it. This spec used to press Digit1 for a
+  // Shrike, which was our own VehicleKind order showing through the menu; the Shrike is key 4.
+  await expect(page.getByRole('button', { name: 'Wildcat', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Shrike', exact: true })).toBeVisible();
-  await page.keyboard.press('Digit1');
+  await page.keyboard.press('Digit4');
   await expect
     .poll(() =>
       page.evaluate(

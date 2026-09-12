@@ -438,11 +438,14 @@ const TANK_HOVER_REST_HEIGHT = (TANK_STAB_LEN_MIN + TANK_STAB_LEN_MAX) / 2;
 // agree instead of fighting (the Wildcat's floor is below its own equilibrium, so both
 // hover kinds float on the spring and only a hard dive reaches the floor).
 const TANK_GROUND_CONTACT_HEIGHT = TANK_HOVER_REST_HEIGHT - GRAVITY / TANK_STAB_SPRING;
-// Ours, measured from the published model: the MPB's wheels reach 2.83 m below its origin
-// in root space (assets/out/katabatic/shapes/vehicle_land_mpbase.glb, y[-2.83, 2.72]), so
-// the origin has to ride at that height for the wheels to sit on the surface rather than
-// half a hull deep in it. Unlike the hover kinds this is a ride height, not a hover band.
-const MPB_GROUND_REST_HEIGHT = 2.83;
+// Ours, measured from the published model: the MPB's WHEELS reach 1.646 m below its origin.
+// Read from the wheels' own accessor bounds in `assets/out/katabatic/shapes/
+// vehicle_land_mpbase.glb` -- every one of the six `G_Wheel*` nodes spans y[-1.646, 1.646] in
+// its own node space -- which is the contact this ride height is about. The whole-shape
+// bounds of that model reach further down (the sensor arms on the side pods), and sizing the
+// ride height from those is what made the Mobile Point Base hover about 1.2 m above the
+// deck it spawned on. Unlike the hover kinds this is a ride height, not a hover band.
+const MPB_GROUND_REST_HEIGHT = 1.646;
 
 // Spec's Vehicle numbers table, used exactly for every field it gives; every other field
 // cites the real T2 script inline (see the plan's numbers table for line ranges).
@@ -1182,9 +1185,12 @@ function applyFlyerThrust(
   const heading = headingOf(vehicles.yaw[id] ?? 0, vehicles.pitch[id] ?? 0);
   const thrust = params.maneuveringForce / data.mass;
   const yaw = at(vehicles.yaw, id);
-  vehicles.velocity[base] = at(vehicles.velocity, base) - Math.cos(yaw) * input.moveX * thrust * dt;
+  // Lateral thrust along the craft's right: (cos yaw, 0, -sin yaw), which is the engine's own
+  // `mRightThrust` direction (`Point3F(1, 0, 0)` in its local frame, whose +X is right). The
+  // signs here used to be the reverse, so a flyer drifted left when the pilot strafed right.
+  vehicles.velocity[base] = at(vehicles.velocity, base) + Math.cos(yaw) * input.moveX * thrust * dt;
   vehicles.velocity[base + 2] =
-    at(vehicles.velocity, base + 2) + Math.sin(yaw) * input.moveX * thrust * dt;
+    at(vehicles.velocity, base + 2) - Math.sin(yaw) * input.moveX * thrust * dt;
   vehicles.velocity[base] = (vehicles.velocity[base] ?? 0) + heading.x * input.moveZ * thrust * dt;
   vehicles.velocity[base + 1] =
     (vehicles.velocity[base + 1] ?? 0) +
@@ -1325,12 +1331,26 @@ interface HoverParams {
   steeringForce: number;
   rollForce: number;
   gyroDrag: number;
-  /** Ours: the script defines no top speed for either hover craft, and this file's
-   *  accel-direct thrust convention reaches 50+ m/s in two seconds, well past the kind's own
-   *  collDamageThresholdVel/groundImpactMinSpeed -- an uncapped hover craft destroys itself
-   *  on its first terrain bump. Sized under both thresholds unboosted, with boost (turbo
-   *  factor) allowed to approach, not exceed, the collision threshold. */
-  maxSpeed: number;
+  /** The script's own `dragForce` (vehicle_wildcat.cs:134, vehicle_tank.cs:262). This is
+   *  what gives a hover craft its top speed, exactly as the engine's model does: thrust
+   *  along an axis against linear drag, so the equilibrium is `thrust / dragForce` -- about
+   *  54 m/s forward for the Wildcat (30 / 0.5556) and 25 m/s for the Tank (50 / 2.0), with
+   *  either able to add its strafe thrust on top. `HoverVehicleData::preload` derives
+   *  `maxThrustSpeed = (mainThrustForce + strafeThrustForce) / dragForce` from the same three
+   *  numbers (hoverVehicle.cc:195) and uses it as a speed RATIO in the craft's own
+   *  control loop (:530), not as a clamp.
+   *
+   *  This replaced an invented `maxSpeed` cap (15 for the Wildcat, 13 for the Tank) that
+   *  existed because an earlier version of this model had no drag at all and accelerated
+   *  without limit; the cap stood in for the drag term and made both craft far slower than
+   *  the source's own physics. */
+  dragForce: number;
+  /** The script's own `vertFactor` (vehicle_wildcat.cs:135, vehicle_tank.cs:263, both 0):
+   *  the engine drags the vertical axis by `dragForce * vertFactor` while the craft is on
+   *  its springs and by 0.25 * dragForce while it floats (hoverVehicle.cc:743-750), so a
+   *  value of 0 means a hover craft's vertical motion is governed by gravity, thrust and the
+   *  stab springs alone. Applied here for the same reason. */
+  vertFactor: number;
   minJetEnergy: number;
   jetEnergyDrain: number;
   /** Ours, m/s: no jump exists in either script. The Wildcat's jet-energy-gated hop is the
@@ -1367,7 +1387,8 @@ const HOVER_PARAMS: Record<HoverKind, HoverParams> = {
     steeringForce: 30,
     rollForce: 15, // vehicles/vehicle_wildcat.cs:155
     gyroDrag: 16, // spec's Vehicle numbers table
-    maxSpeed: 15, // ours -- see HoverParams.maxSpeed
+    dragForce: 25 / 45, // vehicles/vehicle_wildcat.cs:134
+    vertFactor: 0.0, // vehicles/vehicle_wildcat.cs:135
     minJetEnergy: 15, // vehicles/vehicle_wildcat.cs:116
     jetEnergyDrain: 1.3, // vehicles/vehicle_wildcat.cs:117
     jumpImpulsePerMass: 8.3, // ours -- see HoverParams.jumpImpulsePerMass
@@ -1386,7 +1407,8 @@ const HOVER_PARAMS: Record<HoverKind, HoverParams> = {
     steeringForce: 15, // vehicles/vehicle_tank.cs:282
     rollForce: 5, // vehicles/vehicle_tank.cs:283
     gyroDrag: 20, // vehicles/vehicle_tank.cs:279
-    maxSpeed: 13, // ours -- see HoverParams.maxSpeed; under its own 17 m/s impact floor
+    dragForce: 40 / 20, // vehicles/vehicle_tank.cs:262
+    vertFactor: 0.0, // vehicles/vehicle_tank.cs:263
     minJetEnergy: 15, // vehicles/vehicle_tank.cs:239
     jetEnergyDrain: 2.0, // vehicles/vehicle_tank.cs:240
   },
@@ -1519,7 +1541,12 @@ function applyHoverThrust(
 ): void {
   const base = id * 3;
   const heading = headingOf(at(vehicles.yaw, id), 0);
-  const right: Vec3 = { x: heading.z, y: 0, z: -heading.x };
+  // The vehicle's RIGHT, derived rather than assumed: with this sim's axes (x right, y up,
+  // z forward) and forward = (sin yaw, 0, cos yaw), right is up x forward = (cos yaw, 0,
+  // -sin yaw), i.e. (-heading.z, 0, heading.x). The negated vector this used to carry is the
+  // LEFT one, which is why pressing D moved the craft to its left -- the same mirrored
+  // convention the flyer step had (see applyFlyerThrust).
+  const right: Vec3 = { x: -heading.z, y: 0, z: heading.x };
   const boosting = input.jet && at(vehicles.energy, id) >= params.minJetEnergy;
   const forwardAccel = hoverForwardForce(input, boosting, params);
   vehicles.velocity[base] =
@@ -1536,13 +1563,15 @@ function applyHoverThrust(
   }
   applyHoverBraking(vehicles, id, input, dt, params);
 
-  const cap = boosting ? params.maxSpeed * params.turboFactor : params.maxSpeed;
-  const horizSpeed = Math.hypot(at(vehicles.velocity, base), at(vehicles.velocity, base + 2));
-  if (horizSpeed > cap) {
-    const scale = cap / horizSpeed;
-    vehicles.velocity[base] = at(vehicles.velocity, base) * scale;
-    vehicles.velocity[base + 2] = at(vehicles.velocity, base + 2) * scale;
-  }
+  // Drag, then nothing: the top speed falls out of it exactly as the engine's model does
+  // (`force -= vDrag * dragForce`, hoverVehicle.cc:750, where vDrag is the velocity with the
+  // vertical axis scaled by vertFactor). There is deliberately no speed clamp here -- the
+  // engine has none either, and an invented one is what made both craft crawl.
+  const dragScale = Math.max(0, 1 - params.dragForce * dt);
+  vehicles.velocity[base] = at(vehicles.velocity, base) * dragScale;
+  vehicles.velocity[base + 2] = at(vehicles.velocity, base + 2) * dragScale;
+  vehicles.velocity[base + 1] =
+    at(vehicles.velocity, base + 1) * Math.max(0, 1 - params.dragForce * params.vertFactor * dt);
 }
 
 function applyHoverJump(

@@ -1475,20 +1475,35 @@ describe('hover class: Tank', () => {
     const { world, id } = kindWorld(VehicleKind.Tank, 3.625);
     stepVehiclePhysics(world, id, { ...idleInput, moveZ: 1 }, DT);
     // The hover class applies its script forces as accelerations directly, so one tick of
-    // mainThrustForce 50 (vehicle_tank.cs:266) is exactly 50 * DT -- the Wildcat's own
-    // mainThrustForce 30 would give 0.9375 instead.
-    expect(world.vehicles.velocity[id * 3 + 2]).toBeCloseTo(50 * DT, 6);
+    // mainThrustForce 50 (vehicle_tank.cs:266) is 50 * DT less the tick's own drag, which
+    // scales the freshly gained velocity by (1 - dragForce * DT) -- dragForce 40/20 = 2
+    // (vehicle_tank.cs:262). The Wildcat's own mainThrustForce 30 with a drag of 25/45 would
+    // give a visibly different first tick, which is what this test is here to separate.
+    expect(world.vehicles.velocity[id * 3 + 2]).toBeCloseTo(50 * DT * (1 - 2 * DT), 6);
   });
 
-  it('caps at its own top speed and boosts by turboFactor 1.7', () => {
+  it('settles at the speed its own thrust and drag define, and boosts by turboFactor 1.7', () => {
+    // The source has no top-speed field: a hover craft's speed is where thrust and linear
+    // drag balance (`force -= vDrag * dragForce`, hoverVehicle.cc:750), i.e. thrust /
+    // dragForce -- 50 / 2 = 25 m/s forward for the Tank (vehicle_tank.cs:266, :262) and
+    // (50 * 1.7) / 2 = 42.5 m/s under turbo (:269). Per TICK this model gains thrust first
+    // and then applies (1 - dragForce * DT), so the discrete equilibrium is that ratio times
+    // (1 - dragForce * DT) = 25 * 0.9375 = 23.4375 (and 39.84 boosted): the two numbers differ
+    // by exactly one tick's drag, which is the honest expectation for a fixed-step model.
     const { world, id } = kindWorld(VehicleKind.Tank, 3.625);
-    world.vehicles.velocity.set([0, 0, 100], id * 3);
-    stepVehiclePhysics(world, id, { ...idleInput, moveZ: 1 }, DT);
-    // Horizontal only: the hover spring is still working vertically at the same time.
-    expect(Math.abs(world.vehicles.velocity[id * 3 + 2] as number)).toBeCloseTo(13, 6);
-    world.vehicles.velocity.set([0, 0, 100], id * 3);
-    stepVehiclePhysics(world, id, { ...idleInput, moveZ: 1, jet: true }, DT);
-    expect(Math.abs(world.vehicles.velocity[id * 3 + 2] as number)).toBeCloseTo(13 * 1.7, 6);
+    for (let tick = 0; tick < 600; tick += 1) {
+      stepVehiclePhysics(world, id, { ...idleInput, moveZ: 1 }, DT);
+    }
+    expect(world.vehicles.velocity[id * 3 + 2]).toBeCloseTo(25 * (1 - 2 * DT), 3);
+    const { world: boostedWorld, id: boostedId } = kindWorld(VehicleKind.Tank, 3.625);
+    for (let tick = 0; tick < 600; tick += 1) {
+      boostedWorld.vehicles.energy[boostedId] = VEHICLE_DATA[VehicleKind.Tank].maxEnergy;
+      stepVehiclePhysics(boostedWorld, boostedId, { ...idleInput, moveZ: 1, jet: true }, DT);
+    }
+    expect(boostedWorld.vehicles.velocity[boostedId * 3 + 2]).toBeCloseTo(
+      ((50 * 1.7) / 2) * (1 - 2 * DT),
+      1,
+    );
   });
 
   it('steers at its own steeringForce, turning a held 90-degree input slower than the Wildcat', () => {
@@ -1526,10 +1541,13 @@ describe('wheeled class: MobilePointBase', () => {
     const world = createWorld(flat, 1);
     const padId = poweredPad(world);
     const id = spawnVehicleAtPad(world, padId, VehicleKind.MobilePointBase) as number;
-    // Spawned at its own ground contact height (the model's wheels reach 2.83 m below the
-    // origin), so the very first tick is already resting contact: no drop, no bounce.
+    // Spawned at its own ground contact height -- the model's six `G_Wheel*` nodes each
+    // reach 1.646 m below the origin, which is the contact this ride height is about -- so
+    // the very first tick is already resting contact: no drop, no bounce. Sizing it from the
+    // model's whole-shape bounds (2.83, set by the side pods' sensor arms) floated the craft
+    // about 1.2 m above whatever it spawned on, which is the bug this pins.
     const spawnY = world.vehicles.position[id * 3 + 1] as number;
-    expect(spawnY).toBeCloseTo(2.83, 6);
+    expect(spawnY).toBeCloseTo(1.646, 6);
     for (let tick = 0; tick < 60; tick += 1) stepVehicles(world, new Map(), DT);
     expect(world.vehicles.position[id * 3 + 1]).toBeCloseTo(spawnY, 6);
     expect(world.vehicles.onGround[id]).toBe(1);
@@ -1584,8 +1602,10 @@ describe('wheeled class: MobilePointBase', () => {
 
   it('takes ground-impact damage on a hard landing and none on a soft one', () => {
     // minImpactSpeed 12 m/s, speedDamageScale 0.06 (vehicle_mpb.cs:162-163). Shield energy is
-    // zeroed so the hit lands on the hull where the assertion can see it.
-    const hard = kindWorld(VehicleKind.MobilePointBase, 2.9);
+    // zeroed so the hit lands on the hull where the assertion can see it. Both craft start a
+    // hair above their own 1.646 m wheel contact, so the first step is the landing rather than
+    // a fall toward it.
+    const hard = kindWorld(VehicleKind.MobilePointBase, 1.66);
     hard.world.vehicles.energy[hard.id] = 0;
     hard.world.vehicles.velocity.set([0, -25, 0], hard.id * 3);
     stepVehiclePhysics(hard.world, hard.id, idleInput, DT);
@@ -1594,7 +1614,7 @@ describe('wheeled class: MobilePointBase', () => {
     expect(hard.world.vehicles.damage[hard.id]).toBeCloseTo((25 + 20 * DT - 12) * 0.06, 6);
     expect(hard.world.vehicles.destroyed[hard.id]).toBe(0);
 
-    const soft = kindWorld(VehicleKind.MobilePointBase, 2.9);
+    const soft = kindWorld(VehicleKind.MobilePointBase, 1.66);
     soft.world.vehicles.energy[soft.id] = 0;
     soft.world.vehicles.velocity.set([0, -4, 0], soft.id * 3);
     stepVehiclePhysics(soft.world, soft.id, idleInput, DT);

@@ -29,16 +29,28 @@ export interface VehiclePadMenu {
   hide(): void;
 }
 
-/** The picker's own order, and the digit-key order (kind n is key n, 1-based): every base
- *  kind in VehicleKind order. Names are each script's own targetNameTag, the same convention
- *  the Shrike/Wildcat labels already used. */
+/** The picker's order, which is also the digit-key order (entry n is key n, 1-based).
+ *
+ *  This is the SOURCE's own order, not ours: `vehicles/serverVehicleHud.cs` builds the pad
+ *  HUD's rows in exactly this sequence, each guarded by its own
+ *  `%station.vehicle[...]` test -- `scoutVehicle` (the Wildcat, labelled "GRAV CYCLE"),
+ *  `AssaultVehicle` (the Tank, "ASSAULT TANK"), `mobileBaseVehicle` (the MPB, "MOBILE POINT
+ *  BASE"), `scoutFlyer` (the Shrike, "SCOUT FLIER"), `bomberFlyer` (the Bomber, "BOMBER"),
+ *  then `hapcFlyer` (the Havoc, "TRANSPORT"). The pad's row number is that `%count`, so a
+ *  player pressing 1 in the original game got the Wildcat and pressing 4 got the Shrike.
+ *  This list used to be in `VehicleKind` order, which is an internal numbering and put the
+ *  Shrike first; the enum stays as it is because its values ride the wire as raw kind bytes.
+ *
+ *  Names below are each script's own targetNameTag, the same convention the Shrike and
+ *  Wildcat labels already used; the HUD's own row labels are role names ("GRAV CYCLE",
+ *  "TRANSPORT") rather than vehicle names, and this menu names the vehicle. */
 const VEHICLE_MENU_ORDER = [
-  VehicleKind.Shrike,
   VehicleKind.Wildcat,
-  VehicleKind.Bomber,
-  VehicleKind.Havoc,
   VehicleKind.Tank,
   VehicleKind.MobilePointBase,
+  VehicleKind.Shrike,
+  VehicleKind.Bomber,
+  VehicleKind.Havoc,
 ] as const;
 
 const VEHICLE_LABEL: Record<VehicleKind, string> = {
