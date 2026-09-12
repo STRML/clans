@@ -2000,8 +2000,18 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
     // plus built geometry (`segmentBlockedByInteriors`, the shared test turrets, projectiles
     // and repair targeting all consult, with the force-field rule keyed to the listener's own
     // team since a field is team-passable).
+    // The listener's team decides the force-field half of the rule, and the network's own
+    // team is the authoritative one: `world.players.team` in the client's prediction world is
+    // only filled once a snapshot has arrived, so between the Welcome and the first snapshot
+    // the offline read would say team 0 and a field the player should hear through would duck.
+    // Same choice `updateFlagAudio` makes for its own local team (net ? net.team : ...).
     occlusionAt: (position) =>
-      audioOcclusionAt(world, camera.position, position, world.players.team[playerId] ?? 0),
+      audioOcclusionAt(
+        world,
+        camera.position,
+        position,
+        net ? net.team : (world.players.team[playerId] ?? 0),
+      ),
   });
   // Browsers start a fresh AudioContext `suspended` under autoplay restriction and require a
   // real user-gesture handler to resume it -- the same click that already requests pointer
