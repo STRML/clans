@@ -36,7 +36,18 @@
  * in the Torque-to-glTF basis every shipped asset already uses (see `TORQUE_MODEL_BASIS`).
  */
 
-import { BufferUtils, Document, type Accessor, type Material, type Mesh, type Node } from '@gltf-transform/core';
+import {
+  BufferUtils,
+  Document,
+  type Accessor,
+  type Animation,
+  type AnimationChannel,
+  type Material,
+  type Mesh,
+  type Node,
+  type Primitive,
+  type Root,
+} from '@gltf-transform/core';
 
 /** `TSShape::smVersion` is 23 (`ts/tsShape.cc:17`); every base `shapes.vl2` vehicle is 22
  *  or 23, and nothing newer exists to read. */
@@ -295,7 +306,13 @@ class ShapeStream {
     this.version = version;
   }
 
-  private take(view: DataView, offset: number, size: number, section: string, field: string): number {
+  private take(
+    view: DataView,
+    offset: number,
+    size: number,
+    section: string,
+    field: string,
+  ): number {
     if (offset + size > view.byteLength) {
       throw new Error(
         `Truncated DTS: ${field} needs ${size} more bytes at ${offset} of the ${section} ` +
@@ -399,11 +416,7 @@ class ShapeStream {
     const expected = this.guards;
     const found = [this.i32('guard dword'), this.i16('guard word'), this.i8('guard byte')];
     this.guards += 1;
-    const wrapped = [
-      expected | 0,
-      (expected << 16) >> 16,
-      (expected << 24) >> 24,
-    ];
+    const wrapped = [expected | 0, (expected << 16) >> 16, (expected << 24) >> 24];
     if (found[0] !== wrapped[0] || found[1] !== wrapped[1] || found[2] !== wrapped[2]) {
       throw new Error(
         `Corrupt or unsupported DTS: guard #${expected} read [${found.join(', ')}] instead of ` +
@@ -434,21 +447,17 @@ interface ShapeCounts {
   smallestVisibleDetailLevel: number;
 }
 
-/** `TSShape::assembleShape`'s opening `get32` run, in its exact order. */
+/** `TSShape::assembleShape`'s opening `get32` run, in its exact order. The rotation and
+ *  translation key counts sit in the middle of the run and are version-dependent, so
+ *  `readNodeKeyCounts` reads that group; the run ends with the two `smallestVisible*`
+ *  fields, which are read after the count block rather than with it. */
 function readShapeCounts(stream: ShapeStream, version: number): ShapeCounts {
   const numNodes = stream.i32('numNodes');
   const numObjects = stream.i32('numObjects');
   const numDecals = stream.i32('numDecals');
   const numSubShapes = stream.i32('numSubShapes');
   const numIflMaterials = stream.i32('numIflMaterials');
-  // v22 split one rotation+translation count into two; before that the single count covered
-  // both, so the per-purpose counts are its difference from the node count.
-  const rotTrans = version < 22 ? stream.i32('numNodeRots') : 0;
-  const numNodeRots = version < 22 ? rotTrans - numNodes : stream.i32('numNodeRots');
-  const numNodeTrans = version < 22 ? rotTrans - numNodes : stream.i32('numNodeTrans');
-  const numNodeUniformScales = version < 22 ? 0 : stream.i32('numNodeUniformScales');
-  const numNodeAlignedScales = version < 22 ? 0 : stream.i32('numNodeAlignedScales');
-  const numNodeArbitraryScales = version < 22 ? 0 : stream.i32('numNodeArbitraryScales');
+  const nodeKeyCounts = readNodeKeyCounts(stream, version, numNodes);
   const numObjectStates = stream.i32('numObjectStates');
   const numDecalStates = stream.i32('numDecalStates');
   const numTriggers = stream.i32('numTriggers');
@@ -458,17 +467,13 @@ function readShapeCounts(stream: ShapeStream, version: number): ShapeCounts {
   const numNames = stream.i32('numNames');
   const smallestVisibleSize = stream.f32('mSmallestVisibleSize');
   const smallestVisibleDetailLevel = stream.i32('mSmallestVisibleDL');
-  const counts = {
+  const counts: ShapeCounts = {
     numNodes,
     numObjects,
     numDecals,
     numSubShapes,
     numIflMaterials,
-    numNodeRots,
-    numNodeTrans,
-    numNodeUniformScales,
-    numNodeAlignedScales,
-    numNodeArbitraryScales,
+    ...nodeKeyCounts,
     numObjectStates,
     numDecalStates,
     numTriggers,
@@ -478,25 +483,53 @@ function readShapeCounts(stream: ShapeStream, version: number): ShapeCounts {
     smallestVisibleSize,
     smallestVisibleDetailLevel,
   };
-  // Every one of these multiplies a later read, so a nonsense value is a corrupt file, not
-  // an empty shape — the engine only asserts on them much later, if at all.
+  assertCountsArePlausible(counts);
+  return counts;
+}
+
+/** The node key counts `TSShape::assembleShape` reads between `numIflMaterials` and
+ *  `numObjectStates`. Version 22 split one rotation+translation count into two and added the
+ *  three node-scale counts, so an older shape's single `rotTrans` word has to be split here:
+ *  its per-purpose counts are that word's difference from the node count, and it has no
+ *  scale arrays at all. */
+function readNodeKeyCounts(
+  stream: ShapeStream,
+  version: number,
+  numNodes: number,
+): Pick<
+  ShapeCounts,
+  | 'numNodeRots'
+  | 'numNodeTrans'
+  | 'numNodeUniformScales'
+  | 'numNodeAlignedScales'
+  | 'numNodeArbitraryScales'
+> {
+  const rotTrans = version < 22 ? stream.i32('numNodeRots') : 0;
+  const numNodeRots = version < 22 ? rotTrans - numNodes : stream.i32('numNodeRots');
+  const numNodeTrans = version < 22 ? rotTrans - numNodes : stream.i32('numNodeTrans');
+  const numNodeUniformScales = version < 22 ? 0 : stream.i32('numNodeUniformScales');
+  const numNodeAlignedScales = version < 22 ? 0 : stream.i32('numNodeAlignedScales');
+  const numNodeArbitraryScales = version < 22 ? 0 : stream.i32('numNodeArbitraryScales');
+  return {
+    numNodeRots,
+    numNodeTrans,
+    numNodeUniformScales,
+    numNodeAlignedScales,
+    numNodeArbitraryScales,
+  };
+}
+
+/** Every count in the header multiplies a later read, so a nonsense value is a corrupt file,
+ *  not an empty shape — the engine only asserts on them much later, if at all. The count
+ *  name is reported, in the order `ShapeCounts` declares them, because that is the only clue
+ *  a caller gets about which field of a hand-edited file went wrong. */
+function assertCountsArePlausible(counts: ShapeCounts): void {
   const integerCounts: Record<string, number> = { ...counts, smallestVisibleSize: 0 };
   for (const [name, value] of Object.entries(integerCounts)) {
     if (!Number.isInteger(value) || value < 0 || value > 1 << 22) {
       throw new Error(`Invalid DTS shape: ${name} is ${value}, which cannot be a count.`);
     }
   }
-  return counts;
-}
-
-/** `TSIntegerSet::read` — a `S32` that is always written 0, a word count, then the words. */
-function skipIntegerSet(stream: ShapeStream): void {
-  stream.i32('set size');
-  const words = stream.i32('set words');
-  if (words < 0 || words > 0x4000) {
-    throw new Error(`Invalid DTS shape: an animation membership set claims ${words} words.`);
-  }
-  stream.skip32(words, 'membership set');
 }
 
 interface RawNode {
@@ -665,9 +698,24 @@ function readSkinPayload(
 ): MeshArrays {
   const parent = payload.parentMesh >= 0 ? arraysByMesh[payload.parentMesh] : undefined;
   const numUnique = stream.i32('numInitialVerts');
-  const initialVerts = sharedArray(stream, payload.parentMesh, parent, 'verts', numUnique * 3, 'initialVerts');
-  const initialNorms = sharedArray(stream, payload.parentMesh, parent, 'norms', numUnique * 3, 'initialNorms');
-  if (payload.parentMesh < 0 && stream.version > 21) stream.skip8(numUnique, 'initial encoded normals');
+  const initialVerts = sharedArray(
+    stream,
+    payload.parentMesh,
+    parent,
+    'verts',
+    numUnique * 3,
+    'initialVerts',
+  );
+  const initialNorms = sharedArray(
+    stream,
+    payload.parentMesh,
+    parent,
+    'norms',
+    numUnique * 3,
+    'initialNorms',
+  );
+  if (payload.parentMesh < 0 && stream.version > 21)
+    stream.skip8(numUnique, 'initial encoded normals');
   const transforms = stream.i32('numInitialTransforms');
   stream.skip32(transforms * 16, 'initialTransforms'); // inverse bind-pose matrices
   const influenced = stream.i32('numInfluences');
@@ -703,12 +751,10 @@ function readDecalPayload(stream: ShapeStream): void {
   stream.checkGuard();
 }
 
-/** `TSSortedMesh::assemble`: a standard payload, then the cluster tables. */
-function readSortedPayload(
-  stream: ShapeStream,
-  payload: MeshPayload,
-  arraysByMesh: readonly (MeshArrays | undefined)[],
-): MeshArrays {
+/** `TSSortedMesh::assemble`: a standard payload, then the cluster tables. Unlike a skin
+ *  mesh it has no vertex arrays of its own beyond the shared ones, so the payload's arrays
+ *  are already what it renders with and no `arraysByMesh` lookup is needed. */
+function readSortedPayload(stream: ShapeStream, payload: MeshPayload): MeshArrays {
   const clusters = stream.i32('numClusters');
   stream.skip32(clusters * 8, 'clusters');
   const starts = stream.i32('numStartClusters');
@@ -748,7 +794,7 @@ function readMeshList(stream: ShapeStream, counts: ShapeCounts): RawMesh[] {
       arrays = readSkinPayload(stream, payload, arraysByMesh);
       meshes.push(rawMesh('skin', payload, arrays));
     } else if (meshType === SORTED_MESH_TYPE) {
-      arrays = readSortedPayload(stream, payload, arraysByMesh);
+      arrays = readSortedPayload(stream, payload);
       meshes.push(rawMesh('sorted', payload, arrays));
     } else if (meshType === STANDARD_MESH_TYPE) {
       arrays = payload.arrays;
@@ -789,8 +835,17 @@ function rawMesh(kind: DtsMeshKind, payload: MeshPayload, arrays: MeshArrays): R
   // emit. A skin mesh's arrays are already the unique bind-pose verts `updateSkin` uses, so
   // its own count wins.
   const frameLength =
-    kind === 'skin' ? arrays.verts.length / 3 : payload.vertsPerFrame > 0 ? payload.vertsPerFrame : arrays.verts.length / 3;
-  const vertexCount = Math.min(frameLength, arrays.verts.length / 3, arrays.tverts.length / 2, arrays.norms.length / 3);
+    kind === 'skin'
+      ? arrays.verts.length / 3
+      : payload.vertsPerFrame > 0
+        ? payload.vertsPerFrame
+        : arrays.verts.length / 3;
+  const vertexCount = Math.min(
+    frameLength,
+    arrays.verts.length / 3,
+    arrays.tverts.length / 2,
+    arrays.norms.length / 3,
+  );
   return {
     kind,
     parentMesh: payload.parentMesh,
@@ -810,7 +865,10 @@ function rawMesh(kind: DtsMeshKind, payload: MeshPayload, arrays: MeshArrays): R
 }
 
 /** `TSShape::assembleShape` from the count block through the name table, plus the mesh list
- *  it ends with — the same order `TSShape::disassembleShape` writes. */
+ *  it ends with — the same order `TSShape::disassembleShape` writes. Each field group below
+ *  is read by its own helper, named for the group it reads, because this reader's only
+ *  correctness invariant is the order the groups consume the stream in: the engine's
+ *  `checkGuard` calls, one per cursor, are what detect a group read out of order. */
 function readShapeBuffer(stream: ShapeStream, version: number, counts: ShapeCounts): RawShape {
   stream.checkGuard();
   const radius = stream.f32('radius');
@@ -819,129 +877,30 @@ function readShapeBuffer(stream: ShapeStream, version: number, counts: ShapeCoun
   const bounds = stream.box('bounds');
 
   stream.checkGuard();
-  const nodes: RawNode[] = [];
-  for (let index = 0; index < counts.numNodes; index += 1) {
-    const nameIndex = stream.i32('node name');
-    const parentIndex = stream.i32('node parent');
-    stream.skip32(3, 'node links'); // firstObject, firstChild, nextSibling
-    nodes.push({ nameIndex, parentIndex, translation: [0, 0, 0], rotation: [0, 0, 0, 1] });
-  }
-
+  const nodes = readNodeTable(stream, counts);
   stream.checkGuard();
-  const objects: RawObject[] = [];
-  for (let index = 0; index < counts.numObjects; index += 1) {
-    const nameIndex = stream.i32('object name');
-    const numMeshes = stream.i32('object meshes');
-    const startMeshIndex = stream.i32('object first mesh');
-    const nodeIndex = stream.i32('object node');
-    stream.skip32(2, 'object links'); // nextSibling, firstDecal
-    objects.push({ nameIndex, numMeshes, startMeshIndex, nodeIndex });
-  }
-
+  const objects = readObjectTable(stream, counts);
   stream.checkGuard();
   stream.skip32(counts.numDecals * 5, 'decals');
   stream.checkGuard();
-  const iflMaterials: RawIflMaterial[] = [];
-  for (let index = 0; index < counts.numIflMaterials; index += 1) {
-    iflMaterials.push({
-      nameIndex: stream.i32('ifl material name'),
-      materialSlot: stream.i32('ifl material slot'),
-      firstFrame: stream.i32('ifl first frame'),
-      firstFrameOffTimeIndex: stream.i32('ifl off-time frame'),
-      numFrames: stream.i32('ifl frames'),
-    });
-  }
+  const iflMaterials = readIflMaterialTable(stream, counts);
   stream.checkGuard();
-  const firstNodes = stream.ints(counts.numSubShapes, 'subShapeFirstNode');
-  const firstObjects = stream.ints(counts.numSubShapes, 'subShapeFirstObject');
-  stream.skip32(counts.numSubShapes, 'subShapeFirstDecal');
-  stream.checkGuard();
-  const numNodesPerSubShape = stream.ints(counts.numSubShapes, 'subShapeNumNodes');
-  const numObjectsPerSubShape = stream.ints(counts.numSubShapes, 'subShapeNumObjects');
-  stream.skip32(counts.numSubShapes, 'subShapeNumDecals');
-  stream.checkGuard();
-  const subShapes = Array.from({ length: counts.numSubShapes }, (_, index) => ({
-    firstNode: firstNodes[index] ?? 0,
-    numNodes: numNodesPerSubShape[index] ?? 0,
-    firstObject: firstObjects[index] ?? 0,
-    numObjects: numObjectsPerSubShape[index] ?? 0,
-  }));
-
-  // Default node transforms, then the animated keys that follow them in the same arrays.
-  const rotations = stream.words(counts.numNodes * 4, 'defaultRotations');
-  const translations = stream.floats(counts.numNodes * 3, 'defaultTranslations');
-  for (let index = 0; index < counts.numNodes; index += 1) {
-    const node = nodes[index];
-    if (!node) continue;
-    // `QuatF::setMatrix` builds the *inverse* of the rotation the four components name:
-    // `m_quatF_set_matF_C` (`math/mMath_C.cc:135`) writes `m[row*4+col]` with every
-    // off-diagonal term negated relative to a standard rotation matrix, i.e. the transpose,
-    // and `TSTransform::setMatrix` (`ts/tsTransform.h:80`) then puts the translation in
-    // column 3. The engine therefore orients a node by the conjugate of what the file
-    // stores, and `tsShape.cc:498` composes those matrices parent-relative unchanged. glTF
-    // has no such quirk — a node's rotation is the rotation — so the conjugate is taken here
-    // and `DtsNode.rotation` means what its own comment already claims: the node's local
-    // transform, which `dtsToGlb` can write straight into a glTF node. Skipping this leaves
-    // every node whose rotation is not its own inverse misplaced: `turret_aa_large`'s
-    // `Body_`/`Mid_` (stored +90 degrees about X) land 8-10 units away, and only 35% of that
-    // shape's vertices match the shipped `.glb` instead of all of them.
-    node.rotation = [
-      -(rotations[index * 4] ?? 0) / QUAT16_MAX_VAL,
-      -(rotations[index * 4 + 1] ?? 0) / QUAT16_MAX_VAL,
-      -(rotations[index * 4 + 2] ?? 0) / QUAT16_MAX_VAL,
-      (rotations[index * 4 + 3] ?? 0) / QUAT16_MAX_VAL,
-    ];
-    node.translation = [
-      translations[index * 3] ?? 0,
-      translations[index * 3 + 1] ?? 0,
-      translations[index * 3 + 2] ?? 0,
-    ];
-  }
-  const nodeTranslationKeys = stream.floats(counts.numNodeTrans * 3, 'nodeTranslations');
-  const nodeRotationKeys = stream.words(counts.numNodeRots * 4, 'nodeRotations');
-  stream.checkGuard();
-  // Node scale keys arrived with version 22: an older shape has neither the arrays nor the
-  // guard that follows them (`TSShape::assembleShape` reads both inside `smReadVersion>21`).
-  if (version > 21) {
-    stream.skip32(counts.numNodeUniformScales, 'nodeUniformScales');
-    stream.skip32(counts.numNodeAlignedScales * 3, 'nodeAlignedScales');
-    stream.skip32(counts.numNodeArbitraryScales * 3, 'nodeArbitraryScaleFactors');
-    stream.skip16(counts.numNodeArbitraryScales * 4, 'nodeArbitraryScaleRots');
-    stream.checkGuard();
-  }
-
-  const objectStates: DtsObjectState[] = [];
-  for (let index = 0; index < counts.numObjectStates; index += 1) {
-    objectStates.push({
-      visibility: stream.f32('object visibility'),
-      frame: stream.i32('object frame'),
-      materialFrame: stream.i32('object material frame'),
-    });
-  }
-  stream.checkGuard();
+  const subShapes = readSubShapeTable(stream, counts);
+  const { nodeRotationKeys, nodeTranslationKeys } = readNodeKeyArrays(
+    stream,
+    version,
+    counts,
+    nodes,
+  );
+  const objectStates = readObjectStates(stream, counts);
   stream.skip32(counts.numDecalStates, 'decalStates');
   stream.checkGuard();
   stream.skip32(counts.numTriggers * 2, 'triggers');
   stream.checkGuard();
-  const details: RawDetail[] = [];
-  for (let index = 0; index < counts.numDetails; index += 1) {
-    const nameIndex = stream.i32('detail name');
-    const subShapeNum = stream.i32('detail subshape');
-    const objectDetailNum = stream.i32('detail object detail');
-    const size = stream.f32('detail size');
-    const averageError = stream.f32('detail average error');
-    const maxError = stream.f32('detail max error');
-    const polyCount = stream.i32('detail poly count');
-    details.push({ nameIndex, subShapeNum, objectDetailNum, size, averageError, maxError, polyCount });
-  }
-  stream.checkGuard();
-
+  const details = readDetailTable(stream, counts);
   const meshes = readMeshList(stream, counts);
   stream.checkGuard();
-
-  const names: string[] = [];
-  for (let index = 0; index < counts.numNames; index += 1) names.push(stream.string());
-  stream.checkGuard();
+  const names = readNameTable(stream, counts);
   return {
     ...counts,
     radius,
@@ -959,6 +918,200 @@ function readShapeBuffer(stream: ShapeStream, version: number, counts: ShapeCoun
     objectStates,
     iflMaterials,
   };
+}
+
+/** `TSShape::nodes`: a name, a parent, and the three link fields (`firstObject`,
+ *  `firstChild`, `nextSibling`) the reader steps over — the parent link above and
+ *  `Object::nodeIndex` already say what they mean. A node's default transform is not in this
+ *  record: the engine keeps it in the `defaultRotations`/`defaultTranslations` arrays, which
+ *  `readNodeKeyArrays` reads below. */
+function readNodeTable(stream: ShapeStream, counts: ShapeCounts): RawNode[] {
+  const nodes: RawNode[] = [];
+  for (let index = 0; index < counts.numNodes; index += 1) {
+    const nameIndex = stream.i32('node name');
+    const parentIndex = stream.i32('node parent');
+    stream.skip32(3, 'node links'); // firstObject, firstChild, nextSibling
+    nodes.push({ nameIndex, parentIndex, translation: [0, 0, 0], rotation: [0, 0, 0, 1] });
+  }
+  return nodes;
+}
+
+/** `TSShape::objects`: a name, the run of meshes it owns (`startMeshIndex`/`numMeshes`, one
+ *  mesh per detail level) and the node it renders under — plus the two links
+ *  (`nextSibling`, `firstDecal`) the reader steps over because the mesh list below already
+ *  carries the ownership they describe. */
+function readObjectTable(stream: ShapeStream, counts: ShapeCounts): RawObject[] {
+  const objects: RawObject[] = [];
+  for (let index = 0; index < counts.numObjects; index += 1) {
+    const nameIndex = stream.i32('object name');
+    const numMeshes = stream.i32('object meshes');
+    const startMeshIndex = stream.i32('object first mesh');
+    const nodeIndex = stream.i32('object node');
+    stream.skip32(2, 'object links'); // nextSibling, firstDecal
+    objects.push({ nameIndex, numMeshes, startMeshIndex, nodeIndex });
+  }
+  return objects;
+}
+
+/** `TSShape::iflMaterials`: each IFL material's name-table index, the material slot whose
+ *  texture it animates, and the frame range a sequence's `iflMatters` set points into. */
+function readIflMaterialTable(stream: ShapeStream, counts: ShapeCounts): RawIflMaterial[] {
+  const iflMaterials: RawIflMaterial[] = [];
+  for (let index = 0; index < counts.numIflMaterials; index += 1) {
+    iflMaterials.push({
+      nameIndex: stream.i32('ifl material name'),
+      materialSlot: stream.i32('ifl material slot'),
+      firstFrame: stream.i32('ifl first frame'),
+      firstFrameOffTimeIndex: stream.i32('ifl off-time frame'),
+      numFrames: stream.i32('ifl frames'),
+    });
+  }
+  return iflMaterials;
+}
+
+/** The `TSShape::subShape*` arrays, in the two groups `TSShape::disassembleShape` writes
+ *  them in: the node and object first indices, then their counts, with the two decal arrays
+ *  interleaved into those groups and stepped over. Each group is closed by its own guard, so
+ *  the two halves cannot be read as one. */
+function readSubShapeTable(stream: ShapeStream, counts: ShapeCounts): DtsSubShape[] {
+  const firstNodes = stream.ints(counts.numSubShapes, 'subShapeFirstNode');
+  const firstObjects = stream.ints(counts.numSubShapes, 'subShapeFirstObject');
+  stream.skip32(counts.numSubShapes, 'subShapeFirstDecal');
+  stream.checkGuard();
+  const numNodesPerSubShape = stream.ints(counts.numSubShapes, 'subShapeNumNodes');
+  const numObjectsPerSubShape = stream.ints(counts.numSubShapes, 'subShapeNumObjects');
+  stream.skip32(counts.numSubShapes, 'subShapeNumDecals');
+  stream.checkGuard();
+  return Array.from({ length: counts.numSubShapes }, (_, index) => ({
+    firstNode: firstNodes[index] ?? 0,
+    numNodes: numNodesPerSubShape[index] ?? 0,
+    firstObject: firstObjects[index] ?? 0,
+    numObjects: numObjectsPerSubShape[index] ?? 0,
+  }));
+}
+
+/** Applies one node's default rotation and translation out of the two arrays the shape
+ *  stores them in. Split out of the loop that walks the node table so both functions stay
+ *  inside the lint's complexity budget; the conjugation note lives here because this is
+ *  where the conjugation happens. */
+function applyNodeDefaults(
+  node: RawNode,
+  index: number,
+  rotations: Int16Array,
+  translations: Float32Array<ArrayBuffer>,
+): void {
+  // `QuatF::setMatrix` builds the *inverse* of the rotation the four components name:
+  // `m_quatF_set_matF_C` (`math/mMath_C.cc:135`) writes `m[row*4+col]` with every
+  // off-diagonal term negated relative to a standard rotation matrix, i.e. the transpose,
+  // and `TSTransform::setMatrix` (`ts/tsTransform.h:80`) then puts the translation in
+  // column 3. The engine therefore orients a node by the conjugate of what the file
+  // stores, and `tsShape.cc:498` composes those matrices parent-relative unchanged. glTF
+  // has no such quirk -- a node's rotation is the rotation -- so the conjugate is taken here
+  // and `DtsNode.rotation` means what its own comment already claims: the node's local
+  // transform, which `dtsToGlb` can write straight into a glTF node. Skipping this leaves
+  // every node whose rotation is not its own inverse misplaced: `turret_aa_large`'s
+  // `Body_`/`Mid_` (stored +90 degrees about X) land 8-10 units away, and only 35% of that
+  // shape's vertices match the shipped `.glb` instead of all of them.
+  node.rotation = [
+    -(rotations[index * 4] ?? 0) / QUAT16_MAX_VAL,
+    -(rotations[index * 4 + 1] ?? 0) / QUAT16_MAX_VAL,
+    -(rotations[index * 4 + 2] ?? 0) / QUAT16_MAX_VAL,
+    (rotations[index * 4 + 3] ?? 0) / QUAT16_MAX_VAL,
+  ];
+  node.translation = [
+    translations[index * 3] ?? 0,
+    translations[index * 3 + 1] ?? 0,
+    translations[index * 3 + 2] ?? 0,
+  ];
+}
+
+/** The default node transforms and the animation keys that follow them in the same two
+ *  arrays: `defaultRotations`/`nodeRotations` (four `S16`s per key, read out of the 16-bit
+ *  section) and `defaultTranslations`/`nodeTranslations` (three floats per key). The defaults
+ *  are applied to the nodes `readNodeTable` built, and the key arrays are returned for
+ *  `dtsToGlb` to address through a sequence's `baseRotation`/`baseTranslation`. The v22
+ *  node-scale arrays between them are stepped over: a shape's scale keys are never emitted.
+ */
+function readNodeKeyArrays(
+  stream: ShapeStream,
+  version: number,
+  counts: ShapeCounts,
+  nodes: readonly RawNode[],
+): { nodeRotationKeys: Int16Array; nodeTranslationKeys: Float32Array<ArrayBuffer> } {
+  const rotations = stream.words(counts.numNodes * 4, 'defaultRotations');
+  const translations = stream.floats(counts.numNodes * 3, 'defaultTranslations');
+  for (let index = 0; index < counts.numNodes; index += 1) {
+    const node = nodes[index];
+    if (!node) continue;
+    applyNodeDefaults(node, index, rotations, translations);
+  }
+  const nodeTranslationKeys = stream.floats(counts.numNodeTrans * 3, 'nodeTranslations');
+  const nodeRotationKeys = stream.words(counts.numNodeRots * 4, 'nodeRotations');
+  stream.checkGuard();
+  // Node scale keys arrived with version 22: an older shape has neither the arrays nor the
+  // guard that follows them (`TSShape::assembleShape` reads both inside `smReadVersion>21`).
+  if (version > 21) {
+    stream.skip32(counts.numNodeUniformScales, 'nodeUniformScales');
+    stream.skip32(counts.numNodeAlignedScales * 3, 'nodeAlignedScales');
+    stream.skip32(counts.numNodeArbitraryScales * 3, 'nodeArbitraryScaleFactors');
+    stream.skip16(counts.numNodeArbitraryScales * 4, 'nodeArbitraryScaleRots');
+    stream.checkGuard();
+  }
+  return { nodeRotationKeys, nodeTranslationKeys };
+}
+
+/** `TSShape::ObjectState` records, one per keyframe an object's animation can land on: its
+ *  visibility as a float, its mesh frame and its material frame. A sequence's
+ *  visibility/frame/material-frame membership sets index into these records through
+ *  `Sequence::baseObjectState`. */
+function readObjectStates(stream: ShapeStream, counts: ShapeCounts): DtsObjectState[] {
+  const objectStates: DtsObjectState[] = [];
+  for (let index = 0; index < counts.numObjectStates; index += 1) {
+    objectStates.push({
+      visibility: stream.f32('object visibility'),
+      frame: stream.i32('object frame'),
+      materialFrame: stream.i32('object material frame'),
+    });
+  }
+  stream.checkGuard();
+  return objectStates;
+}
+
+/** `TSShape::details`: each detail level's name, the sub-shape it selects and the mesh
+ *  within each of that sub-shape's objects, plus the projected size it is chosen at and the
+ *  error/poly counts the engine's tools read. `dtsToGlb` picks one of these by index. */
+function readDetailTable(stream: ShapeStream, counts: ShapeCounts): RawDetail[] {
+  const details: RawDetail[] = [];
+  for (let index = 0; index < counts.numDetails; index += 1) {
+    const nameIndex = stream.i32('detail name');
+    const subShapeNum = stream.i32('detail subshape');
+    const objectDetailNum = stream.i32('detail object detail');
+    const size = stream.f32('detail size');
+    const averageError = stream.f32('detail average error');
+    const maxError = stream.f32('detail max error');
+    const polyCount = stream.i32('detail poly count');
+    details.push({
+      nameIndex,
+      subShapeNum,
+      objectDetailNum,
+      size,
+      averageError,
+      maxError,
+      polyCount,
+    });
+  }
+  stream.checkGuard();
+  return details;
+}
+
+/** The shape's name table: `numNames` null-terminated byte strings from the 8-bit section,
+ *  which every index read above (`RawNode.nameIndex`, `RawObject.nameIndex`,
+ *  `RawDetail.nameIndex`, ...) resolves against. It is the last group in the buffer. */
+function readNameTable(stream: ShapeStream, counts: ShapeCounts): string[] {
+  const names: string[] = [];
+  for (let index = 0; index < counts.numNames; index += 1) names.push(stream.string());
+  stream.checkGuard();
+  return names;
 }
 
 /** `TSShape::read`'s header: the packed version word and the dword offsets that split the
@@ -1063,7 +1216,9 @@ function readMaterialList(bytes: Uint8Array, offset: number, version: number): D
       .filter(([bit]) => (materialFlags & Number(bit)) !== 0)
       .map(([, flagName]) => flagName);
     // Anything outside the table stays visible rather than being silently dropped.
-    const unknown = materialFlags & ~Object.keys(MATERIAL_FLAG_NAMES).reduce((mask, bit) => mask | Number(bit), 0);
+    const unknown =
+      materialFlags &
+      ~Object.keys(MATERIAL_FLAG_NAMES).reduce((mask, bit) => mask | Number(bit), 0);
     return {
       name,
       flags: materialFlags,
@@ -1104,6 +1259,93 @@ function readSequences(
   return { sequences, materialOffset: cursor };
 }
 
+/** A sequence's cursor over the raw bytes after the shape buffer. It is the same shape as
+ *  `ShapeStream` — one value at a time, each read of the two compound records validated, and
+ *  a read past the end of the file reported through `truncated` — but a sequence is one flat
+ *  record with one cursor rather than three independent sections, so it gets its own reader
+ *  instead of a fourth `ShapeStream` cursor. */
+class SequenceReader {
+  /** Where the next read starts; a sequence's own `cursor` in `readOneSequence`'s terms. */
+  cursor: number;
+
+  constructor(
+    private readonly view: DataView,
+    offset: number,
+    private readonly index: number,
+    private readonly length: number,
+  ) {
+    this.cursor = offset;
+  }
+
+  i32(field: string): number {
+    this.require(4, field);
+    const value = this.view.getInt32(this.cursor, true);
+    this.cursor += 4;
+    return value;
+  }
+
+  /** `dwords(count, field)` in the engine's read order: `count` dwords consumed and only the
+   *  first returned. Only the trigger range is read more than one at a time, and it is
+   *  stepped over. */
+  skip32(count: number, field: string): void {
+    this.require(count * 4, field);
+    this.cursor += count * 4;
+  }
+
+  f32(field: string): number {
+    this.require(4, field);
+    const value = this.view.getFloat32(this.cursor, true);
+    this.cursor += 4;
+    return value;
+  }
+
+  /** The three legacy `Blend`/`Cyclic`/`MakePath` bytes a pre-v22 sequence stores after
+   *  `duration` rather than as bits of its flags word; each one sets its bit of `flags`. They
+   *  are one byte each — the engine's own `Stream::read(bool*)` reads a `U8`. */
+  legacyFlagBytes(flags: number): number {
+    let result = flags;
+    for (let flag = 0; flag < 3; flag += 1) {
+      this.require(1, 'legacy flags');
+      const byte = this.view.getUint8(this.cursor);
+      this.cursor += 1;
+      if (byte !== 0) result |= 1 << (3 + flag);
+    }
+    return result;
+  }
+
+  /** `TSIntegerSet::read`: a `S32` that is always written 0, a word count, then the words.
+   *  The set is returned as the member indices its bits name, which is how every caller of
+   *  this reader uses it. */
+  integerSet(field: string): number[] {
+    this.require(8, field);
+    const words = this.view.getInt32(this.cursor + 4, true);
+    this.cursor += 8;
+    if (words < 0 || words > 0x4000) {
+      throw new Error(
+        `Invalid DTS shape: sequence ${this.index}'s ${field} claims ${words} words.`,
+      );
+    }
+    const members: number[] = [];
+    for (let word = 0; word < words; word += 1) {
+      this.require(4, field);
+      const bits = this.view.getUint32(this.cursor, true);
+      this.cursor += 4;
+      for (let bit = 0; bit < 32; bit += 1) {
+        if ((bits & (1 << bit)) !== 0) members.push(word * 32 + bit);
+      }
+    }
+    return members;
+  }
+
+  private require(bytes: number, field: string): void {
+    if (this.cursor + bytes > this.length) throw truncated(this.index, field, this.length);
+  }
+}
+
+/** One `Sequence::read`: the bookkeeping, the `base` indices and the eight membership sets,
+ *  in the order `ts/tsShapeOldRead.cc` reads them, each version-dependent group split out
+ *  because which fields exist — and therefore where the next one starts — is exactly what
+ *  the version word decides. */
 function readOneSequence(
   view: DataView,
   offset: number,
@@ -1112,88 +1354,31 @@ function readOneSequence(
   index: number,
   names: readonly string[],
 ): { sequence: DtsSequence; cursor: number } {
-  let cursor = offset;
-  const dwords = (count: number, field: string): number => {
-    if (cursor + count * 4 > length) throw truncated(index, field, length);
-    const value = view.getInt32(cursor, true);
-    cursor += count * 4;
-    return value;
-  };
-  const floats = (field: string): number => {
-    if (cursor + 4 > length) throw truncated(index, field, length);
-    const value = view.getFloat32(cursor, true);
-    cursor += 4;
-    return value;
-  };
-  const integerSet = (field: string): number[] => {
-    if (cursor + 8 > length) throw truncated(index, field, length);
-    const words = view.getInt32(cursor + 4, true);
-    cursor += 8;
-    if (words < 0 || words > 0x4000) {
-      throw new Error(`Invalid DTS shape: sequence ${index}'s ${field} claims ${words} words.`);
-    }
-    const members: number[] = [];
-    for (let word = 0; word < words; word += 1) {
-      if (cursor + 4 > length) throw truncated(index, field, length);
-      const bits = view.getUint32(cursor, true);
-      cursor += 4;
-      for (let bit = 0; bit < 32; bit += 1) {
-        if ((bits & (1 << bit)) !== 0) members.push(word * 32 + bit);
-      }
-    }
-    return members;
-  };
-  const nameIndex = dwords(1, 'name');
-  let flags = version > 21 ? dwords(1, 'flags') : 0;
-  const numKeyframes = dwords(1, 'keyframes');
-  const duration = floats('duration');
-  // Before v22 the Blend/Cyclic/MakePath flags were three separate bytes after `duration`
-  // rather than bits of the flags word above (`ts/tsShapeOldRead.cc` `Sequence::read`).
-  // They are one byte each — the engine's own `Stream::read(bool*)` reads a `U8`.
-  if (version < 22) {
-    for (let flag = 0; flag < 3; flag += 1) {
-      if (cursor + 1 > length) throw truncated(index, 'legacy flags', length);
-      const byte = view.getUint8(cursor);
-      cursor += 1;
-      if (byte !== 0) flags |= 1 << (3 + flag);
-    }
-  }
-  dwords(1, 'priority');
-  dwords(1, 'firstGroundFrame');
-  dwords(1, 'numGroundFrames');
-  let baseRotation = 0;
-  let baseTranslation = 0;
-  let baseScale = 0;
-  let baseObjectState = 0;
-  let baseDecalState = 0;
-  if (version > 21) {
-    baseRotation = dwords(1, 'baseRotation');
-    baseTranslation = dwords(1, 'baseTranslation');
-    baseScale = dwords(1, 'baseScale');
-    baseObjectState = dwords(1, 'baseObjectState');
-    baseDecalState = dwords(1, 'baseDecalState');
-  } else if (version >= 17) {
-    baseRotation = dwords(1, 'baseRotation');
-    baseTranslation = baseRotation;
-    baseObjectState = dwords(1, 'baseObjectState');
-    baseDecalState = dwords(1, 'baseDecalState');
-  }
-  if (version > 8) dwords(2, 'trigger range');
-  const toolBegin = version > 7 ? floats('toolBegin') : 0;
-  const rotationMatters = integerSet('rotationMatters');
-  // Before v22 the translation and scale sets are not stored at all: the engine copies
-  // `rotationMatters` into `translationMatters` rather than reading it, and a v21 file has
-  // no scale set either (`ts/tsShapeOldRead.cc` `Sequence::read`). The sets *after* these
-  // two are still written and must still be stepped over, so this copies one and skips one.
-  const translationMatters = version >= 22 ? integerSet('translationMatters') : [...rotationMatters];
-  const scaleMatters = version >= 22 ? integerSet('scaleMatters') : [];
-  const decalMatters = version > 10 ? integerSet('decalMatters') : [];
-  const iflMatters = version > 5 ? integerSet('iflMatters') : [];
-  const visibilityMatters = integerSet('visMatters');
-  const frameMatters = integerSet('frameMatters');
-  const materialFrameMatters = integerSet('matFrameMatters');
+  const reader = new SequenceReader(view, offset, index, length);
+  const nameIndex = reader.i32('name');
+  let flags = version > 21 ? reader.i32('flags') : 0;
+  const numKeyframes = reader.i32('keyframes');
+  const duration = reader.f32('duration');
+  if (version < 22) flags = reader.legacyFlagBytes(flags);
+  reader.i32('priority');
+  reader.i32('firstGroundFrame');
+  reader.i32('numGroundFrames');
+  const { baseRotation, baseTranslation, baseScale, baseObjectState, baseDecalState } =
+    readSequenceBases(reader, version);
+  if (version > 8) reader.skip32(2, 'trigger range');
+  const toolBegin = version > 7 ? reader.f32('toolBegin') : 0;
+  const rotationMatters = reader.integerSet('rotationMatters');
+  const {
+    translationMatters,
+    scaleMatters,
+    visibilityMatters,
+    frameMatters,
+    materialFrameMatters,
+    decalMatters,
+    iflMatters,
+  } = readSequenceMembershipSets(reader, version, rotationMatters);
   return {
-    cursor,
+    cursor: reader.cursor,
     sequence: {
       name: names[nameIndex] ?? `sequence${index}`,
       flags,
@@ -1218,6 +1403,75 @@ function readOneSequence(
   };
 }
 
+/** The `base` indices: where in the shape's keyframe arrays this sequence's members start.
+ *  v22 widened the record to five words — the scale and decal bases joined it — while a v17
+ *  or v18 sequence stores the rotation and translation base as one word and has no scale
+ *  base at all, so its translation base is copied from the rotation base. */
+function readSequenceBases(
+  reader: SequenceReader,
+  version: number,
+): Pick<
+  DtsSequence,
+  'baseRotation' | 'baseTranslation' | 'baseScale' | 'baseObjectState' | 'baseDecalState'
+> {
+  let baseRotation = 0;
+  let baseTranslation = 0;
+  let baseScale = 0;
+  let baseObjectState = 0;
+  let baseDecalState = 0;
+  if (version > 21) {
+    baseRotation = reader.i32('baseRotation');
+    baseTranslation = reader.i32('baseTranslation');
+    baseScale = reader.i32('baseScale');
+    baseObjectState = reader.i32('baseObjectState');
+    baseDecalState = reader.i32('baseDecalState');
+  } else if (version >= 17) {
+    baseRotation = reader.i32('baseRotation');
+    baseTranslation = baseRotation;
+    baseObjectState = reader.i32('baseObjectState');
+    baseDecalState = reader.i32('baseDecalState');
+  }
+  return { baseRotation, baseTranslation, baseScale, baseObjectState, baseDecalState };
+}
+
+/** The membership sets after `rotationMatters`, in file order. Before v22 the translation
+ *  and scale sets are not stored at all: the engine copies `rotationMatters` into
+ *  `translationMatters` rather than reading it, and a v21 file has no scale set either
+ *  (`ts/tsShapeOldRead.cc` `Sequence::read`). The sets *after* these two are still written
+ *  and must still be stepped over, so this copies one and skips one. */
+function readSequenceMembershipSets(
+  reader: SequenceReader,
+  version: number,
+  rotationMatters: readonly number[],
+): Pick<
+  DtsSequence,
+  | 'translationMatters'
+  | 'scaleMatters'
+  | 'visibilityMatters'
+  | 'frameMatters'
+  | 'materialFrameMatters'
+  | 'decalMatters'
+  | 'iflMatters'
+> {
+  const translationMatters =
+    version >= 22 ? reader.integerSet('translationMatters') : [...rotationMatters];
+  const scaleMatters = version >= 22 ? reader.integerSet('scaleMatters') : [];
+  const decalMatters = version > 10 ? reader.integerSet('decalMatters') : [];
+  const iflMatters = version > 5 ? reader.integerSet('iflMatters') : [];
+  const visibilityMatters = reader.integerSet('visMatters');
+  const frameMatters = reader.integerSet('frameMatters');
+  const materialFrameMatters = reader.integerSet('matFrameMatters');
+  return {
+    translationMatters,
+    scaleMatters,
+    visibilityMatters,
+    frameMatters,
+    materialFrameMatters,
+    decalMatters,
+    iflMatters,
+  };
+}
+
 /** Every sequence read past the end of the file reports the same way: the field name and
  *  the sequence it belongs to, as `skipOneSequence` did before sequences were read. */
 function truncated(index: number, field: string, length: number): Error {
@@ -1226,31 +1480,51 @@ function truncated(index: number, field: string, length: number): Error {
   );
 }
 
+/** `TSDrawPrimitive`'s element types that produce triangles: `tsMesh.h`'s `TriangleList`,
+ *  `TriangleFan` and a strip — the third falls through to the alternating-winding walk. */
+const TRIANGLE_LIST = 0;
+const TRIANGLE_FAN = 2;
+
 /** `TSDrawPrimitive` plus `TSMesh::leaveAsMultipleStrips`/`unwindStrip`: each primitive is
  *  a `start`/`numElements` pair into the index list and a material word whose top two bits
  *  say triangles, strip or fan. Degenerate triangles are dropped exactly where
- *  `unwindStrip` drops them. */
+ *  `unwindStrip` drops them. Each element type is walked by its own helper below, because
+ *  the three walks share only the index decode. */
 function primitiveTriangles(mesh: RawMesh, primitiveIndex: number): number[] {
   const start = mesh.primData[primitiveIndex * 2] ?? 0;
   const numElements = mesh.primData[primitiveIndex * 2 + 1] ?? 0;
   const type = ((mesh.primMats[primitiveIndex] ?? 0) >>> PRIMITIVE_TYPE_SHIFT) & 0b11;
   const at = (offset: number): number => mesh.indices[start + offset] ?? 0;
+  if (type === TRIANGLE_LIST) return listTriangles(numElements, at);
+  // A fan and a strip both need three vertices before they describe a triangle at all.
+  if (numElements < 3) return [];
+  if (type === TRIANGLE_FAN) return fanTriangles(numElements, at);
+  return stripTriangles(numElements, at);
+}
+
+/** A plain triangle list: every three indices in turn, with the trailing partial triple
+ *  dropped exactly where the engine's list case leaves it. */
+function listTriangles(numElements: number, at: (offset: number) => number): number[] {
   const triangles: number[] = [];
-  if (type === 0) {
-    for (let index = 0; index + 2 < numElements; index += 3) {
-      triangles.push(at(index), at(index + 1), at(index + 2));
-    }
-    return triangles;
+  for (let index = 0; index + 2 < numElements; index += 3) {
+    triangles.push(at(index), at(index + 1), at(index + 2));
   }
-  if (numElements < 3) return triangles;
-  if (type === 2) {
-    for (let index = 1; index + 1 < numElements; index += 1) {
-      triangles.push(at(0), at(index), at(index + 1));
-    }
-    return triangles;
+  return triangles;
+}
+
+/** A fan: a fixed first vertex, then consecutive pairs. */
+function fanTriangles(numElements: number, at: (offset: number) => number): number[] {
+  const triangles: number[] = [];
+  for (let index = 1; index + 1 < numElements; index += 1) {
+    triangles.push(at(0), at(index), at(index + 1));
   }
-  // Strip: winding alternates; the engine skips any triangle with a repeated index rather
-  // than emitting a degenerate one.
+  return triangles;
+}
+
+/** A strip: winding alternates with the index, and the engine skips any triangle with a
+ *  repeated index rather than emitting a degenerate one. */
+function stripTriangles(numElements: number, at: (offset: number) => number): number[] {
+  const triangles: number[] = [];
   for (let index = 2; index < numElements; index += 1) {
     const a = at(index % 2 === 0 ? index - 2 : index - 1);
     const b = at(index % 2 === 0 ? index - 1 : index - 2);
@@ -1268,7 +1542,8 @@ function buildPrimitives(mesh: RawMesh): DtsPrimitive[] {
   const batches: { materialIndex: number; indices: number[] }[] = [];
   for (let index = 0; index < mesh.primMats.length; index += 1) {
     const materialWord = mesh.primMats[index] ?? 0;
-    const materialIndex = (materialWord & PRIMITIVE_NO_MATERIAL) !== 0 ? -1 : materialWord & PRIMITIVE_MATERIAL_MASK;
+    const materialIndex =
+      (materialWord & PRIMITIVE_NO_MATERIAL) !== 0 ? -1 : materialWord & PRIMITIVE_MATERIAL_MASK;
     const last = batches[batches.length - 1];
     if (!last || last.materialIndex !== materialIndex) batches.push({ materialIndex, indices: [] });
     batches[batches.length - 1]?.indices.push(...primitiveTriangles(mesh, index));
@@ -1297,7 +1572,8 @@ function assembleShape(
   const nameOf = (nameIndex: number, fallback: string): string => raw.names[nameIndex] ?? fallback;
   const meshes = raw.meshes.map((mesh, index) => {
     const owner = raw.objects.find(
-      (object) => index >= object.startMeshIndex && index < object.startMeshIndex + object.numMeshes,
+      (object) =>
+        index >= object.startMeshIndex && index < object.startMeshIndex + object.numMeshes,
     );
     const primitives = buildPrimitives(mesh);
     return {
@@ -1308,7 +1584,10 @@ function assembleShape(
       center: mesh.center,
       radius: mesh.radius,
       vertexCount: mesh.positions.length / 3,
-      triangleCount: primitives.reduce((total, primitive) => total + primitive.indices.length / 3, 0),
+      triangleCount: primitives.reduce(
+        (total, primitive) => total + primitive.indices.length / 3,
+        0,
+      ),
       primitives,
       frameCount: mesh.frameCount,
       materialFrameCount: mesh.materialFrameCount,
@@ -1435,7 +1714,7 @@ const TORQUE_MODEL_BASIS: Quat = [0, Math.SQRT1_2, Math.SQRT1_2, 0];
  *  The scene keeps one node per DTS node with its authored name and its own parent-relative
  *  transform — the form the engine composes in `TSShape::computeBounds` and the form the
  *  client's `Eye`/`Mount0` lookups need — with one mesh per mesh that detail level draws,
- *  carried by its own child node named the way the shipped files name it (see the loop
+ *  carried by its own child node named the way the shipped files name it (see `emitObjectNode`
  *  below: the DTS node's name and its object's name are separate names and both are kept).
  *
  *  Node transforms are written as authored, so each node's *local* TRS is the DTS number;
@@ -1461,6 +1740,16 @@ export function dtsToGlb(shape: DtsShape, options: DtsToGlbOptions = {}): Uint8A
   document.getRoot().setDefaultScene(scene);
   const basis = document.createNode('TorqueModelSpace').setRotation([...TORQUE_MODEL_BASIS]);
   scene.addChild(basis);
+  const nodes = createNodeLayer(document, shape, basis);
+  emitDetailLevel(document, shape, detail, nodes, basis);
+  return serializeGlb(document, options.generator ?? 'clans-dts');
+}
+
+/** The DTS node layer: one glTF node per `shape.nodes` entry, in the shape's own order, each
+ *  carrying its authored name and its own parent-relative transform. A node hangs off its
+ *  parent's node, or off `basis` when it is a root — and also when the shape names a parent
+ *  index it does not have, so a malformed link cannot drop a node out of the scene graph. */
+function createNodeLayer(document: Document, shape: DtsShape, basis: Node): Node[] {
   const nodes = shape.nodes.map((node) =>
     document
       .createNode(node.name)
@@ -1475,50 +1764,87 @@ export function dtsToGlb(shape: DtsShape, options: DtsToGlbOptions = {}): Uint8A
     if (parent) parent.addChild(child);
     else basis.addChild(child);
   });
+  return nodes;
+}
+
+/** Adds every object of the detail level's sub-shape to the node layer, in `TSShape`'s own
+ *  object order — the run `TSShape::computeBounds` walks. The material map is per emission,
+ *  so a material slot is created once and shared by every object whose mesh uses it. */
+function emitDetailLevel(
+  document: Document,
+  shape: DtsShape,
+  detail: DtsDetailLevel,
+  nodes: readonly Node[],
+  basis: Node,
+): void {
   const materials = new Map<number, Material>();
   for (const { nodeIndex, object } of detailObjects(shape, detail)) {
-    // A DTS shape names its two layers separately, and the shipped files keep both: the node
-    // the engine transforms is one name-table entry (`Disc110`, `Main_Body_100`), and the
-    // *object* drawn under it is another (`Disc`, `Main_Body_`) — `Object::nameIndex` is its
-    // own string, which is why the mesh (whose name `parseDts` takes from its object) and its
-    // node usually differ. Torque never merges them: `Object::nodeIndex` is a separate link,
-    // and `TSShape::computeBounds` composes the node's transform before drawing the mesh in
-    // its space. The shipped `.glb`s preserve exactly that pair — a Blender-converted
-    // `weapon_disc.glb` holds `Disc110` as the parent of a `Disc` node carrying `DTSMesh5`,
-    // and every other shape the same way — so a node's own name is the handle the client
-    // animates and looks up (`Disc110` spins, `Mountpoint`, `Eye`, `DumTurn`), while the mesh
-    // child's bare name is the handle a caller toggles or poses (`Disc` goes invisible on
-    // fire, `M_Hood_100` recoils, `MuzzleFlashFront_` flashes). Folding the two into one node
-    // drops a name every one of those lookups resolves against.
-    //
-    // The child is a plain node with no transform of its own, so the chain still composes to
-    // the node's authored TRS and the vertices do not move: this is a naming and hierarchy
-    // change, not a second transform. Each object gets its own child, so two objects under one
-    // node (legal in the format) stay separate meshes rather than one replacing the other.
-    const holder = document.createNode(object.name);
-    // An object whose node is -1 has nothing to hang off and hangs off the basis instead of
-    // vanishing from the scene graph.
-    (nodes[nodeIndex] ?? basis).addChild(holder);
-    // The engine's own test for "this object has geometry at this level" is
-    // `objectDetailNum < object.numMeshes`; past it, or on a `NullMeshType` slot, or on a mesh
-    // with no material batch, the object is still an object the shape names — every collision
-    // and line-of-sight object in the base shapes (`Col`, `Pad`, `Hull`, `LOScol`) is one,
-    // drawn only at the collision detail levels — and it reaches the file as a bare node,
-    // which is exactly the node the shipped files carry for it.
-    const mesh =
-      detail.objectDetailNum < object.numMeshes
-        ? shape.meshes[object.startMeshIndex + detail.objectDetailNum]
-        : undefined;
-    if (mesh && mesh.primitives.length > 0) holder.setMesh(emitMesh(document, shape, mesh, materials));
+    emitObjectNode(document, shape, detail, object, nodeIndex, nodes, basis, materials);
   }
-  return serializeGlb(document, options.generator ?? 'clans-dts');
+}
+
+/** One object's node, and the mesh it draws at this detail level if it draws one.
+ *
+ *  A DTS shape names its two layers separately, and the shipped files keep both: the node
+ *  the engine transforms is one name-table entry (`Disc110`, `Main_Body_100`), and the
+ *  *object* drawn under it is another (`Disc`, `Main_Body_`) — `Object::nameIndex` is its
+ *  own string, which is why the mesh (whose name `parseDts` takes from its object) and its
+ *  node usually differ. Torque never merges them: `Object::nodeIndex` is a separate link,
+ *  and `TSShape::computeBounds` composes the node's transform before drawing the mesh in
+ *  its space. The shipped `.glb`s preserve exactly that pair — a Blender-converted
+ *  `weapon_disc.glb` holds `Disc110` as the parent of a `Disc` node carrying `DTSMesh5`,
+ *  and every other shape the same way — so a node's own name is the handle the client
+ *  animates and looks up (`Disc110` spins, `Mountpoint`, `Eye`, `DumTurn`), while the mesh
+ *  child's bare name is the handle a caller toggles or poses (`Disc` goes invisible on
+ *  fire, `M_Hood_100` recoils, `MuzzleFlashFront_` flashes). Folding the two into one node
+ *  drops a name every one of those lookups resolves against.
+ *
+ *  The child is a plain node with no transform of its own, so the chain still composes to
+ *  the node's authored TRS and the vertices do not move: this is a naming and hierarchy
+ *  change, not a second transform. Each object gets its own child, so two objects under one
+ *  node (legal in the format) stay separate meshes rather than one replacing the other. */
+function emitObjectNode(
+  document: Document,
+  shape: DtsShape,
+  detail: DtsDetailLevel,
+  object: DtsObject,
+  nodeIndex: number,
+  nodes: readonly Node[],
+  basis: Node,
+  materials: Map<number, Material>,
+): void {
+  const holder = document.createNode(object.name);
+  // An object whose node is -1 has nothing to hang off and hangs off the basis instead of
+  // vanishing from the scene graph.
+  (nodes[nodeIndex] ?? basis).addChild(holder);
+  // The engine's own test for "this object has geometry at this level" is
+  // `objectDetailNum < object.numMeshes`; past it, or on a `NullMeshType` slot, or on a mesh
+  // with no material batch, the object is still an object the shape names — every collision
+  // and line-of-sight object in the base shapes (`Col`, `Pad`, `Hull`, `LOScol`) is one,
+  // drawn only at the collision detail levels — and it reaches the file as a bare node,
+  // which is exactly the node the shipped files carry for it.
+  const mesh = meshAtDetail(shape, detail, object);
+  if (mesh && mesh.primitives.length > 0)
+    holder.setMesh(emitMesh(document, shape, mesh, materials));
+}
+
+/** The mesh the object draws at this detail level: its own `objectDetailNum`-th mesh, or
+ *  nothing when the object has fewer meshes than that — the engine's own
+ *  `objectDetailNum < object.numMeshes` test. */
+function meshAtDetail(
+  shape: DtsShape,
+  detail: DtsDetailLevel,
+  object: DtsObject,
+): DtsMesh | undefined {
+  if (detail.objectDetailNum >= object.numMeshes) return undefined;
+  return shape.meshes[object.startMeshIndex + detail.objectDetailNum];
 }
 
 /** An object's node in the emitted document, with the mesh it drew at the detail level being
  *  written (`undefined` when the object had no geometry at that level). Both the visibility
  *  metadata and the IFL binding are keyed off the object, so `dtsToGlb` collects this while
- *  it builds the node layer. */
-interface ObjectNode {
+ *  it builds the node layer. Exported with `applyObjectExtras`, its only consumer. */
+export interface ObjectNode {
   readonly node: Node;
   readonly mesh: DtsMesh | undefined;
 }
@@ -1542,34 +1868,80 @@ interface ObjectNode {
  *  place the shipped `weapon_disc.glb` puts `ifl_sequence: "discSpin"` on its two `dcase00`
  *  casing objects. Which sequence wins when several animate that slot is the first one in
  *  file order, which is what the shipped file carries. */
-function applyObjectExtras(shape: DtsShape, objectNodes: Map<number, ObjectNode>): void {
+export function applyObjectExtras(shape: DtsShape, objectNodes: Map<number, ObjectNode>): void {
   for (const [objectIndex, { node, mesh }] of objectNodes) {
-    const baseState = shape.objectStates[objectIndex];
-    const extras: Record<string, unknown> = { vis: baseState && baseState.visibility > 0 ? 1 : 0 };
-    for (const sequence of shape.sequences) {
-      const rank = sequence.visibilityMatters.indexOf(objectIndex);
-      if (rank < 0) continue;
-      const name = sequence.name.toLowerCase();
-      extras[`vis_keyframes_${name}`] = sequenceKeys(sequence).map((key) =>
-        objectStateAt(shape, sequence, rank, key).visibility > 0 ? 1 : 0,
-      );
-      extras[`vis_duration_${name}`] = sequence.duration;
-      extras[`vis_cyclic_${name}`] = sequence.cyclic ? 1 : 0;
-    }
-    if (mesh) {
-      const slots = new Set(mesh.primitives.map((primitive) => primitive.materialIndex));
-      for (const [materialIndex, material] of shape.iflMaterials.entries()) {
-        if (!slots.has(material.materialSlot)) continue;
-        const sequence = shape.sequences.find((candidate) => candidate.iflMatters.includes(materialIndex));
-        if (!sequence) continue;
-        extras.ifl_sequence = sequence.name;
-        extras.ifl_duration = sequence.duration;
-        extras.ifl_cyclic = sequence.cyclic ? 1 : 0;
-        extras.ifl_tool_begin = sequence.toolBegin;
-      }
-    }
-    node.setExtras(extras);
+    node.setExtras(objectExtras(shape, objectIndex, mesh));
   }
+}
+
+/** The extras one object node carries, in the order the shipped files carry them: the
+ *  visibility keys first, then the IFL binding of the slots the object's drawn mesh uses —
+ *  and nothing beyond the base `vis` when the object draws nothing at this detail level. */
+function objectExtras(
+  shape: DtsShape,
+  objectIndex: number,
+  mesh: DtsMesh | undefined,
+): Record<string, unknown> {
+  const extras = visibilityExtras(shape, objectIndex);
+  if (mesh) Object.assign(extras, iflExtras(shape, mesh));
+  return extras;
+}
+
+/** The base `vis` value of an object — the visibility of the `ObjectState` record a sequence
+ *  animates it through, or 0 when the shape has no record for it — plus one
+ *  `vis_keyframes_`/`vis_duration_`/`vis_cyclic_` triple per sequence whose
+ *  `visibilityMatters` set names the object. */
+function visibilityExtras(shape: DtsShape, objectIndex: number): Record<string, unknown> {
+  const baseState = shape.objectStates[objectIndex];
+  const extras: Record<string, unknown> = { vis: baseState && baseState.visibility > 0 ? 1 : 0 };
+  for (const sequence of shape.sequences) {
+    const rank = sequence.visibilityMatters.indexOf(objectIndex);
+    if (rank < 0) continue;
+    Object.assign(extras, sequenceVisibilityExtras(shape, sequence, rank));
+  }
+  return extras;
+}
+
+/** One sequence's visibility metadata for the `rank`-th object it animates: the per-keyframe
+ *  track the client turns into a boolean list, its length, and whether it cycles. The keys
+ *  are lowercased because the client looks clips up by lowercased name. */
+function sequenceVisibilityExtras(
+  shape: DtsShape,
+  sequence: DtsSequence,
+  rank: number,
+): Record<string, unknown> {
+  const name = sequence.name.toLowerCase();
+  return {
+    [`vis_keyframes_${name}`]: sequenceKeys(sequence).map((key) =>
+      objectStateAt(shape, sequence, rank, key).visibility > 0 ? 1 : 0,
+    ),
+    [`vis_duration_${name}`]: sequence.duration,
+    [`vis_cyclic_${name}`]: sequence.cyclic ? 1 : 0,
+  };
+}
+
+/** The IFL binding of the material slots the mesh's batches use: for each IFL material in
+ *  file order whose slot is one of them, the first sequence that starts it. A shape carries
+ *  one IFL material per slot, so this is one binding; when several IFL materials cover a
+ *  used slot the later ones overwrite the earlier, which is what the loop that wrote these
+ *  keys straight onto the extras object did. */
+function iflExtras(shape: DtsShape, mesh: DtsMesh): Record<string, unknown> {
+  const slots = new Set(mesh.primitives.map((primitive) => primitive.materialIndex));
+  let extras: Record<string, unknown> = {};
+  for (const [materialIndex, material] of shape.iflMaterials.entries()) {
+    if (!slots.has(material.materialSlot)) continue;
+    const sequence = shape.sequences.find((candidate) =>
+      candidate.iflMatters.includes(materialIndex),
+    );
+    if (!sequence) continue;
+    extras = {
+      ifl_sequence: sequence.name,
+      ifl_duration: sequence.duration,
+      ifl_cyclic: sequence.cyclic ? 1 : 0,
+      ifl_tool_begin: sequence.toolBegin,
+    };
+  }
+  return extras;
 }
 
 /** One glTF animation per DTS sequence, named the sequence's own name, with one channel per
@@ -1604,84 +1976,153 @@ function applyObjectExtras(shape: DtsShape, objectNodes: Map<number, ObjectNode>
  *    the object's default. Start there, not at the clip math: the transform clips are right.
  *  @see DTS_CONVERTED_SHAPES in `build.ts` for why the converted shapes are limited to the
  *  four vehicles that have no committed GLB. */
-function emitSequenceAnimations(document: Document, shape: DtsShape, nodes: readonly Node[]): void {
+export function emitSequenceAnimations(
+  document: Document,
+  shape: DtsShape,
+  nodes: readonly Node[],
+): void {
   for (const sequence of shape.sequences) {
     const times = sequenceTimes(sequence);
-    const channels: { node: Node; path: 'rotation' | 'translation'; values: Float32Array<ArrayBuffer> }[] = [];
-    const keyframes = sequence.numKeyframes;
-    for (const [rank, nodeIndex] of sequence.rotationMatters.entries()) {
-      const node = nodes[nodeIndex];
-      if (!node) continue;
-      const values = new Float32Array(times.length * 4);
-      for (const [key, sample] of sequenceKeys(sequence).entries()) {
-        const at = (sequence.baseRotation + rank * keyframes + sample) * 4;
-        // The same conjugate the default node rotations take: `QuatF::setMatrix` builds the
-        // transpose of what the file stores, so the engine applies the conjugate and glTF
-        // needs that rotation, not the stored one.
-        values[key * 4] = -(shape.nodeRotationKeys[at] ?? 0) / QUAT16_MAX_VAL;
-        values[key * 4 + 1] = -(shape.nodeRotationKeys[at + 1] ?? 0) / QUAT16_MAX_VAL;
-        values[key * 4 + 2] = -(shape.nodeRotationKeys[at + 2] ?? 0) / QUAT16_MAX_VAL;
-        values[key * 4 + 3] = (shape.nodeRotationKeys[at + 3] ?? 0) / QUAT16_MAX_VAL;
-      }
-      normalizeQuaternions(values);
-      channels.push({ node, path: 'rotation', values });
-    }
-    for (const [rank, nodeIndex] of sequence.translationMatters.entries()) {
-      const node = nodes[nodeIndex];
-      if (!node) continue;
-      const values = new Float32Array(times.length * 3);
-      for (const [key, sample] of sequenceKeys(sequence).entries()) {
-        const at = (sequence.baseTranslation + rank * keyframes + sample) * 3;
-        values[key * 3] = shape.nodeTranslationKeys[at] ?? 0;
-        values[key * 3 + 1] = shape.nodeTranslationKeys[at + 1] ?? 0;
-        values[key * 3 + 2] = shape.nodeTranslationKeys[at + 2] ?? 0;
-      }
-      channels.push({ node, path: 'translation', values });
-    }
-    const anchor = nodes[0];
-    // `TSShape` keeps a sequence name even when its only members are objects: visibility,
-    // frames and IFL slots are not transform channels, so such a sequence would otherwise
-    // emit no clip at all — and a clip name is how a consumer reaches the sequence. The
-    // shipped files keep those clips, each holding one constant translation key on the
-    // shape's own first node. A sequence with no members at all (the Spinfusor's `NoAmmo`)
-    // animates nothing anywhere and gets no clip, exactly as in the shipped file.
-    const animatesObjects =
-      sequence.visibilityMatters.length > 0 ||
-      sequence.frameMatters.length > 0 ||
-      sequence.materialFrameMatters.length > 0 ||
-      sequence.decalMatters.length > 0 ||
-      sequence.iflMatters.length > 0;
-    if (channels.length === 0 && animatesObjects && anchor) {
-      const held = new Float32Array(6);
-      held.set([...anchor.getTranslation(), ...anchor.getTranslation()]);
-      channels.push({ node: anchor, path: 'translation', values: held });
-    }
+    const channels = sequenceChannels(shape, sequence, nodes, times.length);
     if (channels.length === 0) continue;
     const animation = document.createAnimation(sequence.name);
-    for (const channel of channels) {
-      const sampler = document
-        .createAnimationSampler(`${sequence.name}_${channel.path}`)
-        .setInput(accessorFor(document, `${sequence.name}_${channel.path}_time`, times, 'SCALAR'))
-        .setOutput(
-          accessorFor(
-            document,
-            `${sequence.name}_${channel.path}`,
-            channel.values,
-            channel.path === 'rotation' ? 'VEC4' : 'VEC3',
-          ),
-        )
-        .setInterpolation('LINEAR');
-      animation
-        .addSampler(sampler)
-        .addChannel(
-          document
-            .createAnimationChannel(`${sequence.name}_${channel.path}`)
-            .setTargetNode(channel.node)
-            .setTargetPath(channel.path)
-            .setSampler(sampler),
-        );
-    }
+    for (const channel of channels)
+      addAnimationChannel(document, animation, sequence, channel, times);
   }
+}
+
+/** One transform channel of a sequence: the node it targets, the TRS path it drives, and the
+ *  key list itself, one sample per entry of the sequence's own timebase. */
+interface SequenceChannel {
+  readonly node: Node;
+  readonly path: 'rotation' | 'translation';
+  readonly values: Float32Array<ArrayBuffer>;
+}
+
+/** Every transform channel a sequence drives — its rotation set first, then its translation
+ *  set, in the shape's own member order — plus the placeholder clip a sequence whose only
+ *  members are objects needs. */
+function sequenceChannels(
+  shape: DtsShape,
+  sequence: DtsSequence,
+  nodes: readonly Node[],
+  keyCount: number,
+): SequenceChannel[] {
+  const channels = [
+    ...rotationChannels(shape, sequence, nodes, keyCount),
+    ...translationChannels(shape, sequence, nodes, keyCount),
+  ];
+  // `TSShape` keeps a sequence name even when its only members are objects: visibility,
+  // frames and IFL slots are not transform channels, so such a sequence would otherwise
+  // emit no clip at all — and a clip name is how a consumer reaches the sequence. The
+  // shipped files keep those clips, each holding one constant translation key on the
+  // shape's own first node. A sequence with no members at all (the Spinfusor's `NoAmmo`)
+  // animates nothing anywhere and gets no clip, exactly as in the shipped file.
+  const anchor = nodes[0];
+  if (channels.length === 0 && animatesObjects(sequence) && anchor) {
+    const held = new Float32Array(6);
+    held.set([...anchor.getTranslation(), ...anchor.getTranslation()]);
+    channels.push({ node: anchor, path: 'translation', values: held });
+  }
+  return channels;
+}
+
+/** Whether a sequence's members include any object-level state — visibility, mesh frames,
+ *  material frames, decals or IFL slots — rather than nodes only. */
+function animatesObjects(sequence: DtsSequence): boolean {
+  return (
+    sequence.visibilityMatters.length > 0 ||
+    sequence.frameMatters.length > 0 ||
+    sequence.materialFrameMatters.length > 0 ||
+    sequence.decalMatters.length > 0 ||
+    sequence.iflMatters.length > 0
+  );
+}
+
+/** One VEC4 key list per node the sequence's `rotationMatters` set names, sampled at
+ *  `baseRotation + rank * numKeyframes + k` for the member's rank in the (sorted) set — the
+ *  layout `TSShape::animate` reads.
+ *
+ *  The same conjugate the default node rotations take: `QuatF::setMatrix` builds the
+ *  transpose of what the file stores, so the engine applies the conjugate and glTF needs
+ *  that rotation, not the stored one. */
+function rotationChannels(
+  shape: DtsShape,
+  sequence: DtsSequence,
+  nodes: readonly Node[],
+  keyCount: number,
+): SequenceChannel[] {
+  const channels: SequenceChannel[] = [];
+  const keyframes = sequence.numKeyframes;
+  for (const [rank, nodeIndex] of sequence.rotationMatters.entries()) {
+    const node = nodes[nodeIndex];
+    if (!node) continue;
+    const values = new Float32Array(keyCount * 4);
+    for (const [key, sample] of sequenceKeys(sequence).entries()) {
+      const at = (sequence.baseRotation + rank * keyframes + sample) * 4;
+      values[key * 4] = -(shape.nodeRotationKeys[at] ?? 0) / QUAT16_MAX_VAL;
+      values[key * 4 + 1] = -(shape.nodeRotationKeys[at + 1] ?? 0) / QUAT16_MAX_VAL;
+      values[key * 4 + 2] = -(shape.nodeRotationKeys[at + 2] ?? 0) / QUAT16_MAX_VAL;
+      values[key * 4 + 3] = (shape.nodeRotationKeys[at + 3] ?? 0) / QUAT16_MAX_VAL;
+    }
+    normalizeQuaternions(values);
+    channels.push({ node, path: 'rotation', values });
+  }
+  return channels;
+}
+
+/** One VEC3 key list per node the sequence's `translationMatters` set names, addressed the
+ *  same way `rotationChannels` addresses the rotation keys but into the translation array. */
+function translationChannels(
+  shape: DtsShape,
+  sequence: DtsSequence,
+  nodes: readonly Node[],
+  keyCount: number,
+): SequenceChannel[] {
+  const channels: SequenceChannel[] = [];
+  const keyframes = sequence.numKeyframes;
+  for (const [rank, nodeIndex] of sequence.translationMatters.entries()) {
+    const node = nodes[nodeIndex];
+    if (!node) continue;
+    const values = new Float32Array(keyCount * 3);
+    for (const [key, sample] of sequenceKeys(sequence).entries()) {
+      const at = (sequence.baseTranslation + rank * keyframes + sample) * 3;
+      values[key * 3] = shape.nodeTranslationKeys[at] ?? 0;
+      values[key * 3 + 1] = shape.nodeTranslationKeys[at + 1] ?? 0;
+      values[key * 3 + 2] = shape.nodeTranslationKeys[at + 2] ?? 0;
+    }
+    channels.push({ node, path: 'translation', values });
+  }
+  return channels;
+}
+
+/** One channel of an animation: a sampler over the sequence's shared timebase, aimed at the
+ *  channel's node and TRS path. The sampler is named for the sequence and the path, and so is
+ *  the channel, because the clip's own name is only half of how a consumer reaches it. */
+function addAnimationChannel(
+  document: Document,
+  animation: Animation,
+  sequence: DtsSequence,
+  channel: SequenceChannel,
+  times: Float32Array<ArrayBuffer>,
+): void {
+  const name = `${sequence.name}_${channel.path}`;
+  const sampler = document
+    .createAnimationSampler(name)
+    .setInput(accessorFor(document, `${name}_time`, times, 'SCALAR'))
+    .setOutput(
+      accessorFor(document, name, channel.values, channel.path === 'rotation' ? 'VEC4' : 'VEC3'),
+    )
+    .setInterpolation('LINEAR');
+  animation
+    .addSampler(sampler)
+    .addChannel(
+      document
+        .createAnimationChannel(name)
+        .setTargetNode(channel.node)
+        .setTargetPath(channel.path)
+        .setSampler(sampler),
+    );
 }
 
 /** Keyframe `k` of a sequence: the sample a track reads, wrapping the extra cyclic key back
@@ -1690,7 +2131,9 @@ function sequenceKeys(sequence: DtsSequence): number[] {
   if (!sequence.cyclic || sequence.numKeyframes <= 1) {
     return Array.from({ length: Math.max(sequence.numKeyframes, 1) }, (_, key) => key);
   }
-  return Array.from({ length: sequence.numKeyframes + 1 }, (_, key) => (key === sequence.numKeyframes ? 0 : key));
+  return Array.from({ length: sequence.numKeyframes + 1 }, (_, key) =>
+    key === sequence.numKeyframes ? 0 : key,
+  );
 }
 
 /** When each key plays, in seconds: `numKeyframes` samples spread over `duration`, plus the
@@ -1702,7 +2145,12 @@ function sequenceTimes(sequence: DtsSequence): Float32Array<ArrayBuffer> {
 }
 
 /** The object state keyframe `k` of a sequence's `rank`-th animated object. */
-function objectStateAt(shape: DtsShape, sequence: DtsSequence, rank: number, key: number): DtsObjectState {
+function objectStateAt(
+  shape: DtsShape,
+  sequence: DtsSequence,
+  rank: number,
+  key: number,
+): DtsObjectState {
   const at = sequence.baseObjectState + rank * sequence.numKeyframes + key;
   return shape.objectStates[at] ?? { visibility: 1, frame: 0, materialFrame: 0 };
 }
@@ -1711,12 +2159,18 @@ function objectStateAt(shape: DtsShape, sequence: DtsSequence, rank: number, key
  *  a rounding step of unit but not exactly it. */
 function normalizeQuaternions(values: Float32Array<ArrayBuffer>): void {
   for (let at = 0; at + 3 < values.length; at += 4) {
-    const length = Math.hypot(values[at] ?? 0, values[at + 1] ?? 0, values[at + 2] ?? 0, values[at + 3] ?? 0);
+    const length = Math.hypot(
+      values[at] ?? 0,
+      values[at + 1] ?? 0,
+      values[at + 2] ?? 0,
+      values[at + 3] ?? 0,
+    );
     if (length === 0) {
       values[at + 3] = 1;
       continue;
     }
-    for (let component = 0; component < 4; component += 1) values[at + component] = (values[at + component] ?? 0) / length;
+    for (let component = 0; component < 4; component += 1)
+      values[at + component] = (values[at + component] ?? 0) / length;
   }
 }
 
@@ -1756,8 +2210,14 @@ function emitMesh(
   for (const primitive of mesh.primitives) {
     const gltfPrimitive = document
       .createPrimitive()
-      .setAttribute('POSITION', accessorFor(document, `${mesh.name}_position`, primitive.positions, 'VEC3'))
-      .setAttribute('NORMAL', accessorFor(document, `${mesh.name}_normal`, primitive.normals, 'VEC3'))
+      .setAttribute(
+        'POSITION',
+        accessorFor(document, `${mesh.name}_position`, primitive.positions, 'VEC3'),
+      )
+      .setAttribute(
+        'NORMAL',
+        accessorFor(document, `${mesh.name}_normal`, primitive.normals, 'VEC3'),
+      )
       .setAttribute('TEXCOORD_0', accessorFor(document, `${mesh.name}_uv`, primitive.uvs, 'VEC2'))
       .setIndices(accessorFor(document, `${mesh.name}_index`, primitive.indices, 'SCALAR'));
     const material = materialFor(document, shape, primitive.materialIndex, materials);
@@ -1799,7 +2259,11 @@ function materialFor(
     .setBaseColorFactor([0.8, 0.8, 0.8, 1])
     .setMetallicFactor(0)
     .setRoughnessFactor(0.5)
-    .setExtras({ resource_path: source.name, flags: source.flags, flag_names: [...source.flagNames] });
+    .setExtras({
+      resource_path: source.name,
+      flags: source.flags,
+      flag_names: [...source.flagNames],
+    });
   // Torque draws translucent materials without culling.
   if (source.flagNames.includes('Translucent')) material.setDoubleSided(true);
   materials.set(materialIndex, material);
@@ -1867,146 +2331,253 @@ const GLTF_ELEMENT_ARRAY_BUFFER = 34963;
  *  attributes and the `UNSIGNED_SHORT` indices. */
 function serializeGlb(document: Document, generator: string): Uint8Array {
   const root = document.getRoot();
-  const bufferViews: GltfBufferViewJson[] = [];
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  const accessorIndexes = new Map<Accessor, number>();
-  const accessors: GltfAccessorJson[] = [];
-  const indexAccessors = new Set<Accessor>();
-  const positionAccessors = new Set<Accessor>();
-  const animationInputs = new Set<Accessor>();
+  const indexes = collectGltfIndexes(root);
+  const packed = packAccessors(root, indexes);
+  const binary = packed.chunks.length > 0 ? BufferUtils.concat(packed.chunks) : new Uint8Array(0);
+  const json: GltfJson = {
+    asset: { version: '2.0', generator },
+    scene: 0,
+    scenes: scenesJson(root, indexes.nodeIndexes),
+    nodes: nodesJson(root, indexes.meshIndexes, indexes.nodeIndexes),
+    meshes: meshesJson(root, packed.accessorIndexes, indexes.materialIndexes),
+    materials: materialsJson(root),
+    accessors: packed.accessors,
+    bufferViews: packed.bufferViews,
+    ...animationsJson(root, packed.accessorIndexes, indexes.nodeIndexes),
+    buffers: binary.byteLength > 0 ? [{ byteLength: binary.byteLength }] : [],
+  };
+  return writeGlbContainer(json, binary);
+}
+
+/** The index maps and accessor classifications serialization needs, gathered in one pass:
+ *  meshes own the accessors that take an `ELEMENT_ARRAY_BUFFER` target and the ones that
+ *  need `POSITION` bounds, and an animation's sampler inputs need bounds of their own. */
+interface GltfIndexes {
+  meshIndexes: Map<Mesh, number>;
+  materialIndexes: Map<Material, number>;
+  nodeIndexes: Map<Node, number>;
+  indexAccessors: Set<Accessor>;
+  positionAccessors: Set<Accessor>;
+  animationInputs: Set<Accessor>;
+}
+
+function collectGltfIndexes(root: Root): GltfIndexes {
+  const indexes: GltfIndexes = {
+    meshIndexes: new Map(),
+    materialIndexes: new Map(),
+    nodeIndexes: new Map(),
+    indexAccessors: new Set(),
+    positionAccessors: new Set(),
+    animationInputs: new Set(),
+  };
   for (const animation of root.listAnimations()) {
     for (const sampler of animation.listSamplers()) {
       const input = sampler.getInput();
-      if (input) animationInputs.add(input);
+      if (input) indexes.animationInputs.add(input);
     }
   }
-  const meshIndexes = new Map<Mesh, number>();
-  const materialIndexes = new Map<Material, number>();
-  const nodeIndexes = new Map<Node, number>();
   for (const mesh of root.listMeshes()) {
-    meshIndexes.set(mesh, meshIndexes.size);
-    for (const primitive of mesh.listPrimitives()) {
-      const indices = primitive.getIndices();
-      if (indices) indexAccessors.add(indices);
-      const position = primitive.getAttribute('POSITION');
-      if (position) positionAccessors.add(position);
-    }
+    indexes.meshIndexes.set(mesh, indexes.meshIndexes.size);
+    for (const primitive of mesh.listPrimitives()) classifyPrimitive(primitive, indexes);
   }
-  for (const material of root.listMaterials()) materialIndexes.set(material, materialIndexes.size);
-  for (const node of root.listNodes()) nodeIndexes.set(node, nodeIndexes.size);
+  for (const material of root.listMaterials()) {
+    indexes.materialIndexes.set(material, indexes.materialIndexes.size);
+  }
+  for (const node of root.listNodes()) indexes.nodeIndexes.set(node, indexes.nodeIndexes.size);
+  return indexes;
+}
+
+/** One primitive's two accessor roles: its indices (`ELEMENT_ARRAY_BUFFER`) and the
+ *  `POSITION` attribute glTF wants bounds for. */
+function classifyPrimitive(primitive: Primitive, indexes: GltfIndexes): void {
+  const indices = primitive.getIndices();
+  if (indices) indexes.indexAccessors.add(indices);
+  const position = primitive.getAttribute('POSITION');
+  if (position) indexes.positionAccessors.add(position);
+}
+
+/** Packs every accessor into its own four-byte-aligned buffer view, which is what glTF 2.0
+ *  §3.6.2.4 requires of both the `FLOAT` attributes and the `UNSIGNED_SHORT` indices. */
+function packAccessors(
+  root: Root,
+  indexes: GltfIndexes,
+): {
+  accessors: GltfAccessorJson[];
+  bufferViews: GltfBufferViewJson[];
+  chunks: Uint8Array[];
+  accessorIndexes: Map<Accessor, number>;
+} {
+  const bufferViews: GltfBufferViewJson[] = [];
+  const chunks: Uint8Array[] = [];
+  const accessors: GltfAccessorJson[] = [];
+  const accessorIndexes = new Map<Accessor, number>();
+  let length = 0;
   for (const accessor of root.listAccessors()) {
     const array = accessor.getArray();
     if (!array) continue;
-    const padding = (4 - (length % 4)) % 4;
-    if (padding > 0) {
-      chunks.push(new Uint8Array(padding));
-      length += padding;
-    }
+    length += pushAlignment(chunks, length);
     const bytes = new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
     bufferViews.push({
       buffer: 0,
       byteOffset: length,
       byteLength: bytes.byteLength,
-      target: indexAccessors.has(accessor) ? GLTF_ELEMENT_ARRAY_BUFFER : GLTF_ARRAY_BUFFER,
+      target: indexes.indexAccessors.has(accessor) ? GLTF_ELEMENT_ARRAY_BUFFER : GLTF_ARRAY_BUFFER,
     });
     chunks.push(new Uint8Array(bytes));
     length += bytes.byteLength;
-    const type = accessor.getType();
     accessorIndexes.set(accessor, accessors.length);
-    accessors.push({
-      bufferView: bufferViews.length - 1,
-      componentType: accessor.getComponentType(),
-      count: accessor.getCount(),
-      type,
-      ...(positionAccessors.has(accessor) && array instanceof Float32Array
-        ? boundsOf(array)
-        : {}),
-      ...(animationInputs.has(accessor) && array instanceof Float32Array
-        ? scalarBoundsOf(array)
-        : {}),
-    });
+    accessors.push(accessorJson(accessor, bufferViews.length - 1, array, indexes));
   }
-  const binary = chunks.length > 0 ? BufferUtils.concat(chunks) : new Uint8Array(0);
-  const json: GltfJson = {
-    asset: { version: '2.0', generator },
-    scene: 0,
-    scenes: root.listScenes().map((scene) => ({
-      name: scene.getName(),
-      nodes: scene.listChildren().map((child) => nodeIndexes.get(child) ?? -1),
-    })),
-    nodes: root.listNodes().map((node) => {
-      const mesh = node.getMesh();
-      const children = node.listChildren().map((child) => nodeIndexes.get(child) ?? -1);
-      const extras = node.getExtras();
-      return {
-        name: node.getName(),
-        translation: [...node.getTranslation()],
-        rotation: [...node.getRotation()],
-        scale: [...node.getScale()],
-        ...(Object.keys(extras).length > 0 ? { extras } : {}),
-        ...(mesh ? { mesh: meshIndexes.get(mesh) ?? -1 } : {}),
-        ...(children.length > 0 ? { children } : {}),
-      };
-    }),
-    meshes: root.listMeshes().map((mesh) => ({
-      name: mesh.getName(),
-      primitives: mesh.listPrimitives().map((primitive) => {
-        const attributes: Record<string, number> = {};
-        for (const semantic of primitive.listSemantics()) {
-          const accessor = primitive.getAttribute(semantic);
-          if (accessor) attributes[semantic] = accessorIndexes.get(accessor) ?? -1;
-        }
-        const indices = primitive.getIndices();
-        const material = primitive.getMaterial();
-        return {
-          attributes,
-          ...(indices ? { indices: accessorIndexes.get(indices) ?? -1 } : {}),
-          ...(material ? { material: materialIndexes.get(material) ?? -1 } : {}),
-          mode: primitive.getMode() || GLTF_MODE_TRIANGLES,
-        };
-      }),
-    })),
-    materials: root.listMaterials().map((material) => ({
-      name: material.getName(),
-      extras: material.getExtras(),
-      pbrMetallicRoughness: {
-        baseColorFactor: [...material.getBaseColorFactor()],
-        metallicFactor: material.getMetallicFactor(),
-        roughnessFactor: material.getRoughnessFactor(),
-      },
-      ...(material.getDoubleSided() ? { doubleSided: true } : {}),
-    })),
-    accessors,
-    bufferViews,
-    ...(root.listAnimations().length > 0
-      ? {
-          animations: root.listAnimations().map((animation) => {
-            const samplerIndexes = new Map(animation.listSamplers().map((sampler, index) => [sampler, index]));
-            return {
-              name: animation.getName(),
-              samplers: animation.listSamplers().map((sampler) => ({
-                input: accessorIndexes.get(sampler.getInput()!) ?? 0,
-                output: accessorIndexes.get(sampler.getOutput()!) ?? 0,
-                interpolation: sampler.getInterpolation(),
-              })),
-              channels: animation.listChannels().map((channel) => ({
-                sampler: samplerIndexes.get(channel.getSampler()!) ?? 0,
-                target: {
-                  node: nodeIndexes.get(channel.getTargetNode()!) ?? -1,
-                  path: channel.getTargetPath(),
-                },
-              })),
-            };
-          }),
-        }
-      : {}),
-    buffers: binary.byteLength > 0 ? [{ byteLength: binary.byteLength }] : [],
+  return { accessors, bufferViews, chunks, accessorIndexes };
+}
+
+/** Pads the binary to the next four-byte boundary, returning how many bytes that took. */
+function pushAlignment(chunks: Uint8Array[], length: number): number {
+  const padding = (4 - (length % 4)) % 4;
+  if (padding === 0) return 0;
+  chunks.push(new Uint8Array(padding));
+  return padding;
+}
+
+/** One accessor's JSON. The two bound sets are glTF's own requirements rather than ours:
+ *  `min`/`max` on a `POSITION` accessor (§3.6.2.5) and on an animation's input accessor,
+ *  where they come from the scalar times rather than the positions. */
+function accessorJson(
+  accessor: Accessor,
+  bufferView: number,
+  array: ArrayBufferView,
+  indexes: GltfIndexes,
+): GltfAccessorJson {
+  const vertexBounds =
+    indexes.positionAccessors.has(accessor) && array instanceof Float32Array ? boundsOf(array) : {};
+  const timeBounds =
+    indexes.animationInputs.has(accessor) && array instanceof Float32Array
+      ? scalarBoundsOf(array)
+      : {};
+  return {
+    bufferView,
+    componentType: accessor.getComponentType(),
+    count: accessor.getCount(),
+    type: accessor.getType(),
+    ...vertexBounds,
+    ...timeBounds,
   };
+}
+
+function scenesJson(root: Root, nodeIndexes: Map<Node, number>): GltfJson['scenes'] {
+  return root.listScenes().map((scene) => ({
+    name: scene.getName(),
+    nodes: scene.listChildren().map((child) => nodeIndexes.get(child) ?? -1),
+  }));
+}
+
+function nodesJson(
+  root: Root,
+  meshIndexes: Map<Mesh, number>,
+  nodeIndexes: Map<Node, number>,
+): GltfJson['nodes'] {
+  return root.listNodes().map((node) => {
+    const mesh = node.getMesh();
+    const children = node.listChildren().map((child) => nodeIndexes.get(child) ?? -1);
+    const extras = node.getExtras();
+    return {
+      name: node.getName(),
+      translation: [...node.getTranslation()],
+      rotation: [...node.getRotation()],
+      scale: [...node.getScale()],
+      ...(Object.keys(extras).length > 0 ? { extras } : {}),
+      ...(mesh ? { mesh: meshIndexes.get(mesh) ?? -1 } : {}),
+      ...(children.length > 0 ? { children } : {}),
+    };
+  });
+}
+
+function meshesJson(
+  root: Root,
+  accessorIndexes: Map<Accessor, number>,
+  materialIndexes: Map<Material, number>,
+): GltfJson['meshes'] {
+  return root.listMeshes().map((mesh) => ({
+    name: mesh.getName(),
+    primitives: mesh
+      .listPrimitives()
+      .map((primitive) => primitiveJson(primitive, accessorIndexes, materialIndexes)),
+  }));
+}
+
+function primitiveJson(
+  primitive: Primitive,
+  accessorIndexes: Map<Accessor, number>,
+  materialIndexes: Map<Material, number>,
+): Record<string, unknown> {
+  const attributes: Record<string, number> = {};
+  for (const semantic of primitive.listSemantics()) {
+    const accessor = primitive.getAttribute(semantic);
+    if (accessor) attributes[semantic] = accessorIndexes.get(accessor) ?? -1;
+  }
+  const indices = primitive.getIndices();
+  const material = primitive.getMaterial();
+  return {
+    attributes,
+    ...(indices ? { indices: accessorIndexes.get(indices) ?? -1 } : {}),
+    ...(material ? { material: materialIndexes.get(material) ?? -1 } : {}),
+    mode: primitive.getMode() || GLTF_MODE_TRIANGLES,
+  };
+}
+
+function materialsJson(root: Root): GltfJson['materials'] {
+  return root.listMaterials().map((material) => ({
+    name: material.getName(),
+    extras: material.getExtras(),
+    pbrMetallicRoughness: {
+      baseColorFactor: [...material.getBaseColorFactor()],
+      metallicFactor: material.getMetallicFactor(),
+      roughnessFactor: material.getRoughnessFactor(),
+    },
+    ...(material.getDoubleSided() ? { doubleSided: true } : {}),
+  }));
+}
+
+/** Animations are absent entirely when there are none, which is the case while sequence
+ *  emission is dormant; the key is then left out of the JSON rather than written empty. */
+function animationsJson(
+  root: Root,
+  accessorIndexes: Map<Accessor, number>,
+  nodeIndexes: Map<Node, number>,
+): Pick<GltfJson, 'animations'> {
+  const animations = root.listAnimations();
+  if (animations.length === 0) return {};
+  return {
+    animations: animations.map((animation) => ({
+      name: animation.getName(),
+      samplers: animation.listSamplers().map((sampler) => ({
+        input: accessorIndexes.get(sampler.getInput()!) ?? 0,
+        output: accessorIndexes.get(sampler.getOutput()!) ?? 0,
+        interpolation: sampler.getInterpolation(),
+      })),
+      channels: animation.listChannels().map((channel) => ({
+        sampler: channelSamplerIndex(animation, channel),
+        target: {
+          node: nodeIndexes.get(channel.getTargetNode()!) ?? -1,
+          path: channel.getTargetPath(),
+        },
+      })),
+    })),
+  };
+}
+
+function channelSamplerIndex(animation: Animation, channel: AnimationChannel): number {
+  const sampler = channel.getSampler();
+  if (!sampler) return 0;
+  return animation.listSamplers().indexOf(sampler);
+}
+
+/** glTF 2.0 §4.4: magic, version and total length, then each chunk's length and type. The
+ *  JSON chunk is space-padded and the binary chunk zero-padded, per the same section. */
+function writeGlbContainer(json: GltfJson, binary: Uint8Array): Uint8Array {
   const jsonChunk = BufferUtils.pad(BufferUtils.encodeText(JSON.stringify(json)), 0x20);
   const binChunk = binary.byteLength > 0 ? BufferUtils.pad(binary, 0) : new Uint8Array(0);
   const binHeaderLength = binChunk.byteLength > 0 ? 8 : 0;
-  // glTF 2.0 §4.4: magic, version, total length, then each chunk's length and type.
   const total = 12 + 8 + jsonChunk.byteLength + binHeaderLength + binChunk.byteLength;
   const out = new Uint8Array(total);
   const view = new DataView(out.buffer);

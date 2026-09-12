@@ -10,12 +10,7 @@ import {
   type Vec3,
   type World,
 } from '@clans/sim';
-import {
-  createBotManager,
-  rebalanceTeams,
-  stepBotManager,
-  type BotManager,
-} from './bots.js';
+import { createBotManager, rebalanceTeams, stepBotManager, type BotManager } from './bots.js';
 import {
   createCarrierTelemetry,
   finishCarrierTelemetry,
@@ -192,11 +187,7 @@ function isCarryingFlag(world: World, id: number): boolean {
  *  historical runs this test replaces produced 40-90+ stall windows per 10k ticks from
  *  wedged bots alone. The carrier/other split below is the telemetry sweep's control:
  *  the same windows, counted separately for the bots that were carrying a flag. */
-function trackStallWindow(
-  world: World,
-  manager: BotManager,
-  tracker: MatchTracker,
-): void {
+function trackStallWindow(world: World, manager: BotManager, tracker: MatchTracker): void {
   const STALL_MIN_DISPLACEMENT_M = 2;
   for (const id of manager.botIds) {
     const moved = tracker.windowDisplacement.get(id) ?? 0;
@@ -728,10 +719,7 @@ function escortAbsentCell(samples: CarrierEscortSample[]): string {
   const total = samples.reduce((sum, sample) => sum + sample.samples, 0);
   if (total === 0) return '-';
   const absent = samples.reduce((sum, sample) => sum + sample.absentFraction * sample.samples, 0);
-  const none = samples.reduce(
-    (sum, sample) => sum + sample.noTeammateFraction * sample.samples,
-    0,
-  );
+  const none = samples.reduce((sum, sample) => sum + sample.noTeammateFraction * sample.samples, 0);
   return `${Math.round((absent / total) * 100).toString()}% (${Math.round((none / total) * 100).toString()}% none)`;
 }
 
@@ -772,7 +760,9 @@ function printEscortTable(rows: TableRow[]): void {
     'home no teammate (none alive)',
   ];
   console.log('');
-  console.log('escort presence over time: nearest LIVE teammate every 60 ticks, median and absent share');
+  console.log(
+    'escort presence over time: nearest LIVE teammate every 60 ticks, median and absent share',
+  );
   console.log(
     'legend: "no teammate" = share of samples with no live teammate within 100 m, and in parentheses the share with',
   );
@@ -789,9 +779,7 @@ function encounterCells(row: TableRow): string[] {
   const runs = row.telemetry.runs;
   const encounterSpeeds = runs.flatMap((run) => run.encounterSpeedsMps);
   const died = runs.filter((run) => run.endReason === 'died');
-  const surviving = runs.filter(
-    (run) => run.endReason !== 'died' && run.endReason !== 'captured',
-  );
+  const surviving = runs.filter((run) => run.endReason !== 'died' && run.endReason !== 'captured');
   const runTicks = runs.reduce((sum, run) => sum + run.runTicks, 0);
   const nearTicks = runs.reduce((sum, run) => sum + run.enemyNearTicks, 0);
   return [
@@ -820,9 +808,7 @@ function encounterCells(row: TableRow): string[] {
       surviving.map((run) => run.endEnergy),
       1,
     ),
-    medianCell(
-      runs.map((run) => run.endHealthFraction * 100),
-    ),
+    medianCell(runs.map((run) => run.endHealthFraction * 100)),
   ];
 }
 
@@ -865,9 +851,7 @@ function stallCells(row: TableRow): string[] {
   return [
     row.label,
     String(runs.length),
-    medianMaxCell(
-      runs.map((run) => run.endRoute.ticksSinceProgress),
-    ),
+    medianMaxCell(runs.map((run) => run.endRoute.ticksSinceProgress)),
     `${runs.reduce((sum, run) => sum + run.endRoute.stalledTicks, 0).toString()}`,
     percentCell(runs.filter((run) => run.endRoute.onGround).length, runs.length),
     medianMaxCell(interior),

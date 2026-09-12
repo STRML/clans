@@ -181,11 +181,8 @@ function addTurretMesh(
     // barrels (turret_aa_large.glb). Never reached for the three map-placed barrels, whose
     // rows scene.json always carries.
     assets.scene.shapesForTurretBarrel[1];
-  loadShapeInto(
-    barrel,
-    barrelShape,
-    placement.barrel === 2 ? Math.PI : 0,
-    (loaded, clips) => addTurretAnimations(mesh, loaded, clips),
+  loadShapeInto(barrel, barrelShape, placement.barrel === 2 ? Math.PI : 0, (loaded, clips) =>
+    addTurretAnimations(mesh, loaded, clips),
   );
   mesh.userData.structureKind = 'turret';
   mesh.userData.vehicleTargets = placement.barrel === 1;

@@ -66,7 +66,10 @@ function poweredPads(world: ReturnType<typeof createWorld>, pads = 1): number[] 
   return Array.from({ length: pads }, (_, i) => i + 1);
 }
 
-function vehiclePos(world: ReturnType<typeof createWorld>, id: number): { x: number; y: number; z: number } {
+function vehiclePos(
+  world: ReturnType<typeof createWorld>,
+  id: number,
+): { x: number; y: number; z: number } {
   return {
     x: world.vehicles.position[id * 3] ?? 0,
     y: world.vehicles.position[id * 3 + 1] ?? 0,
@@ -75,11 +78,7 @@ function vehiclePos(world: ReturnType<typeof createWorld>, id: number): { x: num
 }
 
 /** A player standing right beside `vId`, mounted into the given seat (0 = pilot). */
-function boardPlayer(
-  world: ReturnType<typeof createWorld>,
-  vId: number,
-  seat: 0 | 1,
-): number {
+function boardPlayer(world: ReturnType<typeof createWorld>, vId: number, seat: 0 | 1): number {
   const pos = vehiclePos(world, vId);
   const id = addPlayer(world, { x: pos.x + 1, y: pos.y + 1, z: pos.z }, 1);
   stepVehicles(world, new Map([[id, input({ use: true })]]), DT); // seat 0 or 1, nearest first
@@ -214,7 +213,11 @@ describe('vehicle armament: the gunner fires the turret', () => {
       world.pendingVehicleFireEvents.length = 0;
       let shots = 0;
       for (let tick = 0; tick < 32; tick += 1) {
-        stepVehicles(world, new Map([[gunner, input(alt ? { altFire: true } : { fire: true })]]), DT);
+        stepVehicles(
+          world,
+          new Map([[gunner, input(alt ? { altFire: true } : { fire: true })]]),
+          DT,
+        );
         shots += world.pendingVehicleFireEvents.length;
         world.pendingVehicleFireEvents.length = 0;
       }

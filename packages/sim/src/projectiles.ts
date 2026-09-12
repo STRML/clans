@@ -1423,7 +1423,10 @@ function spawnVehicleShot(world: World, event: VehicleFireEvent, dt: number): vo
   // it has carried since M5, which the client draws distinctly from a player Blaster bolt) and
   // an ordinary Tracer. A Grenade round (the mortar, the bombs) waits out the normal one-tick
   // spawn latency, exactly like spawnStored's own mortar.
-  if (data.projectile === ProjectileType.Tracer || data.projectile === ProjectileType.VehicleLaser) {
+  if (
+    data.projectile === ProjectileType.Tracer ||
+    data.projectile === ProjectileType.VehicleLaser
+  ) {
     stepLinearOrTracer(world, id, dt);
   }
 }

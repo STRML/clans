@@ -421,6 +421,38 @@ function stepVehicleTurrets(world: World): void {
   }
 }
 
+/** The stationary turret's own shield step: spends the turret's energy against `amount` at
+ *  the base's own `energyPerDamagePoint` rate (a base that authors 0 has no shield at all)
+ *  and returns how much damage gets through it. Split out of applyTurretDamage so the
+ *  shield, the health pool and the destruction flag each read as their own step; the
+ *  arithmetic and its order are untouched. */
+function absorbTurretShield(store: TurretStore, id: number, amount: number): number {
+  const data = baseFor(store.barrel[id] as TurretBarrelId);
+  const energy = store.energy[id] ?? 0;
+  const shieldCapacity = data.energyPerDamagePoint > 0 ? energy / data.energyPerDamagePoint : 0;
+  const shieldAbsorbed = Math.min(shieldCapacity, amount);
+  store.energy[id] = energy - shieldAbsorbed * data.energyPerDamagePoint;
+  return amount - shieldAbsorbed;
+}
+
+/** The stationary turret's health/destruction step: the damage that made it past the shield
+ *  lands on the barrel's own pool, and a hit that reaches `maxHealth` marks the row destroyed
+ *  and drops its target. Keep a destroyed turret at its real max damage -- besides keeping
+ *  snapshots bounded, this makes a wreck repairable in the same finite time regardless of the
+ *  overkill amount. */
+function applyStationaryTurretDamage(world: World, id: number, amount: number): void {
+  const store = world.turrets;
+  const data = baseFor(store.barrel[id] as TurretBarrelId);
+  if (amount <= 0 || store.destroyed[id]) return;
+  const throughShield = absorbTurretShield(store, id, amount);
+  if (throughShield <= 0) return;
+  store.damage[id] = Math.min((store.damage[id] ?? 0) + throughShield, data.maxHealth);
+  if ((store.damage[id] ?? 0) >= data.maxHealth) {
+    store.destroyed[id] = 1;
+    store.targetId[id] = -1;
+  }
+}
+
 export function applyTurretDamage(world: World, id: number, amount: number): void {
   const store = world.turrets;
   // A vehicle-mounted turret has no shield or health pool of its own: `MobileTurretBase`
@@ -432,21 +464,7 @@ export function applyTurretDamage(world: World, id: number, amount: number): voi
     applyVehicleDamage(world, mountedOn, amount, -1);
     return;
   }
-  const data = baseFor(store.barrel[id] as TurretBarrelId);
-  if (amount <= 0 || store.destroyed[id]) return;
-  const energy = store.energy[id] ?? 0;
-  const shieldCapacity = data.energyPerDamagePoint > 0 ? energy / data.energyPerDamagePoint : 0;
-  const shieldAbsorbed = Math.min(shieldCapacity, amount);
-  store.energy[id] = energy - shieldAbsorbed * data.energyPerDamagePoint;
-  const throughShield = amount - shieldAbsorbed;
-  if (throughShield <= 0) return;
-  // Keep a destroyed turret at its real max damage. Besides keeping snapshots bounded, this
-  // makes a wreck repairable in the same finite time regardless of the overkill amount.
-  store.damage[id] = Math.min((store.damage[id] ?? 0) + throughShield, data.maxHealth);
-  if ((store.damage[id] ?? 0) >= data.maxHealth) {
-    store.destroyed[id] = 1;
-    store.targetId[id] = -1;
-  }
+  applyStationaryTurretDamage(world, id, amount);
 }
 
 /**

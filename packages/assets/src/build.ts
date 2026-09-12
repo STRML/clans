@@ -302,7 +302,12 @@ async function readCachedShape(source: string): Promise<Uint8Array | null> {
   if (!(await exists(path))) return null;
   const bytes = new Uint8Array(await readFile(path));
   if (!source.endsWith('.dts')) return bytes;
-  return dtsToGlb(parseDts(bytes), { name: source.split('/').at(-1)!.replace(/\.dts$/, '') });
+  return dtsToGlb(parseDts(bytes), {
+    name: source
+      .split('/')
+      .at(-1)!
+      .replace(/\.dts$/, ''),
+  });
 }
 
 async function exists(path: string): Promise<boolean> {

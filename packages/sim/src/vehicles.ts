@@ -2260,6 +2260,45 @@ function dismountSeat(world: World, playerId: number, vId: number): void {
   world.players.mountedVehicleId[playerId] = -1;
 }
 
+/** The mounted half of tryMountOrDismount: an edge press leaves the seat and records the
+ *  latch that blocks automatic reboarding until contact is broken. */
+function dismountOnUse(world: World, playerId: number, vId: number): void {
+  const players = world.players;
+  players.wasUseHeld[playerId] = 3; // Block automatic reboarding until leaving contact.
+  dismountSeat(world, playerId, vId);
+  // While mounted, movement.ts's own guard skips stepPlayer entirely for this id, so
+  // onGround/wasGrounded/ski never got refreshed the whole time it was driving -- they're
+  // still whatever they were the instant before mounting. A dismount can land the player
+  // anywhere, so starting movement's own ground-tracking from a clean slate (rather than
+  // carrying over state from wherever they stood before mounting, possibly seconds and
+  // meters away) is the same defensive reset addPlayer/resetPlayerToSpawn already apply
+  // for a fresh spawn -- cheap, and avoids a stale wasGrounded/ski flag ever influencing
+  // classify/integrate's ground-snap logic (movement.ts) for a frame it shouldn't.
+  players.onGround[playerId] = 0;
+  players.wasGrounded[playerId] = 0;
+  players.ski[playerId] = 0;
+  players.wasJumpHeld[playerId] = 0;
+}
+
+/** The unmounted half of tryMountOrDismount: a press that survives the blocked-until-contact
+ *  latch boards the nearest mountable vehicle (or does nothing when the latch holds it).
+ *  `edge`/`blocked` are the pre-latch bits tryMountOrDismount read off `wasUseHeld` before
+ *  overwriting it this tick -- re-reading the field here would see the write, not the state. */
+function mountOnUse(
+  world: World,
+  playerId: number,
+  input: PlayerInput,
+  edge: boolean,
+  blocked: boolean,
+): void {
+  const players = world.players;
+  if (blocked && findMountableVehicleInRange(world, playerId) !== null && !edge) {
+    players.wasUseHeld[playerId] = input.use ? 3 : 2;
+    return;
+  }
+  mountNearestVehicle(world, playerId);
+}
+
 function tryMountOrDismount(world: World, playerId: number, input: PlayerInput): void {
   const players = world.players;
   const wasHeld = (players.wasUseHeld[playerId]! & 1) !== 0;
@@ -2269,28 +2308,10 @@ function tryMountOrDismount(world: World, playerId: number, input: PlayerInput):
   const mountedId = players.mountedVehicleId[playerId] ?? -1;
   const currentVehicle = mountedId >= 0 && mountedId < world.vehicles.count ? mountedId : -1;
   if (currentVehicle !== -1) {
-    if (!edge) return;
-    players.wasUseHeld[playerId] = 3; // Block automatic reboarding until leaving contact.
-    dismountSeat(world, playerId, currentVehicle);
-    // While mounted, movement.ts's own guard skips stepPlayer entirely for this id, so
-    // onGround/wasGrounded/ski never got refreshed the whole time it was driving -- they're
-    // still whatever they were the instant before mounting. A dismount can land the player
-    // anywhere, so starting movement's own ground-tracking from a clean slate (rather than
-    // carrying over state from wherever they stood before mounting, possibly seconds and
-    // meters away) is the same defensive reset addPlayer/resetPlayerToSpawn already apply
-    // for a fresh spawn -- cheap, and avoids a stale wasGrounded/ski flag ever influencing
-    // classify/integrate's ground-snap logic (movement.ts) for a frame it shouldn't.
-    players.onGround[playerId] = 0;
-    players.wasGrounded[playerId] = 0;
-    players.ski[playerId] = 0;
-    players.wasJumpHeld[playerId] = 0;
+    if (edge) dismountOnUse(world, playerId, currentVehicle);
     return;
   }
-  if (blocked && findMountableVehicleInRange(world, playerId) !== null && !edge) {
-    players.wasUseHeld[playerId] = input.use ? 3 : 2;
-    return;
-  }
-  mountNearestVehicle(world, playerId);
+  mountOnUse(world, playerId, input, edge, blocked);
 }
 
 /** Failure matrix row 5's dismount half plus issue #57's crew rule: a pad-respawn (or the
@@ -2394,6 +2415,53 @@ function emitVehicleShot(
   });
 }
 
+/** The crew member who operates a spec's own weapon: its driver for a seat-0 weapon, its
+ *  passenger otherwise, and -1 when that seat is empty. */
+function weaponOperatorId(world: World, vId: number, spec: VehicleWeaponSpec): number {
+  const vehicles = world.vehicles;
+  return spec.seat === 0 ? (vehicles.driverId[vId] ?? -1) : (vehicles.passengerId[vId] ?? -1);
+}
+
+/** The aim a spec's shot uses: the hull's own heading for a pilot-fired weapon (the M5
+ *  Shrike behavior, unchanged), the operator's own look angle for a gunner-fired one -- real
+ *  T2 puts the turreteer/bombardier's client in control of the turret object outright
+ *  (vehicle.cs:601-650, :701-745). */
+function weaponAim(
+  world: World,
+  vId: number,
+  spec: VehicleWeaponSpec,
+  input: PlayerInput,
+): { yaw: number; pitch: number } {
+  const vehicles = world.vehicles;
+  if (spec.seat === 0) return { yaw: at(vehicles.yaw, vId), pitch: at(vehicles.pitch, vId) };
+  return { yaw: input.yaw, pitch: input.pitch };
+}
+
+/** Fires a held, ready weapon for one tick: every shot pays the cadence's own delay --
+ *  the script's held-trigger cadence, where a Fire state that loops back to itself (the
+ *  Tank's chaingun, :502) repeats every fireTime while one that hands off to Reload (the
+ *  mortar, the Bomber's gun and bomb) pays both timeouts -- and spends `data.minEnergy`
+ *  out of the vehicle's own pool (T2's useMountEnergy), the loop stopping the moment that
+ *  pool can no longer afford a shot. Returns the leftover timer. */
+function fireReadyWeapon(
+  world: World,
+  vId: number,
+  spec: VehicleWeaponSpec,
+  shooterId: number,
+  aim: { yaw: number; pitch: number },
+  data: VehicleWeaponData,
+  remaining: number,
+): number {
+  const vehicles = world.vehicles;
+  const cadence = data.fireTime + (data.repeatsWhileHeld ? 0 : data.reloadTime);
+  while (remaining <= TIMER_EPSILON && at(vehicles.energy, vId) >= data.minEnergy) {
+    remaining += cadence;
+    vehicles.energy[vId] = at(vehicles.energy, vId) - data.minEnergy;
+    emitVehicleShot(world, vId, spec, shooterId, aim);
+  }
+  return remaining;
+}
+
 /** One weapon's own tick: held trigger -> shot(s) spaced by the weapon's real Fire-state
  *  timeout, each spending its own energy out of the vehicle's pool (T2's useMountEnergy) and
  *  refused below minEnergy. Identical in shape to the M5 Shrike blaster loop, which this
@@ -2407,19 +2475,14 @@ function stepOneVehicleWeapon(
   dt: number,
 ): void {
   const vehicles = world.vehicles;
-  const seatId =
-    spec.seat === 0 ? (vehicles.driverId[vId] ?? -1) : (vehicles.passengerId[vId] ?? -1);
+  const seatId = weaponOperatorId(world, vId, spec);
   if (!driverIsLive(world, seatId)) return;
   const data = VEHICLE_WEAPON_DATA[spec.weapon];
   const input = inputs.get(seatId) ?? idleVehicleInput();
-  // The script's own held-trigger cadence: a Fire state that loops back to itself (the Tank's
-  // chaingun, :502) repeats every fireTime, while one that hands off to Reload (the mortar,
-  // the Bomber's gun and bomb) pays both timeouts per shot.
-  const cadence = data.fireTime + (data.repeatsWhileHeld ? 0 : data.reloadTime);
   // The first spec uses `weaponTimer` (the only slot the wire carries, snapshot.ts), the
   // second `weaponTimerAlt` -- see VehicleStore.weaponTimerAlt.
   const timer = index === 0 ? vehicles.weaponTimer : vehicles.weaponTimerAlt;
-  let remaining = at(timer, vId) - dt;
+  const remaining = at(timer, vId) - dt;
   // The primary trigger is `fire`; a kind's second weapon hangs off `altFire` (the Tank's
   // mortar and the Bomber's bombs). Real T2 instead cycles `selectedWeapon` with a weapon-
   // switch key; this sim's two fire bits are the closest existing input pair and need no new
@@ -2429,16 +2492,8 @@ function stepOneVehicleWeapon(
     timer[vId] = Math.max(0, remaining);
     return;
   }
-  const aim =
-    spec.seat === 0
-      ? { yaw: at(vehicles.yaw, vId), pitch: at(vehicles.pitch, vId) }
-      : { yaw: input.yaw, pitch: input.pitch };
-  while (remaining <= TIMER_EPSILON && at(vehicles.energy, vId) >= data.minEnergy) {
-    remaining += cadence;
-    vehicles.energy[vId] = at(vehicles.energy, vId) - data.minEnergy;
-    emitVehicleShot(world, vId, spec, seatId, aim);
-  }
-  timer[vId] = Math.max(0, remaining);
+  const aim = weaponAim(world, vId, spec, input);
+  timer[vId] = Math.max(0, fireReadyWeapon(world, vId, spec, seatId, aim, data, remaining));
 }
 
 /** Every weapon the kind mounts, in spec order. Reads each firing crew member's own input
@@ -2501,7 +2556,8 @@ function driverIsLive(world: World, driverId: number): boolean {
  *  id clears so the vehicle does not keep claiming an occupant that is gone. */
 function dropDeadCrew(world: World, vId: number): void {
   for (const seat of [0, 1] as const) {
-    const id = seat === 0 ? (world.vehicles.driverId[vId] ?? -1) : (world.vehicles.passengerId[vId] ?? -1);
+    const id =
+      seat === 0 ? (world.vehicles.driverId[vId] ?? -1) : (world.vehicles.passengerId[vId] ?? -1);
     if (id === -1 || driverIsLive(world, id)) continue;
     world.players.mountedVehicleId[id] = -1;
     if (seat === 0) world.vehicles.driverId[vId] = -1;
@@ -2755,7 +2811,3 @@ function keepDeployedStationPowered(world: World, vId: number): void {
     world.baseObjects.powered[stationId] = 1;
   }
 }
-
-
-
-

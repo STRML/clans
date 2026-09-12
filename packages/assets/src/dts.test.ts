@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { dtsToGlb, parseDts, type DtsShape } from './dts.js';
-import { NodeIO, type Node } from '@gltf-transform/core';
+import { NodeIO, type Node, type Primitive } from '@gltf-transform/core';
 
 /** `turret_muzzlepoint.dts` (809 bytes, version 19) and `reticle_bomber.dts` (1,448 bytes,
  *  version 22) are unmodified `base/@vl2/shapes.vl2/shapes` files from the same mirror the
@@ -11,6 +11,28 @@ import { NodeIO, type Node } from '@gltf-transform/core';
  *  together are smaller than one compressed screenshot. */
 async function fixture(name: string): Promise<Uint8Array> {
   return new Uint8Array(await readFile(new URL(`./__fixtures__/${name}`, import.meta.url)));
+}
+
+/** One attribute's vertex count, or undefined when the primitive lacks it. A helper rather
+ *  than an inline chain because the round-trip assertions compare three of them and the
+ *  optional chain would otherwise count against the test body's own complexity budget. */
+function attributeCount(primitive: Primitive | undefined, semantic: string): number | undefined {
+  return primitive?.getAttribute(semantic)?.getCount();
+}
+
+/** A vertex array's component-wise bounds, recomputed from the parsed mesh so the emitted
+ *  accessor's `min`/`max` can be checked against the data rather than against itself. */
+function vertexBounds(positions: Float32Array): { min: number[]; max: number[] } {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let index = 0; index + 2 < positions.length; index += 3) {
+    for (let axis = 0; axis < 3; axis += 1) {
+      const value = positions[index + axis] ?? 0;
+      min[axis] = Math.min(min[axis] ?? value, value);
+      max[axis] = Math.max(max[axis] ?? value, value);
+    }
+  }
+  return { min, max };
 }
 
 describe('parseDts', () => {
@@ -184,12 +206,10 @@ describe('dtsToGlb', () => {
     expect(mesh?.getName()).toBe('ObjectB');
     const primitive = mesh?.listPrimitives()[0];
     expect(primitive?.getIndices()?.getCount()).toBe(60);
-    expect(primitive?.getAttribute('POSITION')?.getCount()).toBe(
-      primitive?.getAttribute('NORMAL')?.getCount() ?? -1,
-    );
-    expect(primitive?.getAttribute('POSITION')?.getCount()).toBe(
-      primitive?.getAttribute('TEXCOORD_0')?.getCount() ?? -1,
-    );
+    // glTF requires every attribute of a primitive to describe the same vertices, so the
+    // counts must agree rather than merely being present.
+    expect(attributeCount(primitive, 'POSITION')).toBe(attributeCount(primitive, 'NORMAL'));
+    expect(attributeCount(primitive, 'POSITION')).toBe(attributeCount(primitive, 'TEXCOORD_0'));
     const material = root.listMaterials()[0];
     expect(material?.getName()).toBe('gui\\hud_ret_bomber');
     expect(material?.getExtras()).toEqual({
@@ -238,36 +258,41 @@ describe('dtsToGlb', () => {
     expect(triangleCount(reachable)).toBe(documentTriangles);
   });
 
-  it('keeps mesh data as authored and applies the shipped basis at the scene root', async () => {
+  it('keeps mesh data as authored rather than folding the basis into the geometry', async () => {
     const shape = parseDts(await fixture('reticle_bomber.dts'));
     const document = await new NodeIO().readBinary(dtsToGlb(shape));
     const material = document.getRoot().listMaterials()[0];
     expect(material?.getBaseColorTexture()).toBeNull();
     // The reticle is a flat panel authored in the XY plane, 0.09 m thick in Z. The mesh
-    // accessor keeps those exact numbers — the basis change lives on the scene root, so it
+    // accessor keeps those exact numbers: the basis change lives on the scene root, so it
     // cannot be folded into geometry here and then applied a second time by a consumer.
-    const position = document.getRoot().listMeshes()[0]?.listPrimitives()[0]?.getAttribute('POSITION');
+    const position = document
+      .getRoot()
+      .listMeshes()[0]
+      ?.listPrimitives()[0]
+      ?.getAttribute('POSITION');
     // Min/max recomputed from the parsed mesh: a vertex-space axis conversion or a
     // recentring anywhere between the file and the emitted accessor would move them.
     const source = shape.meshes[0]?.primitives[0]?.positions ?? new Float32Array(0);
-    const min = [Infinity, Infinity, Infinity];
-    const max = [-Infinity, -Infinity, -Infinity];
-    for (let index = 0; index + 2 < source.length; index += 3) {
-      for (let axis = 0; axis < 3; axis += 1) {
-        min[axis] = Math.min(min[axis] ?? 0, source[index + axis] ?? 0);
-        max[axis] = Math.max(max[axis] ?? 0, source[index + axis] ?? 0);
-      }
-    }
+    const { min, max } = vertexBounds(source);
     expect(position?.getMin([])).toEqual(min);
     expect(position?.getMax([])).toEqual(max);
-    const node = document.getRoot().listNodes().find((candidate) => candidate.getName() === 'ObjectB1');
+  });
+
+  it('applies the shipped basis to the node chain, which consumers read orientation from', async () => {
+    const shape = parseDts(await fixture('reticle_bomber.dts'));
+    const document = await new NodeIO().readBinary(dtsToGlb(shape));
+    const node = document
+      .getRoot()
+      .listNodes()
+      .find((candidate) => candidate.getName() === 'ObjectB1');
     expect(node?.getTranslation()).toEqual([...shape.nodes[2]!.translation]);
     // ...and its *world* transform is the shipped basis applied to its authored chain. The
     // fixture places `Shape` at (141.00413513183594, 53.27435302734375, 0.024941444396972656)
     // and `ObjectB1` at (-141.10877990722656, -53.281307220458984, 0) with no node rotation,
     // so ObjectB1's model-space world position is (-0.104644775390625, -0.006954193115234375,
     // 0.024941444396972656); the shipped basis maps a Torque point to `(-x, z, y)`. Dropping
-    // the basis, or folding it into the vertices, breaks this — and breaks every consumer,
+    // the basis, or folding it into the vertices, breaks this, and breaks every consumer,
     // which reads orientation from these world transforms.
     const world = node?.getWorldTranslation() ?? [NaN, NaN, NaN];
     expect(world[0]).toBeCloseTo(0.1046447753906251, 6);

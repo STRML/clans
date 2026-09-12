@@ -1452,6 +1452,59 @@ export function updateFootstepAudio(
   });
 }
 
+/** The per-frame audio responses to the state the simulation just produced. Split out of
+ *  `App.frame` to keep that function inside the lint's complexity budget, and because the
+ *  three cases it handles read as one decision: fire cues (networked only, and only on a
+ *  frame that actually stepped -- a zero-step frame has no new fire events to report),
+ *  movement loops while the player can drive them, and the free-cam case below.
+ *
+ *  Codex review round 1 of the M7 PR: skipping the movement update entirely while free cam is
+ *  active meant a jet/ski loop already running at the moment free cam was toggled on never
+ *  got its own stop call -- setJetting/setSkiing are exactly what makes that stop happen, and
+ *  neither ran again until free cam was toggled back off. Forcing both off here closes that
+ *  gap instead of just not looking at it, and setLoop already no-ops a stop of a key that
+ *  never started, so it is cheap every frame. */
+function updateFrameAudio(options: {
+  steps: number;
+  net: NetClient | null;
+  world: World;
+  playerId: number;
+  audio: AudioEngine;
+  freeCam: boolean;
+  jetInputActive: boolean;
+  footstep: FootstepState;
+  dtSeconds: number;
+}): void {
+  if (options.steps > 0 && options.net) {
+    playWeaponFireAudio(options.world, options.playerId, options.audio);
+    playVehicleFireAudio(options.world, options.audio);
+  }
+  if (options.freeCam) {
+    options.audio.setJetting(options.playerId, false, 0);
+    options.audio.setSkiing(options.playerId, false, 0);
+    return;
+  }
+  updateMovementAudio(
+    options.world,
+    options.playerId,
+    options.audio,
+    options.jetInputActive,
+    options.footstep,
+    options.dtSeconds,
+  );
+}
+
+/** The frame's `use` edge. `usePressedThisFrame()` is edge-triggered and consumed once per
+ *  call, so it can only be read once per frame -- computed here and threaded through both the
+ *  outgoing input (the wire-level `use` bit, gated by canSendVehicleUse so an E press near
+ *  neither a vehicle nor while mounted doesn't spam the server with a meaningless mount
+ *  attempt) and syncBaseAssetsView's own station/pad menu toggles, rather than each calling it
+ *  separately. Free cam does not consume the edge at all. */
+function frameUsePressed(app: { freeCam: boolean }, input: Input): boolean {
+  if (app.freeCam) return false;
+  return input.usePressedThisFrame();
+}
+
 /** Task 7 (audio): jet/ski loops and cadence-gated footsteps for the local player, read
  *  straight off the just-simulated world state -- `ski`/`onGround`/`energy`/`velocity` are
  *  real PlayerStore fields (types.ts), not derived here. Split into one small function per
@@ -2010,13 +2063,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         steps = 1;
         app.stepOnce = false;
       }
-      // usePressedThisFrame() is edge-triggered and consumed once per call, so it can only
-      // be read once per frame -- computed here and threaded through both the outgoing input
-      // (the wire-level `use` bit, gated by canSendVehicleUse so an E press near neither a
-      // vehicle nor while mounted doesn't spam the server with a meaningless mount attempt)
-      // and syncBaseAssetsView's own station/pad menu toggles below, rather than each calling
-      // it separately.
-      const usePressed = !app.freeCam && input.usePressedThisFrame();
+      const usePressed = frameUsePressed(app, input);
       previousMounted = syncPilotInput(app, previousMounted, pilotYaw);
       const currentInput = gameplayInput(app, usePressed, pilotYaw);
       const simStart = performance.now();
@@ -2059,22 +2106,17 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       // Task 7 (audio): reacts to the world state this frame's simulation just produced --
       // see each helper's own comment for why weaponFire needs the `steps > 0` guard and the
       // others don't.
-      if (steps > 0 && net) {
-        playWeaponFireAudio(world, playerId, audio);
-        playVehicleFireAudio(world, audio);
-      }
-      // Codex review round 1 of the M7 PR: skipping updateMovementAudio entirely while free
-      // cam is active meant a jet/ski loop already running at the moment free cam was toggled
-      // on never got its own stop call -- setJetting/setSkiing are exactly what makes that
-      // stop happen, and neither ran again until free cam was toggled back off. Explicitly
-      // forcing both off here (setLoop already no-ops a stop of a key that never started, so
-      // this is cheap every frame) closes that gap instead of just not looking at it.
-      if (!app.freeCam) {
-        updateMovementAudio(world, playerId, audio, currentInput.jet, footstepState, dtSeconds);
-      } else {
-        audio.setJetting(playerId, false, 0);
-        audio.setSkiing(playerId, false, 0);
-      }
+      updateFrameAudio({
+        steps,
+        net,
+        world,
+        playerId,
+        audio,
+        freeCam: app.freeCam,
+        jetInputActive: currentInput.jet,
+        footstep: footstepState,
+        dtSeconds,
+      });
 
       syncWorldView(
         world,
