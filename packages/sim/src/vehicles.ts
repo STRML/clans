@@ -450,8 +450,8 @@ export const VEHICLE_DATA: Record<VehicleKind, VehicleData> = {
     // Unchanged from this file's original sphere-based ground rule (checkRadius as the
     // resting height): the flyer is self-supporting, so this only ever matters in a crash.
     groundContactHeight: 5.5, // = checkRadius, vehicles/vehicle_shrike.cs:225
-    numMountPoints: 1, // vehicles/vehicle_shrike.cs:116
-    protectedMountPoints: [true], // vehicles/vehicle_shrike.cs:117
+    numMountPoints: 1, // vehicles/vehicle_shrike.cs:110
+    protectedMountPoints: [true], // vehicles/vehicle_shrike.cs:111
     multipassenger: false, // vehicles/vehicle_shrike.cs:105
     cantAbandon: false, // unset in the script: this vehicle despawns when abandoned
     cantTeamSwitch: false, // unset in the script
@@ -523,8 +523,8 @@ export const VEHICLE_DATA: Record<VehicleKind, VehicleData> = {
     cameraOffset: 2, // vehicles/vehicle_havoc.cs:67
     cameraLag: 8.5, // vehicles/vehicle_havoc.cs:68
     groundContactHeight: 7.8115, // = checkRadius; the flyer only touches ground in a crash
-    numMountPoints: 6, // vehicles/vehicle_havoc.cs:57
-    protectedMountPoints: [true, true, true, true, true, true], // vehicles/vehicle_havoc.cs:58-63
+    numMountPoints: 6, // vehicles/vehicle_havoc.cs:58
+    protectedMountPoints: [true, true, true, true, true, true], // vehicles/vehicle_havoc.cs:59-64
     multipassenger: true, // vehicles/vehicle_havoc.cs:46
     cantAbandon: false, // unset in the script
     cantTeamSwitch: false, // unset in the script
@@ -552,8 +552,8 @@ export const VEHICLE_DATA: Record<VehicleKind, VehicleData> = {
     cameraOffset: 3, // vehicles/vehicle_tank.cs:224
     cameraLag: 1.5, // vehicles/vehicle_tank.cs:225
     groundContactHeight: TANK_GROUND_CONTACT_HEIGHT, // see that constant's own comment
-    numMountPoints: 2, // vehicles/vehicle_tank.cs:225
-    protectedMountPoints: [true, true], // vehicles/vehicle_tank.cs:226-227
+    numMountPoints: 2, // vehicles/vehicle_tank.cs:219
+    protectedMountPoints: [true, true], // vehicles/vehicle_tank.cs:220-221
     multipassenger: true, // vehicles/vehicle_tank.cs:211
     cantAbandon: false, // unset in the script
     cantTeamSwitch: false, // unset in the script
@@ -576,11 +576,11 @@ export const VEHICLE_DATA: Record<VehicleKind, VehicleData> = {
     cameraOffset: 6, // vehicles/vehicle_mpb.cs:133
     cameraLag: 1.5, // vehicles/vehicle_mpb.cs:134
     groundContactHeight: MPB_GROUND_REST_HEIGHT, // see that constant's own comment
-    numMountPoints: 1, // vehicles/vehicle_mpb.cs:132
-    protectedMountPoints: [true], // vehicles/vehicle_mpb.cs:133
-    multipassenger: false, // vehicles/vehicle_mpb.cs:130
-    cantAbandon: true, // vehicles/vehicle_mpb.cs:135
-    cantTeamSwitch: true, // vehicles/vehicle_mpb.cs:136
+    numMountPoints: 1, // vehicles/vehicle_mpb.cs:126
+    protectedMountPoints: [true], // vehicles/vehicle_mpb.cs:127
+    multipassenger: false, // vehicles/vehicle_mpb.cs:116
+    cantAbandon: true, // vehicles/vehicle_mpb.cs:129
+    cantTeamSwitch: true, // vehicles/vehicle_mpb.cs:130
     // The hull itself mounts nothing: its whole armament arrives with the deployed
     // MobileTurretBase below (vehicle.cs:860-869).
     weapons: NO_WEAPONS,

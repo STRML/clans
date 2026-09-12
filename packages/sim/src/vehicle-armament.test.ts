@@ -234,6 +234,30 @@ describe('vehicle armament: the gunner fires the turret', () => {
 });
 
 describe('vehicle crew seats', () => {
+  it('gives each kind the seat count and protected mounts its own script sets', () => {
+    // Each row is the script's own `numMountPoints` and `isProtectedMountPoint[i]`, cited at
+    // the field in vehicles.ts. Locked here because the seat count decides how many players a
+    // hull can carry and how far a boarding search may reach into its nodes, so a silent edit
+    // would change what a match can do. The citations were re-checked against the vendored
+    // scripts while writing this: three of them had drifted (the Shrike's by six lines, the
+    // Tank's by six and the MPB's seat fields pointed at its camera block), which is exactly
+    // the kind of error a test over the table cannot catch and a reader can.
+    const layout: { kind: VehicleKind; seats: number; protectedSeats: boolean[] }[] = [
+      { kind: VehicleKind.Shrike, seats: 1, protectedSeats: [true] },
+      { kind: VehicleKind.Wildcat, seats: 1, protectedSeats: [true] },
+      { kind: VehicleKind.Bomber, seats: 3, protectedSeats: [true, true, true] },
+      { kind: VehicleKind.Havoc, seats: 6, protectedSeats: [true, true, true, true, true, true] },
+      { kind: VehicleKind.Tank, seats: 2, protectedSeats: [true, true] },
+      { kind: VehicleKind.MobilePointBase, seats: 1, protectedSeats: [true] },
+    ];
+    for (const { kind, seats, protectedSeats } of layout) {
+      expect(VEHICLE_DATA[kind].numMountPoints, `kind ${String(kind)} seats`).toBe(seats);
+      expect(VEHICLE_DATA[kind].protectedMountPoints, `kind ${String(kind)} mounts`).toEqual(
+        protectedSeats,
+      );
+    }
+  });
+
   it('carries a second occupant, and the wire round-trips them', () => {
     const world = createWorld(flat, 1);
     const [pad] = poweredPads(world);

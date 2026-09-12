@@ -73,9 +73,12 @@ rerun in this audit. GitHub issue numbers below refer to
 6. **Fidelity backlog:** #54's yawed and elevated mount coverage (the measured shape replaces
    the sphere for every static pose, and the residual is written down in the shape data),
    the #5/#10 residuals below, #56's interior and force-field occlusion and its two-client
-   listen, then #57's remaining vehicle work: the four new kinds exist with their own models
-   and source constants, and their weapons, mounted turrets, passenger seats and the Mobile
-   Point Base's deployment are the next slice.
+   listen. #57's vehicles are done to the extent the scripts describe them: all six kinds
+   exist, the four new ones have their own models converted from source, their physics
+   classes, their script-cited armament, passenger seats on the wire (`passengerId`, protocol
+   11) with protected mounts, and the Mobile Point Base deploys a working station and turret
+   and packs them away again. The seat-count and protected-mount table is now pinned by a
+   test, and three of its citations were found to have drifted when it was written.
 7. **Interiors cannot be rebuilt from source.** Every `interiors.vl2/interiors/*.glb` source
    is 404 while the `.dif` originals are served, so a clean clone cannot build the interiors;
    the local cache hides that. A DIF reader is the same kind of job as the `.dts` reader and

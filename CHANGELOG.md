@@ -24,8 +24,12 @@ redeployed together.
   (`WheeledVehicleData(MobileBaseVehicle)`, mass 2000, `maxWheelSpeed` 20, `cantAbandon`),
   with their own models and skins. The physics went from two hardcoded kinds to three classes
   (`stepFlyer`, `stepHover`, and a new `stepWheeled`) with the Shrike and Wildcat proven
-  bit-identical across a 900-tick differential before and after. Their weapons, mounted
-  turrets, passenger seats and the MPB's deployment are not in yet and are named as such
+  bit-identical across a 900-tick differential before and after. Their armament, passenger
+  seats and the Mobile Point Base's deployment landed with them: the Tank's gunner-fired
+  chaingun and mortar, the Bomber's fusion bolt and bombs, the Shrike's pilot blaster, each
+  script-cited, with a second crew seat on the wire as an optional `passengerId`, protected
+  mounts redirecting damage to the hull, and the MPB deploying a working station and its
+  `MobileTurretBase` at the script's own mount nodes and mounting them back on undeploy
   (#57).
 - A Tribes 2 `.dts` shape reader (`packages/assets/src/dts.ts`) written from the Torque
   engine's stream code with a citation per field group, emitting GLB with the node hierarchy,
