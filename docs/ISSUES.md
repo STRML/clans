@@ -356,6 +356,24 @@ Playwright cases.
 
 ## Still open
 
+### P2: 48-bot tick bursts during mass engagements
+
+A 24-versus-24 match runs at a mean of 1.8 to 2.4 ms per tick against the sim's 32 ms budget
+(`FIXED_TICK_MS`), but not uniformly: measured over four seeds by 12,000 ticks, the
+over-budget ticks cluster instead of scattering. Seed 2 held 31 to 36 ms per tick for twenty
+consecutive ticks (3236 to 3255), and instrumenting that window puts **all** of it in the bot
+half -- 30 to 35 ms of bot decision-making while the simulation itself stayed at about 1.2 ms
+-- as the projectile count climbed through 126 to 158 during a mass engagement. So the server
+cannot hold 50 Hz for the duration of a big fight, and the cause is bot cost under load
+rather than physics or startup.
+
+Two runs of the identical tree counted 27 and 82 over-budget ticks out of 48,000, so host
+contention moves the count; the burst is compute. The bot half is also the whole mean (1.6 to
+2.0 ms against the simulation's 0.3), and the super-linear term is per-bot perception: each
+bot scans the whole roster with a terrain line-of-sight march per candidate
+(`perception.ts`'s `findNearestVisibleEnemy`, `findCarrierThreat`, `findAttackableTurret`).
+Attributing the burst to a specific scan and cutting it is the open work.
+
 ### P1: bots take the flag but never capture — #32
 
 See Start here for the current measurements and the ablation table. In one line: carriers are

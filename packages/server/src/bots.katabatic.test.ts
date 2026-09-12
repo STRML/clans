@@ -371,10 +371,17 @@ describe('bot-only match on production Katabatic (issue #32)', () => {
     //
     // Tick cost at this seating, measured over four seeds x 12,000 ticks (48,000 ticks, the
     // full window this test runs) with per-tick timing around the harness's own loop and the
-    // real respawn duty: mean 2.396 ms, deciles 1.5 to 4.3 ms, p99 19.4 ms, max 65.1 ms, and
-    // 82 of 48,000 ticks over the sim's 32 ms budget (FIXED_TICK_MS) -- 0.17%, concentrated
-    // in warmup and respawn waves. The bot half dominates the simulation half (2.04 against
-    // 0.36 ms), so the tail is bot AI, not physics.
+    // real respawn duty: mean 1.8 to 2.4 ms, deciles 1.2 to 3.4 ms, p99 16 to 19 ms, and a
+    // tail that is NOT warmup. Two runs of the same tree gave 27 and 82 ticks over the sim's
+    // 32 ms budget (FIXED_TICK_MS) out of 48,000, and the overruns cluster rather than
+    // scattering: seed 2, ticks 3236 to 3255, held 31 to 36 ms per tick for twenty
+    // consecutive ticks. Instrumenting that window attributes it entirely to the bot half
+    // (30 to 35 ms) with the simulation steady at about 1.2 ms, while the projectile count
+    // climbed through 126 to 158 -- a mass engagement, with 43 of 48 players alive and no
+    // deaths. So the cost is bot decision-making under load, not physics and not startup,
+    // and a 48-bot match cannot hold 50 Hz for the duration of such an engagement. The count
+    // varying between identical runs means part of it is host contention, but the burst
+    // itself is compute.
     let totalTouches = 0;
     const touchesByFlag: number[] = [];
     for (const seed of [1, 2, 3]) {
