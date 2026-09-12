@@ -12,6 +12,7 @@ import {
   FIXED_TICK_MS,
   FlagState,
   hasLineOfSight,
+  segmentBlockedByInteriors,
   VEHICLE_DATA,
   type VehicleData,
   VehicleKind,
@@ -1505,6 +1506,27 @@ function frameUsePressed(app: { freeCam: boolean }, input: Input): boolean {
   return input.usePressedThisFrame();
 }
 
+/** Whether the audience at `listener` should hear a cue at `position` as muffled: the same
+ *  two-part visibility rule the simulation uses everywhere it asks whether two points can
+ *  see each other. Terrain is the march `hasLineOfSight` runs; built geometry is
+ *  `segmentBlockedByInteriors`, the shared test turrets, projectiles and repair targeting
+ *  consult, whose force-field half is keyed to `team` because a field is team-passable.
+ *
+ *  Issue #56's occlusion residual: this was the terrain march alone, so a cue firing from
+ *  inside a bunker, or through a powered opposing field, sounded unobstructed. Exported for a
+ *  focused test, like the other read-only twins in this file. */
+export function audioOcclusionAt(
+  world: World,
+  listener: Vec3,
+  position: Vec3,
+  team: number,
+): boolean {
+  return (
+    !hasLineOfSight(world, listener, position) ||
+    segmentBlockedByInteriors(world, listener, position, team)
+  );
+}
+
 /** Task 7 (audio): jet/ski loops and cadence-gated footsteps for the local player, read
  *  straight off the just-simulated world state -- `ski`/`onGround`/`energy`/`velocity` are
  *  real PlayerStore fields (types.ts), not derived here. Split into one small function per
@@ -1971,7 +1993,15 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const audio = createAudioEngine({
     context: new AudioContext(),
     position: camera.position,
-    occlusionAt: (position) => !hasLineOfSight(world, camera.position, position),
+    // Issue #56's occlusion residual: this used to be the terrain march alone, which left a
+    // cue firing from inside a bunker to a target outside, or through a powered opposing
+    // force field, sounding unobstructed. It is now the same pair the simulation uses
+    // everywhere it asks whether two points can see each other -- terrain (`hasLineOfSight`)
+    // plus built geometry (`segmentBlockedByInteriors`, the shared test turrets, projectiles
+    // and repair targeting all consult, with the force-field rule keyed to the listener's own
+    // team since a field is team-passable).
+    occlusionAt: (position) =>
+      audioOcclusionAt(world, camera.position, position, world.players.team[playerId] ?? 0),
   });
   // Browsers start a fresh AudioContext `suspended` under autoplay restriction and require a
   // real user-gesture handler to resume it -- the same click that already requests pointer

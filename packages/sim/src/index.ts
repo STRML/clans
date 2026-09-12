@@ -36,4 +36,5 @@ export * from './weapons.js';
 export * from './world.js';
 
 export * from './ground.js';
+export * from './occlusion.js';
 export * from './spawn.js';

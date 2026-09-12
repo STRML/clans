@@ -9,6 +9,7 @@ import {
   BaseObjectKind,
   createBaseObjects,
   createFlags,
+  buildInteriorCollider,
   createWorld,
   FIXED_DT,
   FlagState,
@@ -37,6 +38,7 @@ import {
 } from '@clans/protocol';
 import type { AudioEngine } from './audio.js';
 import {
+  audioOcclusionAt,
   commanderMapPlayers,
   debugIsStationPowered,
   debugKillGenerator,
@@ -135,6 +137,27 @@ const flat: Heightfield = {
   heightScale: 1,
   heights: new Uint16Array(4),
 };
+
+describe('audioOcclusionAt (issue #56: built geometry muffles, not just terrain)', () => {
+  it('muffles a cue behind a wall that the terrain march alone would pass', () => {
+    const world = createWorld(flat, 1);
+    // A quad wall in the plane x = 5, the same fixture the simulation's own occlusion tests
+    // use, placed with no rotation.
+    world.interiors = [
+      buildInteriorCollider(
+        {
+          positions: new Float32Array([5, 0, -4, 5, 4, -4, 5, 4, 4, 5, 0, -4, 5, 4, 4, 5, 0, 4]),
+        },
+        { position: { x: 0, y: 0, z: 0 }, rotation: { axis: { x: 0, y: 1, z: 0 }, degrees: 0 } },
+      ),
+    ];
+    const listener = { x: -2, y: 1, z: 0 };
+    expect(audioOcclusionAt(world, listener, { x: 8, y: 1, z: 0 }, 1)).toBe(true);
+    // The same listener against a cue with no geometry between them is audible, so the answer
+    // above comes from the wall and not from the helper returning true unconditionally.
+    expect(audioOcclusionAt(world, listener, { x: -2, y: 1, z: 40 }, 1)).toBe(false);
+  });
+});
 
 describe('PilotYawController', () => {
   it('keeps sustained large mouse turns on their requested side of the vehicle', () => {
