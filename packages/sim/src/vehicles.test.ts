@@ -1462,6 +1462,54 @@ describe('flying class: Bomber and Havoc', () => {
 });
 
 describe('hover class: Tank', () => {
+  it('strafes the way the player does, on both vehicle classes', () => {
+    // The direction this pins was wrong on both classes: the vector the steps called `right`
+    // was (heading.z, 0, -heading.x), and the flyer step had the same sign written out by
+    // hand, so a craft moved opposite to the player. Nothing caught it because every strafe
+    // test checked magnitude rather than direction.
+    //
+    // The convention to match is the player's own, and it is geometric: `movement.ts`'s
+    // strafe basis is `x = moveZ * sin - moveX * cos`, i.e. at yaw 0 a positive moveX (the D
+    // key) drives the player toward -x, which is the true right for a body facing +z with up
+    // +y (right = forward x up = z x y = -x). A craft must do the same, so moveX +1 must
+    // LOWER x for a hover craft and a flyer alike, and moveX -1 must raise it.
+    const hover = kindWorld(VehicleKind.Wildcat, 2.75);
+    const flyer = kindWorld(VehicleKind.Shrike, 20);
+    for (let tick = 0; tick < 40; tick += 1) {
+      stepVehiclePhysics(hover.world, hover.id, { ...idleInput, moveX: 1 }, DT);
+      stepVehiclePhysics(flyer.world, flyer.id, { ...idleInput, moveX: 1 }, DT);
+    }
+    expect(hover.world.vehicles.velocity[hover.id * 3] ?? 0).toBeLessThan(-0.05);
+    expect(flyer.world.vehicles.velocity[flyer.id * 3] ?? 0).toBeLessThan(-0.05);
+    // The reverse input takes it the other way, so the assertion is about direction rather
+    // than about a craft drifting for some unrelated reason.
+    const other = kindWorld(VehicleKind.Wildcat, 2.75);
+    for (let tick = 0; tick < 40; tick += 1) {
+      stepVehiclePhysics(other.world, other.id, { ...idleInput, moveX: -1 }, DT);
+    }
+    expect(other.world.vehicles.velocity[other.id * 3] ?? 0).toBeGreaterThan(0.05);
+  });
+
+  it('cannot lose its whole bar to one impact at its own top speed', () => {
+    // The check the drag model has to clear, from the table's own fields: ground-impact
+    // damage is (speed - groundImpactMinSpeed) * groundImpactSpeedDamageScale, against
+    // maxDamage. The Wildcat tops out around 53 m/s (measured equilibrium: mainThrust 30 over
+    // dragForce 25/45, vehicle_wildcat.cs:138, :134), so its worst single hit is
+    // (53 - 29) * 0.010 = 0.24 of a 0.60 bar. Losing the bar in one hit would need about
+    // 89 m/s, which the equilibrium never reaches -- so removing the invented 15 m/s cap did
+    // not make a hover craft self-destructive. The cap had been standing in for a drag term
+    // that did not exist, and THAT model (unbounded acceleration) was the self-destructive
+    // one; this test keeps the distinction from being lost.
+    const wildcat = VEHICLE_DATA[VehicleKind.Wildcat];
+    const measuredTopSpeed = 53;
+    const worstHit =
+      (measuredTopSpeed - wildcat.groundImpactMinSpeed) * wildcat.groundImpactSpeedDamageScale;
+    expect(worstHit).toBeLessThan(wildcat.maxDamage);
+    const lethalInOneHit =
+      wildcat.groundImpactMinSpeed + wildcat.maxDamage / wildcat.groundImpactSpeedDamageScale;
+    expect(lethalInOneHit).toBeGreaterThan(measuredTopSpeed);
+  });
+
   it('settles on its own stab band, not the Wildcat hover height', () => {
     // stabLenMin 3.25 / stabLenMax 4 / stabSpringConstant 50 (vehicle_tank.cs:274-276), so
     // the spring's equilibrium sits the Tank at 3.625 - GRAVITY/50 = 3.225 m above terrain.

@@ -1185,12 +1185,13 @@ function applyFlyerThrust(
   const heading = headingOf(vehicles.yaw[id] ?? 0, vehicles.pitch[id] ?? 0);
   const thrust = params.maneuveringForce / data.mass;
   const yaw = at(vehicles.yaw, id);
-  // Lateral thrust along the craft's right: (cos yaw, 0, -sin yaw), which is the engine's own
-  // `mRightThrust` direction (`Point3F(1, 0, 0)` in its local frame, whose +X is right). The
-  // signs here used to be the reverse, so a flyer drifted left when the pilot strafed right.
-  vehicles.velocity[base] = at(vehicles.velocity, base) + Math.cos(yaw) * input.moveX * thrust * dt;
+  // Lateral thrust along the craft's right, which is the player's own convention
+  // (movement.ts's strafe basis): at yaw 0 a positive moveX drives -x, since right for a body
+  // facing +z with up +y is forward x up = z x y = -x. This pair was already correct; the
+  // hover class's vector was the mirrored one (see applyHoverThrust).
+  vehicles.velocity[base] = at(vehicles.velocity, base) - Math.cos(yaw) * input.moveX * thrust * dt;
   vehicles.velocity[base + 2] =
-    at(vehicles.velocity, base + 2) - Math.sin(yaw) * input.moveX * thrust * dt;
+    at(vehicles.velocity, base + 2) + Math.sin(yaw) * input.moveX * thrust * dt;
   vehicles.velocity[base] = (vehicles.velocity[base] ?? 0) + heading.x * input.moveZ * thrust * dt;
   vehicles.velocity[base + 1] =
     (vehicles.velocity[base + 1] ?? 0) +
