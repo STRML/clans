@@ -198,6 +198,34 @@ describe('vehicle armament: the gunner fires the turret', () => {
     expect(world.pendingVehicleFireEvents).toHaveLength(0);
   });
 
+  it('alternates the Shrike blaster between its two image slots, and says which one fired', () => {
+    // Issue #53's residual: the source mounts a PairImage at x +1.93 and its sibling at
+    // -1.93 and toggles them per shot (`%obj.nextWeaponFire`), which is why consecutive
+    // bolts leave opposite wings. The side is the simulation's to choose and it now travels
+    // on the event (and from there onto the projectile), so a client presenting the muzzle
+    // stops inferring it from how many bolts it has drawn.
+    const world = createWorld(flat, 1);
+    const [pad] = poweredPads(world);
+    const vId = spawnVehicleAtPad(world, pad as number, VehicleKind.Shrike) as number;
+    const pilot = boardPlayer(world, vId, 0);
+
+    const sides: number[] = [];
+    for (let shot = 0; shot < 4; shot += 1) {
+      world.vehicles.energy[vId] = VEHICLE_DATA[VehicleKind.Shrike].maxEnergy;
+      world.pendingVehicleFireEvents.length = 0;
+      // The blaster's own cooldown, cleared so each pass fires exactly one shot.
+      (world.vehicles as unknown as { weaponTimer: Float64Array }).weaponTimer[vId] = 0;
+      stepVehicles(world, new Map([[pilot, input({ fire: true })]]), DT);
+      expect(world.pendingVehicleFireEvents).toHaveLength(1);
+      sides.push(world.pendingVehicleFireEvents[0]!.side ?? 0);
+      // Release, so the next press is a fresh trigger edge.
+      stepVehicles(world, new Map([[pilot, input({})]]), DT);
+    }
+    // Strict alternation, starting on the right barrel, with no repeat or gap between the
+    // two values: a counter that flipped twice (or never) would show here.
+    expect(sides).toEqual([1, -1, 1, -1]);
+  });
+
   it('fires the chaingun many times a second but the mortar once per two seconds', () => {
     const world = createWorld(flat, 1);
     const [pad] = poweredPads(world);

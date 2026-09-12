@@ -38,13 +38,16 @@ describe('handshake codec', () => {
     expect(decodeJoin(encodeJoin())).toEqual({ type: MessageType.Join, version: PROTOCOL_VERSION });
   });
 
-  it('is version 11, so a #55-era v10 peer fails the Join equality check in both directions', () => {
-    // #55 changed the Loadout frame (3 -> 4 bytes, pack byte + weapons bitmask). Both the
-    // server's join.version !== PROTOCOL_VERSION check and the client's Welcome status
-    // reject a 10.x peer -- this pins the actual number so the bump cannot silently
-    // regress to a value a stale peer happens to share.
-    expect(PROTOCOL_VERSION).toBe(11);
-    expect(decodeJoin(encodeJoin()).version).not.toBe(10);
+  it('is version 12, so an 11-era peer fails the Join equality check in both directions', () => {
+    // #53 added a byte to every projectile record (the paired-image muzzle side), which is a
+    // fixed-size layout change rather than an optional trailing field, so client and server
+    // must be redeployed together: an 11 peer's projectile array would decode one byte short
+    // per entry and misalign every later row. Both the server's
+    // join.version !== PROTOCOL_VERSION check and the client's Welcome status reject it, and
+    // this pins the actual number so the bump cannot silently regress to a value a stale peer
+    // happens to share.
+    expect(PROTOCOL_VERSION).toBe(12);
+    expect(decodeJoin(encodeJoin()).version).not.toBe(11);
   });
 
   it('round-trips an accepted Welcome message, including the spawn point', () => {

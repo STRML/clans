@@ -792,6 +792,10 @@ describe('NetClient', () => {
           vy: 0,
           vz: 0,
           ownerId: 0,
+          // #53's paired-image side rides every projectile record (protocol 12), so a
+          // round-trip fixture carries it: 1 is the right barrel, the default a
+          // single-barrel weapon reports.
+          muzzleSide: 1,
           armed: 1,
         },
       ],

@@ -238,6 +238,7 @@ export function createProjectileStore(capacity = PROJECTILE_CAPACITY): Projectil
     velocity: new Float64Array(capacity * 3),
     expiresAtTick: new Float64Array(capacity),
     armed: new Uint8Array(capacity),
+    muzzleSide: new Int8Array(capacity).fill(1),
     impactSequence: 0,
     lastImpacts: [],
   };
@@ -1409,6 +1410,8 @@ function spawnVehicleShot(world: World, event: VehicleFireEvent, dt: number): vo
   const data = VEHICLE_WEAPON_DATA[weaponId];
   // The firing driver/gunner, for kill attribution -- see VehicleFireEvent.ownerId.
   store.ownerId[id] = event.ownerId ?? -1;
+  // Issue #53: the firing vehicle's own alternation, carried onto the shot it produced.
+  store.muzzleSide[id] = event.side ?? 1;
   store.type[id] = data.projectile;
   store.weaponId[id] = VEHICLE_WEAPON_ID_OFFSET + weaponId;
   store.team[id] = event.team;

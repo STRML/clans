@@ -205,6 +205,12 @@ export interface ProjectileStore {
    *  the only thing that behaves the same under both call paths. */
   expiresAtTick: Float64Array;
   armed: Uint8Array;
+  /** Which barrel of a paired image fired this shot: -1 left, +1 right (issue #53's per-side
+   *  Shrike muzzle origins). Presentation state that rides the projectile record so a client
+   *  presenting the muzzle does not have to infer the side from how many bolts it has drawn,
+   *  which misreported it whenever a recycled id rebuilt a mesh. The simulation sets it from
+   *  the firing vehicle's own alternation (VehicleStore.nextWeaponFire). */
+  muzzleSide: Int8Array;
   /** Monotonic source of ProjectileImpact.seq values -- see that interface. Kept on the store
    *  (not World) because createProjectileStore owns the store literal, and World's own literal
    *  lives in world.ts; stepProjectiles is the only writer. */

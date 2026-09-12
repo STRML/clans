@@ -85,6 +85,24 @@ redeployed together.
   with the client the moment the slot cap landed; it now derives from the simulation's own
   helper and asserts the visible slot count equals the armour's.
 
+### 2026-09-11 — the source's own shot sides, and audio that hears walls
+
+#### Changed
+
+- The Shrike's blaster alternates between its two mounted image slots the way the source does
+  (`%obj.nextWeaponFire` toggling a `PairImage` at x +1.93 and its sibling at -1.93), and the
+  simulation now reports which slot fired. The side rides `VehicleFireEvent` and the projectile
+  record, so a client presenting a bolt's muzzle uses the shot's own side instead of inferring
+  it from how many bolts it has drawn, which misreported the side whenever a recycled id
+  rebuilt a mesh. The projectile record grew a byte for it, so this ships as **protocol 12**:
+  client and server must be redeployed together, and the version pin's own test carries that
+  reason (#53).
+- Audio occlusion is now the same two-part rule the simulation uses for sight everywhere else:
+  the terrain march plus `segmentBlockedByInteriors`, the shared test turrets, projectiles and
+  repair targeting consult, with the force-field half keyed to the listener's own team. A cue
+  firing from inside a bunker, or through a powered opposing field, used to sound unobstructed
+  (#56).
+
 ### 2026-09-11 — the regenerated shapes are back in the basis the shipped ones used
 
 #### Fixed

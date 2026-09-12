@@ -63,6 +63,14 @@ export interface ProjectileSnapshotData {
    * predicting its exact expiry tick. Codex review round 15 (PR #9), finding 2.
    */
   armed: number;
+  /**
+   * Which barrel of a paired image fired this shot: -1 left, +1 right (issue #53). Optional
+   * so a frame from a peer that does not send it still decodes, and written only for a shot
+   * that has a paired image to choose between -- a single-barrel weapon's +1 is the default
+   * the reader applies. It is presentation state: the muzzle a client draws a bolt's tail
+   * from, which used to be inferred locally and got the side wrong after an id was recycled.
+   */
+  muzzleSide?: number;
 }
 export interface FlagSnapshotData {
   id: number;
@@ -234,11 +242,12 @@ const HEADER_BYTES = 1 + 4 + 4 + 4 + 4 + 1; // type, snapshotId, baselineId, tic
 // set. A networked client's HUD, prediction (armorFor drives energy/speed caps and fall-
 // damage scaling), and reconcile() all silently disagreed with the server's real loadout.
 // Codex round 1, finding 2.
-// id, type, weaponId, 6 f32 (pos+vel), ownerId i16, armed (round 15, PR #9, finding 2).
+// id, type, weaponId, 6 f32 (pos+vel), ownerId i16, armed (round 15, PR #9, finding 2),
+// muzzleSide u8 (#53's paired-image side, protocol 12).
 // ownerId is I16 since the #15 fix: a u16 write turned the turret-shot "no owner" sentinel
 // -1 into 65535 on the wire (see ProjectileSnapshotData.ownerId's own comment); the width
 // and therefore this total are unchanged.
-const PROJECTILE_BYTES = 2 + 1 + 1 + 4 * 6 + 2 + 1;
+const PROJECTILE_BYTES = 2 + 1 + 1 + 4 * 6 + 2 + 1 + 1;
 // id, team, state, 3 f32 (pos), carrierId i16, returnInS f32.
 const FLAG_BYTES = 1 + 1 + 1 + 4 * 3 + 2 + 4;
 // #55 adds hasEnergyPack (u8) + carriedWeapons (u8) after hasRepairPack: 17 -> 19 fixed
@@ -440,6 +449,10 @@ function writeProjectile(cursor: Cursor, p: ProjectileSnapshotData): void {
   // self-exclusion/attribution comparison against real player ids saw a phantom owner
   // (issue #15). Same signed-id convention FlagSnapshotData.carrierId already uses.
   writeI16(cursor, p.ownerId);
+  // Issue #53: the paired-image side, 0 for left and 1 for right (a signed byte would save
+  // nothing on the wire and this codec has no i8 writer). A single-barrel weapon's own
+  // value is 1, so the reader's default and the writer's agree.
+  writeU8(cursor, p.muzzleSide === -1 ? 0 : 1);
   writeU8(cursor, p.armed);
 }
 function readProjectile(cursor: Cursor): ProjectileSnapshotData {
@@ -453,9 +466,10 @@ function readProjectile(cursor: Cursor): ProjectileSnapshotData {
   const vy = readF32(cursor);
   const vz = readF32(cursor);
   const ownerId = readI16(cursor);
+  const muzzleSide = readU8(cursor) === 0 ? -1 : 1;
   const armed = readU8(cursor) ? 1 : 0;
   assertFinite([x, y, z, vx, vy, vz]);
-  return { id, type, weaponId, x, y, z, vx, vy, vz, ownerId, armed };
+  return { id, type, weaponId, x, y, z, vx, vy, vz, ownerId, muzzleSide, armed };
 }
 
 function writeFlag(cursor: Cursor, f: FlagSnapshotData): void {

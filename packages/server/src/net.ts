@@ -606,6 +606,9 @@ function snapshotProjectile(world: World, id: number): ProjectileSnapshotData {
     vy: projectileNum(p.velocity, base + 1),
     vz: projectileNum(p.velocity, base + 2),
     ownerId: p.ownerId[id] ?? -1,
+    // Issue #53: which barrel of a paired image fired, so the client's muzzle presentation
+    // stops inferring it. 1 (a single-barrel weapon's side) is what the codec defaults to.
+    muzzleSide: (p.muzzleSide[id] ?? 1) as -1 | 1,
     // Codex review round 15 (PR #9), finding 2: armed was hashed (hash.ts's mixProjectiles)
     // but never wired onto the snapshot. expiresAtTick deliberately stays off the wire -- see
     // ProjectileSnapshotData's doc comment (protocol/snapshot.ts).

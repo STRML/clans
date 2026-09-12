@@ -59,9 +59,13 @@ rerun in this audit. GitHub issue numbers below refer to
 3. **#53 remaining art.** The IFL playback driver, its frame table and **all 104 sequence
    frames** are committed (12 sequences: disc explosion, plasma barrel glow, both blaster
    muzzles, laser sweeps, spinfusor casing, jet exhaust, pad light, station blink, screen
-   static), so the sequences now animate instead of holding frame 0. Blaster ball/trail and
-   Chaingun crossed-ribbon tracers remain approximations. Per-side Shrike muzzle origins need
-   `VehicleFireEvent` side data in the sim (the client already alternates visually).
+   static), so the sequences now animate instead of holding frame 0. **Per-side Shrike muzzle
+   origins are done**: the simulation alternates the paired image slots exactly as
+   `%obj.nextWeaponFire` does, the side rides `VehicleFireEvent` and the projectile record, and
+   the client uses it instead of inferring the side from how many bolts it has drawn. That
+   grew the projectile record by a byte, so the wire is **protocol 12**. What remains is the
+   art itself: the Blaster ball and trail and the Chaingun's crossed-ribbon tracers are still
+   approximations.
 4. **#51 remaining: the perceptual listen.** The beam, HUD feedback, lifecycle gating, the
    player-candidate line-of-sight fix and the recording are all in: the "no source sample
    exists" claim was wrong, `fx/packs/repair_use.wav` is the source's own
@@ -98,7 +102,8 @@ rerun in this audit. GitHub issue numbers below refer to
 
 Verification: **1159 unit tests pass across 73 files** (the opt-in telemetry sweep is the one
 skip); `pnpm typecheck`, `pnpm lint` and `prettier --check` clean; **38/38 Playwright cases
-pass** (`env -u CI node_modules/.bin/playwright test`). Protocol stays **11**.
+pass** (`env -u CI node_modules/.bin/playwright test`). Protocol is **12**, bumped by the
+projectile record's paired-image side (see below).
 
 ## Landed in the second 2026-09-11 wave
 

@@ -189,7 +189,23 @@ describe('snapshot codec', () => {
 
   it('round-trips projectiles, flags, team scores, game over, and bots -- bots decoded in order, after every other field', () => {
     const projectiles: ProjectileSnapshotData[] = [
-      { id: 3, type: 0, weaponId: 0, x: 1, y: 2, z: 3, vx: 90, vy: 0, vz: 0, ownerId: 0, armed: 1 },
+      // muzzleSide is #53's paired-image side and rides every projectile record, so a
+      // round-trip fixture must carry it: -1 is the left barrel, the value a Shrike's second
+      // shield does not use. 1 is the default a single-barrel weapon reports.
+      {
+        id: 3,
+        type: 0,
+        weaponId: 0,
+        x: 1,
+        y: 2,
+        z: 3,
+        vx: 90,
+        vy: 0,
+        vz: 0,
+        ownerId: 0,
+        muzzleSide: -1,
+        armed: 1,
+      },
     ];
     const flags: FlagSnapshotData[] = [
       { id: 0, team: 1, state: 0, x: 0, y: 0, z: 0, carrierId: -1, returnInS: -1 },
@@ -602,7 +618,22 @@ describe('snapshot codec', () => {
     // the snapshot itself. expiresAtTick is deliberately NOT wired -- see
     // ProjectileSnapshotData's doc comment for why.
     const projectiles: ProjectileSnapshotData[] = [
-      { id: 5, type: 1, weaponId: 2, x: 1, y: 2, z: 3, vx: 0, vy: 0, vz: 0, ownerId: 0, armed: 1 },
+      // Same field as the round-trip above, at its other value, so both sides of the
+      // alternation are covered by a fixture rather than only the one a default produces.
+      {
+        id: 5,
+        type: 1,
+        weaponId: 2,
+        x: 1,
+        y: 2,
+        z: 3,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        ownerId: 0,
+        muzzleSide: 1,
+        armed: 1,
+      },
     ];
     const bytes = encodeSnapshot(1, 0, 0, [], null, {
       ...emptyExtras(),

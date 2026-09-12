@@ -62,7 +62,7 @@ export enum OrderKind {
 // would silently decode as "Repair Pack") and never reads the weapons byte at all, so the
 // handshake check must reject the mismatch in both directions exactly like every bump
 // before it.
-export const PROTOCOL_VERSION = 11;
+export const PROTOCOL_VERSION = 12;
 
 export enum WelcomeStatus {
   Ok = 0,

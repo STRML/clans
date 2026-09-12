@@ -135,6 +135,14 @@ export interface VehicleWeaponSpec {
    *  node 1 -- the Tank's turreteer (vehicle.cs:701) and the Bomber's bombardier (:601)
    *  -- while the Shrike's blaster belongs to its single pilot. */
   seat: 0 | 1;
+  /** True when the script mounts a PAIR of images and alternates them per shot, which is
+   *  what decides which barrel a shot visibly leaves. Only the Shrike has one in this set:
+   *  `vehicle_shrike.cs` places the blaster at x +1.93 and its sibling at -1.93, and
+   *  `%obj.nextWeaponFire` toggles between the two slots every shot. The choice is
+   *  presentation only -- the collision origin stays the hull line
+   *  (see `atMountNode` below) -- but it is the simulation's choice, not the client's to
+   *  guess, so it rides the fire event and the projectile that results. */
+  pairImage?: boolean;
   /** False only for the Shrike. Its shot has always originated at the hull origin since M5
    *  and its own kill-credit test fires along the hull heading through a target placed on
    *  that line; moving the origin to the wingtip (1.93 -0.52 0.044 from Mount10, the real
@@ -156,6 +164,7 @@ const SHRIKE_WEAPONS: readonly VehicleWeaponSpec[] = [
     barrelNode: 10,
     offset: { x: 1.93, y: -0.52, z: 0.044 }, // vehicle_shrike.cs:254
     seat: 0,
+    pairImage: true, // ...and its sibling image at -1.93, alternated per shot
     atMountNode: false, // see VehicleWeaponSpec.atMountNode
   },
 ];
@@ -219,6 +228,12 @@ export interface VehicleFireEvent {
   /** The T2 mount node the shot left from (VehicleWeaponSpec.mountNode), carried so the
    *  event names its own geometry and a test can assert it without re-deriving the table. */
   mountNode?: number;
+  /** Which barrel of a paired image fired: -1 the left, +1 the right. Only meaningful for a
+   *  spec with `pairImage`; single-barrel weapons report +1. The simulation alternates it the
+   *  way the source does (`%obj.nextWeaponFire`), so a client presenting the muzzle no
+   *  longer has to infer the side from how many bolts it has drawn -- which misreported the
+   *  side whenever a projectile's mesh was rebuilt after an id was recycled. */
+  side?: -1 | 1;
   /** The driving player credited when this shot destroys something (issue #57 kill
    *  attribution): tryFireShrikeBlaster always sets it, since it only fires piloted.
    *  Optional so partial/older event shapes stay valid -- projectiles.ts's
@@ -631,6 +646,13 @@ export interface VehicleStore {
   spawnTime: Float64Array; // seconds until fabrication and automatic boarding complete
   reservedPilotId: Int16Array;
   weaponTimer: Float64Array; // primary weapon cooldown; unused by the Wildcat
+  /** Which barrel of a paired image fires next: -1 left, +1 right, flipped after every shot
+   *  by a `pairImage` weapon and left at +1 by single-barrel ones. Real T2 keeps this as
+   *  `%obj.nextWeaponFire` on the vehicle object and toggles it per shot, which is why
+   *  consecutive blaster bolts leave opposite wings; it is per vehicle, so it survives a
+   *  weapon switch and a seat change. Presentation state, not physics, but the simulation
+   *  owns the alternation and hands it to the client on the event and the projectile. */
+  nextWeaponFire: Int8Array;
   /** Secondary weapon cooldown (a kind's weapons[1], i.e. the Tank's mortar and the
    *  Bomber's bombs); unused by every single-weapon kind. Kept off the wire -- see
    *  snapshot.ts's VehicleSnapshotData.weaponTimer comment. */
@@ -690,6 +712,7 @@ export function createVehicleStore(capacity = VEHICLE_CAPACITY): VehicleStore {
     spawnTime: new Float64Array(capacity),
     reservedPilotId: new Int16Array(capacity).fill(-1),
     weaponTimer: new Float64Array(capacity),
+    nextWeaponFire: new Int8Array(capacity).fill(1),
     weaponTimerAlt: new Float64Array(capacity),
     onGround: new Uint8Array(capacity),
     lastAttackerId: new Int16Array(capacity).fill(-1),
@@ -2396,10 +2419,16 @@ function emitVehicleShot(
 ): void {
   const vehicles = world.vehicles;
   const base = vId * 3;
+  // The side this shot leaves from, taken from the vehicle's own alternation and flipped here
+  // so the next shot of a paired image uses the other barrel (`%obj.nextWeaponFire`).
+  const nextSide: -1 | 1 = (vehicles.nextWeaponFire[vId] ?? 1) < 0 ? -1 : 1;
+  const side: -1 | 1 = spec.pairImage ? nextSide : 1;
+  if (spec.pairImage) vehicles.nextWeaponFire[vId] = side === 1 ? -1 : 1;
   world.pendingVehicleFireEvents.push({
     vehicleId: vId,
     weapon: spec.weapon,
     mountNode: spec.mountNode,
+    side,
     team: at(vehicles.team, vId),
     origin: weaponMuzzlePosition(world, vId, spec),
     direction: headingOf(aim.yaw, aim.pitch),

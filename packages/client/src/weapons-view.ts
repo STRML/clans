@@ -149,6 +149,16 @@ function nextShrikeMuzzleTail(): { x: number; y: number } {
   return { x: SHRIKE_MUZZLE_OFFSET_X * side, y: SHRIKE_MUZZLE_OFFSET_Y };
 }
 
+/** The muzzle tail for one bolt. The simulation now chooses the side and sends it on the
+ *  projectile (issue #53: `VehicleStore.nextWeaponFire` alternates exactly as
+ *  `%obj.nextWeaponFire` does, and the shot carries it), so that value is authoritative and
+ *  is what a bolt uses. The local alternation below is only the fallback for a projectile
+ *  that arrives without one. */
+function muzzleTailFor(p: ProjectileSnapshotData): { x: number; y: number } {
+  if (p.muzzleSide === undefined) return nextShrikeMuzzleTail();
+  return { x: SHRIKE_MUZZLE_OFFSET_X * p.muzzleSide, y: SHRIKE_MUZZLE_OFFSET_Y };
+}
+
 /** Crossed textured ribbons preserve the original glow from different viewing angles.
  * A Shrike bolt's two ribbons share the alternating muzzle tail; the cross ribbon is the
  * same geometry rotated a quarter turn about the beam axis, so its shear arrives
@@ -230,7 +240,8 @@ export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.
   // bolt carries the twin-muzzle tail: its alternating wing origins come from the source
   // image-pair offsets, while the handheld Chaingun has the one barrel.
   const color = projectileColor(projectile.weaponId, projectile.type);
-  const tail = projectile.type === ProjectileType.VehicleLaser ? nextShrikeMuzzleTail() : undefined;
+  const tail =
+    projectile.type === ProjectileType.VehicleLaser ? muzzleTailFor(projectile) : undefined;
   const mesh = new THREE.Mesh(
     projectileGeometry(projectile, tail),
     new THREE.MeshBasicMaterial({
