@@ -1344,7 +1344,18 @@ interface HoverParams {
    *  This replaced an invented `maxSpeed` cap (15 for the Wildcat, 13 for the Tank) that
    *  existed because an earlier version of this model had no drag at all and accelerated
    *  without limit; the cap stood in for the drag term and made both craft far slower than
-   *  the source's own physics. */
+   *  the source's own physics.
+   *
+   *  One consequence is worth knowing, because the cap was hiding it: collision damage
+   *  (`applyCollisionDamage`, the max closing speed across ground, interior and player
+   *  contacts) only fires above `collDamageThresholdVel`, and the Wildcat's cap sat BELOW its
+   *  own 23 m/s threshold, so a hover craft could never take collision damage at all. At the
+   *  drag equilibrium it can, exactly as its script prescribes: the Wildcat's
+   *  `collDamageMultiplier` 0.030 against a 0.60 pool makes a wall hit above about 43 m/s
+   *  fatal, and a full-speed slam is 53. That is the source's own arithmetic rather than an
+   *  artifact of removing the cap, and it is why a scouting craft should not be flown into
+   *  structures. The Tank is not affected in practice (0.045 against a 3.15 pool, so a
+   *  full-speed hit costs about 0.24). */
   dragForce: number;
   /** The script's own `vertFactor` (vehicle_wildcat.cs:135, vehicle_tank.cs:263, both 0):
    *  the engine drags the vertical axis by `dragForce * vertFactor` while the craft is on
