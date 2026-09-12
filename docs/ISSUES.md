@@ -363,16 +363,22 @@ A 24-versus-24 match runs at a mean of 1.8 to 2.4 ms per tick against the sim's 
 over-budget ticks cluster instead of scattering. Seed 2 held 31 to 36 ms per tick for twenty
 consecutive ticks (3236 to 3255), and instrumenting that window puts **all** of it in the bot
 half -- 30 to 35 ms of bot decision-making while the simulation itself stayed at about 1.2 ms
--- as the projectile count climbed through 126 to 158 during a mass engagement. So the server
-cannot hold 50 Hz for the duration of a big fight, and the cause is bot cost under load
-rather than physics or startup.
+-- with 43 of 48 players alive, no deaths, and the projectile count climbing through 126 to
+158. So the server cannot hold 50 Hz for the duration of a big fight, and the cause is bot
+cost under load rather than physics or startup.
 
-Two runs of the identical tree counted 27 and 82 over-budget ticks out of 48,000, so host
-contention moves the count; the burst is compute. The bot half is also the whole mean (1.6 to
-2.0 ms against the simulation's 0.3), and the super-linear term is per-bot perception: each
-bot scans the whole roster with a terrain line-of-sight march per candidate
-(`perception.ts`'s `findNearestVisibleEnemy`, `findCarrierThreat`, `findAttackableTurret`).
-Attributing the burst to a specific scan and cutting it is the open work.
+The projectile count is a proxy rather than the input: nothing in `packages/bots` reads the
+projectile store at all, and the perception scans that dominate cost walk the PLAYER store
+(`perception.ts`'s `findNearestVisibleEnemy` and `findCarrierThreat` at :73 and :193) and the
+turret store (:252), each candidate costing a terrain line-of-sight march. A rising
+projectile count therefore means many bots engaged, and more bots with a target is more
+roster scanning. Two runs of the identical tree counted 27 and 82 over-budget ticks out of
+48,000, so host contention moves the count too; the burst itself is compute.
+
+Attributing the burst to one specific scan and cutting it is the open work, and the fix has a
+shape already suggested by the numbers: the scans are per-bot and per-candidate over the full
+roster, so anything that shares or bounds them (a spatial bucket, a re-scan interval, or
+reusing one bot's visibility result for a neighbour) attacks the super-linear term.
 
 ### P1: bots take the flag but never capture — #32
 
