@@ -45,11 +45,25 @@ rerun in this audit. GitHub issue numbers below refer to
    the closest approach went 48 to 204 m. Meeting the help does not save the carrier, so the
    help is not a combat asset.
 
-   The number behind all four: at the death tick the nearest live teammate is a median **209 m
-   behind the carrier** while the team is at full strength, and the carrier is killed by the
-   first enemy that reaches it, a median 23 m away, at 15 m/s. Every lever that tried to move
-   the carrier, its speed or its company failed the same way. Re-run the telemetry before
-   theorizing, and read the wave section below before changing any carrier policy.
+   A **fifth** closed lever narrows what is left: the bots' lead solve ignored the velocity
+   their own projectile inherits (`velInherit`, 0.5 for the Spinfusor and the Chaingun), so a
+   moving shooter's shot arrived displaced by `v * inherit * travelTime`. The model gap is
+   real and small where it matters (about 1.7 m at 20 m for a 15 m/s shooter with the
+   Spinfusor, inside that weapon's 7.5 m splash). Measured at the target size it was neutral
+   on kills (370 to 375) and carrier deaths (21 to 22) and worse on the two numbers that
+   describe an actual flag run -- best penetration 48 to 354 m and both-flags-carried ticks
+   11059 to 5645 -- so it was reverted.
+
+   The number behind all four proximity/speed levers: at the death tick the nearest live
+   teammate is a median **209 m behind the carrier** while the team is at full strength, and
+   the carrier is killed by the first enemy that reaches it, a median 23 m away, at 15 m/s.
+   But proximity is not what kills it: a probe of every carrier death shows the carrier
+   fighting to the end (its last shot is a median 0 to 24 ticks before the death, and it lands
+   damage -- its killer finishes at 57 to 66 percent damage against a LIGHT pool of about
+   0.66). The carrier loses close fights narrowly, and the two arms that raised teammate
+   proximity changed nothing, so what remains is bot combat effectiveness in a chase rather
+   than coordination or navigation. Re-run the telemetry before theorizing, and read the wave
+   section below before changing any carrier policy.
 2. **Wildcat bugs (user report, 2026-09-10): closed.** Pad spawn and steering were fixed and
    measured in `1e26db4`; the camera followed in `c9e729f`, which gives the Wildcat T2's own
    camera: the cockpit rests on the model's authored `Eye` node and `X` slides it to the
