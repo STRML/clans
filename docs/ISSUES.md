@@ -73,7 +73,7 @@ rerun in this audit. GitHub issue numbers below refer to
    the capture-refusal rule has been exercised by data at all. The best configuration measured
    gives 415 kills, 17 flag touches, a closest approach of 2 m and that single capture.
 
-   It is a start, not a finish: three seeds of four still capture nothing. Four attempts at the
+   It is a start, not a finish: three seeds of four still capture nothing. Five attempts at the
    rate are measured, and only one is kept:
 
    | attempt | result |
@@ -82,11 +82,16 @@ rerun in this audit. GitHub issue numbers below refer to
    | a wider detour radius for carriers, 200 m to 400 m | inert: byte-identical matches |
    | aiming the craft at the waypoint graph's heading instead of the straight line | worse on every axis: 0 captures, kills 316, closest 122 m |
    | topping up a destroyed craft from the pad, as a player would | inert: byte-identical matches, so crafts are not being destroyed at all |
+   | a deflection ladder on a stalled ride, turning 45 degrees and retrying instead of dismounting | worse: 0 captures, kills 415 to 278, closest approach 2 to 6 m |
 
-   The last one is the informative one: the limit is not attrition, so it is that the carrier
-   and the one craft per side do not meet often enough, or that a ride ends before it has
-   crossed the ~1,000 m home leg. Note Katabatic carries exactly one vehicle pad per base, so
-   one craft exists per team by map data, not by policy.
+   Two of the five are informative and they point the same way: the limit is not attrition
+   (topping up a destroyed craft changed nothing) and not the driver's obstacle handling
+   (deflecting around one is worse than dismounting, because a craft wandering off its line
+   hurts every other bot's fight too: kills fell to 278). What remains is that the carrier and
+   the one craft per side do not meet often enough. Note Katabatic carries exactly one vehicle
+   pad per base, so one craft exists per team by map data, not by policy. The next candidate,
+   named and not built: reserve the team's craft for the carrier explicitly, so an attacker
+   riding it gives it up when its team takes the flag.
 
    The number behind the four proximity/speed levers that came before: at the death tick the
    nearest live teammate is a median **209 m behind the carrier** while the team is at full
