@@ -28,7 +28,13 @@ import {
 } from './perception.js';
 import { steerToward } from './steering.js';
 import { BotRole, BotState, type BotRuntimeState } from './types.js';
-import { decideVehicleGoal, shouldUseVehicle } from './vehicles.js';
+import {
+  decideVehicleGoal,
+  driveInputFor,
+  shouldUseVehicle,
+  vehicleDetourGoal,
+  VEHICLE_CARRIER_DETOUR_M,
+} from './vehicles.js';
 import type { WaypointGraph } from './waypoints.js';
 
 export const DEFEND_ENGAGE_RADIUS = 120; // Ours.
@@ -413,6 +419,11 @@ function carrierHomeGoal(
     return { position: carrierHoldPoint(world, runtime, ownId), key };
   }
   const home = flagStandPosition(world, ownId);
+  // Issue #32 vehicles: the same long-leg rule as the attacker's approach, and the reason the
+  // round trip can close -- a craft left at the enemy base during the take is right there
+  // when the flag comes off the stand.
+  const ride = vehicleDetourGoal(world, runtime.playerId, home, VEHICLE_CARRIER_DETOUR_M);
+  if (ride !== null) return ride;
   if (!carrierShouldRegroup(world, runtime)) return { position: home, key };
   // Regroup hold point: REGROUP_HOLD_M along the carrier -> home ray. Key stays
   // `home:<id>` so steering treats it as the same task (drift repathing handles the
@@ -440,7 +451,15 @@ function decideAttackerGoal(
   runtime: BotRuntimeState,
 ): { position: Vec3; key: string } {
   const enemyId = enemyFlagId(world, world.players.team[runtime.playerId] ?? 0);
-  return { position: flagPosition(world, enemyId), key: `enemyFlag:${String(enemyId)}` };
+  const target = flagPosition(world, enemyId);
+  // Issue #32 vehicles: the approach to the enemy stand is the long leg (the stands are
+  // 1,060 m apart), so an attacker takes a parked craft when one is on its way rather than
+  // walking the whole way. The carrier's own return leg gets the same treatment in
+  // carrierHomeGoal -- a craft parked at the enemy base is usually the one that attacker
+  // arrived in, which is how the round trip closes.
+  const ride = vehicleDetourGoal(world, runtime.playerId, target);
+  if (ride !== null) return ride;
+  return { position: target, key: `enemyFlag:${String(enemyId)}` };
 }
 
 /** Issue #32: how far an escort holds off its carrier. Exactly ON the carrier is worse
@@ -1126,6 +1145,19 @@ export function stepBot(
   maybeHeal(world, runtime.playerId);
   applyRepairOrder(world, runtime, order);
   const goal = decideGoal(world, runtime, order);
+  const combat = decideCombat(world, runtime);
+  // Issue #32 vehicles: a bot in a vehicle DRIVES it. Before this branch existed nothing in
+  // the brain knew a bot was mounted, so a riding bot kept emitting walking input -- which a
+  // vehicle reads as throttle and steer -- and kept pathing on foot. The craft steers toward
+  // an absolute heading (`applyHoverSteering`, the flyer controller), so the drive input is
+  // the bearing to the goal plus throttle, and `use` is the dismount once it is close enough
+  // to walk the rest.
+  if ((world.players.mountedVehicleId[runtime.playerId] ?? -1) !== -1) {
+    const drive = driveInputFor(world, runtime.playerId, goal.position);
+    runtime.aimYaw = drive.yaw;
+    runtime.state = decideState(runtime, combat.targetId);
+    return drivingInput(world, runtime, goal.position, combat);
+  }
   const armor = armorFor(world, runtime.playerId);
   const energy = world.players.energy[runtime.playerId] ?? 0;
   const team = world.players.team[runtime.playerId] ?? 0;
@@ -1142,12 +1174,25 @@ export function stepBot(
     armor,
     energy,
   );
-  const combat = decideCombat(world, runtime);
   // `aiming` (decideCombat) covers player AND structure aim solutions -- a turret target
   // keeps targetId null for decideState, so the yaw must key off `aiming`, not targetId.
   const yaw = combat.aiming ? combat.yaw : move.headingYaw;
   runtime.aimYaw = yaw;
   runtime.state = decideState(runtime, combat.targetId);
+  return walkingInput(world, runtime, order, move, combat, yaw);
+}
+
+/** The input a walking bot sends: the steering solution plus the combat decision, with the
+ *  mounting bit and the pack trigger the two callers below decide. Split out of stepBot
+ *  alongside drivingInput to keep that function inside the lint's complexity budget. */
+function walkingInput(
+  world: World,
+  runtime: BotRuntimeState,
+  order: TeamOrder | null,
+  move: { moveX?: number; moveZ?: number; jump?: boolean; jet?: boolean },
+  combat: ReturnType<typeof decideCombat>,
+  yaw: number,
+): PlayerInput {
   return {
     moveX: move.moveX ?? 0,
     moveZ: move.moveZ ?? 0,
@@ -1172,6 +1217,36 @@ export function stepBot(
     // stepVehicles itself edge-detects the bit, so holding this true for several consecutive
     // ticks still mounts exactly once, the same as a human holding E.
     use: shouldUseVehicle(world, runtime, runtime.playerId),
+  };
+}
+
+/** The input a mounted bot sends: the craft steers toward an absolute heading, so this is the
+ *  drive solution plus the combat decision it can still act on. Split out of stepBot to keep
+ *  that function inside the lint's complexity budget. */
+function drivingInput(
+  world: World,
+  runtime: BotRuntimeState,
+  goal: Vec3,
+  combat: ReturnType<typeof decideCombat>,
+): PlayerInput {
+  const drive = driveInputFor(world, runtime.playerId, goal);
+  return {
+    moveX: 0,
+    moveZ: drive.moveZ,
+    yaw: drive.yaw,
+    // Level, with jets only to climb to a goal that is above the craft (see driveInputFor):
+    // a flag stand sits on a base deck about 21 m up, which is the one vertical move the
+    // controller needs to make a run reachable.
+    pitch: 0,
+    jump: false,
+    jet: drive.jet,
+    fire: combat.fire,
+    altFire: false,
+    slot: combat.weaponId !== null ? combat.weaponId + 1 : 0,
+    // A driver runs no Repair Pack: the pack is a walking action, and the vehicle's own
+    // repair rules are the sim's business.
+    packActive: false,
+    use: drive.use,
   };
 }
 

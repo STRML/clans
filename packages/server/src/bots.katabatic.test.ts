@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BaseObjectKind,
   dueForRespawn,
   FlagState,
   hashWorld,
   LIGHT_ARMOR,
   respawnPlayer,
+  spawnVehicleAtPad,
+  VehicleKind,
   stepWorld,
   type PlayerInput,
   type Vec3,
@@ -265,8 +268,10 @@ async function runMatch(
   ticks: number,
   telemetryOut?: MatchTelemetry[],
   botsPerTeam: number = DEFAULT_BOTS_PER_TEAM,
+  vehiclesPerTeam = 0,
 ): Promise<MatchStats> {
   const { world, spawns } = await loadKatabaticWorld(seed);
+  parkVehiclesForMatch(world, vehiclesPerTeam);
   const landmarks = productionLandmarks(world, spawns);
   const manager = createBotManager(world, spawns, landmarks, botsPerTeam * 2, botsPerTeam);
   rebalanceTeams(manager, world, spawns);
@@ -304,6 +309,36 @@ const MATCH_TICKS = 12000; // Ours: ~6.4 minutes of simulated time -- long enoug
 // multiple flag runs each way at a ~10 m/s ski; the M2 bots-under-tick-budget bench
 // already proves the 5000-tick shape runs in budget, so this only scales the window.
 
+/** One vehicle parked on each team's pad, which is the state a real match starts from when
+ *  players have put them there. A bot-only match has nobody to spawn them, so the harness
+ *  does it when asked: without it the bot brain's own vehicle policy can never fire, since
+ *  it deliberately never spawns a vehicle itself (see `bots/vehicles.ts`). Katabatic carries
+ *  exactly one pad per base, so one per team is the map's own count. */
+function parkVehiclesForMatch(world: World, vehiclesPerTeam: number): void {
+  for (const team of [1, 2]) {
+    for (let parked = 0; parked < vehiclesPerTeam; parked += 1) {
+      const pad = nthPoweredPadForTeam(world, team, parked);
+      if (pad === null) continue;
+      const kind = team === 1 ? VehicleKind.Shrike : VehicleKind.Wildcat;
+      spawnVehicleAtPad(world, pad, kind);
+    }
+  }
+}
+
+/** The first powered vehicle pad a team owns, or null: the pad that a real match would have
+ *  a vehicle standing on. */
+function nthPoweredPadForTeam(world: World, team: number, index: number): number | null {
+  let seen = 0;
+  for (let id = 0; id < world.baseObjects.count; id += 1) {
+    if (world.baseObjects.kind[id] !== BaseObjectKind.StationVehiclePad) continue;
+    if (world.baseObjects.team[id] !== team) continue;
+    if ((world.baseObjects.powered[id] ?? 0) !== 1) continue;
+    if (seen === index) return id;
+    seen += 1;
+  }
+  return null;
+}
+
 /** The sweep's own tick count, overridable for iteration only: the full sweep is four
  *  matches x MATCH_TICKS and takes minutes, so a development pass can shorten it without
  *  touching the acceptance window or any behaviour constant. */
@@ -314,6 +349,11 @@ const SWEEP_TICKS = Number(process.env.BOT_TELEMETRY_TICKS ?? MATCH_TICKS);
  *  single acceptance test. Defaults to the acceptance seating, so an unset environment
  *  reproduces the sweep exactly as it was. */
 const SWEEP_BOTS_PER_TEAM = Number(process.env.BOT_TELEMETRY_TEAM_SIZE ?? DEFAULT_BOTS_PER_TEAM);
+
+/** Vehicles parked on each team's pad for the sweep, so the same four seeds can be measured
+ *  with and without the map's vehicles in play. Off by default: an unset environment
+ *  reproduces every table this harness has printed before. */
+const SWEEP_VEHICLES_PER_TEAM = Number(process.env.BOT_TELEMETRY_VEHICLES ?? 0);
 
 describe('bot-only match on production Katabatic (issue #32)', () => {
   it('sustains combat: multiple kills across the match, on every seed', async () => {
@@ -1063,7 +1103,13 @@ describe.skipIf(process.env.BOT_TELEMETRY !== '1')(
       );
       for (const seed of TELEMETRY_SEEDS) {
         const collected: MatchTelemetry[] = [];
-        const stats = await runMatch(seed, SWEEP_TICKS, collected, SWEEP_BOTS_PER_TEAM);
+        const stats = await runMatch(
+          seed,
+          SWEEP_TICKS,
+          collected,
+          SWEEP_BOTS_PER_TEAM,
+          SWEEP_VEHICLES_PER_TEAM,
+        );
         const telemetry = collected[0];
         if (!telemetry) throw new Error(`no telemetry collected for seed ${String(seed)}`);
         assertTelemetryWellFormed(telemetry, stats);

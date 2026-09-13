@@ -92,3 +92,121 @@ export function shouldUseVehicle(world: World, runtime: BotRuntimeState, botId: 
   if (!isUsableByTeam(store, vehicleId, team)) return false;
   return distance3D(world, botId, vehicleId) <= MOUNT_RANGE;
 }
+
+// --- Issue #32: bots drive the map's vehicles, and take one when the leg is long ---------
+//
+// Until this, `decideVehicleGoal` was a last-resort goal checked after every CTF priority, so
+// with a full roster it never fired at all: measured 0 mounts in 12,000 ticks with two
+// vehicles parked at the teams' own pads. Vehicles were also unusable when they did happen,
+// because nothing in the brain knew a bot was mounted -- a riding bot kept emitting walking
+// input, which a vehicle reads as throttle and steer. Both halves are here.
+
+/** A vehicle is worth the detour only when the leg is long: on Katabatic the two flag stands
+ *  are 1,060 m apart, and the point of a vehicle is to cross that at 25-100 m/s instead of
+ *  walking it at 15. Under this the walk is fine and the detour is pure loss. */
+export const VEHICLE_MIN_LEG_M = 300;
+
+/** How far off the line a bot will walk to reach a parked vehicle. Sized from the map: the
+ *  pads sit at each base alongside the spawns, so a radius of 90 m caught almost nothing (one
+ *  rider per match, measured), while 200 m lets a bot leaving its own base pick up the craft
+ *  parked there -- which is the whole point, since the leg it then rides is about 1,000 m. */
+
+export const VEHICLE_DETOUR_M = 200;
+
+/** Where a driving bot stops driving and dismounts. Deliberately tight: a capture is taken
+ *  inside a 2 m radius of the stand (`flags.ts`'s `PICKUP_RADIUS`, and its check reads the
+ *  CARRIER's position, which for a mounted player is the vehicle's), so a mounted carrier
+ *  that can reach the stand captures without ever getting out. At 40 m the rider arrived,
+ *  dismounted, and then had to walk the last stretch -- the stretch the whole feature exists
+ *  to skip. The dismount is now only for a craft that cannot get closer. */
+
+export const VEHICLE_DISMOUNT_M = 4;
+
+/** Straight-line distance from a bot to a point: the leg a detour has to be worth. */
+function legLengthTo(world: World, botId: number, target: Vec3): number {
+  const base = botId * 3;
+  return Math.hypot(
+    target.x - (world.players.position[base] ?? 0),
+    target.y - (world.players.position[base + 1] ?? 0),
+    target.z - (world.players.position[base + 2] ?? 0),
+  );
+}
+
+/** The nearest unoccupied same-team vehicle within `range`, or null. */
+export function findUsableVehicleNear(world: World, botId: number, range: number): number | null {
+  const store = world.vehicles;
+  const team = world.players.team[botId] ?? 0;
+  let best: number | null = null;
+  let bestDistance = Infinity;
+  for (let id = 0; id < store.count; id += 1) {
+    if (!isUsableByTeam(store, id, team)) continue;
+    const d = distance3D(world, botId, id);
+    if (d > range || d >= bestDistance) continue;
+    bestDistance = d;
+    best = id;
+  }
+  return best;
+}
+
+/** A detour to a parked vehicle when the bot's own leg is long, or null to walk it. Null
+ *  whenever the bot is already riding: once mounted, its goal must be the real target, not
+ *  the vehicle it is sitting in -- which is also what keeps the ride from reading as
+ *  "arrived" and dismounting on the spot. */
+export function vehicleDetourGoal(
+  world: World,
+  botId: number,
+  target: Vec3,
+  detourRange: number = VEHICLE_DETOUR_M,
+): { position: Vec3; key: string } | null {
+  if ((world.players.mountedVehicleId[botId] ?? -1) !== -1) return null;
+  if (legLengthTo(world, botId, target) < VEHICLE_MIN_LEG_M) return null;
+  const vehicleId = findUsableVehicleNear(world, botId, detourRange);
+  if (vehicleId === null) return null;
+  const vBase = vehicleId * 3;
+  return {
+    position: {
+      x: world.vehicles.position[vBase] ?? 0,
+      y: world.vehicles.position[vBase + 1] ?? 0,
+      z: world.vehicles.position[vBase + 2] ?? 0,
+    },
+    key: `vehicle:${String(vehicleId)}`,
+  };
+}
+
+/** The driving input for a mounted bot: the craft steers toward an absolute heading
+ *  (`applyHoverSteering` and the flyer's own controller both read `input.yaw` as the heading
+ *  to hold), so pointing it at the goal is the whole controller, and throttle is full until
+ *  the dismount range. `use` is the dismount: the sim edge-detects it, and holding it across
+ *  ticks does not re-mount (its own test pins that). */
+export function driveInputFor(
+  world: World,
+  botId: number,
+  goal: Vec3,
+): { yaw: number; moveZ: number; jet: boolean; use: boolean } {
+  const base = botId * 3;
+  const dx = goal.x - (world.players.position[base] ?? 0);
+  const dz = goal.z - (world.players.position[base + 2] ?? 0);
+  const dy = goal.y - (world.players.position[base + 1] ?? 0);
+  const distance = Math.hypot(dx, dz);
+  return {
+    yaw: Math.atan2(dx, dz),
+    moveZ: distance > VEHICLE_DISMOUNT_M ? 1 : 0,
+    // Jets when the goal is ABOVE the craft, which is what makes a flag run reachable at
+    // all: Katabatic's stands sit about 21 m up on the bases' decks, so a level-flying craft
+    // that never climbs can only ever get under them. A flyer climbs on its jets; a hover
+    // craft gets its hop. Nothing else about altitude is modelled yet -- no terrain
+    // following, no dive -- so this is the one vertical rule the controller has.
+    jet: dy > VEHICLE_CLIMB_M,
+    use: distance <= VEHICLE_DISMOUNT_M,
+  };
+}
+
+export const VEHICLE_CLIMB_M = 4;
+
+/** How far a FLAG CARRIER will walk to reach a craft, which is deliberately much further than
+ *  an attacker will (VEHICLE_DETOUR_M). The asymmetry is the round trip: the craft is parked
+ *  at the enemy base by whoever drove it there, and the carrier that takes the flag off that
+ *  stand has a 1,060 m walk home ahead of it, so a detour of several hundred metres still
+ *  wins. Measured: with the attacker's 200 m the first capture appeared but only in one seed
+ *  of four, with carriers reaching 0, 7, 30 and 86 m of their own stand. */
+export const VEHICLE_CARRIER_DETOUR_M = 400;
