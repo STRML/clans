@@ -35,7 +35,16 @@ const SHRIKE_TEXTURE = sourceTexture('projectiles/shrikeBolt.png');
 const SHRIKE_CROSS = sourceTexture('projectiles/shrikeBoltCross.png');
 const TRACER_TEXTURE = sourceTexture('projectiles/tracer00.PNG');
 const TRACER_CROSS = sourceTexture('projectiles/tracercross.png');
-const BLASTER_TRAIL_SECONDS = 0.2;
+const BLASTER_CROSS = sourceTexture('projectiles/blasterBoltCross.PNG');
+// The Blaster bolt, from its own datablock rather than approximated (blaster.cs's EnergyBolt):
+// `scale = "0.25 20.0 1.0"` is the stretched quad that gives the bolt its streak, and
+// `crossSize = 0.55` the cross quad that gives it volume from any angle, textured
+// `special/blasterBolt` and `special/blasterBoltCross` (:261-262). Issue #53's residual was
+// exactly this pair: the committed presentation was a sphere plus a positional-history line,
+// because the source's own rendering was thought to live only upstream.
+const BLASTER_TRAIL_WIDTH = 0.25;
+const BLASTER_TRAIL_LENGTH = 20;
+const BLASTER_CROSS_SIZE = 0.55;
 const SHRIKE_BOLT_LENGTH = 45;
 const CHAINGUN_TRACER_LENGTH = 15;
 // vehicle_shrike.cs mounts the Shrike's blaster images at offset x ±1.93, z +0.044
@@ -44,8 +53,6 @@ const CHAINGUN_TRACER_LENGTH = 15;
 const SHRIKE_MUZZLE_OFFSET_X = 1.93;
 const SHRIKE_MUZZLE_OFFSET_Y = 0.044;
 let nextShrikeMuzzleSide = 1;
-
-type TrailPoint = { position: THREE.Vector3; age: number };
 
 function directionFor(projectile: ProjectileSnapshotData): THREE.Vector3 {
   const velocity = new THREE.Vector3(projectile.vx, projectile.vy, projectile.vz);
@@ -64,7 +71,18 @@ function projectileGeometry(
   if (p.weaponId === WeaponId.Mortar || p.type === ProjectileType.Grenade) {
     return new THREE.SphereGeometry(p.type === ProjectileType.Grenade ? 0.25 : 0.19, 10, 7);
   }
-  return new THREE.SphereGeometry(p.type === ProjectileType.Energy ? 0.11 : 0.07, 8, 6);
+  if (p.type === ProjectileType.Energy) return blasterTrailGeometry();
+  return new THREE.SphereGeometry(0.07, 8, 6);
+}
+
+/** The Blaster bolt's streak quad: `EnergyBolt`'s own `scale` of 0.25 wide by 20 long
+ *  (blaster.cs:255), laid along the bolt's travel axis the same way the tracer ribbons are,
+ *  so the texture stretches behind the head rather than sitting on it. */
+function blasterTrailGeometry(): THREE.PlaneGeometry {
+  const geometry = new THREE.PlaneGeometry(BLASTER_TRAIL_WIDTH, BLASTER_TRAIL_LENGTH);
+  geometry.rotateX(Math.PI / 2);
+  geometry.translate(0, 0, BLASTER_TRAIL_LENGTH / 2);
+  return geometry;
 }
 
 function projectileColor(weaponId: number, type: number): number {
@@ -82,29 +100,6 @@ function projectileTexture(p: ProjectileSnapshotData): THREE.Texture | null {
   if (p.weaponId === WeaponId.Mortar) return MORTAR_TEXTURE;
   if (p.type === ProjectileType.Energy) return BLASTER_TEXTURE;
   return null;
-}
-
-/** The Blaster bolt's streak is a short positional history line (updateBlasterHistory
- * below); the source EnergyBolt's full rendering -- the energy_bolt.dts layered bolt
- * shape, its 20-long stretched trail and blasterBoltCross quad -- lives only upstream
- * (t2-mapper), so the committed presentation stays this textured ball plus history
- * streak. Documented approximation, per issue #53. */
-function addProjectileTrail(mesh: THREE.Mesh, p: ProjectileSnapshotData, color: number): void {
-  if (p.type !== ProjectileType.Energy) return;
-  const length = 0;
-  const trail = new THREE.Line(
-    new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(),
-      new THREE.Vector3(0, 0, length),
-    ]),
-    new THREE.LineBasicMaterial({
-      color: p.type === ProjectileType.Energy ? 0xff5533 : color,
-      transparent: true,
-      opacity: 0.7,
-    }),
-  );
-  trail.name = 'projectile-trail';
-  mesh.add(trail);
 }
 
 function isTracerType(type: number): boolean {
@@ -168,19 +163,31 @@ function addTracerCross(
   p: ProjectileSnapshotData,
   tail?: { x: number; y: number },
 ): void {
-  if (!isTracerType(p.type)) return;
-  const ribbon = new THREE.Mesh(
-    tracerGeometry(p, tail && { x: tail.y, y: -tail.x }),
-    mesh.material,
-  );
-  ribbon.rotation.z = Math.PI / 2;
-  ribbon.name = 'tracer-ribbon';
-  mesh.add(ribbon);
-  const size = p.type === ProjectileType.VehicleLaser ? 0.99 : 0.2;
+  if (!isTracerType(p.type) && p.type !== ProjectileType.Energy) return;
+  if (p.type !== ProjectileType.Energy) {
+    const ribbon = new THREE.Mesh(
+      tracerGeometry(p, tail && { x: tail.y, y: -tail.x }),
+      mesh.material,
+    );
+    ribbon.rotation.z = Math.PI / 2;
+    ribbon.name = 'tracer-ribbon';
+    mesh.add(ribbon);
+  }
+  const size =
+    p.type === ProjectileType.Energy
+      ? BLASTER_CROSS_SIZE
+      : p.type === ProjectileType.VehicleLaser
+        ? 0.99
+        : 0.2;
   const head = new THREE.Mesh(
     new THREE.PlaneGeometry(size, size),
     new THREE.MeshBasicMaterial({
-      map: p.type === ProjectileType.VehicleLaser ? SHRIKE_CROSS : TRACER_CROSS,
+      map:
+        p.type === ProjectileType.Energy
+          ? BLASTER_CROSS
+          : p.type === ProjectileType.VehicleLaser
+            ? SHRIKE_CROSS
+            : TRACER_CROSS,
       color: projectileColor(p.weaponId, p.type),
       transparent: true,
       blending: THREE.AdditiveBlending,
@@ -258,7 +265,6 @@ export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.
       side: THREE.DoubleSide,
     }),
   );
-  addProjectileTrail(mesh, projectile, color);
   addTracerCross(mesh, projectile, tail);
   addDiscGlow(mesh, projectile);
   // Codex review round 2 (PR #9), finding 8: the sim recycles freed projectile ids (same
@@ -267,7 +273,6 @@ export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.
   // built for onto the mesh itself lets syncProjectileMeshes below detect the swap.
   mesh.userData.type = projectile.type;
   mesh.userData.weaponId = projectile.weaponId;
-  mesh.userData.history = projectile.type === ProjectileType.Energy ? [] : undefined;
   projectileOrientation(mesh, projectile);
   return mesh;
 }
@@ -320,34 +325,6 @@ function pruneProjectileMeshes(
   }
 }
 
-function updateBlasterHistory(
-  mesh: THREE.Mesh,
-  trail: THREE.Line,
-  p: ProjectileSnapshotData,
-  dt: number,
-): void {
-  const history = (mesh.userData.history as TrailPoint[] | undefined) ?? [];
-  const current = new THREE.Vector3(p.x, p.y, p.z);
-  for (const point of history) point.age += dt;
-  while (history.length > 0 && history[0]!.age > BLASTER_TRAIL_SECONDS) history.shift();
-  const last = history[history.length - 1];
-  if (!last || last.position.distanceToSquared(current) > 1e-8)
-    history.push({ position: current, age: 0 });
-  mesh.userData.history = history;
-  const inverse = new THREE.Matrix4().compose(mesh.position, mesh.quaternion, mesh.scale).invert();
-  trail.geometry.setFromPoints(
-    history.map((point) => point.position.clone().applyMatrix4(inverse)),
-  );
-}
-
-function updateBlasterTrail(mesh: THREE.Mesh, p: ProjectileSnapshotData, dt: number): void {
-  const trail = mesh.getObjectByName('projectile-trail');
-  if (!(trail instanceof THREE.Line) || !(trail.material instanceof THREE.LineBasicMaterial))
-    return;
-  if (p.type === ProjectileType.Energy) updateBlasterHistory(mesh, trail, p, dt);
-  trail.material.opacity = p.type === ProjectileType.Tracer ? 0.8 : 0.7;
-}
-
 function syncOneProjectile(
   scene: THREE.Scene,
   meshes: Map<number, THREE.Mesh>,
@@ -381,7 +358,6 @@ function syncOneProjectile(
     mesh.userData.travelled = travelled;
     mesh.scale.z = Math.min(1, travelled / tracerLength(p));
   }
-  updateBlasterTrail(mesh, p, dt);
 }
 
 export function syncProjectileMeshes(

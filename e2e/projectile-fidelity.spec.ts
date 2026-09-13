@@ -110,3 +110,61 @@ test('Shrike and chaingun render original glowing tracer textures', async ({ pag
   ]);
   await page.screenshot({ path: testInfo.outputPath('tracer-textures.png') });
 });
+
+test("the Blaster bolt renders the datablock's own bolt and cross textures at their sizes", async ({
+  page,
+}, testInfo) => {
+  await page.goto('/');
+  await page.locator('#debug-stats[data-ready="1"]').waitFor({ state: 'attached' });
+  const result = await page.evaluate(async () => {
+    const app = (window as unknown as { __app: App }).__app;
+    app.paused = true;
+    const modulePath = '/src/weapons-view.ts';
+    const { createProjectileMesh } = await import(modulePath);
+    const mesh = createProjectileMesh({
+      id: 3,
+      type: 3, // ProjectileType.Energy
+      weaponId: 4, // WeaponId.Blaster
+      x: 0,
+      y: 0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: -425,
+      ownerId: -1,
+      armed: 1,
+    });
+    const position = app.camera.position
+      .clone()
+      .set(0, 0.4, -8)
+      .applyQuaternion(app.camera.quaternion)
+      .add(app.camera.position);
+    mesh.position.copy(position);
+    mesh.quaternion.copy(app.camera.quaternion);
+    mesh.rotateY(Math.PI / 3);
+    app.scene.add(mesh);
+    const textures = [mesh.material.map, mesh.getObjectByName('tracer-head')?.material.map];
+    for (const texture of textures) {
+      if (!texture?.image?.complete)
+        await new Promise<void>((resolve) =>
+          texture?.image
+            ? texture.image.addEventListener('load', () => resolve(), { once: true })
+            : setTimeout(resolve, 500),
+        );
+    }
+    app.frame(0);
+    return {
+      // EnergyBolt's own numbers (blaster.cs:255, :256).
+      trail: [mesh.geometry.parameters.width, mesh.geometry.parameters.height],
+      cross: [
+        mesh.getObjectByName('tracer-head')?.geometry.parameters.width,
+        mesh.getObjectByName('tracer-head')?.geometry.parameters.height,
+      ],
+      textured: textures.map((texture) => !!texture?.image?.width),
+    };
+  });
+  expect(result.trail).toEqual([0.25, 20]);
+  expect(result.cross).toEqual([0.55, 0.55]);
+  expect(result.textured).toEqual([true, true]);
+  await page.screenshot({ path: testInfo.outputPath('blaster-bolt.png') });
+});

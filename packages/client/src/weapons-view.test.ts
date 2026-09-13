@@ -77,16 +77,26 @@ describe('syncProjectileMeshes', () => {
     expect((tracer.geometry as THREE.PlaneGeometry).parameters.width).toBe(0.1);
   });
 
-  it('keeps a bounded, position-following history trail for bouncing blaster bolts', () => {
+  it('draws the Blaster bolt at the size its own datablock gives', () => {
+    // `EnergyBolt` (blaster.cs:255-262): `scale = "0.25 20.0 1.0"` is the stretched quad and
+    // `crossSize = 0.55` the cross quad, textured `special/blasterBolt` and
+    // `special/blasterBoltCross`. This replaces a sphere plus a positional-history line, which
+    // was the approximation issue #53 named -- so the numbers here come from the script, not
+    // from what the code used to do.
     const scene = new THREE.Scene();
     const meshes = new Map<number, THREE.Mesh>();
     const bolt = { ...disc(1, 0), type: 3, weaponId: 4, vx: 10 };
     syncProjectileMeshes(scene, meshes, [bolt], 0.05);
-    syncProjectileMeshes(scene, meshes, [{ ...bolt, x: 1 }], 0.05);
-    const trail = meshes.get(1)?.getObjectByName('projectile-trail') as THREE.Line;
-    expect(trail.geometry.getAttribute('position').count).toBe(2);
-    syncProjectileMeshes(scene, meshes, [{ ...bolt, x: 10 }], 0.25);
-    expect((meshes.get(1)?.userData.history as unknown[]).length).toBe(1);
+    const mesh = meshes.get(1) as THREE.Mesh;
+    const trail = mesh.geometry as THREE.PlaneGeometry;
+    expect(trail.parameters.width).toBe(0.25);
+    expect(trail.parameters.height).toBe(20);
+    const head = mesh.getObjectByName('tracer-head') as THREE.Mesh;
+    const cross = head.geometry as THREE.PlaneGeometry;
+    expect(cross.parameters.width).toBe(0.55);
+    expect(cross.parameters.height).toBe(0.55);
+    // The textures themselves are the manifest's business and the browser suite's (it decodes
+    // every shipped recording and bitmap); here the contract is the source's numbers.
   });
 
   it('adds a mesh per projectile and removes it once the id disappears', () => {
