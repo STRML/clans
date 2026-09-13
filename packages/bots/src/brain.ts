@@ -1153,11 +1153,15 @@ export function stepBot(
   // the bearing to the goal plus throttle, and `use` is the dismount once it is close enough
   // to walk the rest.
   if ((world.players.mountedVehicleId[runtime.playerId] ?? -1) !== -1) {
-    const drive = driveInputFor(world, runtime.playerId, goal.position);
+    const drive = driveInputFor(world, runtime, goal.position);
     runtime.aimYaw = drive.yaw;
     runtime.state = decideState(runtime, combat.targetId);
-    return drivingInput(world, runtime, goal.position, combat);
+    return drivingInput(combat, drive);
   }
+  // On foot, the ride's own bookkeeping is cleared: a later ride starts fresh rather than
+  // inheriting the last one's stall count.
+  runtime.rideStallTicks = 0;
+  runtime.rideBestDistance = Infinity;
   const armor = armorFor(world, runtime.playerId);
   const energy = world.players.energy[runtime.playerId] ?? 0;
   const team = world.players.team[runtime.playerId] ?? 0;
@@ -1224,12 +1228,9 @@ function walkingInput(
  *  drive solution plus the combat decision it can still act on. Split out of stepBot to keep
  *  that function inside the lint's complexity budget. */
 function drivingInput(
-  world: World,
-  runtime: BotRuntimeState,
-  goal: Vec3,
   combat: ReturnType<typeof decideCombat>,
+  drive: { moveZ: number; yaw: number; jet: boolean; use: boolean },
 ): PlayerInput {
-  const drive = driveInputFor(world, runtime.playerId, goal);
   return {
     moveX: 0,
     moveZ: drive.moveZ,

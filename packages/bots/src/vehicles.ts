@@ -180,26 +180,47 @@ export function vehicleDetourGoal(
  *  ticks does not re-mount (its own test pins that). */
 export function driveInputFor(
   world: World,
-  botId: number,
+  runtime: BotRuntimeState,
   goal: Vec3,
 ): { yaw: number; moveZ: number; jet: boolean; use: boolean } {
+  const botId = runtime.playerId;
   const base = botId * 3;
   const dx = goal.x - (world.players.position[base] ?? 0);
   const dz = goal.z - (world.players.position[base + 2] ?? 0);
   const dy = goal.y - (world.players.position[base + 1] ?? 0);
   const distance = Math.hypot(dx, dz);
+  // Stall escape. Without it a craft that cannot reach the goal -- a wall, the base deck the
+  // stand sits on, a slope it cannot climb -- holds throttle against the obstacle for the rest
+  // of the match, with the bot still inside it, which is what the 7, 30 and 86 m closest
+  // approaches were. Progress is measured on the best distance this ride has seen, so a
+  // detour around an obstacle still counts as progress and a craft stuck against one does
+  // not.
+  if (distance < runtime.rideBestDistance - RIDE_PROGRESS_M) {
+    runtime.rideBestDistance = distance;
+    runtime.rideStallTicks = 0;
+  } else {
+    runtime.rideStallTicks += 1;
+  }
+  const stalled = runtime.rideStallTicks >= RIDE_STALL_TICKS;
   return {
     yaw: Math.atan2(dx, dz),
-    moveZ: distance > VEHICLE_DISMOUNT_M ? 1 : 0,
+    moveZ: distance > VEHICLE_DISMOUNT_M && !stalled ? 1 : 0,
     // Jets when the goal is ABOVE the craft, which is what makes a flag run reachable at
     // all: Katabatic's stands sit about 21 m up on the bases' decks, so a level-flying craft
     // that never climbs can only ever get under them. A flyer climbs on its jets; a hover
     // craft gets its hop. Nothing else about altitude is modelled yet -- no terrain
     // following, no dive -- so this is the one vertical rule the controller has.
-    jet: dy > VEHICLE_CLIMB_M,
-    use: distance <= VEHICLE_DISMOUNT_M,
+    jet: dy > VEHICLE_CLIMB_M && !stalled,
+    use: stalled || distance <= VEHICLE_DISMOUNT_M,
   };
 }
+
+/** Progress a ride has to make to count as moving, in metres, and how many ticks without it
+ *  before the driver gives up and walks. 1 m over 3 s is a craft that is not going anywhere:
+ *  a Wildcat crosses 1,000 m in under a minute, so anything that holds a metre for three
+ *  seconds is against something. */
+const RIDE_PROGRESS_M = 1;
+const RIDE_STALL_TICKS = 90;
 
 export const VEHICLE_CLIMB_M = 4;
 

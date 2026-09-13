@@ -135,6 +135,13 @@ export interface BotRuntimeState {
    *  when it is not staging. Decision-layer state with no world-side equivalent: the sim
    *  records no flag-pickup tick, and the bounded wait is exactly this clock. */
   carrierStageSinceTick: number;
+  /** Issue #32 vehicles: ticks the bot has been riding while its distance to the goal has
+   *  not improved, and the best (smallest) distance seen during this ride. A craft that
+   *  cannot reach its goal -- blocked by a base deck it cannot climb, a wall, or terrain --
+   *  otherwise holds throttle forever: measured closest approaches of 7, 30 and 86 m on seeds
+   *  where the carrier never arrived. Reset when the bot is not riding. */
+  rideStallTicks: number;
+  rideBestDistance: number;
   /** Issue #32 launch cohesion: true once the carrier's staging wait has ended -- company
    *  arrived, the give-up expired, or the carrier was already past the stage line -- so it
    *  walks the home leg and does not walk back. Cleared wherever carrierStageSinceTick is
@@ -181,6 +188,8 @@ export function createBotRuntimeState(
     escapeJetTicks: 0,
     pocketTicks: 0,
     pocketBaseGap: 0,
+    rideStallTicks: 0,
+    rideBestDistance: Infinity,
     carrierStageSinceTick: -1,
     carrierStageLaunched: false,
     lastSteerPosition: null,
