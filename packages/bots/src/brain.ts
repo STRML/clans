@@ -415,15 +415,20 @@ function carrierHomeGoal(
   if (recover !== null) return recover;
   const stage = carrierStageGoal(world, runtime, team);
   if (stage !== null) return stage;
-  if (ownFlagAway(world, team)) {
-    return { position: carrierHoldPoint(world, runtime, ownId), key };
-  }
   const home = flagStandPosition(world, ownId);
   // Issue #32 vehicles: the same long-leg rule as the attacker's approach, and the reason the
   // round trip can close -- a craft left at the enemy base during the take is right there
-  // when the flag comes off the stand.
+  // when the flag comes off the stand. Checked BEFORE the own-flag-away hold, because that
+  // hold is where a carrier spends much of a run (both flags are carried about a quarter of
+  // the time) and a craft is travel either way: holding at a point 700 m from home and riding
+  // to it are the same task, and the ride is the one that ends in a capture. The staging wait
+  // above is deliberately left in front of this: staging is a cohesion decision, and a
+  // carrier that rides off alone has abandoned it.
   const ride = vehicleDetourGoal(world, runtime.playerId, home, VEHICLE_CARRIER_DETOUR_M);
   if (ride !== null) return ride;
+  if (ownFlagAway(world, team)) {
+    return { position: carrierHoldPoint(world, runtime, ownId), key };
+  }
   if (!carrierShouldRegroup(world, runtime)) return { position: home, key };
   // Regroup hold point: REGROUP_HOLD_M along the carrier -> home ray. Key stays
   // `home:<id>` so steering treats it as the same task (drift repathing handles the
