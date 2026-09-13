@@ -54,9 +54,31 @@ rerun in this audit. GitHub issue numbers below refer to
    describe an actual flag run -- best penetration 48 to 354 m and both-flags-carried ticks
    11059 to 5645 -- so it was reverted.
 
-   The number behind all four proximity/speed levers: at the death tick the nearest live
-   teammate is a median **209 m behind the carrier** while the team is at full strength, and
-   the carrier is killed by the first enemy that reaches it, a median 23 m away, at 15 m/s.
+   **Vehicles change this, and they are the first thing that has.** Bots never used them: a
+   vehicle goal was a last-resort fallback after every CTF priority, so with a full roster it
+   never fired (measured 0 mounts in 12,000 ticks with two craft parked at the teams' own
+   pads), and nothing in the brain knew a bot was mounted, so a rider kept sending walking
+   input. Both halves are in now -- a driving controller (bearing, throttle, jets to climb to
+   a goal that is above the craft, which is what reaches a stand on a base deck) and a policy
+   that takes a parked craft when the bot's own leg is long -- measured at 24v24 over four
+   seeds:
+
+   | | no vehicles | bots drive |
+   | --- | --- | --- |
+   | captures | 0 | **1** |
+   | runs arriving in the 2 m radius | 0 | **1** |
+   | refused ticks (own flag away) | 0 | 1,245 |
+
+   Those are two firsts: the first capture any configuration has produced, and the first time
+   the capture-refusal rule has been exercised by data at all. Per-seed closest approaches
+   become 0, 7, 30 and 86 m against 48-570 m before, so the rides get close rather than
+   wandering. It is a start, not a finish: three seeds of four still capture nothing, and the
+   map carries one vehicle pad per team, so at most one craft per side exists to be ridden.
+
+   The number behind the four proximity/speed levers that came before: at the death tick the
+   nearest live teammate is a median **209 m behind the carrier** while the team is at full
+   strength, and the carrier is killed by the first enemy that reaches it, a median 23 m away,
+   at 15 m/s.
    But proximity is not what kills it: a probe of every carrier death shows the carrier
    fighting to the end (its last shot is a median 0 to 24 ticks before the death, and it lands
    damage -- its killer finishes at 57 to 66 percent damage against a LIGHT pool of about
