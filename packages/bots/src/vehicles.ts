@@ -183,6 +183,13 @@ export function driveInputFor(
   runtime: BotRuntimeState,
   goal: Vec3,
 ): { yaw: number; moveZ: number; jet: boolean; use: boolean } {
+  // Straight line to the goal, measured against the alternative rather than assumed: aiming
+  // the craft at the WALKING solution's heading instead (the waypoint graph, which is the only
+  // heading in the brain that routes) made every seed worse -- 0 captures against 1, kills 316
+  // against 405, closest approach 122 m against 2 m. The graph is coarse and built for
+  // pedestrians: a craft follows its nodes in a long detour and overshoots each one at speed.
+  // If the straight line is blocked the stall escape ends the ride, which costs less than the
+  // detour does.
   const botId = runtime.playerId;
   const base = botId * 3;
   const dx = goal.x - (world.players.position[base] ?? 0);
