@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { addPlayer, createWorld, type Heightfield } from '@clans/sim';
-import { decideVehicleGoal, findMountableVehicle, shouldUseVehicle } from './vehicles.js';
+import {
+  decideVehicleGoal,
+  driveInputFor,
+  findMountableVehicle,
+  shouldUseVehicle,
+  VEHICLE_CARRIER_DETOUR_M,
+  VEHICLE_DETOUR_M,
+  VEHICLE_DISMOUNT_M,
+  VEHICLE_MIN_LEG_M,
+  vehicleDetourGoal,
+} from './vehicles.js';
 import { BotRole, createBotRuntimeState } from './types.js';
 
 const flat: Heightfield = {
@@ -157,5 +167,109 @@ describe('shouldUseVehicle', () => {
     runtime.goalKey = `vehicle:${String(vehicleId)}`;
     world.vehicles.destroyed[vehicleId] = 1;
     expect(shouldUseVehicle(world, runtime, bot)).toBe(false);
+  });
+});
+
+// --- Issue #32 vehicles: the driving controller and the detour policy -------------------
+
+describe('driveInputFor', () => {
+  function rig(): {
+    world: ReturnType<typeof createWorld>;
+    runtime: ReturnType<typeof createBotRuntimeState>;
+  } {
+    const world = createWorld(flat, 1);
+    const playerId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    return { world, runtime: createBotRuntimeState(playerId) };
+  }
+
+  it('steers at the goal and holds throttle until it is close', () => {
+    const { world, runtime } = rig();
+    // Due +z: the sim's own heading at yaw 0, so the drive yaw is 0 and the throttle is full.
+    const ahead = driveInputFor(world, runtime, { x: 0, y: 0, z: 200 });
+    expect(ahead.yaw).toBeCloseTo(0, 6);
+    expect(ahead.moveZ).toBe(1);
+    expect(ahead.use).toBe(false);
+    // Due +x is a quarter turn, which is the bearing the controller has to produce.
+    const right = driveInputFor(world, runtime, { x: 200, y: 0, z: 0 });
+    expect(right.yaw).toBeCloseTo(Math.PI / 2, 6);
+  });
+
+  it('dismounts inside the dismount range and stops throttling', () => {
+    const { world, runtime } = rig();
+    const close = driveInputFor(world, runtime, { x: 0, y: 0, z: VEHICLE_DISMOUNT_M / 2 });
+    expect(close.moveZ).toBe(0);
+    expect(close.use).toBe(true);
+  });
+
+  it('holds jets only when the goal is above the craft', () => {
+    const { world, runtime } = rig();
+    expect(driveInputFor(world, runtime, { x: 0, y: 0, z: 200 }).jet).toBe(false);
+    // A flag stand sits about 21 m up on a base deck; without the climb the craft can only
+    // ever get underneath it.
+    expect(driveInputFor(world, runtime, { x: 0, y: 21, z: 200 }).jet).toBe(true);
+  });
+
+  it('escapes a craft that stops making progress, and not one that is closing', () => {
+    const { world, runtime } = rig();
+    // Closing 10 m a tick on a goal that stays far away: never a stall, however long it runs.
+    // (The goal has to stay outside the dismount range -- arriving is a dismount, which is a
+    // different rule and would make this loop assert the wrong thing.)
+    for (let tick = 0; tick < 200; tick += 1) {
+      const goal = { x: 0, y: 0, z: 5000 - tick * 10 };
+      expect(driveInputFor(world, runtime, goal).use).toBe(false);
+    }
+    // Now a goal it cannot reach: same distance every tick.
+    const stuck = { x: 0, y: 0, z: 500 };
+    let escapedAt = -1;
+    for (let tick = 0; tick < 200 && escapedAt === -1; tick += 1) {
+      if (driveInputFor(world, runtime, stuck).use) escapedAt = tick;
+    }
+    expect(escapedAt).toBeGreaterThan(0);
+    expect(escapedAt).toBeLessThan(200);
+  });
+});
+
+describe('vehicleDetourGoal', () => {
+  it('is null for a short leg, and for a bot already riding', () => {
+    const world = createWorld(flat, 1);
+    const playerId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    addVehicle(world, { team: 1, x: 0, y: 0, z: 20 });
+    // A leg under the threshold is a walk, not a ride.
+    expect(
+      vehicleDetourGoal(world, playerId, { x: 0, y: 0, z: VEHICLE_MIN_LEG_M - 10 }),
+    ).toBeNull();
+    // A bot already in a craft must keep steering at its real target: a vehicle goal here
+    // would read as "arrived" and dismount on the spot.
+    world.players.mountedVehicleId[playerId] = 0;
+    expect(vehicleDetourGoal(world, playerId, { x: 0, y: 0, z: 5000 })).toBeNull();
+  });
+
+  it('takes a same-team craft on a long leg and ignores one it cannot use', () => {
+    const world = createWorld(flat, 1);
+    const playerId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const far = { x: 0, y: 0, z: VEHICLE_MIN_LEG_M + 200 };
+    // Enemy craft, destroyed craft and an occupied one are all unusable, so the answer is a
+    // walk rather than a detour to something the sim would refuse to mount.
+    const enemy = addVehicle(world, { team: 2, x: 0, y: 0, z: 10 });
+    expect(vehicleDetourGoal(world, playerId, far)).toBeNull();
+    world.vehicles.destroyed[enemy] = 1;
+    expect(vehicleDetourGoal(world, playerId, far)).toBeNull();
+    const mine = addVehicle(world, { team: 1, x: 0, y: 0, z: 30 });
+    expect(vehicleDetourGoal(world, playerId, far)?.key).toBe(`vehicle:${String(mine)}`);
+    world.vehicles.driverId[mine] = 7;
+    expect(vehicleDetourGoal(world, playerId, far)).toBeNull();
+  });
+
+  it('gives a carrier a longer reach for its craft than an attacker gets', () => {
+    // The carrier has about 1,060 m to walk home, so it will fetch a craft from further away
+    // than an attacker will: measured 0, 7, 30 and 86 m closest approaches at the attacker's
+    // 200 m against the first capture at the carrier's 400 m.
+    const world = createWorld(flat, 1);
+    const playerId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const distance = VEHICLE_DETOUR_M + 50;
+    addVehicle(world, { team: 1, x: 0, y: 0, z: distance });
+    const far = { x: 0, y: 0, z: VEHICLE_MIN_LEG_M + 500 };
+    expect(vehicleDetourGoal(world, playerId, far)).toBeNull();
+    expect(vehicleDetourGoal(world, playerId, far, VEHICLE_CARRIER_DETOUR_M)).not.toBeNull();
   });
 });
