@@ -70,10 +70,23 @@ rerun in this audit. GitHub issue numbers below refer to
    | refused ticks (own flag away) | 0 | 1,245 |
 
    Those are two firsts: the first capture any configuration has produced, and the first time
-   the capture-refusal rule has been exercised by data at all. Per-seed closest approaches
-   become 0, 7, 30 and 86 m against 48-570 m before, so the rides get close rather than
-   wandering. It is a start, not a finish: three seeds of four still capture nothing, and the
-   map carries one vehicle pad per team, so at most one craft per side exists to be ridden.
+   the capture-refusal rule has been exercised by data at all. The best configuration measured
+   gives 415 kills, 17 flag touches, a closest approach of 2 m and that single capture.
+
+   It is a start, not a finish: three seeds of four still capture nothing. Four attempts at the
+   rate are measured, and only one is kept:
+
+   | attempt | result |
+   | --- | --- |
+   | a stall escape, so a craft pressed against a deck dismounts | **kept** (kills 352 to 405) |
+   | a wider detour radius for carriers, 200 m to 400 m | inert: byte-identical matches |
+   | aiming the craft at the waypoint graph's heading instead of the straight line | worse on every axis: 0 captures, kills 316, closest 122 m |
+   | topping up a destroyed craft from the pad, as a player would | inert: byte-identical matches, so crafts are not being destroyed at all |
+
+   The last one is the informative one: the limit is not attrition, so it is that the carrier
+   and the one craft per side do not meet often enough, or that a ride ends before it has
+   crossed the ~1,000 m home leg. Note Katabatic carries exactly one vehicle pad per base, so
+   one craft exists per team by map data, not by policy.
 
    The number behind the four proximity/speed levers that came before: at the death tick the
    nearest live teammate is a median **209 m behind the carrier** while the team is at full
