@@ -179,7 +179,7 @@ describe('driveInputFor', () => {
   } {
     const world = createWorld(flat, 1);
     const playerId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
-    return { world, runtime: createBotRuntimeState(playerId) };
+    return { world, runtime: createBotRuntimeState(playerId, BotRole.Attacker, 1) };
   }
 
   it('steers at the goal and holds throttle until it is close', () => {
