@@ -518,7 +518,25 @@ Playwright cases.
 - Perceptual QA note: the panner path is exercised through fakes in unit tests; a two-client
   browser listen is still the honest check.
 
-## Still open
+## Issue ledger
+
+Open first, then the closed items whose evidence is worth keeping. The tracker is the authority
+on state; this section is the evidence behind it, and each heading below says which it is.
+
+### Open now
+
+- **#51 repair presentation** -- beam, HUD feedback and lifecycle gating are in, and the beam's
+  source recording (`fx/packs/repair_use.wav`, `repairpack.cs`'s `RepairPackFireSound`) is wired; the
+  issue's acceptance also asks for a perceptual listen, which no test can do. Rig in Development
+  handoff.
+- **#55 UI, inventory and loadout** -- loadout, pack icon, `maxWeapons` and the vehicle reticles
+  are done; what is left is the pixel layout of the compass and the vehicle instrument cluster
+  (no `.gui` layout files in either game-data dump; the two instrument bitmaps are single-colour
+  alpha masks) and the screen comparison, whose five screens one command generates.
+- **#56 remaining sound fidelity** -- every recording the issue listed is committed and wired,
+  and interior plus force-field occlusion is modelled; left open for the same two-client listen.
+- **48-bot tick bursts** (no issue): thin headroom at 24 v 24 rather than a failure, see below.
+- **Two net/protocol residuals** (no issue), see below.
 
 ### P2: 48-bot tick bursts during mass engagements
 
@@ -568,7 +586,7 @@ tile-bounded skip for spans the sightline is provably above -- attacks the super
 An accelerator has to be exactly equivalent to the march, and `hashWorld` in the telemetry sweep
 is what proves it: an equivalent accelerator leaves the per-seed fingerprints unchanged.
 
-### P1: bots take the flag but never capture — #32
+### P1: bots take the flag but never capture — #32 (closed)
 
 Closed. See Start here: at the game's own 46,875-tick match length the current configuration
 takes the flag on two of four seeds, the refusal rule is exercised by data (303 refused ticks,
@@ -576,7 +594,7 @@ seed 2), and nine levers in the vehicle and carrier policy space are falsified w
 one-liner this section used to carry -- carriers killed in midfield with no teammate within
 100 m -- was measured at a quarter of a match and is superseded by that table.
 
-### P2: projectile art and texture animation — #53
+### P2: projectile art and texture animation — #53 (closed)
 
 - IFL playback driver: a 12-resource frame table from the upstream `.ifl` files (30 Hz
   ticks) injected into `withVisibility`, keyed to the GLB's `ifl_sequence`/`ifl_duration`/
@@ -597,13 +615,13 @@ one-liner this section used to carry -- carriers killed in midfield with no team
 - Remaining: no committed repair-beam recording exists, so the loop is silent until a source
   sample is added; player-candidate repair still ignores terrain occlusion in the sim.
 
-### P2: terrain texture repeat scale — #2
+### P2: terrain texture repeat scale — #2 (closed)
 
 - Not verifiable from committed evidence (manifest has no scale field, `.ter` v2 stores
   none, no Torque renderer source in the repo). `terrain.ts` documents the uncertainty and a
   do-not-bump guide.
 
-### P2: turret animation QA — #54
+### P2: turret animation QA — #54 (closed)
 
 - Aim limits derive from the mount (pedestal → Large 15/140, none → Sentry 89/175), targets
   clamp to the source theta band, no-target syncs relax to the authored rest pose, and
@@ -632,17 +650,15 @@ one-liner this section used to carry -- carriers killed in midfield with no team
 - `session.ts` still documents u32 input/snapshot counter exhaustion after years of
   uninterrupted operation; reconnect is the accepted recovery.
 
-### P2: vehicle and bot scope residuals — #57
+### P2: vehicle and bot scope residuals — #57 (closed)
 
-- Only Shrike and Wildcat exist. The four remaining T2 base vehicles, per `jdknight/t2ds`'s
-  `GameData/base/scripts/vehicles/`: **Bomber** (`vehicle_bomber.cs`), **Havoc**
-  (`vehicle_havoc.cs`), **Tank** (`vehicle_tank.cs`) and the **Mobile Point Base**
-  (`vehicle_mpb.cs`) — each with its own weapons, mount rules and passenger seats.
-  `vehicle.cs` (the shared base) and `serverVehicleHud.cs` are the shared plumbing they need,
-  and the AA barrel's vehicle targeting, vehicle shields, ejection and collision damage
-  already exist, having been built against the two implemented kinds.
-- Bot carrier survival is unfinished (#32), and complete vehicle piloting, strategic
-  loadouts, and a full match with captures remain unproven.
+- Superseded, kept for the checklist it was: all six kinds exist now, the four base vehicles
+  having been built from those same scripts (`vehicle_bomber.cs`, `vehicle_havoc.cs`,
+  `vehicle_tank.cs`, `vehicle_mpb.cs`) with their own weapons, mount rules and seats, their HUD
+  following the source's own pad order (`serverVehicleHud.cs`) and reticle table (`hud.cs`), and
+  bots that drive them.
+- Bot carrier survival is closed with #32: two captures on four full-length seeds, measured at
+  the game's own 46,875-tick match length.
 
 ## Resolved earlier (regression watch list)
 
