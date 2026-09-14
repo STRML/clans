@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { Input } from './input.js';
+import { applyKeymap, resetKeymap } from './keymap.js';
 
 describe('Input.releaseAll', () => {
   it('drops the jet flag, the fire flag, and every held key', () => {
@@ -119,5 +120,46 @@ describe('Input.voiceMenuPressedThisFrame', () => {
     expect(input.voiceMenuPressedThisFrame()).toBe(false);
     keys.add('KeyV');
     expect(input.voiceMenuPressedThisFrame()).toBe(true); // a fresh press fires again
+  });
+});
+
+describe('Input reads actions through the keymap', () => {
+  beforeEach(() => resetKeymap());
+
+  /** The held-key set is private; every test in this file pokes it directly. */
+  function keysOf(input: Input): Set<string> {
+    return (input as unknown as { keys: Set<string> }).keys;
+  }
+
+  it('forward follows the keymap: a remapped key drives moveZ, the default stops', () => {
+    applyKeymap({ forward: 'KeyQ' });
+    const input = new Input({} as HTMLElement);
+    keysOf(input).add('KeyQ');
+    expect(input.snapshot().moveZ).toBe(1);
+    keysOf(input).clear();
+    keysOf(input).add('KeyW');
+    expect(input.snapshot().moveZ).toBe(0);
+  });
+
+  it('edge actions fire on their remapped key and not on the old default', () => {
+    applyKeymap({ use: 'KeyF' });
+    const input = new Input({} as HTMLElement);
+    const keys = keysOf(input);
+    keys.add('KeyF');
+    expect(input.usePressedThisFrame()).toBe(true);
+    expect(input.usePressedThisFrame()).toBe(false); // still held, no re-fire
+    keys.delete('KeyF');
+    keys.add('KeyE');
+    expect(input.usePressedThisFrame()).toBe(false);
+  });
+
+  it('weapon slots scan the keymap bindings in slot order', () => {
+    applyKeymap({ slot2: 'BracketLeft' });
+    const input = new Input({} as HTMLElement);
+    const keys = keysOf(input);
+    keys.add('BracketLeft');
+    expect(input.snapshot().slot).toBe(2);
+    keys.add('Digit1');
+    expect(input.snapshot().slot).toBe(1); // slot 1 still outranks a held slot 2
   });
 });

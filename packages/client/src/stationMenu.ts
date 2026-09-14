@@ -74,6 +74,104 @@ export function currentLoadoutChoice(world: World, playerId: number): LoadoutCho
   };
 }
 
+/** Where the station menu keeps this browser's favorites (spec Client bullet
+ *  "...save favorites"). Keyed per origin like any localStorage user; the value is
+ *  saveFavorites's JSON below. */
+export const FAVORITES_STORAGE_KEY = 'clans.station-favorites';
+
+/** The three storage operations favorites need, stated structurally: the browser's
+ *  localStorage satisfies it as-is, and the node-environment unit tests stub any object
+ *  with the same three methods. */
+export interface FavoritesStore {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+/** localStorage when the environment offers one. The property access itself can throw
+ *  (sandboxed frames, some privacy modes), and a missing storage reads as "none" either
+ *  way -- favorites are a convenience, never a requirement. */
+export function defaultFavoritesStore(): FavoritesStore | null {
+  try {
+    const storage = globalThis.localStorage;
+    return storage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Saves the full chosen loadout as this browser's favorites. What is saved is exactly
+ *  what Confirm sends -- armor, pack, weapons; the grenade has no Loadout-message field
+ *  to carry a choice (see the grenade row in createStationMenu), so there is nothing to
+ *  save for it. Throws if the store refuses the write (quota, privacy mode): the caller
+ *  decides whether that blocks anything, and the menu's Confirm handler treats it as
+ *  best-effort. */
+export function saveFavorites(store: FavoritesStore, choice: LoadoutChoice): void {
+  store.setItem(
+    FAVORITES_STORAGE_KEY,
+    JSON.stringify({ armor: choice.armor, pack: choice.pack, weapons: choice.weapons }),
+  );
+}
+
+/** The saved favorites, or null when there are none -- or when the payload is unusable:
+ *  a parse failure, an armor id no ArmorData backs, a pack outside PackId, or a weapons
+ *  mask outside the five WeaponId bits the wire itself bounds (decodeLoadout's 0x1f), so
+ *  the menu can never prefill a bit Confirm would silently drop. Sanitizing a legal but
+ *  over-cap mask against the saved armor is deliberately NOT this function's job --
+ *  LoadoutSelection's constructor does that for a favorites prefill exactly as it already
+ *  does for a currentLoadoutChoice one. A store that throws on read also reads as "no
+ *  favorites": the menu must open even when storage is hostile. */
+export function loadFavorites(store: FavoritesStore): LoadoutChoice | null {
+  let raw: string | null;
+  try {
+    raw = store.getItem(FAVORITES_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+  if (raw === null) return null;
+  return parseFavoritesPayload(raw);
+}
+
+function parseFavoritesPayload(raw: string): LoadoutChoice | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  // `in` narrowing keeps every read checked: after the guards pass, parsed.armor/.pack/
+  // .weapons are ArmorId/PackId/number, and a MISSING key reads as undefined, which every
+  // guard rejects -- one rejection path per field, no shape cast.
+  if (!('armor' in parsed && 'pack' in parsed && 'weapons' in parsed)) return null;
+  if (!validArmorId(parsed.armor)) return null;
+  if (!validPackId(parsed.pack)) return null;
+  if (!validWeaponMask(parsed.weapons)) return null;
+  return { armor: parsed.armor, pack: parsed.pack, weapons: parsed.weapons };
+}
+
+function validArmorId(armor: unknown): armor is ArmorId {
+  // ARMORS is keyed by the enum's VALUES ('0'/'1'/'2'), so `armor in ARMORS` is exact
+  // value membership -- no cast, and no name-key trap the way `in` on a numeric ENUM
+  // object would have (see validPackId).
+  return typeof armor === 'number' && armor in ARMORS;
+}
+
+function validPackId(pack: unknown): pack is PackId {
+  // Enum membership by VALUE (LoadoutSelection.setPack's idiom): a numeric enum object's
+  // keys are the names, so `pack in PackId` would test '0' and never match.
+  const PACK_CHOICES: readonly number[] = [PackId.None, PackId.Repair, PackId.Energy];
+  return typeof pack === 'number' && PACK_CHOICES.includes(pack);
+}
+
+function validWeaponMask(weapons: unknown): weapons is number {
+  // The wire's own bound (decodeLoadout's 0x1f): only the five WeaponId bits are
+  // meaningful, and favorites must never hold a bit the menu has no row for.
+  return (
+    typeof weapons === 'number' && Number.isInteger(weapons) && weapons >= 0 && weapons <= 0x1f
+  );
+}
+
 /**
  * Pure selection state behind the station menu (#55), kept DOM-free for the node-environment
  * unit tests the same way hud.ts keeps describeHud pure. Every mutation re-sanitizes against
@@ -152,6 +250,14 @@ export class LoadoutSelection {
     return this.data.maxWeapons;
   }
 
+  /** The current armor's hand-grenade grant (`ArmorData.grenadeCount`) -- the count the
+   *  menu's grenade row renders. The sim has no grenade CHOICE to expose: it models
+   *  exactly one thrown type (weapons.ts's tryThrowGrenade alt-fire) and grants this many
+   *  of it on every loadout. */
+  get grenadeCount(): number {
+    return this.data.grenadeCount;
+  }
+
   /** A loadout with no weapons would decode as "armor defaults" (mask 0 on the wire), not
    *  as an unarmed loadout -- so Confirm refuses an empty selection rather than silently
    *  sending the opposite of what the player picked. */
@@ -195,6 +301,10 @@ export function createStationMenu(
   container: HTMLElement,
   onConfirm: (choice: LoadoutChoice) => void,
   onClose: () => void = () => {},
+  // Favorites storage; defaults to this environment's localStorage, null when there is
+  // none (favorites then read as never-saved and Confirm skips the save). Tests pass a
+  // stub. Optional, so app.ts's three-argument call is unchanged.
+  favorites: FavoritesStore | null = defaultFavoritesStore(),
 ): StationMenu {
   const root = document.createElement('div');
   root.id = 'station-menu';
@@ -262,12 +372,65 @@ export function createStationMenu(
     weaponBoxes[id] = checkbox;
   }
 
+  // Grenade row (spec Client bullet "pick an armor, weapons, pack, and grenades"): present
+  // but DISABLED, because that is the honest state of the wire. The sim models exactly one
+  // thrown grenade type -- weapons.ts's tryThrowGrenade alt-fire, whose body rides the
+  // firing weapon's id as ProjectileType.Grenade -- and every armor carries its own count
+  // of it (ArmorData.grenadeCount, restocked by applyLoadoutSelection's resetLoadout).
+  // There is no GrenadeId to pick, and protocol 11's LoadoutMessage (protocol/src/
+  // messages.ts) is armor/pack/weapons only -- LOADOUT_MESSAGE_BYTES = 4, no grenade
+  // field -- so a selectable row would promise a loadout slot the server can never honor.
+  // Grenade selection needs a protocol bump first; this wave ships the disabled row
+  // instead of inventing a field.
+  const grenadeHeading = document.createElement('h3');
+  grenadeHeading.textContent = 'Grenades';
+  root.append(grenadeHeading);
+  const grenadeBox = document.createElement('input');
+  grenadeBox.type = 'checkbox';
+  // Always carried, never chosen: checked and disabled rather than an empty grey row, so
+  // the picker shows the state the sim actually grants.
+  grenadeBox.checked = true;
+  grenadeBox.disabled = true;
+  const grenadeLabel = document.createElement('label');
+  grenadeLabel.append(grenadeBox, ' Hand Grenade');
+  root.append(grenadeLabel);
+  const grenadeNote = document.createElement('small');
+  grenadeNote.id = 'station-grenade-note';
+  root.append(grenadeNote);
+
+  // Clear favorites (the "save favorites" half of the spec needs a way back out): empties
+  // the stored favorites so the next open prefills from the carried loadout. The
+  // in-progress selection is deliberately untouched -- clearing is about future visits.
+  const clearFavoritesButton = document.createElement('button');
+  clearFavoritesButton.textContent = 'Clear favorites';
+  clearFavoritesButton.disabled = favorites === null;
+  clearFavoritesButton.addEventListener('click', () => {
+    if (favorites === null) return;
+    try {
+      favorites.removeItem(FAVORITES_STORAGE_KEY);
+    } catch {
+      // A refusing store never held usable favorites, so the button's outcome stands.
+    }
+    clearFavoritesButton.disabled = true;
+  });
+
   const confirm = document.createElement('button');
   confirm.textContent = 'Confirm';
   confirm.addEventListener('click', () => {
-    if (selection.confirmable) onConfirm(selection.choice);
+    if (!selection.confirmable) return;
+    // Favorites save BEFORE the loadout leaves, best-effort: a refusing store (quota,
+    // privacy mode) must never keep the player from applying the chosen loadout.
+    if (favorites) {
+      try {
+        saveFavorites(favorites, selection.choice);
+        clearFavoritesButton.disabled = false;
+      } catch {
+        // Storage unavailable: the loadout still applies; favorites are simply not kept.
+      }
+    }
+    onConfirm(selection.choice);
   });
-  root.appendChild(confirm);
+  root.append(confirm, clearFavoritesButton);
   const close = document.createElement('button');
   close.textContent = 'Close (Esc)';
   close.addEventListener('click', onClose);
@@ -282,6 +445,7 @@ export function createStationMenu(
     const slotsUsed = selection.slotCount;
     const slotCapacity = selection.slotCapacity;
     slotLine.textContent = `Weapon slots ${String(slotsUsed)} / ${String(slotCapacity)}`;
+    grenadeNote.textContent = `×${String(selection.grenadeCount)} carried -- granted by the armor, not chosen here.`;
     for (const armor of Object.keys(armorButtons))
       armorButtons[Number(armor)]!.setAttribute(
         'aria-pressed',
@@ -313,7 +477,12 @@ export function createStationMenu(
     // from the current loadout because every close path goes through hide() first.
     show(choice: LoadoutChoice = LIGHT_DEFAULT): void {
       if (!root.hidden) return;
-      selection = new LoadoutSelection(choice);
+      // A saved favorites loadout prefills over the current carried one on every NEW
+      // visit -- the source station opens on the client's own favorites string
+      // (hud.cs:324-392). Corrupt or absent favorites fall through to the passed choice.
+      const saved = favorites === null ? null : loadFavorites(favorites);
+      selection = new LoadoutSelection(saved ?? choice);
+      clearFavoritesButton.disabled = favorites === null || saved === null;
       syncSelection();
       root.hidden = false;
     },

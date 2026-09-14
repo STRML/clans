@@ -78,6 +78,13 @@ import {
 } from './netclient.js';
 import type { PlayerView } from './players-view.js';
 import { createScoreboard, type ScoreboardView } from './scoreboard.js';
+import {
+  createNameplates,
+  nameplateStates,
+  teammatesFromSnapshots,
+  teammatesFromWorld,
+  type NameplatesView,
+} from './nameplates.js';
 import { RemoteBuffer, syncRemotePlayers } from './remote.js';
 import {
   createRepairBeamView,
@@ -605,6 +612,7 @@ interface BaseAssetsViewState {
   camera: THREE.Camera;
   hud: { update(source: HudSource): void };
   scoreboard: ScoreboardView;
+  nameplates: NameplatesView;
   baseObjectView: ReturnType<typeof createBaseObjectView>;
   stationMenu: StationMenu;
   stationMenuState: { open: boolean; triggerStation: number | null };
@@ -855,7 +863,9 @@ function turretTargetPositions(
  *  prediction slot's playerId offline). Single-player has no server to broadcast a Roster
  *  message, so the local player is the whole roster there: no kills/deaths/ping exist to
  *  show, and the row renders those columns at zero. */
-function rosterEntriesFor(state: BaseAssetsViewState): RosterEntryMessage[] {
+function rosterEntriesFor(
+  state: Pick<BaseAssetsViewState, 'net' | 'playerId' | 'world'>,
+): RosterEntryMessage[] {
   if (state.net) return state.net.roster;
   return [
     {
@@ -881,6 +891,42 @@ function syncScoreboard(state: BaseAssetsViewState): void {
   const localId = state.net ? state.net.playerId : state.playerId;
   state.scoreboard.update(rosterEntriesFor(state), localId);
   state.scoreboard.show();
+}
+
+/** Per-frame IFF plates over teammates (the design-spec HUD bullet; nameplates.ts's header
+ *  carries the T2 sourcing). Split out for the complexity budget like its sibling sync
+ *  functions, but called from frame() AFTER renderer.render, not from
+ *  syncBaseAssetsView: the plates must be projected with the camera pose this exact frame
+ *  drew with, and syncBaseAssetsView runs before placeCamera -- a plate synced there would
+ *  trail one frame behind every mouse turn. renderer.render has by now refreshed
+ *  camera.matrixWorldInverse (Camera.updateMatrixWorld), which is all the projection needs
+ *  on top of the already-placed position/rotation. */
+function syncNameplates(
+  state: Pick<BaseAssetsViewState, 'world' | 'playerId' | 'net' | 'camera' | 'nameplates'>,
+): void {
+  const localId = localNetworkId(state.net, state.playerId);
+  const localTeam = state.net ? state.net.team : (state.world.players.team[state.playerId] ?? 0);
+  // NetClient's prediction world only ever holds the local seat, so networked plates read
+  // net.remotePlayers (already filtered to non-local ids) and solo plates read the world's
+  // own player arrays -- the same two-source split commanderMapPlayers documents.
+  const players = state.net
+    ? teammatesFromSnapshots(state.net.remotePlayers.values())
+    : teammatesFromWorld(state.world, localId);
+  const names = new Map(rosterEntriesFor(state).map((entry) => [entry.playerId, entry.name]));
+  state.nameplates.update(
+    nameplateStates(
+      players,
+      localId,
+      localTeam,
+      names,
+      {
+        position: state.camera.position,
+        matrixWorldInverse: state.camera.matrixWorldInverse,
+        projectionMatrix: state.camera.projectionMatrix,
+      },
+      { width: window.innerWidth, height: window.innerHeight },
+    ),
+  );
 }
 
 function playerTargetPosition(world: World, playerId: number): THREE.Vector3 {
@@ -1973,6 +2019,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   document.body.appendChild(repairStatus);
   const hud = createHud(document.body, hudSourceFrom(world, playerId, net));
   const scoreboard = createScoreboard(document.body);
+  const nameplates = createNameplates(document.body);
   const interactionPrompt = createInteractionPrompt(document.body);
   const stationMenuState = { open: false, triggerStation: null as number | null };
   const stationMenu: StationMenu = createStationMenu(
@@ -2215,28 +2262,30 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         audio,
       );
 
+      const baseAssetsState: BaseAssetsViewState = {
+        world,
+        playerId,
+        net,
+        input,
+        assets,
+        camera,
+        hud,
+        scoreboard,
+        nameplates,
+        baseObjectView,
+        stationMenu,
+        stationMenuState,
+        vehicleView,
+        vehicleBuffers,
+        vehiclePadMenu,
+        vehiclePadMenuState,
+        commanderMapCanvas,
+        orderState,
+        voiceMenu,
+        audio,
+      };
       syncBaseAssetsView(
-        {
-          world,
-          playerId,
-          net,
-          input,
-          assets,
-          camera,
-          hud,
-          scoreboard,
-          baseObjectView,
-          stationMenu,
-          stationMenuState,
-          vehicleView,
-          vehicleBuffers,
-          vehiclePadMenu,
-          vehiclePadMenuState,
-          commanderMapCanvas,
-          orderState,
-          voiceMenu,
-          audio,
-        },
+        baseAssetsState,
         usePressed,
         // Issue #54: the turret mount's clips, muzzle flash and aim smoothing must advance in
         // simulated seconds. Reuse the weapon-animation gate (0 while paused or after the
@@ -2280,6 +2329,9 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         stationAudioState,
       );
       renderer.render(scene, camera);
+      // IFF plates over teammates, projected with the pose this frame just drew with --
+      // see syncNameplates for why this runs here rather than inside syncBaseAssetsView.
+      syncNameplates(baseAssetsState);
       weaponModel.sync(world, playerId, app.freeCam, weaponAnimationDelta(app, dtSeconds));
       // Issue #56: the Chaingun's own state recordings follow the same simulated state the
       // viewmodel just read, one frame, one source of truth.

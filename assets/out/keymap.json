@@ -1,0 +1,21 @@
+{
+  "forward": "KeyW",
+  "back": "KeyS",
+  "left": "KeyA",
+  "right": "KeyD",
+  "jump": "Space",
+  "grenade": "KeyG",
+  "pack": "KeyR",
+  "zoom": "KeyZ",
+  "scoreboard": "Tab",
+  "use": "KeyE",
+  "commanderMap": "KeyC",
+  "voiceMenu": "KeyV",
+  "cameraToggle": "KeyX",
+  "escape": "Escape",
+  "slot1": "Digit1",
+  "slot2": "Digit2",
+  "slot3": "Digit3",
+  "slot4": "Digit4",
+  "slot5": "Digit5"
+}

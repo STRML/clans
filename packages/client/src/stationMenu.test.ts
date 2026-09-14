@@ -3,9 +3,15 @@ import { addPlayer, createWorld, type Heightfield } from '@clans/sim';
 import { createBaseObjects, BaseObjectKind, stepPower } from '@clans/sim';
 import {
   currentLoadoutChoice,
+  defaultFavoritesStore,
+  FAVORITES_STORAGE_KEY,
   inventoryStationTriggerAt,
   LoadoutSelection,
+  loadFavorites,
+  saveFavorites,
   stationMenuVisible,
+  type FavoritesStore,
+  type LoadoutChoice,
 } from './stationMenu.js';
 import {
   allowedWeaponMask,
@@ -158,6 +164,29 @@ describe('LoadoutSelection (#55)', () => {
     selection.setPack(99);
     expect(selection.choice.pack).toBe(PackId.None);
   });
+
+  it('exposes the armor hand-grenade grant the menu grenade row renders', () => {
+    // armor.ts's grenadeCount -- 5/6/8 -- is the only grenade state the picker can
+    // honestly show: the row is display-only because the wire has no grenade field.
+    const light = new LoadoutSelection({
+      armor: ArmorId.Light,
+      pack: PackId.None,
+      weapons: 1 << WeaponId.Spinfusor,
+    });
+    const medium = new LoadoutSelection({
+      armor: ArmorId.Medium,
+      pack: PackId.None,
+      weapons: 1 << WeaponId.Spinfusor,
+    });
+    const heavy = new LoadoutSelection({
+      armor: ArmorId.Heavy,
+      pack: PackId.None,
+      weapons: 1 << WeaponId.Spinfusor,
+    });
+    expect(light.grenadeCount).toBe(5);
+    expect(medium.grenadeCount).toBe(6);
+    expect(heavy.grenadeCount).toBe(8);
+  });
 });
 
 describe('currentLoadoutChoice', () => {
@@ -191,5 +220,76 @@ describe('currentLoadoutChoice', () => {
       pack: PackId.Energy,
       weapons: (1 << WeaponId.Spinfusor) | (1 << WeaponId.Mortar),
     });
+  });
+});
+
+describe('station favorites', () => {
+  /** Map-backed FavoritesStore stub -- exactly the three methods localStorage offers. */
+  function stubStore(): FavoritesStore {
+    const backing = new Map<string, string>();
+    return {
+      getItem: (key) => backing.get(key) ?? null,
+      setItem: (key, value) => void backing.set(key, value),
+      removeItem: (key) => void backing.delete(key),
+    };
+  }
+
+  const DISTINCTIVE: LoadoutChoice = {
+    armor: ArmorId.Heavy,
+    pack: PackId.Energy,
+    weapons: (1 << WeaponId.Spinfusor) | (1 << WeaponId.Mortar) | (1 << WeaponId.Blaster),
+  };
+
+  it('round-trips a full chosen loadout -- armor, pack, weapons -- through the store', () => {
+    const store = stubStore();
+    saveFavorites(store, DISTINCTIVE);
+    expect(loadFavorites(store)).toEqual(DISTINCTIVE);
+  });
+
+  it('reads null from an empty store, and null rather than throwing from a corrupt one', () => {
+    const store = stubStore();
+    expect(loadFavorites(store)).toBeNull();
+    store.setItem(FAVORITES_STORAGE_KEY, 'not json at all');
+    expect(loadFavorites(store)).toBeNull();
+  });
+
+  it('rejects saved shapes no real loadout could have', () => {
+    // Armor 9 backs no ArmorData; pack 9 is outside PackId; a weapons mask outside the
+    // wire's own 0x1f bound would prefill a bit the menu has no row for; a non-integer or
+    // negative mask is not a bitmask at all.
+    const store = stubStore();
+    const payloads = [
+      '{"armor":9,"pack":0,"weapons":1}',
+      '{"armor":1,"pack":9,"weapons":1}',
+      '{"armor":1,"pack":0,"weapons":"all"}',
+      '{"armor":1,"pack":0,"weapons":-1}',
+      '{"armor":1,"pack":0,"weapons":32}',
+    ];
+    for (const payload of payloads) {
+      store.setItem(FAVORITES_STORAGE_KEY, payload);
+      expect(loadFavorites(store)).toBeNull();
+    }
+  });
+
+  it('returns an over-cap mask unsanitized -- clamping stays LoadoutSelection prefill work', () => {
+    // Light lists four allowed weapons but has three slots; the stored 0x1f still carries
+    // the Mortar bit loadFavorites cannot judge. The menu prefills through
+    // LoadoutSelection's constructor, which drops it -- exactly as for
+    // currentLoadoutChoice.
+    const store = stubStore();
+    saveFavorites(store, { armor: ArmorId.Light, pack: PackId.None, weapons: 0x1f });
+    expect(loadFavorites(store)).toEqual({
+      armor: ArmorId.Light,
+      pack: PackId.None,
+      weapons: 0x1f,
+    });
+    const selection = new LoadoutSelection(loadFavorites(store)!);
+    expect(selection.choice.weapons).toBe(defaultWeaponMask(ARMORS[ArmorId.Light]));
+  });
+
+  it('defaults to no favorites storage where no localStorage exists', () => {
+    // Node vitest has no localStorage; the browser default path is what
+    // e2e/station-favorites.spec.ts exercises with a real reload.
+    expect(defaultFavoritesStore()).toBeNull();
   });
 });

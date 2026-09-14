@@ -1,0 +1,57 @@
+/* IFF plates over teammates, in the HUD's own translucent-panel language (hud.css's
+   --ink/--panel/--edge palette). No T2 marker bitmap is committed under
+   assets/out/katabatic/gui (hud_playertriangle.png lives only in the original game's
+   textures, see nameplates.ts's header), so the triangle is a CSS border triangle in the
+   HUD ink. The root is a fixed, pointer-transparent full-viewport layer like #hud itself;
+   each plate is absolutely positioned by nameplates.ts's per-frame transform. */
+#nameplates {
+  --ink: #92d9d5;
+  --panel: rgba(7, 62, 72, 0.7);
+  --edge: rgba(114, 190, 192, 0.7);
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  color: var(--ink);
+  font:
+    12px Arial,
+    Helvetica,
+    sans-serif;
+  letter-spacing: 0.025em;
+  text-shadow: 1px 1px 1px #002b33;
+  pointer-events: none;
+}
+#nameplates .nameplate {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+/* The teammate marker: T2's hud_playertriangle floats over the head, point up. */
+#nameplates .nameplate-marker {
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-bottom: 8px solid var(--ink);
+}
+#nameplates .nameplate-name {
+  margin-top: 1px;
+  white-space: nowrap;
+}
+#nameplates .nameplate-health {
+  width: 72px;
+  height: 5px;
+  margin-top: 2px;
+  border: 1px solid var(--edge);
+  background: var(--panel);
+  font-size: 0;
+}
+/* hud-health's own green -- a teammate's bar reads as the same instrument. */
+#nameplates .nameplate-health-fill {
+  height: 100%;
+  background: #39d653;
+}

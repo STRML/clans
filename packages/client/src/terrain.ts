@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { assetUrl, type KatabaticAssets } from './assets.js';
+import { createSnowField } from './snow.js';
 
 export function fogColor(data: KatabaticAssets): THREE.Color {
   const [r, g, b] = data.scene.sky.fogColor;
@@ -139,6 +140,10 @@ export function addEnvironment(target: THREE.Scene, data: KatabaticAssets): void
       1,
     ),
   );
+  // Design-spec environment bullet: "snow particles" — Katabatic moderate snowfall.
+  // The field self-drives via onBeforeRender; tests can step it deterministically
+  // through scene.getObjectByName('katabatic-snow').userData.snow.update(dt, cam).
+  target.add(createSnowField().points);
   target.fog = new THREE.Fog(
     fogColor(data),
     data.scene.sky.fogDistance,

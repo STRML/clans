@@ -12,6 +12,41 @@ redeployed together.
 
 ## Unreleased
 
+### 2026-09-14 — the design spec's remaining client deltas
+
+#### Added
+
+- Snow falls on Katabatic. 320 flakes in a 60x40x60 m box that rides the camera, falling at
+  6 m/s with a light wind drift and per-flake jitter, wrapping at the box edges; one
+  BufferGeometry stepped per frame with zero per-flake allocations, seeded so tests are
+  deterministic. T2's precip bitmap is not among the extracted textures, so the flake is a
+  generated radial-gradient sprite (`client/snow.ts`).
+
+- Teammates carry IFF plates: a small triangle marker, their roster name, and a health bar
+  over every living teammate within 300 m -- the sensor's own detectRadius, the same figure
+  the commander map draws -- anchored above the heaviest armor's bounding box. The plate pool
+  is keyed by player id and reused across frames; names come from the protocol-13 roster.
+  T2's own marker is engine-rendered (its `hud_playertriangle.png` is not in the extracted
+  assets and the dedicated-server script dump holds no client GUI code), so the plate is
+  built in the HUD's DOM/CSS idiom (`client/nameplates.ts`).
+
+- The inventory station remembers favorites: the applied armor, weapons and pack persist to
+  localStorage and prefill the next visit, with a Clear control. The grenade row is present
+  but disabled on purpose: the loadout message (protocol 11) carries no grenade field and
+  the sim grants grenades per armor class (5/6/8 by the source's `grenadeCount`), so
+  selection would be a protocol change, deferred (`client/stationMenu.ts`).
+
+- Keyboard bindings are data instead of literals: `assets/out/keymap.json` (the client's
+  Vite public dir, served at `/keymap.json`, fetched once at boot by
+  `packages/client/src/keymap.ts`) maps action names to `KeyboardEvent.code` strings --
+  `forward`/`back`/`left`/`right`/`jump`/`grenade`/`pack`/`zoom`/`scoreboard`/`use`/
+  `commanderMap`/`voiceMenu`/`cameraToggle`/`escape`/`slot1`..`slot5`. Omitted actions
+  keep the built-in defaults (exactly the old W/A/S/D set); an unknown action, a value
+  that is not a `KeyboardEvent.code`, or two actions resolved onto one key (including
+  onto another action's untouched default) is rejected with a console error and the
+  defaults stand. Jet and fire stay mouse buttons, and the number keys keep their
+  dialog-selection role in the commander-map and voice menus.
+
 ### 2026-09-14 — the Tab scoreboard (protocol 12 to 13)
 
 #### Added

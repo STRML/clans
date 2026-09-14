@@ -543,17 +543,11 @@ on state; this section is the evidence behind it, and each heading below says wh
   and interior plus force-field occlusion is modelled; left open for the same two-client listen.
 - **48-bot tick bursts** (no issue): thin headroom at 24 v 24 rather than a failure, see below.
 - **Two net/protocol residuals** (no issue), see below.
-- **Spec deltas, untracked by any issue.** A 2026-09-14 pass over the design spec's Client
-  section against the code found five elements the spec names that no client module implements,
-  each needing an implementer's confirmation pass (a search that finds nothing can also mean a
-  different internal name):
-  snow particles (`spec` Client bullet 1; no particle system exists in `packages/client`),
-  a Tab scoreboard (no scoreboard element; the bottom-left panel is team/flag state only),
-  IFF names and health rendered over teammates (no nameplate/overhead pass exists),
-  grenades and saved favorites in the inventory station menu (`stationMenu.ts` covers armor,
-  weapons and pack only), and keybind rebinding through a JSON keymap (input keys are
-  hardcoded in `input.ts`). These are named here so the design spec and the ledger agree
-  about what is not built; none is started.
+- The spec deltas listed here on 2026-09-14 are all built now (see CHANGELOG): the Tab
+  scoreboard, snow particles, teammate IFF plates, keymap rebinding, and the station's saved
+  favorites. The one deliberately deferred piece is grenade *selection* in the station menu:
+  the loadout message has no grenade field and the sim grants grenades per armor class, so
+  the row ships disabled until a protocol bump is wanted.
 
 ### P2: 48-bot tick bursts during mass engagements
 
