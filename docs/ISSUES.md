@@ -125,9 +125,16 @@ rerun in this audit. GitHub issue numbers below refer to
    exists" claim was wrong, `fx/packs/repair_use.wav` is the source's own
    `CloseLooping3d` firing state (`repairpack.cs:33-39`) and it is now wired. What remains is
    the two-client listen, which needs a human and cannot be asserted by a test.
-5. **#2 terrain texture scale.** Cannot be established from committed evidence; `terrain.ts`
-   keeps 64 repeats over 2048 m with the uncertainty documented. Closing it needs the
-   original renderer/material data, not another guess.
+5. **#2 terrain texture scale: closed from the renderer.** The guess was 64 repeats over
+   2048 m (32 m per repeat). Torque's terrain renderer derives the base-texture coordinates
+   from the square size and the LOD level -- `F32 invLevel = 1 / F32(mSquareSize << step->level)`
+   in `terrain/terrRender.cc` -- so at the finest level a material repeats **once per terrain
+   square**, and this client draws one static mesh, i.e. that level. The mission's own
+   TerrainBlock confirms `squareSize = "8"` and `position = "-1024 -1024 0"`, so the repeat is
+   **256** over the 2048 m block, one per 8 m square. The same block sets
+   `detailTexture = "details/snowdet2"`, a second multiply pass Torque layers over the base
+   textures; that bitmap is not in the mirror (both spellings 404), so no detail pass is drawn
+   and the gap is named rather than guessed.
 6. **Fidelity backlog:** #54's yawed and elevated mount coverage (the measured shape replaces
    the sphere for every static pose, and the residual is written down in the shape data),
    the #5/#10 residuals below, #56's interior and force-field occlusion and its two-client
