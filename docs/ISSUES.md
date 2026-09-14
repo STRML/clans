@@ -417,7 +417,7 @@ Playwright cases.
   puff at the live contact point rather than the rewound one — damage, events and
   exactly-once delivery are correct, only that FX point can differ.
 
-### P2: UI, inventory and loadout fidelity — #55
+### P2: UI, inventory and loadout fidelity — #55 (partial)
 
 - Full loadout selection end to end: `PackId` (None/Repair/Energy), `applyLoadoutSelection`
   with an armor-sanitized `1 << WeaponId` mask (mask 0 = armor defaults, never an unarmed
