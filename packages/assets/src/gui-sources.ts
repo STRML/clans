@@ -22,6 +22,10 @@ export const GUI_SOURCE_FILES = [
   'RET_blaster.png',
   'hud_ret_sniper.png',
   'hud_ret_shrike.png',
+  // hud.cs:42-44 gives the Tank (datablock AssaultVehicle, vehicle_tank.cs:197) reticles of
+  // its own rather than the on-foot weapon crosshair the client used to draw for it.
+  'hud_ret_tankchaingun.png',
+  'hud_ret_tankmortar.png',
   'hud_veh_new_dash.png',
   'hud_veh_icon_shrike.png',
   'hud_veh_icon_hoverbike.png',

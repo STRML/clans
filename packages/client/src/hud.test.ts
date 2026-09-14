@@ -16,6 +16,7 @@ import {
   describeHud,
   describeKillFeed,
   packIconSrc,
+  reticleBitmapFor,
   type HudSource,
 } from './hud.js';
 import { EventKind, type EventMessage, type FlagSnapshotData } from '@clans/protocol';
@@ -251,5 +252,27 @@ describe('describeKillFeed', () => {
       'P3 eliminated P9',
       'P2 died',
     ]);
+  });
+});
+
+describe('reticleBitmapFor (issue #55 vehicle reticles)', () => {
+  it("gives the Tank its own reticle from hud.cs's table rather than the on-foot crosshair", () => {
+    expect(reticleBitmapFor(VehicleKind.Tank, WeaponId.Chaingun)).toBe('hud_ret_tankchaingun.png');
+    expect(reticleBitmapFor(VehicleKind.Tank, WeaponId.Mortar)).toBe('hud_ret_tankchaingun.png');
+  });
+
+  it('gives the Bomber the shrike art the table assigns to BomberFlyer, and the Shrike the same', () => {
+    expect(reticleBitmapFor(VehicleKind.Bomber, WeaponId.Blaster)).toBe('hud_ret_shrike.png');
+    expect(reticleBitmapFor(VehicleKind.Shrike, WeaponId.Blaster)).toBe('hud_ret_shrike.png');
+  });
+
+  it('falls back to the weapon crosshair for a vehicle the table does not cover', () => {
+    expect(reticleBitmapFor(VehicleKind.Wildcat, WeaponId.Chaingun)).toBe('RET_chaingun.png');
+    expect(reticleBitmapFor(VehicleKind.Wildcat, WeaponId.Spinfusor)).toBe('RET_disc.png');
+  });
+
+  it('uses the weapon crosshair on foot, and the blaster art for a weapon with none of its own', () => {
+    expect(reticleBitmapFor(undefined, WeaponId.Spinfusor)).toBe('RET_disc.png');
+    expect(reticleBitmapFor(undefined, WeaponId.LaserRifle)).toBe('hud_ret_sniper.png');
   });
 });

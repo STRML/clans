@@ -223,10 +223,10 @@ function updateRack(items: HTMLElement[], source: HudSource, packCell: HTMLEleme
   const weapon = source.world.players.weaponSlot[source.playerId] ?? WeaponId.Blaster;
   const crosshair = document.getElementById('crosshair');
   if (crosshair) {
-    const reticle =
-      vehicleId !== -1 && source.world.vehicles.kind[vehicleId] === VehicleKind.Shrike
-        ? 'hud_ret_shrike.png'
-        : (WEAPON_RETICLE[weapon] ?? 'RET_blaster.png');
+    const reticle = reticleBitmapFor(
+      vehicleId === -1 ? undefined : source.world.vehicles.kind[vehicleId],
+      weapon,
+    );
     crosshair.style.backgroundImage = `url(${assetUrl(`gui/${reticle}`)})`;
   }
 }
@@ -293,6 +293,39 @@ const WEAPON_RETICLE = [
   'hud_ret_sniper.png',
   'RET_blaster.png',
 ];
+
+/** Issue #55: the vehicle reticles the game's own HUD table assigns, `hud.cs:39-53`, keyed by
+ *  the datablock names that file uses -- `AssaultVehicle` is the Tank (vehicle_tank.cs:197) and
+ *  `BomberFlyer` is the Bomber (vehicle_bomber.cs:176). The source gives the Tank a reticle per
+ *  weapon slot (slot 1 `hud_ret_tankchaingun` drawn with the frame overlay, slot 2
+ *  `hud_ret_tankmortar`) and the Bomber its own (slot 1 `hud_ret_shrike`, slot 2 no bitmap at
+ *  all, slot 3 `hud_ret_targlaser`, which our sim has no weapon for).
+ *
+ *  Our sim carries no vehicle weapon-slot selection -- no wire field, no input, and the only
+ *  thing the client knows is the mounted vehicle's kind -- so each kind draws its slot 1 art,
+ *  the vehicle's primary gun. Two consequences are recorded rather than hidden:
+ *   - the art named for the Shrike is what the source's table assigns to the BOMBER. The
+ *     Shrike's own datablock (ScoutFlyer, vehicle_shrike.cs:93) has no row at all, so this
+ *     client keeps drawing that art for it rather than taking a reticle away from a vehicle the
+ *     source leaves unset, and the ambiguity stands as a documented conflict.
+ *   - the frame overlay (`frame = true` on both Tank rows) is a second bitmap the committed
+ *     data does not carry, so only the reticle itself is drawn. */
+const VEHICLE_RETICLE: Partial<Record<VehicleKind, string>> = {
+  [VehicleKind.Tank]: 'hud_ret_tankchaingun.png',
+  [VehicleKind.Bomber]: 'hud_ret_shrike.png',
+  [VehicleKind.Shrike]: 'hud_ret_shrike.png',
+};
+
+/** The reticle bitmap for a player holding `weapon`, riding a vehicle of `kind` or not mounted
+ *  at all (`undefined`). Exported because it is the whole decision: the caller only reads the
+ *  world and hands it the two facts. */
+export function reticleBitmapFor(kind: VehicleKind | undefined, weapon: WeaponId): string {
+  if (kind !== undefined) {
+    const mounted = VEHICLE_RETICLE[kind];
+    if (mounted !== undefined) return mounted;
+  }
+  return WEAPON_RETICLE[weapon] ?? 'RET_blaster.png';
+}
 
 function createWeaponRack(hud: HTMLElement): {
   slots: HTMLElement[];

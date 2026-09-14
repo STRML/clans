@@ -429,11 +429,31 @@ Playwright cases.
 - Client: a full armor/pack/weapons station menu (`LoadoutChoice` state machine, refilled
   per visit and idempotent while open), a HUD pack row and weapon rack that shows the
   carried set, and a two-level quick-chat tree over the nine committed Bot1 lines.
-- Documented gaps: reticle/compass/vehicle-instrument pixel layout is not constrained by
-  the committed reference and was left alone; the Repair Pack has no committed icon
-  (`hud_new_packrepair.png` is absent) so it renders as a text cell; `maxWeapons` has no
-  committed semantics and is deliberately unconsumed (gating uses the grounded
-  `laserRifleAllowed`/`mortarAllowed` flags).
+- The Repair Pack icon is the source's own art now (`hud_new_packrepair.png`, committed with
+  the twelve recordings in `e59eb98`), and `maxWeapons` is consumed (the weapon-slot cap and
+  the Light default bug, `3dc8aa4`).
+- Vehicle reticles are now the game's own assignment rather than ours. `hud.cs:39-53` is a
+  table keyed by datablock name: the Tank is `AssaultVehicle` (`vehicle_tank.cs:197`) and gets
+  `hud_ret_tankchaingun` (slot 1, drawn in the source with the frame overlay) and
+  `hud_ret_tankmortar` (slot 2); the Bomber is `BomberFlyer` (`vehicle_bomber.cs:176`) and gets
+  the art named `hud_ret_shrike` for slot 1, no bitmap at all for slot 2, and
+  `hud_ret_targlaser` for slot 3, which our sim has no weapon for. The client used to draw the
+  on-foot weapon crosshair for every vehicle except the Shrike. Our sim carries no vehicle
+  weapon-slot selection -- no wire field, no input -- so each kind draws its slot 1 art, and two
+  consequences are recorded rather than hidden: the shrike art belongs to the BOMBER in that
+  table, while the Shrike's own datablock (`ScoutFlyer`, `vehicle_shrike.cs:93`) has no row at
+  all, so this client keeps drawing it for the Shrike rather than taking a reticle away from a
+  vehicle the source leaves unset; and the `frame` overlay is a second bitmap the committed data
+  does not carry, so only the reticle itself is drawn. Verified in the client:
+  `e2e/vehicle-reticle.spec.ts` buys a Tank at the pad (its menu row is "Beowulf", the script's
+  own `targetNameTag`) and asserts the crosshair resolves to `hud_ret_tankchaingun.png` and that
+  the bitmap loads.
+- What remains unconstrained is the pixel layout of the compass and the vehicle instrument
+  cluster: neither game-data dump carries a `.gui` layout file, the dash bitmap is a shaped
+  176x108 overlay with no cut-outs for the other two instrument bitmaps, and
+  `hud_veh_speedaltwin.png` and `hud_veh_enrgbar.png` are single-colour alpha masks whose shape
+  is carried entirely in their alpha channel, so they pin their own sizes (74x57 and 77x14) and
+  nothing about where they sit.
 
 ### P2: vehicle and bot feature scope — #57
 
