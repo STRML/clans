@@ -67,7 +67,27 @@ export function loadShapeInto(
   onLoad?: (scene: THREE.Group, animations: THREE.AnimationClip[]) => void,
 ): void {
   if (!name) return;
-  const url = shapeUrl(name);
+  loadShapeUrl(root, shapeUrl(name), modelRotationY, onLoad);
+}
+
+/** `loadShapeInto` for an asset that is not a `<name>.glb` under `shapes/`: the player
+ *  models are published one directory up, keyed by armour (assets.ts's playerModelUrl).
+ *  Same loader, same disposal contract, same Draco pool -- only the URL differs. */
+export function loadShapeFrom(
+  root: THREE.Object3D,
+  url: string,
+  modelRotationY = 0,
+  onLoad?: (scene: THREE.Group, animations: THREE.AnimationClip[]) => void,
+): void {
+  loadShapeUrl(root, url, modelRotationY, onLoad);
+}
+
+function loadShapeUrl(
+  root: THREE.Object3D,
+  url: string,
+  modelRotationY: number,
+  onLoad?: (scene: THREE.Group, animations: THREE.AnimationClip[]) => void,
+): void {
   root.userData.shapeUrl = url;
   root.userData.shapeStatus = 'loading';
   const fail = (error: unknown): void => {

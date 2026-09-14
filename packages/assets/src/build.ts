@@ -15,6 +15,13 @@ import { extractScene } from './scene.js';
 import { decodeTer } from './ter.js';
 import { convertVehicleShape, type VehicleShapeResult } from './vehicleShapes.js';
 import { dtsToGlb, parseDts } from './dts.js';
+import { appendSequences, parseDsq } from './dsq.js';
+import {
+  PLAYER_BODIES,
+  playerClipSource,
+  playerShapeSource,
+  type PlayerBody,
+} from './player-sources.js';
 import { AUDIO_SOURCES } from './audio-sources.js';
 import { GUI_SOURCE_FILES } from './gui-sources.js';
 import { PROJECTILE_SOURCE_FILES } from './projectile-sources.js';
@@ -196,8 +203,10 @@ const DTS_CONVERTED_SHAPES: Record<string, true> = {
 
 const shapesDir = resolve(output, 'shapes');
 const collisionDir = resolve(output, 'collision');
+const playersDir = resolve(output, 'players');
 await mkdir(shapesDir, { recursive: true });
 await mkdir(collisionDir, { recursive: true });
+await mkdir(playersDir, { recursive: true });
 let totalBytes = 0;
 for (const name of ALL_SHAPE_NAMES) {
   // Which directory — and so which extension — a name comes from mirrors `fetch.ts`'s
@@ -227,9 +236,30 @@ for (const name of ALL_SHAPE_NAMES) {
 // committed GLB whose clips this pipeline cannot yet reproduce, so they are kept as committed
 // like every other `.dts` shape with a prior asset (`DTS_CONVERTED_SHAPES` above).
 
+// The three armour bodies, each published as `players/<body>.glb`: one biped node hierarchy
+// with every one of that body's clips appended to it, written in the same Torque-to-glTF basis
+// every other shape here uses. The engine assembles the same pair at load time —
+// `TSShapeConstructor::onAdd` (`ts/tsShapeConstruct.cc:40`) loads `<body>.dts` and calls
+// `TSShape::importSequences` (`ts/tsShapeOldRead.cc:1046`) once per clip file in the
+// datablock's `sequenceN` list — so the conversion does the same thing in the same order, and
+// `dtsToGlb`'s `animate` option is what turns the assembled shape's sequences into clips.
+//
+// A body has no committed counterpart, so nothing here is kept as committed: all three files
+// are new, and the shipped clips are the point of them (`emitSequenceAnimations`' parity note
+// records why every shape that *does* have a committed GLB keeps it, this emitter's clips
+// having two open defects against those files). The meshes are detail level 0, the highest
+// level, as for every other shape; the body's two materials resolve to skins
+// (`skins\base.<body>` and `skins\jetpack`), which `attachShapeTextures` attaches the same way
+// it does for the vehicles.
+for (const body of PLAYER_BODIES) totalBytes += await writePlayerBody(body);
+
+// The interiors and shapes the loop above wrote, plus the three player models: `totalBytes`
+// counts what that loop converts and what the players add. The five weapons and the vehicles
+// keep committed files and are written outside the loop, so they are outside this bound — as
+// they were before the players landed, and unchanged by them.
 if (totalBytes > ASSET_SIZE_BUDGET_BYTES) {
   throw new Error(
-    `Interior/shape assets total ${String(totalBytes)} bytes, over the ${String(ASSET_SIZE_BUDGET_BYTES)} byte budget`,
+    `Interior/shape/player assets total ${String(totalBytes)} bytes, over the ${String(ASSET_SIZE_BUDGET_BYTES)} byte budget`,
   );
 }
 
@@ -298,16 +328,50 @@ const VEHICLE_SHAPES: VehicleShapeSpec[] = [
  *  no DTS at all, and the one shape whose DTS predates the reader. Returns null when the
  *  cache does not hold that path, so callers decide how loud to be. */
 async function readCachedShape(source: string): Promise<Uint8Array | null> {
-  const path = resolve(cache, source);
-  if (!(await exists(path))) return null;
-  const bytes = new Uint8Array(await readFile(path));
-  if (!source.endsWith('.dts')) return bytes;
+  const bytes = await readCachedBytes(source);
+  if (!bytes || !source.endsWith('.dts')) return bytes;
   return dtsToGlb(parseDts(bytes), {
     name: source
       .split('/')
       .at(-1)!
       .replace(/\.dts$/, ''),
   });
+}
+
+/** A cache entry's bytes, or null when the cache does not hold that path. Split out of
+ *  `readCachedShape` because the player bodies need the *source* bytes rather than a
+ *  converted shape: their clips are appended to the parsed shape before one `dtsToGlb` call,
+ *  which is the whole difference between a body and every other shape here. */
+async function readCachedBytes(source: string): Promise<Uint8Array | null> {
+  const path = resolve(cache, source);
+  if (!(await exists(path))) return null;
+  return new Uint8Array(await readFile(path));
+}
+
+/** One armour body's `players/<body>.glb`, returning its size in bytes.
+ *
+ *  The shape is parsed once and each clip appended to it in turn, which is `importSequences`'
+ *  own order and its own result: one shape whose keyframe arrays hold every clip's keys and
+ *  whose sequence list holds every clip. `appendSequences` is given the clip's *file* name,
+ *  which is the name the clip takes in the emitted GLB — the contract's clip names are the
+ *  `.dsq` suffixes (`forward`), not the sequence names the files store (`Forward`).
+ *
+ *  Both halves are hard requirements of the build: a missing clip file is a broken clip list in
+ *  `player-sources.ts`, not a body that ships without that clip, so both throw. */
+async function writePlayerBody(body: PlayerBody): Promise<number> {
+  const shapeSource = playerShapeSource(body);
+  const shapeBytes = await readCachedBytes(shapeSource);
+  if (!shapeBytes) throw new Error(`Missing cached shape: ${shapeSource}`);
+  let shape = parseDts(shapeBytes);
+  for (const clip of body.clips) {
+    const source = playerClipSource(body, clip);
+    const clipBytes = await readCachedBytes(source);
+    if (!clipBytes) throw new Error(`Missing cached clip: ${source}`);
+    shape = appendSequences(shape, parseDsq(clipBytes), clip);
+  }
+  const bytes = attachShapeTextures(dtsToGlb(shape, { animate: true, name: body.body }));
+  await writeFile(resolve(playersDir, `${body.body}.glb`), bytes);
+  return bytes.byteLength;
 }
 
 async function exists(path: string): Promise<boolean> {

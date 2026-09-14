@@ -1,11 +1,10 @@
 import * as THREE from 'three';
 import type { PlayerSnapshotData } from '@clans/sim';
+import { PlayerView } from './players-view.js';
 
 export const INTERP_DELAY_MS = 100;
 export const MAX_EXTRAPOLATE_MS = 50;
 const HISTORY_LENGTH = 8;
-const CAPSULE_RADIUS = 0.6;
-const CAPSULE_HEIGHT = 1.2;
 // A respawn (falling out of the world, or a disconnected id reused by a new player
 // before an intervening snapshot) teleports a player instantly; the snapshot wire format
 // carries no flag for that. Without this, the new position was appended to the same
@@ -33,7 +32,9 @@ interface RemoteSample {
   atMs: number;
   data: PlayerSnapshotData;
 }
-interface RemotePose {
+/** A remote player's interpolated transform, in the client's own frame: the position the
+ *  player model is placed at (feet on the ground) and the yaw its root turns to. */
+export interface RemotePose {
   x: number;
   y: number;
   z: number;
@@ -113,6 +114,14 @@ export class RemoteBuffer {
       : this.interpolate(renderTime);
   }
 
+  /** The newest raw sample, never interpolated: the discrete half of a remote player's state
+   *  (armour, onGround, ski, health, velocity) is logical truth as of the last snapshot and
+   *  must not be blended the way position and yaw are. Same split, and the same reasoning, as
+   *  vehicle-view.ts's VehicleBuffer.latest. */
+  latest(): PlayerSnapshotData | null {
+    return this.samples.at(-1)?.data ?? null;
+  }
+
   private interpolate(renderTime: number): RemotePose {
     const { before, after } = findBracket(this.samples, renderTime);
     if (!before || !after || before.atMs === after.atMs) return poseFromSample(before ?? after);
@@ -130,56 +139,49 @@ export class RemoteBuffer {
   }
 }
 
-export function createCapsule(): THREE.Mesh {
-  const geometry = new THREE.CapsuleGeometry(CAPSULE_RADIUS, CAPSULE_HEIGHT, 4, 8);
-  const material = new THREE.MeshStandardMaterial({ color: 0x4488ff });
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.castShadow = true;
-  return mesh;
-}
-
-function disposeMesh(mesh: THREE.Mesh): void {
-  mesh.geometry.dispose();
-  const material = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-  for (const entry of material) entry.dispose();
-}
-
 function pruneMissing(
   scene: THREE.Scene,
-  meshes: Map<number, THREE.Mesh>,
+  views: Map<number, PlayerView>,
   buffers: Map<number, RemoteBuffer>,
 ): void {
-  for (const id of [...meshes.keys()]) {
+  for (const id of [...views.keys()]) {
     if (buffers.has(id)) continue;
-    const mesh = meshes.get(id);
-    if (mesh) {
-      scene.remove(mesh);
-      // Every mesh here owns geometry and a material created just for it (createCapsule);
-      // removing it from the scene alone leaves both allocated, so a disconnect/rejoin
-      // cycle across a match leaks WebGL resources the GC never reclaims.
-      disposeMesh(mesh);
+    const view = views.get(id);
+    if (view) {
+      scene.remove(view.root);
+      // A view owns the GPU resources it created just for itself -- the fallback capsule's
+      // geometry and material, and the loaded model's meshes, textures and clips -- so
+      // removing it from the scene alone leaves all of them allocated and a
+      // disconnect/rejoin cycle across a match leaks what the GC never reclaims.
+      view.dispose();
     }
-    meshes.delete(id);
+    views.delete(id);
   }
 }
 
-export function syncRemoteMeshes(
+/**
+ * Draws every remote player's interpolated pose: one `PlayerView` per live id, holding the
+ * armour model (players-view.ts) and falling back to the capsule until -- or unless -- it
+ * loads. Position and yaw come from `RemoteBuffer.positionAt`, the discrete inputs the clip
+ * choice needs from its `latest()` sample, and both are stamped with the caller's clock.
+ */
+export function syncRemotePlayers(
   scene: THREE.Scene,
-  meshes: Map<number, THREE.Mesh>,
+  views: Map<number, PlayerView>,
   buffers: Map<number, RemoteBuffer>,
   nowMs: number,
 ): void {
-  pruneMissing(scene, meshes, buffers);
+  pruneMissing(scene, views, buffers);
   for (const [id, buffer] of buffers) {
-    let mesh = meshes.get(id);
-    if (!mesh) {
-      mesh = createCapsule();
-      scene.add(mesh);
-      meshes.set(id, mesh);
-    }
+    const sample = buffer.latest();
     const pose = buffer.positionAt(nowMs);
-    if (!pose) continue;
-    mesh.position.set(pose.x, pose.y + CAPSULE_HEIGHT / 2 + CAPSULE_RADIUS, pose.z);
-    mesh.rotation.y = pose.yaw + Math.PI;
+    if (!sample || !pose) continue;
+    let view = views.get(id);
+    if (!view) {
+      view = new PlayerView(id);
+      scene.add(view.root);
+      views.set(id, view);
+    }
+    view.sync(sample, pose, nowMs);
   }
 }

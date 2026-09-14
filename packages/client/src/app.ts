@@ -75,7 +75,8 @@ import {
   type RemoteVehicleSnapshot,
   type TimestampedEvent,
 } from './netclient.js';
-import { RemoteBuffer, syncRemoteMeshes } from './remote.js';
+import type { PlayerView } from './players-view.js';
+import { RemoteBuffer, syncRemotePlayers } from './remote.js';
 import {
   createRepairBeamView,
   repairBeamStatusText,
@@ -1088,11 +1089,11 @@ function stepNetworked(
   input: PlayerInput,
   steps: number,
   scene: THREE.Scene,
-  remoteMeshes: Map<number, THREE.Mesh>,
+  remoteViews: Map<number, PlayerView>,
   remoteBuffers: Map<number, RemoteBuffer>,
 ): void {
   for (let step = 0; step < steps; step += 1) net.tick(input);
-  updateRemotes(net, scene, remoteMeshes, remoteBuffers, performance.now());
+  updateRemotes(net, scene, remoteViews, remoteBuffers, performance.now());
   stats.ping = net.stats.ping;
   stats.bytesPerSecond = net.stats.bytesPerSecond;
   stats.packetLossEstimate = net.stats.packetLossEstimate;
@@ -1175,18 +1176,18 @@ export function updateVehicleBuffers(
 export function updateRemotes(
   activeNet: Pick<NetClient, 'remoteSnapshots' | 'connected'>,
   targetScene: THREE.Scene,
-  meshes: Map<number, THREE.Mesh>,
+  views: Map<number, PlayerView>,
   buffers: Map<number, RemoteBuffer>,
   nowMs: number,
 ): void {
   // remoteSnapshots only grows when a snapshot arrives, and nothing else clears it once
   // the socket drops -- a plain disconnect (no final empty snapshot) left every remote
-  // mesh, and the GPU resources syncRemoteMeshes' pruning now disposes, stranded until
+  // mesh, and the GPU resources syncRemotePlayers' pruning now disposes, stranded until
   // the page itself tore down. Clearing every buffer here lets that same pruning path
   // remove and dispose them on the very next call.
   if (!activeNet.connected) {
     buffers.clear();
-    syncRemoteMeshes(targetScene, meshes, buffers, nowMs);
+    syncRemotePlayers(targetScene, views, buffers, nowMs);
     return;
   }
   // Codex round 10 (PR #4): reading only the latest remotePlayers/remoteTick once per
@@ -1209,7 +1210,7 @@ export function updateRemotes(
     applyRemoteSnapshot(buffers, snapshot, atMs);
   }
   if (latest) pruneStaleRemoteBuffers(buffers, latest);
-  syncRemoteMeshes(targetScene, meshes, buffers, nowMs);
+  syncRemotePlayers(targetScene, views, buffers, nowMs);
 }
 
 /**
@@ -1912,7 +1913,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   setupResize(container, camera, renderer);
 
   const acc: Accumulator = { remainder: 0 };
-  const remoteMeshes = new Map<number, THREE.Mesh>();
+  const remoteViews = new Map<number, PlayerView>();
   const remoteBuffers = new Map<number, RemoteBuffer>();
   const vehicleBuffers = new Map<number, VehicleBuffer>();
   const fps: FpsWindow = { windowStart: performance.now(), frames: 0 };
@@ -2108,7 +2109,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       const currentInput = gameplayInput(app, usePressed, pilotYaw);
       const simStart = performance.now();
       if (net) {
-        stepNetworked(net, app.stats, currentInput, steps, scene, remoteMeshes, remoteBuffers);
+        stepNetworked(net, app.stats, currentInput, steps, scene, remoteViews, remoteBuffers);
       } else {
         stepSinglePlayer(world, playerId, currentInput, steps, localSpawn, (flagsBefore) => {
           playWeaponFireAudio(world, playerId, audio);

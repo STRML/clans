@@ -14,8 +14,10 @@ export function withVisibility(
   root.traverse((node) => appendIflTrack(node, clips));
   return [...clips.values()].map((clip) => {
     // Use the Float32 track endpoint so a clamped one-shot reaches its final off key.
-    clip.resetDuration();
-    return clip;
+    // Sanitizing here, in the one function every mixer site calls (weapon-animation.ts,
+    // turret-mount.ts, disc-explosion.ts, and createAnimation below), is what keeps a
+    // malformed source clip from hanging the client wherever it is played from.
+    return sanitizeClip(clip).resetDuration();
   });
 }
 
@@ -372,6 +374,49 @@ export function poseShape(root: THREE.Object3D, name: string, seconds: number): 
   animation.seek(name, seconds);
 }
 
+/** A keyframe track whose value buffer is not a whole number of keyframes is corrupt data,
+ *  and three does not merely mis-play it -- it hangs the main thread. `KeyframeTrack` derives
+ *  `valueSize = values.length / times.length` (three/src/animation/KeyframeTrack.js), so a
+ *  track with 11 keys and 6 floats gets a stride of 6/11; `PropertyMixer.saveOriginalState`
+ *  then copies accumulators with `for (let i = stride, e = stride * this._origIndex;
+ *  i !== e; ++ i)` (build/three.core.js:52341), which for a fractional stride never lands on
+ *  its end value and spins forever -- no allocation, no throw, no way for the page to
+ *  recover, and the console shows nothing.
+ *
+ *  The shipped T2 bipeds were exactly this case until 2026-09-14: every `<body>.glb` carried
+ *  `JetFlare` and `Damage` with a `Bip01 Pelvis` translation channel of 11 keys against 2
+ *  VEC3 values (the exporter wrote a two-element constant where a sampler needs one value per
+ *  key), while every other clip animated that same node with a well-formed track. Because
+ *  three shares one PropertyMixer per track name inside a mixer, the corrupt one won for the
+ *  whole model -- whichever clip is created first owns the mixer -- so playing `root`,
+ *  `forward`, `land`, `jet` or `ski` was enough to wedge the client.
+ *
+ *  That data defect is fixed at its source (packages/assets's dts.ts sequenceChannels, with a
+ *  build test asserting output elements == input elements), so today's files have nothing to
+ *  drop. The guard stays regardless of the current data: three's failure mode here is an
+ *  unrecoverable main-thread spin rather than a visible error, and every mixer site reads
+ *  clips this renderer did not author. */
+function sanitizeClip(clip: THREE.AnimationClip): THREE.AnimationClip {
+  const sane = clip.tracks.filter(
+    (track) =>
+      track.times.length > 0 &&
+      track.values.length > 0 &&
+      track.values.length % track.times.length === 0,
+  );
+  if (sane.length === clip.tracks.length) return clip;
+  const dropped = clip.tracks.filter((track) => !sane.includes(track));
+  console.warn(
+    `Dropped ${String(dropped.length)} malformed keyframe track(s) from clip "${clip.name}": ` +
+      dropped
+        .map(
+          (track) =>
+            `${track.name} (${String(track.times.length)} keys, ${String(track.values.length)} values)`,
+        )
+        .join(', '),
+  );
+  return new THREE.AnimationClip(clip.name, clip.duration, sane);
+}
+
 function createAnimation(root: THREE.Object3D, clips: THREE.AnimationClip[]): ShapeAnimation {
   const mixer = new THREE.AnimationMixer(root);
   const actions = new Map(
@@ -381,6 +426,12 @@ function createAnimation(root: THREE.Object3D, clips: THREE.AnimationClip[]): Sh
     seek(name: string, seconds: number): void {
       const action = actions.get(name.toLowerCase());
       if (!action) return;
+      // Only the named clip may contribute. three's mixer accumulates every bound action
+      // and normalizes by total weight, so a clip a caller seeked earlier -- vehicles only
+      // ever seek one name, a player switches between all of them -- would otherwise still
+      // weigh 1 and blend its stale pose into this one at 50/50. A seek is a request for
+      // one pose, so every other action is stopped first.
+      for (const other of actions.values()) if (other !== action) other.stop();
       action.play();
       action.paused = true;
       action.time = Math.min(Math.max(0, seconds), action.getClip().duration);

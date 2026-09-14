@@ -66,6 +66,7 @@ import {
   type RepairBeamFrame,
 } from './app.js';
 import { flagsFromWorld } from './flag-view.js';
+import type { PlayerView } from './players-view.js';
 import { RemoteBuffer } from './remote.js';
 import { VehicleBuffer } from './vehicle-view.js';
 import { spawnProjectileImpacts, type Effect } from './weapons-view.js';
@@ -261,7 +262,7 @@ describe('updateRemotes', () => {
     // Those are unrelated epochs; a remote player either extrapolated forever or stuck to
     // a stale sample because renderTime never bracketed a sample timestamped that way.
     const scene = new THREE.Scene();
-    const meshes = new Map<number, THREE.Mesh>();
+    const meshes = new Map<number, PlayerView>();
     const buffers = new Map<number, RemoteBuffer>();
     const activeNet: Pick<NetClient, 'remoteSnapshots' | 'connected'> = {
       remoteSnapshots: [{ tick: 500, players: new Map([[1, snapshot]]) }],
@@ -282,7 +283,7 @@ describe('updateRemotes', () => {
     // nothing else cleared it on disconnect, so a plain socket close left every remote
     // mesh (and the GPU resources behind it) stranded until the page tore down.
     const scene = new THREE.Scene();
-    const meshes = new Map<number, THREE.Mesh>();
+    const meshes = new Map<number, PlayerView>();
     const buffers = new Map<number, RemoteBuffer>();
     const fakeNet: { remoteSnapshots: NetClient['remoteSnapshots']; connected: boolean } = {
       remoteSnapshots: [{ tick: 1, players: new Map([[1, snapshot]]) }],
@@ -307,7 +308,7 @@ describe('updateRemotes', () => {
     // anything read it, so RemoteBuffer's interpolation history silently lost it and the
     // remote snapped instead of smoothing through the gap.
     const scene = new THREE.Scene();
-    const meshes = new Map<number, THREE.Mesh>();
+    const meshes = new Map<number, PlayerView>();
     const buffers = new Map<number, RemoteBuffer>();
     const remoteSnapshots: RemoteSnapshot[] = [
       { tick: 10, players: new Map([[1, { ...snapshot, x: 10 }]]) },

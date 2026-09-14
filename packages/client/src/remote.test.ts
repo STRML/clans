@@ -1,7 +1,9 @@
 import * as THREE from 'three';
-import { describe, expect, it, vi } from 'vitest';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlayerSnapshotData } from '@clans/sim';
-import { RemoteBuffer, syncRemoteMeshes } from './remote.js';
+import { PlayerView } from './players-view.js';
+import { RemoteBuffer, syncRemotePlayers } from './remote.js';
 
 const sample = (x: number, vx: number): PlayerSnapshotData => ({
   id: 1,
@@ -86,39 +88,48 @@ describe('RemoteBuffer', () => {
   });
 });
 
-describe('syncRemoteMeshes', () => {
-  it('adds a mesh per remote id and removes it once the id drops out', () => {
+describe('syncRemotePlayers', () => {
+  // Every view a sync creates starts loading its armour model; the network is not this
+  // test's subject (players-view.test.ts covers what happens when the load answers).
+  beforeEach(() => vi.spyOn(GLTFLoader.prototype, 'load').mockImplementation(() => {}));
+  afterEach(() => vi.restoreAllMocks());
+
+  it('adds a view per remote id and removes it once the id drops out', () => {
     const scene = new THREE.Scene();
-    const meshes = new Map<number, THREE.Mesh>();
+    const views = new Map<number, PlayerView>();
     const buffers = new Map<number, RemoteBuffer>([[1, new RemoteBuffer()]]);
     buffers.get(1)?.push(0, sample(3, 0));
 
-    syncRemoteMeshes(scene, meshes, buffers, 100);
+    syncRemotePlayers(scene, views, buffers, 100);
     expect(scene.children).toHaveLength(1);
-    expect(meshes.get(1)?.position.x).toBeCloseTo(3);
+    expect(views.get(1)?.root.position.x).toBeCloseTo(3);
 
     buffers.delete(1);
-    syncRemoteMeshes(scene, meshes, buffers, 100);
+    syncRemotePlayers(scene, views, buffers, 100);
     expect(scene.children).toHaveLength(0);
   });
 
-  it('disposes a pruned mesh geometry and material instead of leaking them', () => {
+  it('disposes a pruned player view instead of leaking the resources behind it', () => {
     // Codex round 1 (PR #4): pruning only removed the mesh from the scene and map;
     // geometry and material created for it stayed allocated, so a disconnect/rejoin
     // cycle across a match leaked GPU resources the garbage collector never reclaims.
+    // The view owns its resources now (players-view.ts), so pruning has to dispose it.
     const scene = new THREE.Scene();
-    const meshes = new Map<number, THREE.Mesh>();
+    const views = new Map<number, PlayerView>();
     const buffers = new Map<number, RemoteBuffer>([[1, new RemoteBuffer()]]);
     buffers.get(1)?.push(0, sample(3, 0));
-    syncRemoteMeshes(scene, meshes, buffers, 100);
+    syncRemotePlayers(scene, views, buffers, 100);
 
-    const mesh = meshes.get(1);
-    if (!mesh || Array.isArray(mesh.material)) throw new Error('expected a single-material mesh');
-    const geometryDispose = vi.spyOn(mesh.geometry, 'dispose');
-    const materialDispose = vi.spyOn(mesh.material, 'dispose');
+    const view = views.get(1);
+    // The fallback capsule is the view root's first child (players-view.ts), and it is
+    // the only mesh a load that never completes ever creates.
+    const capsule = view?.root.children[0] as THREE.Mesh;
+    if (!view || Array.isArray(capsule.material)) throw new Error('expected a capsule view');
+    const geometryDispose = vi.spyOn(capsule.geometry, 'dispose');
+    const materialDispose = vi.spyOn(capsule.material, 'dispose');
 
     buffers.delete(1);
-    syncRemoteMeshes(scene, meshes, buffers, 100);
+    syncRemotePlayers(scene, views, buffers, 100);
 
     expect(geometryDispose).toHaveBeenCalledOnce();
     expect(materialDispose).toHaveBeenCalledOnce();

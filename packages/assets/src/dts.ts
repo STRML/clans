@@ -50,8 +50,10 @@ import {
 } from '@gltf-transform/core';
 
 /** `TSShape::smVersion` is 23 (`ts/tsShape.cc:17`); every base `shapes.vl2` vehicle is 22
- *  or 23, and nothing newer exists to read. */
-const SUPPORTED_DTS_VERSION = 23;
+ *  or 23, and nothing newer exists to read. Exported because a `.dsq` sequence container is
+ *  written with the same `smVersion` and refuses a version newer than the reader
+ *  (`ts/tsShapeOldRead.cc:1048`), so `dsq.ts` bounds its own version against this one. */
+export const SUPPORTED_DTS_VERSION = 23;
 
 /** `Quat16::MAX_VAL` — `ts/tsTransform.h`. */
 const QUAT16_MAX_VAL = 0x7fff;
@@ -1252,7 +1254,21 @@ function readSequences(
   let cursor = offset + 4;
   const sequences: DtsSequence[] = [];
   for (let index = 0; index < sequenceCount; index += 1) {
-    const read = readOneSequence(view, cursor, version, bytes.byteLength, index, names);
+    // `Sequence::read(s, true)`: a shape's own sequence list leads each record with its
+    // name-table index (`ts/tsShapeOldRead.cc`), which is resolved here so the record reader
+    // below is the same one a `.dsq`'s name-first records use. The read is bounds-checked here
+    // rather than only in the reader, so a file truncated at a sequence boundary reports the
+    // package's own truncation error instead of a bare `DataView` range error.
+    if (cursor + 4 > bytes.byteLength) throw truncated(index, 'name', bytes.byteLength);
+    const nameIndex = view.getInt32(cursor, true);
+    const read = readSequenceRecord(
+      view,
+      cursor + 4,
+      version,
+      bytes.byteLength,
+      index,
+      names[nameIndex] ?? `sequence${index}`,
+    );
     sequences.push(read.sequence);
     cursor = read.cursor;
   }
@@ -1342,20 +1358,25 @@ class SequenceReader {
   }
 }
 
-/** One `Sequence::read`: the bookkeeping, the `base` indices and the eight membership sets,
- *  in the order `ts/tsShapeOldRead.cc` reads them, each version-dependent group split out
- *  because which fields exist — and therefore where the next one starts — is exactly what
- *  the version word decides. */
-function readOneSequence(
+/** One `Sequence::read` record — the bookkeeping, the `base` indices and the eight membership
+ *  sets, in the order `ts/tsShapeOldRead.cc` reads them, each version-dependent group split out
+ *  because which fields exist — and therefore where the next one starts — is exactly what the
+ *  version word decides.
+ *
+ *  The name is the caller's: a shape's own sequence list stores a name-table index that
+ *  `readSequences` resolves before calling this, while a `.dsq` stores the name itself
+ *  (`exportSequences`'s `writeName`, read back by `importSequences`), because a standalone
+ *  sequence file has no name table to index into. Everything after the name is identical, so
+ *  both containers read their records through this one function. */
+export function readSequenceRecord(
   view: DataView,
   offset: number,
   version: number,
   length: number,
   index: number,
-  names: readonly string[],
+  name: string,
 ): { sequence: DtsSequence; cursor: number } {
   const reader = new SequenceReader(view, offset, index, length);
-  const nameIndex = reader.i32('name');
   let flags = version > 21 ? reader.i32('flags') : 0;
   const numKeyframes = reader.i32('keyframes');
   const duration = reader.f32('duration');
@@ -1380,7 +1401,7 @@ function readOneSequence(
   return {
     cursor: reader.cursor,
     sequence: {
-      name: names[nameIndex] ?? `sequence${index}`,
+      name,
       flags,
       numKeyframes,
       duration,
@@ -1682,6 +1703,12 @@ export interface DtsToGlbOptions {
   readonly name?: string;
   /** glTF `asset.generator`. */
   readonly generator?: string;
+  /** Emit one clip per entry of `shape.sequences` (see `emitSequenceAnimations`). Off by
+   *  default: every shape with a committed GLB is kept as committed, because this emitter is
+   *  not yet at clip parity with those files (`DTS_CONVERTED_SHAPES` in `build.ts` is the
+   *  list, `emitSequenceAnimations` below is the parity table). It is on for the three player
+   *  bodies, which have no committed counterpart and whose whole point is the shipped clips. */
+  readonly animate?: boolean;
 }
 
 /** The basis every `.glb` this repository publishes is written in, as a rotation of Torque's
@@ -1742,6 +1769,7 @@ export function dtsToGlb(shape: DtsShape, options: DtsToGlbOptions = {}): Uint8A
   scene.addChild(basis);
   const nodes = createNodeLayer(document, shape, basis);
   emitDetailLevel(document, shape, detail, nodes, basis);
+  if (options.animate) emitSequenceAnimations(document, shape, nodes);
   return serializeGlb(document, options.generator ?? 'clans-dts');
 }
 
@@ -1948,8 +1976,11 @@ function iflExtras(shape: DtsShape, mesh: DtsMesh): Record<string, unknown> {
  *  animated node — the same clip names, targets and playback length the shipped files carry,
  *  because a clip name is how every consumer reaches the animation.
  *
- *  NOT CALLED YET, and deliberately so. Everything below is verified against the shipped
- *  files (`weapon_disc`, `weapon_chaingun`, `weapon_mortar`, `weapon_sniper`, `weapon_energy`,
+ *  Called for the three player bodies only, through `DtsToGlbOptions.animate`: those GLBs are
+ *  new files with no committed counterpart, and the shipped clips are the whole point of them,
+ *  so there is no "worse file than the one already committed" to weigh here. Everything below
+ *  is verified against the shapes that do have a committed counterpart (`weapon_disc`,
+ *  `weapon_chaingun`, `weapon_mortar`, `weapon_sniper`, `weapon_energy`,
  *  `turret_aa_large`, `turret_base_large`, `turret_fusion_large`, `turret_sentry`,
  *  `station_generator_large`, `station_inv_human`, `sensor_pulse_large`, `vehicle_pad`,
  *  `vehicle_pad_station`, `vehicle_shrike`, `vehicle_wildcat`):
@@ -1964,16 +1995,19 @@ function iflExtras(shape: DtsShape, mesh: DtsMesh): Record<string, unknown> {
  *    over five samples per clip — the weapons' `discSpin`/`Reload`/`Fire`/`Spin`/`Recoil`, the
  *    turrets' `Deploy`/`Activate`/`Elevate`/`Turn`, the stations' and pad's `Activate`.
  *
- *  - Not verified, and why this is not called: (1) the placeholder clips — a sequence whose
- *    only members are objects (visibility/IFL) has no transform channel, and the shipped files
- *    hold a two-key constant on the shape's own first node while this emits the full key list,
- *    with a held value that differs from the shipped one by up to 2.8 world units; (2) this
- *    emits clips for sequences the shipped files have no clip for, and (3) enabling it broke
- *    the whole browser suite, not just the weapon spec: 11 of 11 specs failed, including
- *    `ui-audio` and `world-geometry`, which load no weapon model. The two suspects for (3) are
- *    those non-transform clips and `applyObjectExtras` below, whose `vis` value is derived from
- *    `objectStates[objectIndex]` and would hide a mesh whose object-state record is not simply
- *    the object's default. Start there, not at the clip math: the transform clips are right.
+ *  - Not verified, and why the shapes with a committed GLB still use that file, not this one:
+ *    (1) the placeholder clips — a sequence whose only members are objects (visibility/IFL) has
+ *    no transform channel, and the shipped files hold a two-key constant on the shape's own
+ *    first node while this emits the full key list, with a held value that differs from the
+ *    shipped one by up to 2.8 world units; (2) this emits clips for sequences the shipped files
+ *    have no clip for, and (3) enabling it for those shapes broke the whole browser suite, not
+ *    just the weapon spec: 11 of 11 specs failed, including `ui-audio` and `world-geometry`,
+ *    which load no weapon model. The two suspects for (3) are those non-transform clips and
+ *    `applyObjectExtras` below, whose `vis` value is derived from `objectStates[objectIndex]`
+ *    and would hide a mesh whose object-state record is not simply the object's default. Start
+ *    there, not at the clip math: the transform clips are right. Neither suspect reaches the
+ *    player bodies: their clips are all transform clips (`players.test.ts` asserts the emitted
+ *    channels), and `dtsToGlb` does not call `applyObjectExtras` at all.
  *  @see DTS_CONVERTED_SHAPES in `build.ts` for why the converted shapes are limited to the
  *  four vehicles that have no committed GLB. */
 export function emitSequenceAnimations(
@@ -2018,10 +2052,18 @@ function sequenceChannels(
   // shipped files keep those clips, each holding one constant translation key on the
   // shape's own first node. A sequence with no members at all (the Spinfusor's `NoAmmo`)
   // animates nothing anywhere and gets no clip, exactly as in the shipped file.
+  //
+  // The held value is written once per entry of the sequence's own timebase, not twice: a
+  // sampler's output has to hold one value per input key, and three.js divides the two
+  // lengths to get a track's `valueSize` — a two-value output over an eleven-key input gives
+  // it 0.545, which its mixer then walks as a stride that never lands on the end
+  // (`PropertyMixer.saveOriginalState`, `three.core.js`, `for (let i = stride, e = stride *
+  // this._origIndex; i !== e; ++i)`) and hangs the page rather than playing the clip.
   const anchor = nodes[0];
   if (channels.length === 0 && animatesObjects(sequence) && anchor) {
-    const held = new Float32Array(6);
-    held.set([...anchor.getTranslation(), ...anchor.getTranslation()]);
+    const translation = anchor.getTranslation();
+    const held = new Float32Array(keyCount * 3);
+    for (let key = 0; key < keyCount; key += 1) held.set(translation, key * 3);
     channels.push({ node: anchor, path: 'translation', values: held });
   }
   return channels;

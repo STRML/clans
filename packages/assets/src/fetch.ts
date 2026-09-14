@@ -6,6 +6,7 @@ import textureSources from './texture-sources.json' with { type: 'json' };
 import { AUDIO_SOURCES } from './audio-sources.js';
 import { GUI_SOURCE_FILES } from './gui-sources.js';
 import { PROJECTILE_SOURCE_FILES } from './projectile-sources.js';
+import { playerSourceFiles } from './player-sources.js';
 
 const BASE = 'https://raw.githubusercontent.com/exogen/t2-mapper/HEAD/docs/base/@vl2/';
 // Two shape tiers, with different fates upstream. `shapes.vl2` publishes each shape's DTS
@@ -74,6 +75,9 @@ async function exists(path: string): Promise<boolean> {
 for (const source of [
   ...SOURCES,
   ...PROJECTILE_SOURCE_FILES,
+  // The player bodies: one biped `.dts` per armour plus one `.dsq` per clip, the two halves
+  // the engine joins at load time (`player-sources.ts` names the set and where it comes from).
+  ...playerSourceFiles(),
   ...Object.values(textureSources),
   ...Object.values(AUDIO_SOURCES),
   ...GUI_SOURCE_FILES.map((file) => `textures.vl2/textures/gui/${file}`),

@@ -12,6 +12,51 @@ redeployed together.
 
 ## Unreleased
 
+### 2026-09-14 — remote players render as the T2 armour models, with the game's own animation clips
+
+#### Added
+
+- Character models for every remote player: the three armour shapes the sim actually has --
+  **light male** (`LightMaleHumanArmor`'s `shapeFile = "light_male.dts"`, `player.cs:1207`),
+  medium male (:1461) and heavy male (:1714) -- converted to
+  `assets/out/katabatic/players/<body>.glb` (1.2 MB each, 1,600-1,900 vertices, 56-61 nodes)
+  with the game's own animation clips attached. The clips live in the game data as external
+  `.dsq` files (`light_male_forward.dsq`, `light_male_back.dsq`, `light_male_jet.dsq`, ten
+  `die*` clips, and so on: 38-42 clips per body), which are a sequences-only Torque container
+  the asset pipeline now reads (`packages/assets/src/dsq.ts`); the exporter renames each clip
+  to its file suffix and emits node-transform channels over the biped hierarchy
+  (`Bip01 Pelvis ... Bip01 L Foot`) the same way the vehicle models animate. No new wire
+  fields: the client picks the body from the snapshot's armour byte and drives the clip from
+  velocity, ground, ski and health through a pure `clipFor` state machine whose boundaries are
+  cited to `player.cc` (the engine's own action table at :125-133, the fall threshold at :78,
+  the takeoff window at :1736-1739, the landing gate at :2688-2701). A death plays `dieslump`
+  (the snapshot carries no hit direction, so the ten directional deaths are not selectable);
+  an unknown clip falls back to `root`; a failed model load falls back to the old capsule.
+  Loading deduplicates per body, and the per-frame pose path is a direct seek, measured at
+  1.5 ms for all 47 remotes.
+
+#### Fixed
+
+- The first build of those GLBs shipped two clips whose `Bip01 Pelvis` translation channel had
+  11 keyframe times but only 2 VEC3 values (the IFL-marker clips `JetFlare`/`Damage` took a
+  constant instead of a per-key sampler). three derives a track's stride from
+  `values.length / times.length`, and a fractional stride makes `PropertyMixer`'s
+  save-original-state copy loop forever -- activating any clip that touches the pelvis froze
+  the page's main thread with no error, no exception and no console output. Fixed at the
+  source (the exporter now writes one output per key), guarded in the client
+  (`sanitizeClip` drops a track whose buffer is not a whole number of keyframes), and pinned
+  by a build test asserting every track of every body satisfies
+  `values.length === times.length * itemSize`.
+
+#### Verified
+
+- 47/47 remote models load and pose in a live client against a 48-bot server with zero console
+  errors; the nearest model sits in the camera frustum at NDC (0.18, 0.09) with its 27 submeshes
+  drawn. One honest caveat: headless verification is software-rendered, and at 47 animated
+  characters a frame takes about a second, so the *screenshots* of this feature are
+  throughput-bound (the glamour shot lost a race with the frame rate); the numbers above are the
+  verification. On a real GPU the models are 1,600-1,900 triangles each.
+
 ### 2026-09-11 — the four remaining vehicles, and an asset pipeline that builds from source
 
 #### Added

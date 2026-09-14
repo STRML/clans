@@ -118,6 +118,12 @@ export function assetUrl(path: string): string {
 export function shapeUrl(name: string): string {
   return `${ROOT}shapes/${name}.glb`;
 }
+/** One armour's biped model. `packages/assets`'s build publishes these beside `shapes/`
+ *  rather than inside it: a player model is a node hierarchy plus its own clip set
+ *  (`players/<body>.glb`, one file per ArmorId), not a shape scene.json enumerates. */
+export function playerModelUrl(body: string): string {
+  return `${ROOT}players/${body}.glb`;
+}
 export function collisionUrl(name: string): string {
   return `${ROOT}collision/${name}.collision.bin`;
 }
