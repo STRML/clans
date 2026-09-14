@@ -12,7 +12,36 @@ redeployed together.
 
 ## Unreleased
 
-### 2026-09-14 — remote players render as the T2 armour models, with the game's own animation clips
+### 2026-09-14 — the Tab scoreboard (protocol 12 to 13)
+
+#### Added
+
+- The scoreboard the original TAB key holds open: press and hold Tab and a translucent
+  overlay lists every player in the match per team, sorted kills-descending then name,
+  with Kills/Deaths/Ping columns and the local player's row highlighted; release the key
+  and it hides (`packages/client/src/scoreboard.ts`, in the HUD's own DOM idiom). The data
+  rides a new compact side-message, `MessageType.Roster`, the server broadcasts on join and
+  whenever the roster's content changes -- names, kills, deaths, and ping are server
+  runtime memory the sim has never modelled (the sim tracks a signed `score` only; ping is
+  the per-connection RTT in `net.ts`, 0 for every bot, which is honest: there is no
+  connection to measure), so a snapshot field would have bloated every send and fought the
+  relevance policy for state that is global and rarely changes. `server/roster.ts` keeps
+  the tallies beside the order board as runtime memory: applied from the same
+  `pendingDeaths` the PlayerKilled events broadcast from (so a lag-comp-reversed kill never
+  counts), pruned on leave, cleared when the next match resets scores. Team kills credit
+  the killer's Kills column and the signed score carries the -10, the same split the
+  source's own score screen makes.
+
+This ships as **protocol 13**: a new top-level message kind, bumped per the M7/#52 rule so
+`WelcomeStatus.VersionMismatch` catches a mixed client/server fleet before an old client
+silently renders an empty scoreboard.
+
+#### Changed
+
+- Bare `pnpm dev` now pairs the page with the game server it spawns: the dev script passes
+  `VITE_GAME_SERVER` and `main.ts` falls back to it when no `?server=` parameter is given
+  (`?server=off`, `pnpm dev:client`, and production builds stay offline-first). Nobody
+  should have to hand-type a ws URL to see the bots.
 
 #### Added
 
@@ -43,6 +72,16 @@ redeployed together.
   (`commander-map.ts`'s `terrainShades`).
 
 #### Fixed
+
+- Base turrets regenerate their shield. The shield step spends the turret's energy pool at
+  the base's own `energyPerDamagePoint` rate, but nothing restored that pool, so a turret
+  that had ever been hit fought the rest of the match unshielded. The T2 datablocks author
+  a positive `rechargeRate` beside `repairRate = 0` (`turret.cs:171-174`: Large 0.31,
+  `maxEnergy` 150; `sentryTurret.cs:162-164`: Sentry 0.40) and the engine applies it once
+  per 32 ms tick capped at `maxEnergy` (`shapeBase.cc:1011`), so a turret now recovers
+  energy every tick by its base's rate -- the full Large pool in about 2.6 s -- while hull
+  health stays unregenerated and a destroyed turret never recovers
+  (`sim/turrets.ts`'s `stepTurretRegen`).
 
 - The first build of those GLBs shipped two clips whose `Bip01 Pelvis` translation channel had
   11 keyframe times but only 2 VEC3 values (the IFL-marker clips `JetFlare`/`Damage` took a

@@ -145,6 +145,16 @@ describe('TURRET_BARREL_DATA / TURRET_BASE_DATA', () => {
   it('Sentry base maxHealth matches the spec table', () => {
     expect(TURRET_BASE_DATA[TurretBaseId.Sentry].maxHealth).toBe(1.2);
   });
+  it('shield pools match the scripts: 150 energy, rechargeRate 0.31/0.40, Mobile none', () => {
+    // turret.cs:173-174 (TurretBaseLarge) and sentryTurret.cs:163-164 (SentryTurret).
+    // MobileTurretBase authors neither field: its shield is its carrier's own
+    // (inheritEnergyFromMount, vehicle_mpb.cs:293).
+    expect(TURRET_BASE_DATA[TurretBaseId.Large].maxEnergy).toBe(150);
+    expect(TURRET_BASE_DATA[TurretBaseId.Large].rechargeRate).toBe(0.31);
+    expect(TURRET_BASE_DATA[TurretBaseId.Sentry].maxEnergy).toBe(150);
+    expect(TURRET_BASE_DATA[TurretBaseId.Sentry].rechargeRate).toBe(0.4);
+    expect(TURRET_BASE_DATA[TurretBaseId.Mobile].rechargeRate).toBe(0);
+  });
 });
 
 describe('stepTurrets: acquisition and firing', () => {
@@ -447,6 +457,59 @@ describe('applyTurretDamage', () => {
     expect(world.turrets.destroyed[turret]).toBe(1);
     stepTurrets(world, FIXED_DT);
     expect(world.pendingTurretFireEvents).toHaveLength(0);
+  });
+});
+
+describe('turret shield regen (TurretData.rechargeRate)', () => {
+  it('regenerates spent shield energy at the rate the base authors, per tick', () => {
+    const world = createWorld(flat, 1);
+    const turret = poweredTurret(world, TurretBarrelId.PlasmaBarrelLarge);
+    // One 0.5-radiusDamage plasma hit is fully absorbed: 0.5 * Large's
+    // energyPerDamagePoint 50 = 25 of the 150-point pool spent, and because the shield
+    // held, the hull shows nothing. stepTurretRegen then refills at turret.cs:174's
+    // rechargeRate 0.31 per tick, so 32 ticks (1.024 s) put back exactly 32 * 0.31.
+    applyTurretDamage(world, turret, 0.5);
+    expect(world.turrets.energy[turret]).toBeCloseTo(150 - 25, 10);
+    expect(world.turrets.damage[turret]).toBe(0);
+    for (let tick = 0; tick < 32; tick += 1) stepTurrets(world, FIXED_DT);
+    expect(world.turrets.energy[turret]).toBeCloseTo(125 + 0.31 * 32, 10);
+  });
+
+  it('caps regen at maxEnergy and the refilled shield absorbs again', () => {
+    const world = createWorld(flat, 1);
+    const turret = poweredTurret(world, TurretBarrelId.PlasmaBarrelLarge);
+    applyTurretDamage(world, turret, 0.5); // pool down to 125
+    // (150 - 125) / 0.31 = 80.65, so tick 81 reaches the cap exactly -- and stepping on
+    // must never carry the pool past it.
+    for (let tick = 0; tick < 81; tick += 1) stepTurrets(world, FIXED_DT);
+    expect(world.turrets.energy[turret]).toBe(TURRET_BASE_DATA[TurretBaseId.Large].maxEnergy);
+    for (let tick = 0; tick < 20; tick += 1) stepTurrets(world, FIXED_DT);
+    expect(world.turrets.energy[turret]).toBe(TURRET_BASE_DATA[TurretBaseId.Large].maxEnergy);
+    // A full pool absorbs again: the same hit lands on the shield, not the hull.
+    applyTurretDamage(world, turret, 0.5);
+    expect(world.turrets.energy[turret]).toBeCloseTo(125, 10);
+    expect(world.turrets.damage[turret]).toBe(0);
+  });
+
+  it('a destroyed turret never regenerates', () => {
+    const world = createWorld(flat, 1);
+    const turret = poweredTurret(world, TurretBarrelId.PlasmaBarrelLarge);
+    // The overkill hit drains all 150 shield points, then destroys from the hull.
+    applyTurretDamage(world, turret, 1000);
+    expect(world.turrets.destroyed[turret]).toBe(1);
+    expect(world.turrets.energy[turret]).toBe(0);
+    for (let tick = 0; tick < ticksFor(5); tick += 1) stepTurrets(world, FIXED_DT);
+    expect(world.turrets.energy[turret]).toBe(0);
+  });
+
+  it('a base that authors no rechargeRate (MobileTurretBase) regens nothing', () => {
+    const world = createWorld(flat, 1);
+    const turret = poweredTurret(world, TurretBarrelId.MissileBarrelLarge);
+    // MobileTurretBase's shield is its carrier vehicle's own (vehicle_mpb.cs:293
+    // inheritEnergyFromMount): maxEnergy 0, rechargeRate 0, so the pool starts empty and
+    // stays that way -- the exclusion is data, not a mount special case.
+    for (let tick = 0; tick < ticksFor(2); tick += 1) stepTurrets(world, FIXED_DT);
+    expect(world.turrets.energy[turret]).toBe(0);
   });
 });
 

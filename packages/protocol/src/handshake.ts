@@ -15,6 +15,8 @@ import {
   type Cursor,
 } from './codec.js';
 import {
+  MAX_ROSTER_NAME_BYTES,
+  MAX_SNAPSHOT_ROSTER,
   MessageType,
   PROTOCOL_VERSION,
   type AckMessage,
@@ -26,6 +28,8 @@ import {
   type JoinMessage,
   type LoadoutMessage,
   type NetInputSample,
+  type RosterEntryMessage,
+  type RosterMessage,
   type VehicleSpawnMessage,
   type VoiceBindMessage,
   type WelcomeMessage,
@@ -309,6 +313,102 @@ export function encodeVoiceBind(message: Omit<VoiceBindMessage, 'type'>): Uint8A
   writeU8(cursor, MessageType.VoiceBind);
   writeU8(cursor, message.lineId);
   return bytesOf(cursor);
+}
+// Module-level singletons: encodeRoster/decodeRoster may run per roster broadcast on every
+// client connection, and re-constructing TextEncoder/TextDecoder per call would allocate the
+// same stateless object over and over.
+const rosterNameEncoder = new TextEncoder();
+const rosterNameDecoder = new TextDecoder('utf-8');
+
+/** u16 counters (kills/deaths/ping) clamp instead of throwing: unlike the entry-count and
+ *  name-length bounds below -- which can only be exceeded by a server-side programming error
+ *  and so fail loudly, the same convention writeU8Counted established -- these carry measured
+ *  or tallied values (a monotonic death counter, an RTT sample) that a long-lived server could
+ *  legitimately push past 65535 one day; saturating the wire keeps the frame encodable without
+ *  inventing a failure mode a scoreboard column does not need. */
+function clampU16(value: number): number {
+  return Math.max(0, Math.min(0xffff, Math.round(value)));
+}
+
+/** Wire layout: type u8, entry count u8, then per entry: playerId u16, team u8, kills u16,
+ *  deaths u16, ping u16, name length u8, name bytes (UTF-8). Per-entry fixed part is
+ *  2 + 1 + 2 + 2 + 2 + 1 = 10 bytes plus the name. A stale 12-era peer never decodes one of
+ *  these (its dispatch has no Roster arm), and the PROTOCOL_VERSION 13 bump keeps the mixed
+ *  fleet from ever forming -- see messages.ts's own bump comment. */
+export function encodeRoster(message: Omit<RosterMessage, 'type'>): Uint8Array {
+  if (message.entries.length > MAX_SNAPSHOT_ROSTER) {
+    throw new RangeError(
+      `Roster claims ${String(message.entries.length)} entries, over the ` +
+        `${String(MAX_SNAPSHOT_ROSTER)}-seat world capacity`,
+    );
+  }
+  const names = message.entries.map((entry) => rosterNameEncoder.encode(entry.name));
+  for (const name of names) {
+    if (name.length > MAX_ROSTER_NAME_BYTES) {
+      throw new RangeError(
+        `Roster name is ${String(name.length)} UTF-8 bytes, over ` +
+          `${String(MAX_ROSTER_NAME_BYTES)}`,
+      );
+    }
+  }
+  const byteLength =
+    2 + message.entries.reduce((sum, _, index) => sum + 10 + (names[index]?.length ?? 0), 0);
+  const cursor = createWriter(byteLength);
+  writeU8(cursor, MessageType.Roster);
+  writeU8(cursor, message.entries.length);
+  message.entries.forEach((entry, index) => {
+    writeU16(cursor, entry.playerId);
+    writeU8(cursor, entry.team);
+    writeU16(cursor, clampU16(entry.kills));
+    writeU16(cursor, clampU16(entry.deaths));
+    writeU16(cursor, clampU16(entry.ping));
+    const name = names[index];
+    if (!name) throw new RangeError('Roster entry has no encoded name');
+    writeU8(cursor, name.length);
+    for (const byte of name) writeU8(cursor, byte);
+  });
+  return bytesOf(cursor);
+}
+
+export function decodeRoster(bytes: Uint8Array): RosterMessage {
+  const cursor = createReader(bytes);
+  expectType(cursor, MessageType.Roster);
+  const count = readU8(cursor);
+  if (count > MAX_SNAPSHOT_ROSTER) {
+    throw new RangeError(
+      `Roster claims ${String(count)} entries, over the ${String(MAX_SNAPSHOT_ROSTER)} ceiling`,
+    );
+  }
+  const entries: RosterEntryMessage[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const entry: RosterEntryMessage = {
+      playerId: readU16(cursor),
+      team: readU8(cursor),
+      kills: readU16(cursor),
+      deaths: readU16(cursor),
+      ping: readU16(cursor),
+      name: '',
+    };
+    const nameLength = readU8(cursor);
+    if (nameLength > MAX_ROSTER_NAME_BYTES) {
+      throw new RangeError(
+        `Roster name is ${String(nameLength)} bytes, over ${String(MAX_ROSTER_NAME_BYTES)}`,
+      );
+    }
+    const nameBytes = new Uint8Array(
+      cursor.view.buffer,
+      cursor.view.byteOffset + cursor.offset,
+      nameLength,
+    );
+    entry.name = rosterNameDecoder.decode(nameBytes);
+    cursor.offset += nameLength;
+    entries.push(entry);
+  }
+  // Trailing bytes the entry loop did not consume mean the frame is not the message the
+  // count byte promised -- the same "reject, do not guess" reading decodeEvent's exact
+  // length checks give every event shape.
+  if (cursor.offset !== bytes.byteLength) throw new RangeError('Trailing bytes after roster');
+  return { type: MessageType.Roster, entries };
 }
 export function decodeVoiceBind(bytes: Uint8Array): VoiceBindMessage {
   const cursor = createReader(bytes);

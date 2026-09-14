@@ -7,6 +7,7 @@ import {
   decodeInput,
   decodeJoin,
   decodeLoadout,
+  decodeRoster,
   decodeVehicleSpawn,
   decodeVoiceBind,
   decodeWelcome,
@@ -17,6 +18,7 @@ import {
   encodeInput,
   encodeJoin,
   encodeLoadout,
+  encodeRoster,
   encodeVehicleSpawn,
   encodeVoiceBind,
   encodeWelcome,
@@ -31,6 +33,7 @@ import {
   WelcomeStatus,
   type InputMessage,
   type NetInputSample,
+  type RosterEntryMessage,
 } from './messages.js';
 
 describe('handshake codec', () => {
@@ -38,16 +41,16 @@ describe('handshake codec', () => {
     expect(decodeJoin(encodeJoin())).toEqual({ type: MessageType.Join, version: PROTOCOL_VERSION });
   });
 
-  it('is version 12, so an 11-era peer fails the Join equality check in both directions', () => {
-    // #53 added a byte to every projectile record (the paired-image muzzle side), which is a
-    // fixed-size layout change rather than an optional trailing field, so client and server
-    // must be redeployed together: an 11 peer's projectile array would decode one byte short
-    // per entry and misalign every later row. Both the server's
+  it('is version 13, so a 12-era peer fails the Join equality check in both directions', () => {
+    // The scoreboard roster work added the Roster side-message (MessageType 12) and bumped
+    // the version with it -- the same new-top-level-message-kind rule the M7 and #52 bumps
+    // established, so a 12-era client can never connect to a 13-era server (or vice versa)
+    // and meet a frame the other build does not understand. Both the server's
     // join.version !== PROTOCOL_VERSION check and the client's Welcome status reject it, and
     // this pins the actual number so the bump cannot silently regress to a value a stale peer
     // happens to share.
-    expect(PROTOCOL_VERSION).toBe(12);
-    expect(decodeJoin(encodeJoin()).version).not.toBe(11);
+    expect(PROTOCOL_VERSION).toBe(13);
+    expect(decodeJoin(encodeJoin()).version).not.toBe(12);
   });
 
   it('round-trips an accepted Welcome message, including the spawn point', () => {
@@ -546,5 +549,59 @@ describe('ProjectileImpact event codec (#52)', () => {
   it('rejects a truncated impact payload instead of decoding a partial record', () => {
     const bytes = encodeEvent({ kind: EventKind.ProjectileImpact, a: 0, b: -1, impact });
     expect(() => decodeEvent(bytes.subarray(0, 24))).toThrow(RangeError);
+  });
+});
+
+describe('Roster codec (scoreboard roster)', () => {
+  const entries = [
+    { playerId: 0, team: 1, kills: 12, deaths: 3, ping: 87, name: 'Player 0' },
+    { playerId: 7, team: 2, kills: 0, deaths: 1, ping: 0, name: 'Bot 7' },
+    { playerId: 63, team: 2, kills: 65535, deaths: 0, ping: 1234, name: 'Pïng 63' },
+  ];
+
+  it('round-trips the full roster, including a non-ASCII name and the u16 ceilings', () => {
+    const decoded = decodeRoster(encodeRoster({ entries }));
+    expect(decoded.type).toBe(MessageType.Roster);
+    expect(decoded.entries).toEqual(entries);
+  });
+
+  it('round-trips an empty roster', () => {
+    expect(decodeRoster(encodeRoster({ entries: [] })).entries).toEqual([]);
+  });
+
+  it('clamps out-of-range counters instead of emitting an undecodable frame', () => {
+    const decoded = decodeRoster(
+      encodeRoster({
+        entries: [{ playerId: 1, team: 1, kills: -4, deaths: 1e9, ping: -1, name: 'x' }],
+      }),
+    ).entries[0];
+    expect(decoded?.kills).toBe(0);
+    expect(decoded?.deaths).toBe(0xffff);
+    expect(decoded?.ping).toBe(0);
+  });
+
+  it('rejects a hostile entry count, an over-long name, and trailing bytes instead of guessing', () => {
+    const hostile: RosterEntryMessage[] = Array.from({ length: 65 }, (_, index) => ({
+      playerId: index,
+      team: 1,
+      kills: 0,
+      deaths: 0,
+      ping: 0,
+      name: `B${String(index)}`,
+    }));
+    expect(() => encodeRoster({ entries: hostile })).toThrow(RangeError);
+    expect(() => encodeRoster({ entries: [{ ...entries[0]!, name: 'x'.repeat(33) }] })).toThrow(
+      RangeError,
+    );
+    const bytes = encodeRoster({ entries });
+    expect(() => decodeRoster(new Uint8Array([...bytes, 0]))).toThrow(RangeError);
+    // A count byte above MAX_SNAPSHOT_ROSTER from a hostile or corrupted frame must be
+    // rejected before any entry is read off it.
+    expect(() => decodeRoster(new Uint8Array([MessageType.Roster, 65]))).toThrow(RangeError);
+  });
+
+  it('rejects a truncated frame instead of decoding a partial roster', () => {
+    const bytes = encodeRoster({ entries });
+    expect(() => decodeRoster(bytes.subarray(0, bytes.length - 3))).toThrow(RangeError);
   });
 });

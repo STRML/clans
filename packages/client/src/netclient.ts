@@ -26,6 +26,7 @@ import {
   SNAPSHOT_HISTORY_DEPTH,
   WelcomeStatus,
   decodeEvent,
+  decodeRoster,
   decodeSnapshot,
   decodeWelcome,
   encodeAck,
@@ -44,11 +45,11 @@ import {
   type OrderKind,
   type OrderSnapshotData,
   type ProjectileSnapshotData,
+  type RosterEntryMessage,
   type TurretSnapshotData,
 } from '@clans/protocol';
 import type { SnapshotBaseline } from '@clans/protocol';
 import type { Transport } from './transport.js';
-
 const EVENT_HISTORY = 100;
 
 const MAX_REPLAY_TICKS = 30;
@@ -196,6 +197,14 @@ export class NetClient {
     predictionErrorM: 0,
     entityCount: 1,
   };
+  /**
+   * The scoreboard roster (protocol's Roster side-message): every player's name, team,
+   * kills, deaths, and server-measured ping, replaced wholesale by each Roster message --
+   * the server only broadcasts one when its content changes (join/leave or a tally moved),
+   * so this sits at rest between those moments. Nothing here is predicted or reconciled:
+   * like `orders`, it is authoritative presentation state the client displays verbatim.
+   */
+  roster: RosterEntryMessage[] = [];
 
   private readonly now: () => number;
   private sequence = 0;
@@ -343,6 +352,7 @@ export class NetClient {
       if (type === MessageType.Welcome) this.handleWelcome(bytes);
       else if (type === MessageType.Snapshot) this.handleSnapshot(bytes);
       else if (type === MessageType.Event) this.handleEvent(bytes);
+      else if (type === MessageType.Roster) this.handleRoster(bytes);
     } catch {
       // Malformed frame: drop it. There is nothing to ack or reconcile against.
     }
@@ -352,6 +362,10 @@ export class NetClient {
     this.eventSequence += 1;
     this.recentEvents.push({ ...decodeEvent(bytes), seq: this.eventSequence });
     if (this.recentEvents.length > EVENT_HISTORY) this.recentEvents.shift();
+  }
+
+  private handleRoster(bytes: Uint8Array): void {
+    this.roster = decodeRoster(bytes).entries;
   }
 
   private handleWelcome(bytes: Uint8Array): void {

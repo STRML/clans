@@ -1,0 +1,64 @@
+/* The Tab-held roster overlay, in the HUD's own translucent-panel language (hud.css's
+   --ink/--panel/--edge palette). Hidden by default; shown only while Tab is held. */
+#scoreboard {
+  --ink: #92d9d5;
+  --panel: rgba(7, 62, 72, 0.7);
+  --edge: rgba(114, 190, 192, 0.7);
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: none;
+  min-width: 380px;
+  max-width: min(640px, 80vw);
+  max-height: 72vh;
+  overflow-y: auto;
+  padding: 10px 14px;
+  border: 1px solid var(--edge);
+  background: var(--panel);
+  color: var(--ink);
+  font:
+    12px Arial,
+    Helvetica,
+    sans-serif;
+  letter-spacing: 0.025em;
+  text-shadow: 1px 1px 1px #002b33;
+  pointer-events: none;
+}
+#scoreboard[data-visible='1'] {
+  display: block;
+}
+#scoreboard .scoreboard-header,
+#scoreboard .scoreboard-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) 56px 56px 56px;
+  column-gap: 10px;
+  align-items: baseline;
+  padding: 2px 4px;
+}
+#scoreboard .scoreboard-header {
+  border-bottom: 1px solid var(--edge);
+  font-weight: bold;
+}
+#scoreboard .scoreboard-title {
+  grid-column: 1 / -1;
+  margin-bottom: 4px;
+}
+#scoreboard .scoreboard-team {
+  margin-top: 8px;
+}
+#scoreboard .scoreboard-team-heading {
+  font-weight: bold;
+  border-bottom: 1px solid rgba(145, 188, 188, 0.6);
+  padding-bottom: 2px;
+}
+#scoreboard .scoreboard-row[data-local='1'] {
+  background: rgba(146, 217, 213, 0.18);
+  outline: 1px solid var(--edge);
+}
+#scoreboard .scoreboard-kills,
+#scoreboard .scoreboard-deaths,
+#scoreboard .scoreboard-ping {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

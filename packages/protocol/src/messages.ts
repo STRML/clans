@@ -12,6 +12,10 @@ export enum MessageType {
   VehicleSpawn = 9,
   CommandOrder = 10,
   VoiceBind = 11,
+  /** Scoreboard roster (this scoreboard work): a compact side-message the server sends on
+   *  join and whenever the roster's content changes -- see RosterMessage below for why this
+   *  is a side message and not snapshot fields. */
+  Roster = 12,
 }
 
 /** Attack/Defend/Repair -- a commander's order to their own team's bots. */
@@ -62,7 +66,17 @@ export enum OrderKind {
 // would silently decode as "Repair Pack") and never reads the weapons byte at all, so the
 // handshake check must reject the mismatch in both directions exactly like every bump
 // before it.
-export const PROTOCOL_VERSION = 12;
+//
+// Roster-side-message bump 12 -> 13 (this scoreboard work): a new MessageType (Roster) and
+// a new entry shape ride it. Neither direction of a mixed fleet crashes today -- an old
+// client's message dispatch simply never matches the new type byte, the same way it ignores
+// anything else it does not know -- but the repo's own precedent (M7, #52) bumps the version
+// for every new top-level message kind, and doing so here keeps that rule from eroding: the
+// handshake's WelcomeStatus.VersionMismatch is the one mechanism that catches "these two
+// builds disagree about what the wire means" BEFORE any per-message fallback has to guess.
+// A scoreboard the user sees silently emptying on a version mismatch is exactly the kind of
+// quiet degradation a bump exists to prevent.
+export const PROTOCOL_VERSION = 13;
 
 export enum WelcomeStatus {
   Ok = 0,
@@ -175,6 +189,41 @@ export interface CommandOrderMessage {
   x: number;
   z: number;
 }
+/** One scoreboard row, as the server computes it (RosterMessage). All counters are
+ *  server-side runtime memory: the sim's PlayerStore has a signed `score` but no per-player
+ *  deaths counter and no names at all, and `pingMs` lives in the server's per-connection
+ *  ClientEntry -- none of it belongs in World/hashWorld, so none of it can ride the
+ *  snapshot. `kills`/`deaths` count lethal events (a team kill still credits the killer's
+ *  kill column; a suicide credits only the victim's death column, mirroring damage.ts's
+ *  scoreForDeath split); `ping` is the server's measured RTT in ms, 0 for every bot (a bot
+ *  has no connection to measure) and for any id whose socket has already closed. */
+export interface RosterEntryMessage {
+  playerId: number;
+  team: number;
+  kills: number;
+  deaths: number;
+  ping: number;
+  /** Server-assigned display name ("Player <id>" / "Bot <id>"): a JoinMessage carries no
+   *  name, so there is nothing client-chosen to echo back. Length-prefixed UTF-8 on the
+   *  wire, bounded by MAX_ROSTER_NAME_BYTES. */
+  name: string;
+}
+/**
+ * The whole visible roster in one message, replacing (not diffing) whatever the client held:
+ * at WORLD_CAPACITY's 64 seats the full list is smaller than one snapshot's player block, so
+ * a diff would buy nothing and cost the re-send bookkeeping every other side-message skips.
+ * This is deliberately a side message rather than trailing snapshot fields: the snapshot's
+ * per-player record is fixed-width binary with its own dirty-bit machinery, and a variable-
+ * length name plus three rarely-changing counters would bloat every SNAPSHOT_EVERY_N_TICKS
+ * send and grow that mask for state that changes on kill events, not per tick. The message
+ * idiom already exists for exactly this shape of infrequent, non-predicted state
+ * (CommandOrder, VoiceBind, VehicleSpawn). Rides the PROTOCOL_VERSION 13 bump like every new
+ * MessageType before it.
+ */
+export interface RosterMessage {
+  type: MessageType.Roster;
+  entries: RosterEntryMessage[];
+}
 export interface VoiceBindMessage {
   type: MessageType.VoiceBind;
   lineId: number;
@@ -240,3 +289,14 @@ export const MAX_SNAPSHOT_VEHICLES = 255; // Matches @clans/sim's VehicleStore c
 export const MAX_SNAPSHOT_BOTS = 64;
 export const MAX_SNAPSHOT_ORDERS = 2; // Ours -- one active order per team, no queue.
 export const VOICE_LINE_COUNT = 9; // Ours -- see M7 plan's "ours" numbers table.
+// One entry per active player in a Roster message (this scoreboard work): the roster lists
+// everyone the server knows, and WORLD_CAPACITY (64 seats, 32 v 32) is the honest ceiling the
+// extras' own MAX_SNAPSHOT_BOTS comment already argues for -- a wire count is a single u8
+// here too, so the same write-side guard/decode-side validation pair applies, and a count
+// above the seat capacity is corrupt or hostile rather than unusually busy.
+export const MAX_SNAPSHOT_ROSTER = 64;
+// Longest name a Roster entry can carry, in UTF-8 bytes. T2's own client names cap out well
+// below this; the bound exists so a hostile server cannot push an unbounded string at a
+// client through the one variable-length field the message has, and so the length byte's 255
+// ceiling is never the real limit.
+export const MAX_ROSTER_NAME_BYTES = 32;

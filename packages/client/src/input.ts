@@ -40,7 +40,10 @@ export class Input {
     target.addEventListener('click', () => this.resumeMouseLook());
     target.addEventListener('contextmenu', (event) => event.preventDefault());
     window.addEventListener('keydown', (event) => {
-      if (event.code === 'Space' || event.code.startsWith('F')) event.preventDefault();
+      // Tab as well: the scoreboard is a hold-to-show key like T2's, and the browser's own
+      // focus traversal would steal both the key and subsequent pointer-lock input.
+      if (event.code === 'Space' || event.code === 'Tab' || event.code.startsWith('F'))
+        event.preventDefault();
       if (!event.repeat) this.keys.add(event.code);
     });
     window.addEventListener('keyup', (event) => this.keys.delete(event.code));
@@ -101,6 +104,14 @@ export class Input {
   /** Hold Z to zoom; Z avoids the original A binding because A is movement here. */
   isZooming(): boolean {
     return !this.uiOpen && this.isDown('KeyZ');
+  }
+
+  /** The Tab scoreboard is held, not toggled: show while the key is down, hide on release,
+   *  exactly the original game's own TAB overlay (`scoreHud` visibility follows the key).
+   *  Level-triggered like isZooming, so no edge state to consume; menus suppress it via the
+   *  same uiOpen gate every other held binding reads. */
+  isScoreboardHeld(): boolean {
+    return !this.uiOpen && this.isDown('Tab');
   }
 
   /** True on the call where `E` transitions from up to held since the last call --

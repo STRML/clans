@@ -49,8 +49,10 @@ import {
   decodeVehicleSpawn,
   decodeVoiceBind,
   encodeEvent,
+  encodeRoster,
   encodeSnapshot,
   encodeWelcome,
+  type RosterEntryMessage,
   type BaseObjectSnapshotData,
   type EventMessage,
   type FlagSnapshotData,
@@ -78,6 +80,12 @@ import {
   type InteriorFootprint,
   type RelevanceCache,
 } from './snapshot-policy.js';
+import {
+  applyRosterDeaths,
+  buildRosterEntries,
+  createRosterBoard,
+  type RosterBoard,
+} from './roster.js';
 import { joinableTeam, rebalanceTeams, stepBotManager, type BotManager } from './bots.js';
 import {
   activePlayerPositions,
@@ -198,6 +206,7 @@ function handleJoin(
   spawns: SceneSpawn[],
   botManager: BotManager,
   clients: Map<WebSocket, ClientEntry>,
+  rosterBoard: RosterBoard,
   now: () => number,
   socket: WebSocket,
   bytes: Uint8Array,
@@ -292,6 +301,17 @@ function handleJoin(
   // per-team cap, removes exactly one bot on it before this join would push it over
   // (failure matrix row 12) -- never the other way around.
   rebalanceTeams(botManager, world, spawns);
+  // The scoreboard roster, immediately and unconditionally to THIS socket: the broadcast
+  // below is change-gated, so a client joining a settled match would otherwise wait for
+  // the next kill or join to see any roster at all. The just-joined player is already
+  // active in world.players, so this includes their own row.
+  socket.send(
+    encodeRoster({
+      entries: buildRosterEntries(world, rosterBoard, botManager.botIds, (playerId) =>
+        pingForPlayer(clients, playerId),
+      ),
+    }),
+  );
 }
 
 function handleInput(
@@ -471,13 +491,15 @@ function handleMessage(
   spawns: SceneSpawn[],
   botManager: BotManager,
   board: OrderBoard,
+  rosterBoard: RosterBoard,
   clients: Map<WebSocket, ClientEntry>,
   now: () => number,
   socket: WebSocket,
   bytes: Uint8Array,
 ): void {
   const type = bytes[0];
-  if (type === MessageType.Join) handleJoin(world, spawns, botManager, clients, now, socket, bytes);
+  if (type === MessageType.Join)
+    handleJoin(world, spawns, botManager, clients, rosterBoard, now, socket, bytes);
   else if (type === MessageType.Input) handleInput(clients, socket, bytes);
   else if (type === MessageType.Ack) handleAck(clients, now, socket, bytes);
   else if (type === MessageType.God) handleGod(world, clients, socket, bytes);
@@ -493,6 +515,7 @@ function handleClose(
   spawns: SceneSpawn[],
   botManager: BotManager,
   clients: Map<WebSocket, ClientEntry>,
+  rosterBoard: RosterBoard,
   history: PositionHistory,
   socket: WebSocket,
 ): void {
@@ -518,6 +541,11 @@ function handleClose(
   // -- a reused id (the same disconnect/rejoin churn clearHistory's own comment describes)
   // inherited a stale cooldown deadline from whoever held that id before, silently dropping
   // the new occupant's first otherwise-valid voice bind.
+  // The departing id's scoreboard tallies die with the connection: a freed id can be
+  // re-allocated by the very next Join (addPlayer pops it straight back off the sim's
+  // freeIds), which can happen between two tick builds -- the prune at build time would
+  // never see this id inactive. Same id-reuse reasoning as clearHistory above.
+  rosterBoard.tallies.delete(entry.session.playerId);
   lastVoiceBindAtTick.delete(entry.session.playerId);
   clients.delete(socket);
 }
@@ -1155,6 +1183,32 @@ export function startNetServer(options: NetServerOptions): NetServer {
   // Set by startNextMatch, consumed by the next sendAllSnapshots: a reset is a resync, so the
   // first snapshot after one is a full send for every client (see startNextMatch).
   let forceFullSnapshot = false;
+  // The scoreboard roster's server-side state (roster.ts): tallies cleared by
+  // startNextMatch, kept in sync with broadcasts by syncRoster below.
+  const rosterBoard = createRosterBoard();
+  // The roster bytes every client last received, for the change-gated broadcast in tick():
+  // kills/deaths move on kill events (every tick), not on the snapshot cadence, and a
+  // settle match otherwise never re-sends anything at all.
+  let lastRosterBytes: Uint8Array | null = null;
+  function currentRosterEntries(): RosterEntryMessage[] {
+    return buildRosterEntries(options.world, rosterBoard, options.botManager.botIds, (playerId) =>
+      pingForPlayer(clients, playerId),
+    );
+  }
+  /** Builds the roster, broadcasts it to every joined client when its bytes differ from
+   *  what they already hold, and remembers the bytes. Every tick, cheap when unchanged:
+   *  the build is a linear scan of at most WORLD_CAPACITY entries. */
+  function syncRoster(): void {
+    const bytes = encodeRoster({ entries: currentRosterEntries() });
+    if (
+      lastRosterBytes !== null &&
+      lastRosterBytes.length === bytes.length &&
+      lastRosterBytes.every((byte, index) => byte === bytes[index])
+    )
+      return;
+    for (const entry of clients.values()) entry.socket.send(bytes);
+    lastRosterBytes = bytes;
+  }
 
   wss.on('connection', (socket) => {
     // clients.has(socket) is only ever set once handleJoin succeeds, so this is a plain
@@ -1169,6 +1223,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
           options.spawns,
           options.botManager,
           options.board,
+          rosterBoard,
           clients,
           now,
           socket,
@@ -1183,7 +1238,15 @@ export function startNetServer(options: NetServerOptions): NetServer {
     });
     socket.on('close', () => {
       clearTimeout(joinTimeout);
-      handleClose(options.world, options.spawns, options.botManager, clients, history, socket);
+      handleClose(
+        options.world,
+        options.spawns,
+        options.botManager,
+        clients,
+        rosterBoard,
+        history,
+        socket,
+      );
     });
     // A malformed frame at the WebSocket protocol level itself (an invalid raw frame,
     // e.g. an unmasked client frame) fires 'error' on the socket before 'message' ever
@@ -1192,7 +1255,15 @@ export function startNetServer(options: NetServerOptions): NetServer {
     // the process; this absorbs it the same way the server-level handler below does.
     socket.on('error', () => {
       clearTimeout(joinTimeout);
-      handleClose(options.world, options.spawns, options.botManager, clients, history, socket);
+      handleClose(
+        options.world,
+        options.spawns,
+        options.botManager,
+        clients,
+        rosterBoard,
+        history,
+        socket,
+      );
     });
   });
 
@@ -1277,6 +1348,10 @@ export function startNetServer(options: NetServerOptions): NetServer {
       applyLagCompensatedHits(options.world, clients, history, flagsBefore, preTick);
     }
 
+    // The scoreboard tallies the same list being broadcast, at the same point: after lag
+    // compensation has (via unkillPlayer) removed any death it reversed, so the roster
+    // counts exactly the kills every client's kill feed shows.
+    applyRosterDeaths(rosterBoard, options.world.pendingDeaths);
     for (const event of killEvents(options.world)) broadcastEvent(clients, event);
     for (const event of flagEvents(options.world, flagsBefore)) broadcastEvent(clients, event);
     for (const event of laserEvents(options.world)) broadcastEvent(clients, event);
@@ -1285,13 +1360,16 @@ export function startNetServer(options: NetServerOptions): NetServer {
 
   /**
    * Starts the next match, and drops every server-side store keyed off the clock the reset
-   * just rewound. sim's resetMatch (sim/match.ts) returns the world itself; these three are
-   * the server's own runtime memory beside it:
+   * just rewound. sim's resetMatch (sim/match.ts) returns the world itself; these are the
+   * server's own runtime memory beside it:
    *
    *  - the lag-comp position history: its samples carry absolute ticks from the match that
    *    just ended, so a shooter's rewind window would otherwise be searched at match-two tick
    *    numbers against match-one samples;
    *  - the order board: an order's expiresAtTick is absolute too (see clearOrders);
+   *  - the roster tallies: the sim's resetMatch zeroes every score, and the source's own
+   *    GameCore::startGame zeroes kills/deaths with it (sim/match.ts's header) -- a new
+   *    match starts its scoreboard from zero;
    *  - the per-client relevance caches, via a forced full snapshot: a viewer's cached copy of
    *    a distant player is otherwise replayed from before the reset for up to
    *    DISTANT_PLAYER_UPDATE_EVERY snapshots, which would show a reset player standing where
@@ -1301,6 +1379,7 @@ export function startNetServer(options: NetServerOptions): NetServer {
     resetMatch(options.world);
     for (let id = 0; id < options.world.players.count; id += 1) clearHistory(history, id);
     clearOrders(options.board);
+    rosterBoard.tallies.clear();
     forceFullSnapshot = true;
     intermissionTicksLeft = -1;
   }
@@ -1350,6 +1429,10 @@ export function startNetServer(options: NetServerOptions): NetServer {
       }
       runOneTick(inputs);
     }
+    // Every tick, live or frozen: a kill only happens on a live tick, but joins/leaves
+    // (and their rebalances) happen during the intermission too, and each one is a roster
+    // change the change-gate below turns into exactly one broadcast.
+    syncRoster();
     if (tickNumber % SNAPSHOT_EVERY_N_TICKS !== 0) return;
     sendAllSnapshots();
   }

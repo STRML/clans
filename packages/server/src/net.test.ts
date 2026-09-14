@@ -32,6 +32,7 @@ import {
 } from '@clans/sim';
 import {
   decodeEvent,
+  decodeRoster,
   decodeSnapshot,
   decodeWelcome,
   encodeAck,
@@ -101,11 +102,38 @@ const spawns: SceneSpawn[] = [
   { name: null, team: 2, position: [1, 0, 1], radius: 5 },
 ];
 const TEST_PORT = 17722;
-
 function receive(socket: WebSocket): Promise<Uint8Array> {
-  return new Promise((resolve) =>
-    socket.once('message', (data) => resolve(new Uint8Array(data as Uint8Array))),
-  );
+  // Executor form: the project's tsconfig lib predates Promise.withResolvers.
+  return new Promise((resolve) => {
+    const next = (data: Uint8Array): void => {
+      const bytes = new Uint8Array(data);
+      // The scoreboard roster is a change-gated broadcast that can legitimately interleave
+      // with any other server frame (it rides its own trigger: joins, kills, the next
+      // match's reset), so every consumer here that is waiting for a Welcome, a snapshot,
+      // or an event skips past one instead of decoding it as the wrong message.
+      if (bytes[0] === MessageType.Roster) {
+        socket.once('message', next);
+        return;
+      }
+      socket.off('message', next);
+      resolve(bytes);
+    };
+    socket.once('message', next);
+  });
+}
+function receiveRoster(socket: WebSocket): Promise<Uint8Array> {
+  return new Promise((resolve) => {
+    const next = (data: Uint8Array): void => {
+      const bytes = new Uint8Array(data);
+      if (bytes[0] !== MessageType.Roster) {
+        socket.once('message', next);
+        return;
+      }
+      socket.off('message', next);
+      resolve(bytes);
+    };
+    socket.once('message', next);
+  });
 }
 function connect(port: number): Promise<WebSocket> {
   return new Promise((resolve) => {
@@ -248,6 +276,46 @@ describe('startNetServer', () => {
       port: TEST_PORT,
     });
     await server.ready;
+  });
+
+  it('sends a joining client the scoreboard roster, and a changed one after a death', async () => {
+    const client = await connect(TEST_PORT);
+    const welcomePromise = receive(client);
+    // Attached before the Join: the server sends the roster immediately after the
+    // Welcome, and a listener attached after the await would miss that first frame.
+    const firstRosterPromise = receiveRoster(client);
+    client.send(encodeJoin());
+    const welcome = decodeWelcome(await welcomePromise);
+
+    // The join itself delivers the roster (a settled match would otherwise never
+    // broadcast again): every active player, this client included, with the server-assigned
+    // name and a zero ping for bots.
+    const firstRoster = decodeRoster(await firstRosterPromise);
+    expect(firstRoster.type).toBe(MessageType.Roster);
+    const self = firstRoster.entries.find((entry) => entry.playerId === welcome.playerId);
+    expect(self).toMatchObject({ team: welcome.team, kills: 0, deaths: 0, ping: 0 });
+    expect(self?.name).toBe(`Player ${String(welcome.playerId)}`);
+
+    // A death inside the simulation changes the roster, and the change-gated broadcast
+    // delivers the updated copy. The death is staged the only way an external test can --
+    // below the kill plane, so stepWorld's own fall-out path records it (a death pushed
+    // straight into pendingDeaths from outside would be wiped by the next stepPlayers
+    // pass before the roster's post-stepWorld tally runs) -- and it is unattributed, so
+    // only the victim's Deaths column moves.
+    const updatedPromise = receiveRoster(client);
+    // No ground under the player's square, so the below-kill-plane teleport actually
+    // kills: on solid ground movement.ts snaps a falling player back onto the surface
+    // before its kill-plane check ever runs (movement.test.ts's own `holed` fixture).
+    world.terrain = { ...world.terrain, emptySquares: new Set([0]) };
+    world.players.position.set(
+      [world.players.position[welcome.playerId * 3] ?? 0, world.killY - 10, 0],
+      welcome.playerId * 3,
+    );
+    server.tick(2); // one live tick: stepWorld records the death, the roster sync broadcasts
+    const updated = decodeRoster(await updatedPromise);
+    expect(updated.entries.find((entry) => entry.playerId === welcome.playerId)?.deaths).toBe(1);
+    expect(updated.entries.every((entry) => entry.kills === 0)).toBe(true);
+    client.close();
   });
   afterEach(() => server.close());
 

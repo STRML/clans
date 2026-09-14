@@ -44,6 +44,7 @@ import { EventKind, OrderKind, MessageType } from '@clans/protocol';
 import type {
   BaseObjectSnapshotData,
   ProjectileSnapshotData,
+  RosterEntryMessage,
   TurretSnapshotData,
   VehicleSnapshotData,
 } from '@clans/protocol';
@@ -76,6 +77,7 @@ import {
   type TimestampedEvent,
 } from './netclient.js';
 import type { PlayerView } from './players-view.js';
+import { createScoreboard, type ScoreboardView } from './scoreboard.js';
 import { RemoteBuffer, syncRemotePlayers } from './remote.js';
 import {
   createRepairBeamView,
@@ -602,6 +604,7 @@ interface BaseAssetsViewState {
   assets: KatabaticAssets;
   camera: THREE.Camera;
   hud: { update(source: HudSource): void };
+  scoreboard: ScoreboardView;
   baseObjectView: ReturnType<typeof createBaseObjectView>;
   stationMenu: StationMenu;
   stationMenuState: { open: boolean; triggerStation: number | null };
@@ -847,6 +850,39 @@ function turretTargetPositions(
   return targets;
 }
 
+/** The roster rows the scoreboard renders, and the id the local row highlights by --
+ *  HudSource.networkPlayerId's own distinction (wire id when networked, the local
+ *  prediction slot's playerId offline). Single-player has no server to broadcast a Roster
+ *  message, so the local player is the whole roster there: no kills/deaths/ping exist to
+ *  show, and the row renders those columns at zero. */
+function rosterEntriesFor(state: BaseAssetsViewState): RosterEntryMessage[] {
+  if (state.net) return state.net.roster;
+  return [
+    {
+      playerId: state.playerId,
+      team: state.world.players.team[state.playerId] ?? 1,
+      kills: 0,
+      deaths: 0,
+      ping: 0,
+      name: `Player ${String(state.playerId)}`,
+    },
+  ];
+}
+
+/** T2's scoreboard is held, not toggled (`Tab` down shows it, release hides it); the
+ *  roster is only re-rendered while visible, and update() itself dedupes unchanged
+ *  content. Split out of syncBaseAssetsView for the same complexity-budget reason as its
+ *  sibling sync functions. */
+function syncScoreboard(state: BaseAssetsViewState): void {
+  if (!state.input.isScoreboardHeld()) {
+    state.scoreboard.hide();
+    return;
+  }
+  const localId = state.net ? state.net.playerId : state.playerId;
+  state.scoreboard.update(rosterEntriesFor(state), localId);
+  state.scoreboard.show();
+}
+
 function playerTargetPosition(world: World, playerId: number): THREE.Vector3 {
   const offset = playerId * 3;
   return new THREE.Vector3(
@@ -907,6 +943,10 @@ function syncBaseAssetsView(
       !state.commanderMapCanvas.hidden ||
       state.voiceMenu.visible,
   );
+
+  // After setUiOpen, so a scoreboard held down while a menu closes renders this frame
+  // rather than one frame late.
+  syncScoreboard(state);
 
   // A second, redundant hud.update immediately after syncWorldView's own -- see
   // hudSourceFrom's own comment for why aimedStructure isn't computed inside that
@@ -1932,6 +1972,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   repairStatus.id = 'repair-status';
   document.body.appendChild(repairStatus);
   const hud = createHud(document.body, hudSourceFrom(world, playerId, net));
+  const scoreboard = createScoreboard(document.body);
   const interactionPrompt = createInteractionPrompt(document.body);
   const stationMenuState = { open: false, triggerStation: null as number | null };
   const stationMenu: StationMenu = createStationMenu(
@@ -2183,6 +2224,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
           assets,
           camera,
           hud,
+          scoreboard,
           baseObjectView,
           stationMenu,
           stationMenuState,

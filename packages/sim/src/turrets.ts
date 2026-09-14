@@ -521,6 +521,31 @@ export function stepTurretPower(world: World): void {
   }
 }
 
+/** Per-tick shield-energy regen for stationary turrets. The engine recharges every living
+ *  ShapeBase's energy once per 32 ms tick -- ShapeBase::updateEnergy, `mEnergy +=
+ *  mRechargeRate` capped at maxEnergy (shapeBase.cc:1011), the exact reading movement.ts's
+ *  applyJet and vehicles.ts's vehicle steps already implement -- and a turret is a ShapeBase
+ *  (`new Turret()`, turret.cs:128-136), so the TurretData datablock's own `rechargeRate`
+ *  refills the same pool absorbTurretShield drains: TurretBaseLarge `rechargeRate = 0.31`
+ *  (turret.cs:174, with `isShielded = true` :171, `maxEnergy = 150` :173) and SentryTurret
+ *  `rechargeRate = 0.40` (sentryTurret.cs:164). Those same datablocks author
+ *  `repairRate = 0` (turret.cs:165, sentryTurret.cs:155) -- the SHIELD recovers on its own,
+ *  the hull never does -- which is why this step touches only energy. Per tick, not per
+ *  second, like every other rechargeRate in this sim, and it does not gate on the powered
+ *  flag: the engine recharges unconditionally, and this sim's own shield
+ *  (absorbTurretShield) likewise spends energy whether or not the turret is powered. A
+ *  destroyed turret regens nothing, and a base that authors no rate -- MobileTurretBase,
+ *  whose shield is its carrier vehicle's own (inheritEnergyFromMount, vehicle_mpb.cs:293)
+ *  -- is excluded by data rather than a mount special case. */
+export function stepTurretRegen(world: World): void {
+  const store = world.turrets;
+  for (let id = 0; id < store.count; id += 1) {
+    const data = baseFor(store.barrel[id] as TurretBarrelId);
+    if (store.destroyed[id] || data.rechargeRate <= 0) continue;
+    store.energy[id] = Math.min(data.maxEnergy, (store.energy[id] ?? 0) + data.rechargeRate);
+  }
+}
+
 function distance(ax: number, ay: number, az: number, bx: number, by: number, bz: number): number {
   return Math.hypot(ax - bx, ay - by, az - bz);
 }
@@ -868,6 +893,7 @@ function stepSeekerMissiles(world: World, dt: number): void {
 export function stepTurrets(world: World, dt: number): void {
   stepVehicleTurrets(world);
   stepTurretPower(world);
+  stepTurretRegen(world);
   world.pendingTurretFireEvents = [];
   for (let id = 0; id < world.turrets.count; id += 1) stepOneTurret(world, id, dt);
   stepSeekerMissiles(world, dt);

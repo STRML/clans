@@ -17,7 +17,16 @@ declare global {
 const container = document.getElementById('app');
 if (!container) throw new Error('#app missing');
 
-const serverUrl = new URLSearchParams(location.search).get('server');
+// An explicit `?server=` always wins; `?server=off` opts out entirely (demo.spec row 25's
+// offline-first contract). Bare `pnpm dev` pairs this page with the game server it spawns
+// via VITE_GAME_SERVER (scripts/dev.ts), so the default dev flow reaches the bots without
+// anyone hand-typing a ws URL; `pnpm dev:client` and the production build never set the
+// variable and stay offline-first.
+const requestedServer = new URLSearchParams(location.search).get('server');
+const serverUrl =
+  requestedServer === 'off'
+    ? null
+    : (requestedServer ?? (import.meta.env.VITE_GAME_SERVER as string | undefined) ?? null);
 const app = await createApp(container, { serverUrl });
 window.__clansDebug = {
   teleportToFlag: (team) => app.debugTeleportToFlag(team),
