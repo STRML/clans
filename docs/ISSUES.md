@@ -642,14 +642,30 @@ capture-refusal rule remains untested by data.
 - `pnpm dev` starts client 5173 and server 7777. Use
   `http://127.0.0.1:5173/?server=ws://127.0.0.1:7777` for network testing; the bare URL
   follows the solo path. Restart both after protocol/server changes.
-- Current protocol is **11** (impacts, shields, turret target kind, signed projectile owner,
-  and the loadout/pack/weapons selection). Converted assets are committed; ordinary startup
-  needs no fetch/build. Asset additions need manifest, builder and generated output changes
-  together.
-- Gates: `pnpm test` (1159 tests, 73 files; the opt-in telemetry sweep is the one skip),
-  `pnpm typecheck`, `pnpm lint`, and `env -u CI node_modules/.bin/playwright test` (37 cases;
+- Current protocol is **12** (impacts, shields, turret target kind, signed projectile owner,
+  the loadout/pack/weapons selection, and the projectile record's `muzzleSide` byte). Converted
+  assets are committed; ordinary startup needs no fetch/build. Asset additions need manifest,
+  builder and generated output changes together.
+- Gates: `pnpm test` (1,304 tests plus one opt-in skip, the telemetry sweep),
+  `pnpm typecheck`, `pnpm lint`, and `env -u CI node_modules/.bin/playwright test` (42 cases;
   the environment sets `CI=true`, which disables reuse of an already-running dev server). Do
   not edit while browser tests run: HMR causes false failures.
+- The perceptual listen (#51, #56) is a two-client job and the server seats two humans on
+  opposite teams by itself (`net.ts`'s `joinableTeam` picks the smaller one), so the rig is:
+
+  ```
+  node_modules/.bin/tsx packages/server/src/index.ts --bots 46 --team-size 24 --port 7777 &
+  pnpm dev:client
+  ```
+
+  then two browser windows at `http://127.0.0.1:5173/?server=ws://127.0.0.1:7777` (46 bots plus
+  the two of you is 24 v 24). What the issues ask to hear, in their own terms: the Repair Pack's
+  beam loop and its activation one-shot (#51); per-armour footsteps on terrain against the
+  metal variant indoors, the Chaingun's spin-up, spin-down and continuous fire loop, a hand
+  grenade detonation, turret impacts (#56); flag pickup, drop, return and capture cues from the
+  perspective of both teams; and ducking through interiors and force fields as one of you walks
+  behind cover. No test can assert a mix, which is why these two issues stay open until a human
+  has listened to them.
 - Measuring bot behavior: run the carrier telemetry sweep before and after any carrier-policy
   change, and treat a single-seed arrival as noise. The command, and the reason
   `--reporter=verbose` is required, are in the telemetry section above. Three different
