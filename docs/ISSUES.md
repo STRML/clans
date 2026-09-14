@@ -448,6 +448,15 @@ Playwright cases.
   `e2e/vehicle-reticle.spec.ts` buys a Tank at the pad (its menu row is "Beowulf", the script's
   own `targetNameTag`) and asserts the crosshair resolves to `hud_ret_tankchaingun.png` and that
   the bitmap loads.
+- Our side of the acceptance's screen comparison is captured rather than described:
+  `e2e/hud-screens.spec.ts` writes five screens -- on foot, zoom, vehicle cockpit, station menu
+  and commander map -- into `docs/hud-screens/` at the reference frame's own 16:10, each after
+  asserting the state it is in, so a shot can never silently capture the wrong screen. What is
+  left is the comparison itself against the reference images.
+- Observation from those shots, recorded and not chased: the commander map fills its canvas with
+  one flat colour and draws base objects, players and sensor circles over it, so it shows no
+  terrain (commander-map.ts's `drawCommanderMap`). Nothing in the committed reference describes
+  the commander screen's own background, so that is named here rather than changed.
 - What remains unconstrained is the pixel layout of the compass and the vehicle instrument
   cluster: neither game-data dump carries a `.gui` layout file, the dash bitmap is a shaped
   176x108 overlay with no cut-outs for the other two instrument bitmaps, and
