@@ -6,6 +6,7 @@ import { OrderKind, type OrderSnapshotData } from '@clans/protocol';
 import {
   canvasToWorld,
   drawOrderMarkers,
+  terrainShades,
   friendlySensorCircles,
   playersFromWorld,
   sensedEnemyIds,
@@ -176,5 +177,30 @@ describe('drawOrderMarkers', () => {
     } as unknown as CanvasRenderingContext2D;
     drawOrderMarkers(ctx, orders, 1, (x, z) => [x, z]);
     expect(strokeCalls).toBe(0);
+  });
+});
+
+describe('terrainShades (issue #55 commander terrain shading)', () => {
+  const mission = { minX: -10, minZ: -20, width: 20, depth: 20 };
+
+  it('lights a sun-facing slope brighter than its lee side', () => {
+    const world = createWorld(hillBetween(20), 1);
+    // Sun from +x: the east side of the x=0 ridge is lit, the west side is not.
+    const shades = terrainShades(world, mission, [1, 0.6, 0], 11);
+    // Cell (6,1) sits east of the ridge column on a flat row; (4,1) is its western mirror.
+    const east = shades[1 * 11 + 6] ?? 0;
+    const west = shades[1 * 11 + 4] ?? 0;
+    expect(east).toBeGreaterThan(west);
+  });
+
+  it('keeps flat ground uniform and every value in range', () => {
+    const world = createWorld(hillBetween(20), 1);
+    const shades = terrainShades(world, mission, [1, 0.6, 0], 11);
+    for (const value of shades) {
+      expect(value).toBeGreaterThanOrEqual(0);
+      expect(value).toBeLessThanOrEqual(1);
+    }
+    // Two far-apart flat cells (no ridge row or column) must read identically.
+    expect(shades[1 * 11 + 1]).toBeCloseTo(shades[9 * 11 + 1] ?? 0, 5);
   });
 });

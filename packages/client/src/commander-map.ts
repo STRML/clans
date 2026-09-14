@@ -205,6 +205,142 @@ function drawPlayers(
   }
 }
 
+/** The terrain raster under the markers, and the one part of the spec's command circuit this
+ *  canvas was missing: "a 2D top-down canvas of the mission area with terrain shading, base
+ *  assets with power state, teammates, and enemy contacts inside your team's sensor coverage"
+ *  (design spec, Client section). Base assets, players and sensor envelopes were built; the
+ *  shading is this.
+ *
+ *  The raster is sampled heights -- `sampleTerrain` over a steps x steps grid covering the
+ *  mission area -- shaded by the scene's own sun direction (committed scene data, the same
+ *  vector the 3D terrain's material uses), with brightness carrying both altitude and slope:
+ *  a slope facing the sun reads lighter, a lee slope darker, which is what makes ridges read
+ *  as ridges on a map this small. Output is normalized 0..1 brightness per cell, row-major
+ *  from the mission area's top-left, so the canvas layer and the tests share one definition. */
+export const TERRAIN_SHADE_STEPS = 96; // Ours: 96 x 96 samples over the mission area.
+
+function sampleHeights(
+  world: World,
+  missionArea: { minX: number; minZ: number; width: number; depth: number },
+  steps: number,
+): Float32Array {
+  const heights = new Float32Array(steps * steps);
+  const cellW = missionArea.width / (steps - 1);
+  const cellD = missionArea.depth / (steps - 1);
+  for (let j = 0; j < steps; j += 1) {
+    for (let i = 0; i < steps; i += 1) {
+      heights[j * steps + i] =
+        sampleTerrain(world.terrain, missionArea.minX + i * cellW, missionArea.minZ + j * cellD)
+          .height ?? 0;
+    }
+  }
+  return heights;
+}
+
+function rangeOf(values: Float32Array): { min: number; max: number } {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < values.length; i += 1) {
+    const v = values[i] ?? 0;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return { min, max: max === -Infinity ? min : max };
+}
+
+/** One cell's brightness from its neighbours' heights: slope-lit by the scene sun, then
+ *  mixed with the normalized altitude. */
+function cellShade(
+  heights: Float32Array,
+  steps: number,
+  sun: { x: number; y: number; z: number },
+  worldPerCell: number,
+  min: number,
+  span: number,
+  i: number,
+  j: number,
+): number {
+  const at = (ii: number, jj: number): number => heights[jj * steps + ii] ?? 0;
+  const hL = at(Math.max(0, i - 1), j);
+  const hR = at(Math.min(steps - 1, i + 1), j);
+  const hD = at(i, Math.max(0, j - 1));
+  const hU = at(i, Math.min(steps - 1, j + 1));
+  const dhx = (hR - hL) / (2 * worldPerCell);
+  const dhz = (hU - hD) / (2 * worldPerCell);
+  const normalLen = Math.hypot(dhx, 1, dhz);
+  const light = Math.max(0, (-dhx * sun.x + sun.y - dhz * sun.z) / normalLen);
+  const altitude = (at(i, j) - min) / span;
+  return Math.min(1, 0.22 + 0.4 * altitude + 0.38 * light);
+}
+
+export function terrainShades(
+  world: World,
+  missionArea: { minX: number; minZ: number; width: number; depth: number },
+  sunDirection: readonly [number, number, number],
+  steps: number,
+): Float32Array {
+  const heights = sampleHeights(world, missionArea, steps);
+  const { min, max } = rangeOf(heights);
+  const span = max - min || 1;
+  const cellW = missionArea.width / (steps - 1);
+  const cellD = missionArea.depth / (steps - 1);
+  const worldPerCell = Math.hypot(cellW, cellD) || 1;
+  // Slope from central differences; the sun is normalized once here so the per-cell dot is
+  // just multiplies. Lighting above the horizon only: a sun below it would invert the map.
+  const sunLen = Math.hypot(sunDirection[0], sunDirection[1], sunDirection[2]) || 1;
+  const sun = {
+    x: sunDirection[0] / sunLen,
+    y: sunDirection[1] / sunLen,
+    z: sunDirection[2] / sunLen,
+  };
+  const shade = new Float32Array(steps * steps);
+  for (let j = 0; j < steps; j += 1) {
+    for (let i = 0; i < steps; i += 1) {
+      shade[j * steps + i] = cellShade(heights, steps, sun, worldPerCell, min, span, i, j);
+    }
+  }
+  return shade;
+}
+
+let terrainLayer: { key: string; canvas: HTMLCanvasElement } | null = null;
+
+/** Paints (or reuses) the cached raster. The heightfield never changes mid-match, so the cache
+ *  key is the canvas size, the sample count and a checksum of the samples themselves -- a
+ *  different world repaints, the same world blits. */
+function drawCommanderTerrain(
+  ctx: CanvasRenderingContext2D,
+  world: World,
+  missionArea: { minX: number; minZ: number; width: number; depth: number },
+  sunDirection: readonly [number, number, number],
+): void {
+  const { width, height } = ctx.canvas;
+  const steps = TERRAIN_SHADE_STEPS;
+  const shade = terrainShades(world, missionArea, sunDirection, steps);
+  let checksum = 0;
+  for (let i = 0; i < shade.length; i += 97) checksum += shade[i] ?? 0;
+  const key = `${String(width)}x${String(height)}:${String(steps)}:${checksum.toFixed(4)}`;
+  if (!terrainLayer || terrainLayer.key !== key) {
+    const canvas = document.createElement('canvas');
+    canvas.width = steps;
+    canvas.height = steps;
+    const raster = canvas.getContext('2d');
+    if (!raster) return;
+    const image = raster.createImageData(steps, steps);
+    for (let cell = 0; cell < steps * steps; cell += 1) {
+      const v = shade[cell] ?? 0;
+      // The ice palette the HUD already uses: near-background deep blue at the lows, snow at
+      // the highs, so markers and the sensor envelopes keep their contrast against it.
+      image.data[cell * 4] = Math.round(14 + 193 * v);
+      image.data[cell * 4 + 1] = Math.round(26 + 190 * v);
+      image.data[cell * 4 + 2] = Math.round(40 + 184 * v);
+      image.data[cell * 4 + 3] = 255;
+    }
+    raster.putImageData(image, 0, 0);
+    terrainLayer = { key, canvas };
+  }
+  ctx.drawImage(terrainLayer.canvas, 0, 0, width, height);
+}
+
 export function drawCommanderMap(
   ctx: CanvasRenderingContext2D,
   assets: Pick<KatabaticAssets, 'scene'>,
@@ -221,6 +357,7 @@ export function drawCommanderMap(
   ];
   ctx.fillStyle = '#0b1420';
   ctx.fillRect(0, 0, width, height);
+  drawCommanderTerrain(ctx, world, assets.scene.missionArea, assets.scene.sun.direction);
   drawBaseObjects(ctx, world, localTeam, toCanvas);
   drawPlayers(ctx, players, localTeam, sensedIds, toCanvas);
 }

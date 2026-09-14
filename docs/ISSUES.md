@@ -456,13 +456,13 @@ Playwright cases.
   committed: the capture depends on live match state, so committed copies would churn on every
   browser run (measured: four of the five changed between two runs of the suite) and never be
   current anyway. What is left is the comparison itself against the reference images.
-- Observation from those shots, upgraded to a named spec gap: the commander map fills its canvas
-  with one flat colour and draws base objects, players and sensor circles over it, so it shows no
-  terrain (commander-map.ts's `drawCommanderMap`). The design spec does describe the screen --
-  "a 2D top-down canvas of the mission area with terrain shading, base assets with power state,
-  teammates, and enemy contacts inside your team's sensor coverage" -- so the base assets,
-  players and sensor envelopes are built and the terrain shading is the outstanding half. The
-  committed reference frames do not constrain its appearance, so the shading is not guessed at.
+- The commander map's terrain shading is built (`commander-map.ts`'s `terrainShades` +
+  `drawCommanderTerrain`): heights sampled over the mission area by `sampleTerrain`, lit by the
+  scene's own sun direction, altitude and slope mixed into one brightness, rasterized once into
+  a cached offscreen canvas and blitted under the markers. Verified in the captured commander
+  screen: irregular light/dark regions where the terrain rises, with base and player markers
+  still readable on top. What remains for this screen is the comparison against reference
+  frames, not implementation.
 - What remains unconstrained is the pixel layout of the compass and the vehicle instrument
   cluster: neither game-data dump carries a `.gui` layout file, the dash bitmap is a shaped
   176x108 overlay with no cut-outs for the other two instrument bitmaps, and
@@ -529,9 +529,8 @@ on state; this section is the evidence behind it, and each heading below says wh
 ### Open now
 
 - Landed 2026-09-14, no longer open: **remote players render as the T2 armour models with the
-  game's own clips** (see CHANGELOG). The design spec's player-model and commander-map
-  terrain-shading elements are now both real; the commander map's terrain shading is the one of
-  the two still to build.
+  game's own clips**, and the **commander map now shades its terrain** (both were named by the
+  design spec; see CHANGELOG).
 - **#51 repair presentation** -- beam, HUD feedback and lifecycle gating are in, and the beam's
   source recording (`fx/packs/repair_use.wav`, `repairpack.cs`'s `RepairPackFireSound`) is wired; the
   issue's acceptance also asks for a perceptual listen, which no test can do. Rig in Development

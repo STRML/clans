@@ -35,6 +35,13 @@ redeployed together.
   Loading deduplicates per body, and the per-frame pose path is a direct seek, measured at
   1.5 ms for all 47 remotes.
 
+- The commander map now shades its terrain, completing the design spec's command-circuit line
+  ("a 2D top-down canvas of the mission area with terrain shading, base assets with power state,
+  teammates, and enemy contacts inside your team's sensor coverage"): heights sampled over the
+  mission area, lit by the scene's own sun direction with altitude and slope mixed into one
+  brightness, rasterized once into a cached offscreen canvas and blitted under the markers
+  (`commander-map.ts`'s `terrainShades`).
+
 #### Fixed
 
 - The first build of those GLBs shipped two clips whose `Bip01 Pelvis` translation channel had
