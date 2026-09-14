@@ -102,6 +102,58 @@ rerun in this audit. GitHub issue numbers below refer to
    vehicle-and-carrier-policy space this repo can vary: the vehicle path is not what is holding
    the capture rate down.
 
+   **Measured at the game's own match length, and it changes the picture.** Every capture
+   number above was taken on the harness's own 12,000-tick window, which is not a match:
+   `packages/sim/src/flags.ts` configures the game with `CAPTURES_TO_WIN = 8` and
+   `TIME_LIMIT_SECONDS = 25 * 60` (`TIME_LIMIT_TICKS` 46,875, i.e. 12,000 ticks is a quarter
+   of one). The harness value is ours and documented as such (bots.katabatic.test.ts's
+   MATCH_TICKS), so the same configuration was re-run at the full 46,875 ticks, four seeds,
+   24 v 24, one craft per team:
+
+   | seed | kills | touches | captures | runs | refused | carrier deaths (enemy/team/self) |
+   | --- | --- | --- | --- | --- | --- | --- |
+   | 1 | 260 | 15 | 0 | 17 | 0 | 17 (16/1/0) |
+   | 2 | 270 | 14 | 1 | 26 | 303 | 25 (18/3/1) |
+   | 3 | 275 | 12 | 0 | 17 | 0 | 17 (14/2/0) |
+   | 4 | 283 | 16 | 1 | 20 | 0 | 17 (17/0/0) |
+   | all | **1,088** | **57** | **2 of 4 seeds** | 80 | 303 | 76 (65/6/1) |
+
+   At the real length the match is not marginal: 1,088 kills, 57 flag touches, 80 carrier runs,
+   captures on two seeds, and the capture-refusal rule finally exercised by data (303 refused
+   ticks on seed 2 -- the case the stand hold was written for and had never once fired). The
+   harness's window has been scaled to match: `SWEEP_TIMEOUT_MS` grows with `SWEEP_TICKS`,
+   because the old fixed 900-second cap cut a full-length sweep off mid-table and printed a
+   partial one.
+
+   **A line-of-fire guard was built, measured twice, and falsified.** The full-length carrier
+   telemetry shows 6 of 76 carrier deaths credited to a teammate plus 1 self-kill, and the sim
+   scores friendly fire at -10 (`damage.ts`), while the bot combat layer had no line-of-fire
+   check at all -- so a bot shot through its own team. Two versions were measured against the
+   full-length table above, same four seeds:
+
+   | configuration | captures | kills | touches | carrier deaths (enemy/team/self/unattributed) |
+   | --- | --- | --- | --- | --- |
+   | no guard (shipped) | 2 | 1,088 | 57 | 65/6/1/4 |
+   | guard every teammate inside 1.5 m of the shot corridor | 0 | 981 | 60 | 65/3/2/5 |
+   | guard the flag carrier inside 3 m, and nobody else | 1 | 1,044 | 55 | 60/8/1/7 |
+
+   Neither version does the job it was built for. The wide guard halves friendly deaths (6 to 3)
+   but suppresses fire across every melee and takes kills down 10 percent; the carrier-only
+   version, which exists precisely to avoid that cost, leaves the friendly-death count no better
+   than it found it (6 to 8) and still loses a capture. The mechanism is visible in the numbers:
+   the deaths it targets are not line-of-fire deaths, since a three-metre corridor over a body
+   the escorts already stand 8 m off changes nothing about them, which points at splash rather
+   than a shot passing through a teammate. Both reverted; only the record and the harness
+   timeout change remain.
+
+   **What four seeds can and cannot resolve.** The three full-length configurations above
+   captured 2, 0 and 1 times in four seeds. That spread is the measurement's noise floor, not a
+   lever's effect: at four seeds this harness cannot resolve a change of one or two captures, so
+   any capture-rate verdict it gives is a statement about large effects only. Four seeds, four
+   matches, is enough to falsify a lever that costs 100 kills and not enough to accept one that
+   finds a capture. Measuring the capture rate properly needs many more seeds, not another
+   constant.
+
    The number behind the four proximity/speed levers that came before: at the death tick the
    nearest live teammate is a median **209 m behind the carrier** while the team is at full
    strength, and the carrier is killed by the first enemy that reaches it, a median 23 m away,

@@ -456,6 +456,14 @@ describe('bot-only match on production Katabatic (issue #32)', () => {
 
 const TELEMETRY_SEEDS = [1, 2, 3, 4];
 
+/** Ours: how long vitest may spend on the sweep. A window knob that cannot reach the game's
+ *  own match length is a knob that lies -- `flags.ts`'s TIME_LIMIT_TICKS is 46,875 (25
+ *  minutes) while vitest's default per-test cap is 15, and a full-length sweep measured
+ *  ~5.5 ms per simulated tick per seed, so the old fixed cap killed the run mid-table and
+ *  printed a partial one. The allowance therefore scales with the work, with the historical
+ *  15-minute figure kept as the floor so a default sweep's own room does not shrink. */
+const SWEEP_TIMEOUT_MS = Math.max(900_000, SWEEP_TICKS * TELEMETRY_SEEDS.length * 10);
+
 /** Half of LIGHT's damage bar. Every bot spawns in LIGHT armor (addOneBot's default), and
  *  full armor is restored on respawn, so a carrier's bar is always a full LIGHT bar. An
  *  unattributed death (killerId -1) that took at least this much on its FINAL tick landed
@@ -1095,71 +1103,75 @@ function assertTelemetryWellFormed(telemetry: MatchTelemetry, stats: MatchStats)
 describe.skipIf(process.env.BOT_TELEMETRY !== '1')(
   'carrier telemetry sweep (issue #32, BOT_TELEMETRY=1)',
   () => {
-    it('measures every seed and prints the carrier table', async () => {
-      const rows: TableRow[] = [];
-      console.log('');
-      console.log(
-        `match size: ${SWEEP_BOTS_PER_TEAM.toString()} v ${SWEEP_BOTS_PER_TEAM.toString()} (${(SWEEP_BOTS_PER_TEAM * 2).toString()} bots seated), ${SWEEP_TICKS.toString()} ticks x ${TELEMETRY_SEEDS.length.toString()} seeds`,
-      );
-      for (const seed of TELEMETRY_SEEDS) {
-        const collected: MatchTelemetry[] = [];
-        const stats = await runMatch(
-          seed,
-          SWEEP_TICKS,
-          collected,
-          SWEEP_BOTS_PER_TEAM,
-          SWEEP_VEHICLES_PER_TEAM,
+    it(
+      'measures every seed and prints the carrier table',
+      async () => {
+        const rows: TableRow[] = [];
+        console.log('');
+        console.log(
+          `match size: ${SWEEP_BOTS_PER_TEAM.toString()} v ${SWEEP_BOTS_PER_TEAM.toString()} (${(SWEEP_BOTS_PER_TEAM * 2).toString()} bots seated), ${SWEEP_TICKS.toString()} ticks x ${TELEMETRY_SEEDS.length.toString()} seeds`,
         );
-        const telemetry = collected[0];
-        if (!telemetry) throw new Error(`no telemetry collected for seed ${String(seed)}`);
-        assertTelemetryWellFormed(telemetry, stats);
-        rows.push({ label: String(seed), stats, telemetry });
-      }
-      printTelemetryTable(rows);
-      const pooled = mergeTelemetry(rows.map((row) => row.telemetry));
-      const sum = (pick: (stats: MatchStats) => number): number =>
-        rows.reduce((total, row) => total + pick(row.stats), 0);
-      const stats = {
-        ticks: pooled.sampledTicks,
-        kills: sum((s) => s.kills),
-        captures: sum((s) => s.captures),
-        flagTouches: sum((s) => s.flagTouches),
-        // Summed per flag rather than concatenated, so the pooled row keeps the same shape as
-        // a seed row and the both-sides-attacking check reads the same in either.
-        flagTouchesByFlag: [0, 1].map((flagId) =>
-          rows.reduce((total, row) => total + (row.stats.flagTouchesByFlag[flagId] ?? 0), 0),
-        ),
-        stallWindows: sum((s) => s.stallWindows),
-        botWindowCount: sum((s) => s.botWindowCount),
-        landmarks: rows[0]?.stats.landmarks ?? 0,
-        carrierWindowCount: sum((s) => s.carrierWindowCount),
-        carrierStallWindows: sum((s) => s.carrierStallWindows),
-        otherWindowCount: sum((s) => s.otherWindowCount),
-        otherStallWindows: sum((s) => s.otherStallWindows),
-      };
-      const pooledRow: TableRow = { label: 'ALL', stats, telemetry: pooled };
-      console.log(tableCells(pooledRow).join(' | '));
-      printCarrierDeathTable(rows);
-      console.log(deathCells(pooledRow).join(' | '));
-      // The waypoint graph's landmark set, printed because it decides what the runs above
-      // can possibly be: runMatch builds it with productionLandmarks (spawns + flag stands
-      // + every base object), the set the deployed server uses.
-      console.log('');
-      console.log(
-        `waypoint landmarks: production set (spawns + flag stands + base objects) = ${stats.landmarks.toString()} per seed; seeds ${TELEMETRY_SEEDS.join('/')}`,
-      );
-      printRunEndTable(rows);
-      console.log(runEndCells(pooledRow).join(' | '));
-      printRunShapeTable(rows);
-      console.log(runShapeCells(pooledRow).join(' | '));
-      printEscortTable(rows);
-      console.log(escortCells(pooledRow).join(' | '));
-      printEncounterTable(rows);
-      console.log(encounterCells(pooledRow).join(' | '));
-      printDeathPlaceTable(rows);
-      console.log(deathPlaceCells(pooledRow).join(' | '));
-      printStallTable(rows);
-      console.log(stallCells(pooledRow).join(' | '));
-    }, 900_000);
+        for (const seed of TELEMETRY_SEEDS) {
+          const collected: MatchTelemetry[] = [];
+          const stats = await runMatch(
+            seed,
+            SWEEP_TICKS,
+            collected,
+            SWEEP_BOTS_PER_TEAM,
+            SWEEP_VEHICLES_PER_TEAM,
+          );
+          const telemetry = collected[0];
+          if (!telemetry) throw new Error(`no telemetry collected for seed ${String(seed)}`);
+          assertTelemetryWellFormed(telemetry, stats);
+          rows.push({ label: String(seed), stats, telemetry });
+        }
+        printTelemetryTable(rows);
+        const pooled = mergeTelemetry(rows.map((row) => row.telemetry));
+        const sum = (pick: (stats: MatchStats) => number): number =>
+          rows.reduce((total, row) => total + pick(row.stats), 0);
+        const stats = {
+          ticks: pooled.sampledTicks,
+          kills: sum((s) => s.kills),
+          captures: sum((s) => s.captures),
+          flagTouches: sum((s) => s.flagTouches),
+          // Summed per flag rather than concatenated, so the pooled row keeps the same shape as
+          // a seed row and the both-sides-attacking check reads the same in either.
+          flagTouchesByFlag: [0, 1].map((flagId) =>
+            rows.reduce((total, row) => total + (row.stats.flagTouchesByFlag[flagId] ?? 0), 0),
+          ),
+          stallWindows: sum((s) => s.stallWindows),
+          botWindowCount: sum((s) => s.botWindowCount),
+          landmarks: rows[0]?.stats.landmarks ?? 0,
+          carrierWindowCount: sum((s) => s.carrierWindowCount),
+          carrierStallWindows: sum((s) => s.carrierStallWindows),
+          otherWindowCount: sum((s) => s.otherWindowCount),
+          otherStallWindows: sum((s) => s.otherStallWindows),
+        };
+        const pooledRow: TableRow = { label: 'ALL', stats, telemetry: pooled };
+        console.log(tableCells(pooledRow).join(' | '));
+        printCarrierDeathTable(rows);
+        console.log(deathCells(pooledRow).join(' | '));
+        // The waypoint graph's landmark set, printed because it decides what the runs above
+        // can possibly be: runMatch builds it with productionLandmarks (spawns + flag stands
+        // + every base object), the set the deployed server uses.
+        console.log('');
+        console.log(
+          `waypoint landmarks: production set (spawns + flag stands + base objects) = ${stats.landmarks.toString()} per seed; seeds ${TELEMETRY_SEEDS.join('/')}`,
+        );
+        printRunEndTable(rows);
+        console.log(runEndCells(pooledRow).join(' | '));
+        printRunShapeTable(rows);
+        console.log(runShapeCells(pooledRow).join(' | '));
+        printEscortTable(rows);
+        console.log(escortCells(pooledRow).join(' | '));
+        printEncounterTable(rows);
+        console.log(encounterCells(pooledRow).join(' | '));
+        printDeathPlaceTable(rows);
+        console.log(deathPlaceCells(pooledRow).join(' | '));
+        printStallTable(rows);
+        console.log(stallCells(pooledRow).join(' | '));
+      },
+      SWEEP_TIMEOUT_MS,
+    );
   },
 );
