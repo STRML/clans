@@ -83,15 +83,24 @@ rerun in this audit. GitHub issue numbers below refer to
    | aiming the craft at the waypoint graph's heading instead of the straight line | worse on every axis: 0 captures, kills 316, closest 122 m |
    | topping up a destroyed craft from the pad, as a player would | inert: byte-identical matches, so crafts are not being destroyed at all |
    | a deflection ladder on a stalled ride, turning 45 degrees and retrying instead of dismounting | worse: 0 captures, kills 415 to 278, closest approach 2 to 6 m |
+   | reserving the team's craft for the carrier, so a rider gives it up when its team takes the flag | worse: 1 capture either way (seed 4), kills 415 to 340, touches 17 to 16, both-flags-carried 4,766 to 3,296 |
 
    Two of the five are informative and they point the same way: the limit is not attrition
    (topping up a destroyed craft changed nothing) and not the driver's obstacle handling
    (deflecting around one is worse than dismounting, because a craft wandering off its line
    hurts every other bot's fight too: kills fell to 278). What remains is that the carrier and
    the one craft per side do not meet often enough. Note Katabatic carries exactly one vehicle
-   pad per base, so one craft exists per team by map data, not by policy. The next candidate,
-   named and not built: reserve the team's craft for the carrier explicitly, so an attacker
-   riding it gives it up when its team takes the flag.
+   pad per base, so one craft exists per team by map data, not by policy.
+
+   That last lever was the obvious next candidate -- reserve the craft for the carrier so a rider
+   hands it over when its team takes the flag -- and it was built and measured rather than left
+   as a hypothesis, because it is the one lever that attacks the meeting problem directly. It
+   loses: one capture on seed 4 exactly as before, but kills fall 415 to 340 and the
+   both-flags-carried count collapses 4,766 to 3,296, because a bot that gives up the craft
+   rides it less and therefore fights less. Reserving the craft subtracts from the encounters it
+   was meant to create. Six levers, all falsified on the numbers, and that exhausts the
+   vehicle-and-carrier-policy space this repo can vary: the vehicle path is not what is holding
+   the capture rate down.
 
    The number behind the four proximity/speed levers that came before: at the death tick the
    nearest live teammate is a median **209 m behind the carrier** while the team is at full
