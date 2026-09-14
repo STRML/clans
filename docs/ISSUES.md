@@ -506,10 +506,15 @@ Playwright cases.
   per-frame listener orientation, terrain-only occlusion ducking
   (`OCCLUSION_ATTENUATION = 0.3`, ours), a footstep cue table keyed by armor and surface,
   and loop stops on destruction, death, disconnect, power loss and menu transitions.
-- Documented gaps: no committed spin-up/spin-down or continuous fire-loop recordings, no
-  medium/heavy-armor or interior footstep recordings, no hand-grenade detonation sample, no
-  turret-impact samples, and interior/force-field occlusion is not modeled. None of these
-  are synthesized (repo rule).
+- The gaps this bullet used to list are closed, and the recordings were there all along:
+  `e59eb98` committed the twelve samples the manifest had never listed (Chaingun spin-up and
+  spin-down, medium and heavy armour footsteps with their interior metal variants, the hand
+  grenade detonation, the turret impacts) and `f1ce478` wired them, and interior plus
+  enemy-force-field occlusion lives in `sim/src/occlusion.ts` (`activeForceFieldBlockers`),
+  which the client's audio path reaches through `audioOcclusionAt`. What remains is the
+  perceptual listen and nothing else; the rig and the cue list are in Development handoff.
+  A barrel with no committed recording still stays silent rather than inventing one (repo
+  rule).
 - Perceptual QA note: the panner path is exercised through fakes in unit tests; a two-client
   browser listen is still the honest check.
 
@@ -534,17 +539,42 @@ projectile count therefore means many bots engaged, and more bots with a target 
 roster scanning. Two runs of the identical tree counted 27 and 82 over-budget ticks out of
 48,000, so host contention moves the count too; the burst itself is compute.
 
+**Measured again on a quiet host (2026-09-14, `main` at `ab8c10b`) and it does not currently
+reproduce: 0 of 48,000 ticks over budget.** Four seeds x 12,000 ticks, 24 v 24 on the
+production landmark set, through the same probe the earlier numbers came from
+(`/tmp/ticktail/bench.ts`, which times the bot half and the sim half separately):
+
+```
+mean 1.663 ms   p99 13.634 ms   max 31.675 ms   over budget 0
+bot half mean 1.410 ms   sim half mean 0.253 ms
+deciles 1.17 1.56 1.12 2.94 1.87 1.07 1.29 1.56 1.85 2.21 ms
+```
+
+So the earlier counts were host contention, exactly as the paragraph above suspected: the same
+tree that showed 27 and 82 shows none when nothing else is running. Two things follow, and the
+second is the reason this stays open rather than closed. The bot half is 5.6x the sim half, so
+bot decision-making is still where the time is. And the tail is thin against the budget -- a
+single tick at 31.7 of 32 ms, p99 at 13.6 against a 1.66 ms mean -- so a busier host, a bigger
+fight or a slower machine crosses it. Do not trust the count without recording host load beside
+it; a CPU-profiled run of the same probe (profiling distorts a tight loop by an order of
+magnitude) reported 95, which is the profiler's cost and not the game's.
+
 Attributing the burst to one specific scan and cutting it is the open work, and the fix has a
 shape already suggested by the numbers: the scans are per-bot and per-candidate over the full
-roster, so anything that shares or bounds them (a spatial bucket, a re-scan interval, or
-reusing one bot's visibility result for a neighbour) attacks the super-linear term.
+roster, each candidate paying a terrain line-of-sight march at `LOS_MARCH_STEP = 0.5` m
+(`turrets.ts:9`), so a 300 m sightline is 600 terrain samples and the marches are the term worth
+attacking. Anything that shares or bounds them -- a spatial bucket, a re-scan interval, a
+tile-bounded skip for spans the sightline is provably above -- attacks the super-linear term.
+An accelerator has to be exactly equivalent to the march, and `hashWorld` in the telemetry sweep
+is what proves it: an equivalent accelerator leaves the per-seed fingerprints unchanged.
 
 ### P1: bots take the flag but never capture — #32
 
-See Start here for the current measurements and the ablation table. In one line: carriers are
-killed by lone enemies in midfield with no teammate within 100 m, roughly 780 m from their own
-stand, and no carrier has yet reached the capture radius in any measured configuration, so the
-capture-refusal rule remains untested by data.
+Closed. See Start here: at the game's own 46,875-tick match length the current configuration
+takes the flag on two of four seeds, the refusal rule is exercised by data (303 refused ticks,
+seed 2), and nine levers in the vehicle and carrier policy space are falsified with numbers. The
+one-liner this section used to carry -- carriers killed in midfield with no teammate within
+100 m -- was measured at a quarter of a match and is superseded by that table.
 
 ### P2: projectile art and texture animation — #53
 
