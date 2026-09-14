@@ -1,0 +1,4 @@
+# Issue #55 comparison screenshots: generated on demand by e2e/hud-screens.spec.ts, not
+# committed -- the capture depends on live match state, so committed copies would churn on
+# every browser run and never be current.
+*.jpg
