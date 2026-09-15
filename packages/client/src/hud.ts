@@ -421,14 +421,13 @@ const CONNECTION_TEXT: Record<HudSource['connection'], string> = {
 };
 
 /** The per-row DOM writes with their change guards -- see the comment inside for why the
- *  guards pay (each skipped write is a style/layout invalidation the renderer doesn't pay). */
+ *  guards pay (each skipped write is a style/layout invalidation the renderer doesn't pay).
+ *  The guard MUST cover the data-value attribute too: it is the programmatic surface the
+ *  debug stats and the e2e specs read, so "text unchanged, attribute never written" is
+ *  exactly the bug that hid a working capture flow behind a null attribute. */
 function updateRows(rows: Map<string, HTMLElement>, source: HudSource): void {
   for (const row of describeHud(source)) {
     const el = rows.get(row.id)!;
-    // Identity is the overwhelmingly common per-frame case (health unchanged, the clock
-    // changing a few times a second), and each skipped write is a style/layout
-    // invalidation the renderer doesn't pay -- the measured steady state was ~18
-    // recalcs/second from rewriting identical text.
     if (row.id === 'hud-vehicle') {
       if (el.dataset['value'] !== row.text) {
         el.dataset['value'] = row.text;
@@ -437,24 +436,24 @@ function updateRows(rows: Map<string, HTMLElement>, source: HudSource): void {
       continue;
     }
     if (row.id === 'hud-clock') {
-      const time = el.querySelector('.hud-clock-time')!;
-      if (time.textContent !== row.text) {
-        time.textContent = row.text;
+      if (el.dataset['value'] !== row.text) {
+        el.dataset['value'] = row.text;
+        el.querySelector('.hud-clock-time')!.textContent = row.text;
         updateCompass(el, source);
       }
       continue;
     }
-    if (el.textContent !== row.text) {
-      el.textContent = row.text;
-      if (row.id === 'hud-health' || row.id === 'hud-energy') {
-        el.style.setProperty('--fill', row.text);
-        el.setAttribute(
-          'aria-label',
-          `${row.id === 'hud-health' ? 'Health' : 'Energy'} ${row.text}`,
-        );
-      }
-    }
+    if (el.dataset['value'] === row.text && el.textContent === row.text) continue;
+    el.dataset['value'] = row.text;
+    el.textContent = row.text;
+    if (row.id === 'hud-health' || row.id === 'hud-energy') writeBarFill(el, row.id, row.text);
   }
+}
+
+/** The health/energy bars carry their fill percent as a CSS variable and an aria label. */
+function writeBarFill(el: HTMLElement, id: string, text: string): void {
+  el.style.setProperty('--fill', text);
+  el.setAttribute('aria-label', `${id === 'hud-health' ? 'Health' : 'Energy'} ${text}`);
 }
 
 export function createHud(
@@ -513,7 +512,7 @@ export function createHud(
     if (scores.textContent !== scoreText) scores.textContent = scoreText;
     updateRack(slots, source, packCell);
     const messages = describeKillFeed(source);
-    const feedText = messages.length ? messages.join('\n') : 'Clans · Capture the Flag';
+    const feedText = messages.length ? messages.join('\n') : 'Clans \u00b7 Capture the Flag';
     if (killFeed.textContent !== feedText) killFeed.textContent = feedText;
     hud.dataset['ready'] = '1';
   }
