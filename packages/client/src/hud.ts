@@ -420,6 +420,43 @@ const CONNECTION_TEXT: Record<HudSource['connection'], string> = {
   reconnecting: 'RECONNECTING…',
 };
 
+/** The per-row DOM writes with their change guards -- see the comment inside for why the
+ *  guards pay (each skipped write is a style/layout invalidation the renderer doesn't pay). */
+function updateRows(rows: Map<string, HTMLElement>, source: HudSource): void {
+  for (const row of describeHud(source)) {
+    const el = rows.get(row.id)!;
+    // Identity is the overwhelmingly common per-frame case (health unchanged, the clock
+    // changing a few times a second), and each skipped write is a style/layout
+    // invalidation the renderer doesn't pay -- the measured steady state was ~18
+    // recalcs/second from rewriting identical text.
+    if (row.id === 'hud-vehicle') {
+      if (el.dataset['value'] !== row.text) {
+        el.dataset['value'] = row.text;
+        updateVehicleInstruments(el, source);
+      }
+      continue;
+    }
+    if (row.id === 'hud-clock') {
+      const time = el.querySelector('.hud-clock-time')!;
+      if (time.textContent !== row.text) {
+        time.textContent = row.text;
+        updateCompass(el, source);
+      }
+      continue;
+    }
+    if (el.textContent !== row.text) {
+      el.textContent = row.text;
+      if (row.id === 'hud-health' || row.id === 'hud-energy') {
+        el.style.setProperty('--fill', row.text);
+        el.setAttribute(
+          'aria-label',
+          `${row.id === 'hud-health' ? 'Health' : 'Energy'} ${row.text}`,
+        );
+      }
+    }
+  }
+}
+
 export function createHud(
   container: HTMLElement,
   initialSource: HudSource,
@@ -462,40 +499,22 @@ export function createHud(
   function update(source: HudSource): void {
     const mounted = (source.world.players.mountedVehicleId[source.playerId] ?? -1) !== -1;
     hud.dataset['piloting'] = String(mounted);
+    updateRows(rows, source);
     connection.dataset['state'] = source.connection;
     connection.textContent = CONNECTION_TEXT[source.connection];
-    for (const row of describeHud(source)) {
-      const el = rows.get(row.id)!;
-      el.dataset['value'] = row.text;
-      if (row.id === 'hud-vehicle') {
-        updateVehicleInstruments(el, source);
-        continue;
-      }
-      if (row.id === 'hud-clock') {
-        el.querySelector('.hud-clock-time')!.textContent = row.text;
-        updateCompass(el, source);
-      } else {
-        el.textContent = row.text;
-      }
-      if (row.id === 'hud-health' || row.id === 'hud-energy') {
-        el.style.setProperty('--fill', row.text);
-        el.setAttribute(
-          'aria-label',
-          `${row.id === 'hud-health' ? 'Health' : 'Energy'} ${row.text}`,
-        );
-      }
-    }
     const scores = rows.get('hud-team-scores')!;
-    scores.textContent = source.teamScores
+    const scoreText = source.teamScores
       .map((score, i) => {
         const flag = source.flags.find((f) => f.team === i + 1);
         const status = flag?.state === FlagState.Home ? '<At Base>' : '<Away>';
         return `Team ${String(i + 1)}   ${String(score)}   FLAG  ${status}`;
       })
       .join('\n');
+    if (scores.textContent !== scoreText) scores.textContent = scoreText;
     updateRack(slots, source, packCell);
     const messages = describeKillFeed(source);
-    killFeed.textContent = messages.length ? messages.join('\n') : 'Clans · Capture the Flag';
+    const feedText = messages.length ? messages.join('\n') : 'Clans · Capture the Flag';
+    if (killFeed.textContent !== feedText) killFeed.textContent = feedText;
     hud.dataset['ready'] = '1';
   }
   update(initialSource);
