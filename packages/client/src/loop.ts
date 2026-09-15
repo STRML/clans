@@ -23,3 +23,14 @@ export function advance(
   acc.remainder -= steps * fixedDt;
   return steps;
 }
+/**
+ * Whether a render is due. The rAF driver fires at the display's refresh (120 Hz on the
+ * ProMotion Macs this gets played on), and every per-frame cost -- three's scene graph and
+ * shadow pass, the HUD and nameplate DOM syncs -- scales with it, so the loop skips whole
+ * frames once the elapsed time drops under the frame budget (half a millisecond of slack
+ * absorbs rAF jitter). `last` stays at the last rendered frame's timestamp, so skipped
+ * frames accumulate and the next render sees the real elapsed time as its dt.
+ */
+export function frameDue(last: number, now: number, frameBudgetMs: number): boolean {
+  return now - last >= frameBudgetMs - 0.5;
+}

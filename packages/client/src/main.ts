@@ -1,5 +1,6 @@
 import { createApp, type App } from './app.js';
 import { createDebug } from './debug.js';
+import { frameDue } from './loop.js';
 
 declare global {
   interface Window {
@@ -38,12 +39,26 @@ window.__clansDebug = {
 // e2e-only handle (Playwright's command-circuit.spec.ts polls net.orders off it) -- never
 // ships in a production Pages build.
 if (import.meta.env.DEV || import.meta.env.MODE === 'test') window.__app = app;
+/**
+ * The render loop's rate cap. rAF fires at the display's own refresh -- 120 Hz on the
+ * ProMotion Macs this game gets played on -- and every per-frame cost (three's scene
+ * graph, the shadow pass, the HUD and nameplate DOM syncs) scales with it, so an uncapped
+ * loop burns multiple cores for frames nobody sees. 60 is the cap the source era ran at;
+ * `?fps=` overrides for experiments (?fps=30 on a weak GPU, ?fps=0 = uncapped).
+ */
+const MAX_FPS = Number(new URLSearchParams(location.search).get('fps') ?? 60) || Infinity;
+const FRAME_BUDGET_MS = 1000 / MAX_FPS;
 const debug = createDebug(app, document.body);
 let last = performance.now();
 const tick = (now: number): void => {
-  app.frame((now - last) / 1000);
-  debug.update();
-  last = now;
+  // Schedule first so a throw inside frame() still keeps the loop alive, then skip the
+  // whole frame when the display is faster than the cap: `last` only advances on frames
+  // actually rendered, so the sim's dt stays the real elapsed time across skipped frames.
   requestAnimationFrame(tick);
+  if (!frameDue(last, now, FRAME_BUDGET_MS)) return;
+  const dt = Math.min((now - last) / 1000, 0.2);
+  last = now;
+  app.frame(dt);
+  debug.update();
 };
 requestAnimationFrame(tick);
