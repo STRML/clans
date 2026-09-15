@@ -586,6 +586,52 @@ the issue's acceptance names besides the comparison -- loadouts, `maxWeapons`, p
 vehicle reticles, contact activation, number-key selection, released cursor -- is implemented
 with its own spec (see the issue thread's earlier verification comments).
 
+### #32: the turret-suppression lever — built, measured, and falsified by diagnosis (2026-09-15)
+
+The full-length re-measurement at HEAD (four seeds, 46,875 ticks, one craft per team, the
+harness path via a new `BOT_TELEMETRY_SEEDS` knob, one seed per fork after a worker died
+holding several full matches of telemetry):
+
+| seed | kills | touches | captures | runs | reach | carrier deaths | closest min/med |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 228 | 18 | 0 | 25 | 0 | 24 | 23/768 |
+| 2 | 185 | 19 | 0 | 22 | 0 | 22 | 99/676 |
+| 3 | 316 | 15 | 0 | 27 | 0 | 27 | 23/711 |
+| 4 | 264 | 14 | 0 | 20 | 0 | 18 | 164/694 |
+| all | **993** | **66** | **0 of 4** | 94 | **0** | 91 | |
+
+Kills and touches hold against the pre-regen table (1,088/57); captures fell to zero and
+**no carrier run in 94 ever entered the 2 m capture radius**. The built lever (attackers
+suppress the enemy base turret while their team carries) was implemented, mutation-proven,
+gated — and then diagnosed inert on the real map, which turned the diagnosis into the real
+result:
+
+- **The base plasmas die absurdly early.** Katabatic's two base plasma barrels
+  (`TurretBarrelId.PlasmaBarrelLarge`, the only player-threatening turrets on a base) are
+  wrecked by tick ~945 and ~4,832 across seeds 1-3 and stay wrecked (hull
+  `repairRate` is 0). What kills them that early is not yet instrumented -- bots never
+  shoot them (the attackable-turret scan collected zero candidates across 159k sampled
+  calls) -- and is the next diagnostic question, because a base with no plasma from tick
+  ~1000 onward is not the defended base T2 runs.
+- **The deck's own turret is the AA gun** (`AABarrelLarge`, 31 m from the stand): it is
+  not a player threat by design (`threatensPlayers`), and the plasma sits 128.6 m and
+  160.9 m OUT from the deck it covers (measured on seed 3's map data), inside its own
+  80 m sensor only when someone walks the approach. A deck-side suppression ring
+  (150-200 m) found a live powered candidate in **0 of 576** in-ring samples; the
+  simplified approach-form of the rung fired **0 times in 16,291** live samples.
+- **Turret regen (`abe9ad0`) is therefore not the mechanism behind the capture drop.** It
+  can only act while the plasmas live (first ~945 ticks), long before the first flag carry
+  (ticks 3,017-5,250 on seeds 1-3). What kills 91 of 94 carrier runs is enemy PLAYERS at a
+  median 17 m at the deck. The 2-of-4 to 0-of-4 delta may be run-to-run variance (single
+  measurement per seed per commit) as much as any behavioral change; a variance estimate
+  needs repeated seeds and is the honest next measurement before any further lever.
+
+The lever's code is reverted with the numbers recorded here (the discipline applied to the
+six carrier-side levers above); the measurement knob (`BOT_TELEMETRY_SEEDS`, default
+unchanged) stays. What this diagnosis leaves as the standing candidates: instrument what
+wrecks the base plasmas, estimate full-length run variance, and the parked craft-
+reservation decision.
+
 ### P2: 48-bot tick bursts during mass engagements (resolved 2026-09-15)
 
 **Resolved by an exactly-equivalent accelerator.** The scans now collect cheap distances

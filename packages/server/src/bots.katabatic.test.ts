@@ -454,7 +454,12 @@ describe('bot-only match on production Katabatic (issue #32)', () => {
 // three acceptance tests above, and are not this sweep's business -- and prints one row per
 // seed plus a pooled row.
 
-const TELEMETRY_SEEDS = [1, 2, 3, 4];
+// A full-length sweep holds several complete matches of telemetry in one vitest worker
+// fork, which has died on the memory. Each seed in its own process (BOT_TELEMETRY_SEEDS=2,
+// say) keeps every fork's footprint to one match; the default sweeps all four.
+const TELEMETRY_SEEDS = (process.env.BOT_TELEMETRY_SEEDS ?? '1,2,3,4')
+  .split(',')
+  .map((value) => Number(value));
 
 /** Ours: how long vitest may spend on the sweep. A window knob that cannot reach the game's
  *  own match length is a knob that lies -- `flags.ts`'s TIME_LIMIT_TICKS is 46,875 (25
