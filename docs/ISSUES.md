@@ -564,7 +564,10 @@ reticles, compact cluster):
   flag table bottom-left, a narrow icon rack on the right edge, centre clear. The one
   concrete mismatch the comparison surfaced was the flag table's team names: the references
   read **Storm** and **Inferno**, ours said Team 1 and Team 2. Fixed this pass
-  (`client/teams.ts`, row order as the evidence, cited in the source).
+  (`client/teams.ts`) -- as an explicitly stated inference: the frames are medium-confidence
+  and their map is not confirmed to be Katabatic, no mission file with real teamName fields
+  exists in either dump, and the rows' order against our team ids is the whole evidence.
+  A surfaced mission file replaces the mapping.
 - **Vehicle** (03 vs the WSGF 16:10 Wildcat frame): the compact instrument cluster matches --
   bottom-centre, speed readout over a blue bar and a green bar flanking a circular gauge,
   about 20% of the screen width and under 12% of its height, centred; the top-right circular
