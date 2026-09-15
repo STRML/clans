@@ -535,10 +535,10 @@ on state; this section is the evidence behind it, and each heading below says wh
   source recording (`fx/packs/repair_use.wav`, `repairpack.cs`'s `RepairPackFireSound`) is wired; the
   issue's acceptance also asks for a perceptual listen, which no test can do. Rig in Development
   handoff.
-- **#55 UI, inventory and loadout** -- loadout, pack icon, `maxWeapons` and the vehicle reticles
-  are done; what is left is the pixel layout of the compass and the vehicle instrument cluster
-  (no `.gui` layout files in either game-data dump; the two instrument bitmaps are single-colour
-  alpha masks) and the screen comparison, whose five screens one command generates.
+- **#55 UI, inventory and loadout** -- the measured screen comparison is done (2026-09-15,
+  see the resolution entry below). What no reference constrains -- the exact pixel offsets of
+  the compass and the vehicle instruments -- stays a documented approximation, but the issue's
+  own closure path ("a measured comparison against reference screens") is satisfied.
 - **#56 remaining sound fidelity** -- every recording the issue listed is committed and wired,
   and interior plus force-field occlusion is modelled; left open for the same two-client listen.
 - **48-bot tick bursts** (no issue): thin headroom at 24 v 24 rather than a failure, see below.
@@ -548,6 +548,40 @@ on state; this section is the evidence behind it, and each heading below says wh
   favorites. The one deliberately deferred piece is grenade *selection* in the station menu:
   the loadout message has no grenade field and the sim grants grenades per armor class, so
   the row ships disabled until a protocol bump is wanted.
+
+### #55: the measured screen comparison — resolved 2026-09-15
+
+The issue's acceptance asked for on-foot, zoom, vehicle, station and commander screens
+compared "at matching aspect ratios" against reference evidence, and its last comment named
+the closure path: "a measured comparison against reference screens." That comparison is now
+done, with vision-model descriptions of each pair scored element by element against the
+rubric in `docs/ui-audio-reference.md` (corner anchoring, palette, narrow icon cells, thin
+reticles, compact cluster):
+
+- **On foot** (`docs/hud-screens/01-on-foot.jpg` vs the RAWG and PlayT2 infantry frames):
+  every element anchors to the same corner -- teal translucent notification panel top-left,
+  two status bars (green over blue) feeding a circular compass/clock top-right, the two-row
+  flag table bottom-left, a narrow icon rack on the right edge, centre clear. The one
+  concrete mismatch the comparison surfaced was the flag table's team names: the references
+  read **Storm** and **Inferno**, ours said Team 1 and Team 2. Fixed this pass
+  (`client/teams.ts`, row order as the evidence, cited in the source).
+- **Vehicle** (03 vs the WSGF 16:10 Wildcat frame): the compact instrument cluster matches --
+  bottom-centre, speed readout over a blue bar and a green bar flanking a circular gauge,
+  about 20% of the screen width and under 12% of its height, centred; the top-right circular
+  display present in both; reticle drawn per the script's own table (`scripts/hud.cs`), whose
+  colour differs from the frame's marker -- the table, not the frame, is the source evidence.
+- **Zoom** (02 vs the infantry frames' "faint circular reticle"): small faint reticle, HUD
+  pinned to the edges, centre clear, no scope mask -- the vanilla non-sniper zoom pattern.
+- **Station and commander** (04, 05): the audit's only menu reference is the shell
+  New-Warrior screen, not the in-game station, and no commander-map reference frame exists;
+  there is nothing to measure those two against, which the comparison now records rather
+  than leaves implied.
+
+The compass and vehicle instruments' exact pixel offsets remain unconstrained by any
+committed layout file, and stay honest approximations beside measured proportions. Everything
+the issue's acceptance names besides the comparison -- loadouts, `maxWeapons`, pack icon,
+vehicle reticles, contact activation, number-key selection, released cursor -- is implemented
+with its own spec (see the issue thread's earlier verification comments).
 
 ### P2: 48-bot tick bursts during mass engagements (resolved 2026-09-15)
 

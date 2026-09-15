@@ -80,7 +80,7 @@ describe('describeHud', () => {
 
   it('shows the team scores line', () => {
     expect(rowsOf(baseSource({ teamScores: [300, 100] }))['hud-team-scores']).toBe(
-      'Team 1: 300 — Team 2: 100',
+      'Storm: 300 — Inferno: 100',
     );
   });
 
@@ -122,7 +122,7 @@ describe('describeHud', () => {
       winnerTeam: 2,
       gameOverReason: GameOverReason.CaptureLimit,
     });
-    expect(rowsOf(source)['hud-game-over']).toBe('Match ended: Team 2 wins. Movement is paused.');
+    expect(rowsOf(source)['hud-game-over']).toBe('Match ended: Inferno wins. Movement is paused.');
   });
 
   it('names a time-limit win with "on time"', () => {
@@ -132,7 +132,7 @@ describe('describeHud', () => {
       gameOverReason: GameOverReason.TimeLimit,
     });
     expect(rowsOf(source)['hud-game-over']).toBe(
-      'Match ended: Team 1 wins on time. Movement is paused.',
+      'Match ended: Storm wins on time. Movement is paused.',
     );
   });
 

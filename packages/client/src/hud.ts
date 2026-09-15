@@ -14,6 +14,7 @@ import {
 import { EventKind, type EventMessage, type FlagSnapshotData } from '@clans/protocol';
 import { assetUrl } from './assets.js';
 import { type AimedStructureInfo } from './base-object-view.js';
+import { teamName } from './teams.js';
 
 export interface HudSource {
   world: World;
@@ -102,7 +103,10 @@ function weaponAmmoRows(source: HudSource): HudRow[] {
 
 function teamScoresRow(source: HudSource): HudRow {
   const [team1, team2] = source.teamScores;
-  return { id: 'hud-team-scores', text: `Team 1: ${String(team1)} — Team 2: ${String(team2)}` };
+  return {
+    id: 'hud-team-scores',
+    text: `${teamName(1)}: ${String(team1)} — ${teamName(2)}: ${String(team2)}`,
+  };
 }
 
 /** Failure matrix row 3's caller-visible message: a carrier whose own flag is away cannot
@@ -138,7 +142,7 @@ function gameOverRow(source: HudSource): HudRow {
   const suffix = source.gameOverReason === GameOverReason.TimeLimit ? ' on time' : '';
   return {
     id: 'hud-game-over',
-    text: `Match ended: Team ${String(source.winnerTeam)} wins${suffix}. Movement is paused.`,
+    text: `Match ended: ${teamName(source.winnerTeam)} wins${suffix}. Movement is paused.`,
   };
 }
 
@@ -506,7 +510,7 @@ export function createHud(
       .map((score, i) => {
         const flag = source.flags.find((f) => f.team === i + 1);
         const status = flag?.state === FlagState.Home ? '<At Base>' : '<Away>';
-        return `Team ${String(i + 1)}   ${String(score)}   FLAG  ${status}`;
+        return `${teamName(i + 1)}   ${String(score)}   FLAG  ${status}`;
       })
       .join('\n');
     if (scores.textContent !== scoreText) scores.textContent = scoreText;

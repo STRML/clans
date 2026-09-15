@@ -1,4 +1,5 @@
 import { type RosterEntryMessage } from '@clans/protocol';
+import { teamName } from './teams.js';
 import './scoreboard.css';
 
 /**
@@ -112,7 +113,7 @@ function createTeamSection(group: ScoreboardTeamGroup): HTMLElement {
   section.dataset['team'] = String(group.team);
   const heading = document.createElement('div');
   heading.className = 'scoreboard-team-heading';
-  heading.textContent = `Team ${String(group.team)}`;
+  heading.textContent = teamName(group.team);
   section.appendChild(heading);
   for (const row of group.rows) section.appendChild(createRow(row, -1));
   return section;
