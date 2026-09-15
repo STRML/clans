@@ -1,7 +1,7 @@
 import { teamHasPower } from './baseObjects.js';
 import type { PlayerHitbox } from './damage.js';
 import { segmentBlockedByInteriors } from './occlusion.js';
-import { sampleTerrain } from './terrain.js';
+import { sampleTerrainHeight, type TerrainHeightSample } from './terrain.js';
 import { vehicleMountPosition, applyVehicleDamage } from './vehicles.js';
 import { ProjectileType } from './weapons.js';
 import type { Vec3, World } from './types.js';
@@ -18,18 +18,26 @@ export const MPB_TURRET_MOUNT_NODE = 1;
  *  height there. Matches the real T2 sensor's `detectsUsingLOS = true`
  *  (`turret.cs:142`, `turrets/sentryTurret.cs:129`). Duplicated from the same technique
  *  `projectiles.ts` uses for terrain marching, not imported from it, because this task runs
- *  before Task 5 exports anything reusable — see this plan's Global Constraints. */
+ *  before Task 5 exports anything reusable — see this plan's Global Constraints.
+ *
+ *  P2 ledger (docs/ISSUES.md, "48-bot tick bursts"): each sample used to build a full
+ *  TerrainSample -- a fresh object plus a face normal this test never reads -- so a 150 m
+ *  sightline allocated ~300 objects and ran ~300 unused hypots. The march now reads the
+ *  height-only sampleTerrainHeight; the numbers come from the same evalTerrainPlane pass
+ *  sampleTerrain uses, so every boolean here is bit-identical to the old code, proven by
+ *  the four 24v24 seed fingerprints staying byte-identical. */
+const marchSample: TerrainHeightSample = { height: 0, empty: false };
 export function hasLineOfSight(world: World, from: Vec3, to: Vec3): boolean {
-  const dx = to.x - from.x,
-    dy = to.y - from.y,
-    dz = to.z - from.z;
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dz = to.z - from.z;
   const horizontal = Math.hypot(dx, dz);
   if (horizontal === 0) return true;
   const steps = Math.max(1, Math.ceil(horizontal / LOS_MARCH_STEP));
   for (let i = 1; i < steps; i += 1) {
     const t = i / steps;
-    const sample = sampleTerrain(world.terrain, from.x + dx * t, from.z + dz * t);
-    if (!sample.empty && sample.height >= from.y + dy * t) return false;
+    sampleTerrainHeight(world.terrain, from.x + dx * t, from.z + dz * t, marchSample);
+    if (!marchSample.empty && marchSample.height >= from.y + dy * t) return false;
   }
   return true;
 }

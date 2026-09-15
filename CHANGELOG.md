@@ -12,6 +12,19 @@ redeployed together.
 
 ## Unreleased
 
+### 2026-09-15 — the 48-bot tick burst is gone
+
+#### Fixed
+
+- Bot perception no longer marches a terrain line of sight for every candidate it can see:
+  the scans collect cheap distances, then march only the finalists in (distance, id) order
+  with early exit -- provably the same argmin the old per-candidate march computed -- and
+  the march itself samples through a shared, allocation-free terrain plane core. The bot
+  half of a 24v24 tick drops 57% (mean 0.51 -> 0.22 ms), its p99 75% (2.85 -> 0.72 ms), and
+  the worst observed tick is 2.5 ms of the 32 ms budget. Equivalence is pinned by
+  byte-identical per-seed match fingerprints and a 24,000-segment differential comparison
+  against the old semantics.
+
 ### 2026-09-14 — the design spec's remaining client deltas
 
 #### Added

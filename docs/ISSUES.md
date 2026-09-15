@@ -549,7 +549,27 @@ on state; this section is the evidence behind it, and each heading below says wh
   the loadout message has no grenade field and the sim grants grenades per armor class, so
   the row ships disabled until a protocol bump is wanted.
 
-### P2: 48-bot tick bursts during mass engagements
+### P2: 48-bot tick bursts during mass engagements (resolved 2026-09-15)
+
+**Resolved by an exactly-equivalent accelerator.** The scans now collect cheap distances
+first and march line-of-sight only for the finalists, in ascending (distance, id) order --
+which is provably the same fold the old code computed (argmin over visible with lowest-id
+tie-break; LOS answers are order-independent, so the first visible in that order IS the old
+minimum). The march itself stopped allocating: the sim's terrain plane math moved into one
+shared core (`terrain.ts`'s `evalTerrainPlane`) with a height-only, caller-owned-buffer
+sampler that `hasLineOfSight` now uses. Equivalence is proven two independent ways: the
+telemetry probe's per-seed hashWorld fingerprints are byte-identical on all four seeds, and
+a differential reimplementation of the OLD semantics agreed with the new code on 24,000 LOS
+segments and every scan across 4,000 randomized worlds with zero mismatches
+(`/tmp/ticktail/diff-perception.ts`). Measured on the same four-seed 24v24 probe
+(load 9.8-12.7 beside each run): bot half mean 0.51 -> 0.22 ms (-57%), p99 2.85 -> 0.72 ms
+(-75%), worst tick 8.0 -> 2.5 ms of the 32 ms budget -- the engagement burst can no longer
+reach the budget from the bot half, which was the entry's open question. Shapes rejected
+with reasons: cross-call LOS caches (duplicates became rare once early exit landed),
+detect-radius cuts (already implicit in the baseline), tile-bounded skips (a skip-interval
+proof for bilinear terrain is genuinely hard and no longer worth it at these numbers).
+
+The original measurement, kept for the history:
 
 A 24-versus-24 match runs at a mean of 1.8 to 2.4 ms per tick against the sim's 32 ms budget
 (`FIXED_TICK_MS`), but not uniformly: measured over four seeds by 12,000 ticks, the

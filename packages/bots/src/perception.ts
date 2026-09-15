@@ -45,12 +45,134 @@ function isEngageableEnemy(world: World, botId: number, team: number, id: number
   return true;
 }
 
+// Scratch for the nearest-target scans (findNearestVisibleEnemy, findCarrierThreat,
+// findAttackableTurret). P2 ledger (docs/ISSUES.md, "48-bot tick bursts"): at 24v24 the
+// bot half of a tick measured 5.6x the sim half (1.41 ms vs 0.25 ms mean, p99 13.6 ms,
+// worst tick 31.7 of the 32 ms budget) because each scan marched line of sight for EVERY
+// candidate before choosing. The scans now collect cheap distances first and march
+// candidates in ascending (distance, id) order, stopping at the first visible one --
+// firstVisibleCollected below carries the exactness argument. One module-level
+// grow-on-demand set of arrays keeps the hot path allocation-free; the scans are
+// synchronous, never re-entrant (no scan calls another), and the world does not change
+// while one runs (perception queries run between simulation steps) -- the same purity the
+// old per-candidate fold already relied on. Distances are finite: positions come from the
+// float64 integrator and spawn points, and a NaN position would already have poisoned
+// every physics step and match hash, so ordering by distance is a total order.
+const SCAN_SCRATCH_MIN = 64; // Covers the 48-bot roster and the test worlds; grows on demand.
+let scanIds = new Int32Array(SCAN_SCRATCH_MIN);
+let scanDist = new Float64Array(SCAN_SCRATCH_MIN);
+let scanX = new Float64Array(SCAN_SCRATCH_MIN); // Sight-target center per candidate, kept so
+let scanY = new Float64Array(SCAN_SCRATCH_MIN); // a finalist's LOS march reads the exact
+let scanZ = new Float64Array(SCAN_SCRATCH_MIN); // floats its distance was computed from.
+const scanTarget: Vec3 = { x: 0, y: 0, z: 0 };
+
+function growScanScratch(count: number): void {
+  if (count <= scanIds.length) return;
+  const cap = Math.max(count, scanIds.length * 2);
+  scanIds = new Int32Array(cap);
+  scanDist = new Float64Array(cap);
+  scanX = new Float64Array(cap);
+  scanY = new Float64Array(cap);
+  scanZ = new Float64Array(cap);
+}
+
+/** The cheap half of the shared visibility rule below -- engageable AND inside `rangeM`
+ *  of the observer's eye -- WITHOUT the line-of-sight march, which is the expensive half
+ *  (a 0.5 m terrain walk over the whole sightline, ~300 samples at VISION_RANGE; P2
+ *  ledger). Leaves the target's distance and center in the scan scratch at [targetId] so
+ *  the scan's later march reads the same floats; returns the distance, null when the id
+ *  is not a candidate. */
+function engageableDistanceM(
+  world: World,
+  observerId: number,
+  team: number,
+  eye: { x: number; y: number; z: number },
+  targetId: number,
+  rangeM: number,
+): number | null {
+  growScanScratch(world.players.count);
+  if (!isEngageableEnemy(world, observerId, team, targetId)) return null;
+  const hitbox = playerHitbox(world, targetId, armorFor(world, targetId));
+  const d = Math.hypot(eye.x - hitbox.center.x, eye.y - hitbox.center.y, eye.z - hitbox.center.z);
+  if (d > rangeM) return null;
+  scanDist[targetId] = d;
+  scanX[targetId] = hitbox.center.x;
+  scanY[targetId] = hitbox.center.y;
+  scanZ[targetId] = hitbox.center.z;
+  return d;
+}
+
+/** Collects every engageable enemy within `rangeM` of the observer's eye into the scan
+ *  scratch -- ids packed into scanIds[0..n), distances and centers indexed by entity id --
+ *  and returns n. No line-of-sight marching happens here; that is the point. */
+function collectVisibleEnemies(world: World, observerId: number, rangeM: number): number {
+  const team = world.players.team[observerId] ?? 0;
+  const eye = botEye(world, observerId);
+  let n = 0;
+  for (let id = 0; id < world.players.count; id += 1) {
+    if (engageableDistanceM(world, observerId, team, eye, id, rangeM) === null) continue;
+    scanIds[n] = id;
+    n += 1;
+  }
+  return n;
+}
+
+/** The scans' (distance, id) preference order, named because it IS the exactness
+ *  contract: the old folds walked ids ascending and kept the minimum distance with a
+ *  strict `<` update, so equal distances went to the LOWEST id, and this predicate ranks
+ *  candidates in exactly that order. */
+function candidateOutranks(a: number, b: number): boolean {
+  const da = scanDist[a] ?? 0;
+  const db = scanDist[b] ?? 0;
+  return da < db || (da === db && a < b);
+}
+
+/** Points the shared scanTarget at candidate `id`'s stored center, so a finalist's
+ *  hasLineOfSight march reads the exact floats its distance came from, with no fresh
+ *  allocation. */
+function aimScanTargetAt(id: number): void {
+  scanTarget.x = scanX[id] ?? 0;
+  scanTarget.y = scanY[id] ?? 0;
+  scanTarget.z = scanZ[id] ?? 0;
+}
+
+/** Marches line of sight over the collected candidates in ascending (distance, id) order
+ *  and returns the first VISIBLE one -- the same target the old full fold returned,
+ *  because a line-of-sight answer never depends on iteration order (the same eye and
+ *  center floats march the same terrain): the first visible candidate in preference order
+ *  IS the old minimum, and every march the old code ran past the winner (typically nearly
+ *  all of them in a 24v24 melee, where the nearest enemy is usually visible) is simply
+ *  not marched. Selection is swap-pop over scanIds, O(n) per finalist, so the common case
+ *  (the nearest candidate is visible) costs one pass of cheap compares and one march. */
+function firstVisibleCollected(
+  world: World,
+  eye: { x: number; y: number; z: number },
+  count: number,
+): number | null {
+  let remaining = count;
+  while (remaining > 0) {
+    let bestAt = 0;
+    for (let i = 1; i < remaining; i += 1) {
+      const id = scanIds[i] ?? -1;
+      const bestId = scanIds[bestAt] ?? -1;
+      if (candidateOutranks(id, bestId)) bestAt = i;
+    }
+    const id = scanIds[bestAt] ?? -1;
+    aimScanTargetAt(id);
+    if (hasLineOfSight(world, eye, scanTarget)) return id;
+    remaining -= 1;
+    scanIds[bestAt] = scanIds[remaining] ?? -1;
+  }
+  return null;
+}
+
 /** The one definition of "this enemy is a target for this observer": engageable (see
  *  isEngageableEnemy) AND inside VISION_RANGE of the observer's own eye AND in line of
  *  sight from it. Returns the 3D eye-to-hitbox distance when it is a target, `null` when
- *  it is not -- distance is never a sentinel. Both nearest-enemy scans route through here
- *  (findNearestVisibleEnemy from the bot's own eye, findCarrierThreat from the carrier's),
- *  so "visible" cannot drift into two different rules one caller at a time. */
+ *  it is not -- distance is never a sentinel. Both nearest-enemy scans are built from the
+ *  same two halves this function composes -- engageableDistanceM (the cheap filter, via
+ *  collectVisibleEnemies) and hasLineOfSight (the march, via firstVisibleCollected) -- so
+ *  "visible" cannot drift into two different rules one caller at a time. */
 export function visibleEnemyDistanceM(
   world: World,
   observerId: number,
@@ -58,25 +180,17 @@ export function visibleEnemyDistanceM(
 ): number | null {
   if (targetId < 0 || targetId >= world.players.count) return null;
   const team = world.players.team[observerId] ?? 0;
-  if (!isEngageableEnemy(world, observerId, team, targetId)) return null;
   const eye = botEye(world, observerId);
-  const hitbox = playerHitbox(world, targetId, armorFor(world, targetId));
-  const d = Math.hypot(eye.x - hitbox.center.x, eye.y - hitbox.center.y, eye.z - hitbox.center.z);
-  if (d > VISION_RANGE) return null;
-  if (!hasLineOfSight(world, eye, hitbox.center)) return null;
+  const d = engageableDistanceM(world, observerId, team, eye, targetId, VISION_RANGE);
+  if (d === null) return null;
+  aimScanTargetAt(targetId);
+  if (!hasLineOfSight(world, eye, scanTarget)) return null;
   return d;
 }
 
 export function findNearestVisibleEnemy(world: World, botId: number): number | null {
-  let best: number | null = null;
-  let bestDistance = Infinity;
-  for (let id = 0; id < world.players.count; id += 1) {
-    const d = visibleEnemyDistanceM(world, botId, id);
-    if (d === null || d >= bestDistance) continue;
-    best = id;
-    bestDistance = d;
-  }
-  return best;
+  const candidates = collectVisibleEnemies(world, botId, VISION_RANGE);
+  return firstVisibleCollected(world, botEye(world, botId), candidates);
 }
 
 export function needsHealing(world: World, botId: number): boolean {
@@ -188,15 +302,13 @@ export const CARRIER_THREAT_RADIUS_M = 120; // Ours, meters.
 export function findCarrierThreat(world: World, carrierId: number, radiusM: number): number | null {
   if (carrierId < 0 || carrierId >= world.players.count) return null;
   if (!world.players.active[carrierId] || !world.players.alive[carrierId]) return null;
-  let best: number | null = null;
-  let bestDistance = Infinity;
-  for (let id = 0; id < world.players.count; id += 1) {
-    const d = visibleEnemyDistanceM(world, carrierId, id);
-    if (d === null || d > radiusM || d >= bestDistance) continue;
-    best = id;
-    bestDistance = d;
-  }
-  return best;
+  // The threat cap folds into the cheap collect as min(VISION_RANGE, radiusM): a candidate
+  // beyond radiusM could never win the old fold (it was skipped -- but only AFTER its line
+  // of sight had been marched, which the P2 ledger flags as the wasted work), so skipping
+  // its march too returns the same answer. The min is the visibility rule's own clamp, not
+  // a second radius check.
+  const candidates = collectVisibleEnemies(world, carrierId, Math.min(VISION_RANGE, radiusM));
+  return firstVisibleCollected(world, botEye(world, carrierId), candidates);
 }
 
 /** Issue #32 carrier fire discipline: true while this bot is the one carrying the ENEMY
@@ -244,23 +356,46 @@ export interface AttackableTurret {
  *  the way to a take, so a handful of passing attackers strip the shield (3 damage at 50
  *  energy per point) and health (2.25) over a few runs and the carrier's exit window
  *  stops costing 40-95% health. */
-export function findAttackableTurret(world: World, botId: number): AttackableTurret | null {
+/** Turret-side twin of collectVisibleEnemies: gathers every enemy turret that threatens
+ *  players, is standing and powered, and sits within TURRET_ATTACK_RANGE_M of the bot's
+ *  eye (its cheapest-out half of the old fold; the old code checked range before its
+ *  march too, so the eligible set is unchanged). Returns how many it collected. */
+function collectAttackableTurrets(world: World, botId: number): number {
   const team = world.players.team[botId] ?? 0;
+  growScanScratch(world.turrets.count);
   const eye = botEye(world, botId);
-  let best: AttackableTurret | null = null;
-  let bestDistance = Infinity;
+  let n = 0;
   for (let id = 0; id < world.turrets.count; id += 1) {
     if (world.turrets.team[id] === team || world.turrets.destroyed[id]) continue;
     if (!world.turrets.powered[id]) continue;
     if (!threatensPlayers(world, id)) continue;
     const hitbox = turretHitbox(world, id);
     const d = Math.hypot(eye.x - hitbox.center.x, eye.y - hitbox.center.y, eye.z - hitbox.center.z);
-    if (d > TURRET_ATTACK_RANGE_M || d >= bestDistance) continue;
-    if (!hasLineOfSight(world, eye, hitbox.center)) continue;
-    best = { id, position: hitbox.center };
-    bestDistance = d;
+    if (d > TURRET_ATTACK_RANGE_M) continue;
+    scanDist[id] = d;
+    scanX[id] = hitbox.center.x;
+    scanY[id] = hitbox.center.y;
+    scanZ[id] = hitbox.center.z;
+    scanIds[n] = id;
+    n += 1;
   }
-  return best;
+  return n;
+}
+
+export function findAttackableTurret(world: World, botId: number): AttackableTurret | null {
+  // Same (distance, id) order, same first-visible-wins march as the player scans: the old
+  // fold walked ids ascending with a strict `<` update and a range check before its march,
+  // so its winner was the nearest in-range visible turret, lowest id on ties -- which is
+  // exactly what firstVisibleCollected returns, minus the marches it ran past the winner.
+  const id = firstVisibleCollected(
+    world,
+    botEye(world, botId),
+    collectAttackableTurrets(world, botId),
+  );
+  if (id === null) return null;
+  // The same center floats the fold judged. turretHitbox builds a fresh object per call,
+  // so no caller can be holding the old object's identity -- only its values, unchanged.
+  return { id, position: { x: scanX[id] ?? 0, y: scanY[id] ?? 0, z: scanZ[id] ?? 0 } };
 }
 
 /** Issue #32 carrier survival: the friendly station worth a detour on the way home,
