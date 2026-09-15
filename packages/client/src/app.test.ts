@@ -1092,6 +1092,7 @@ describe('hudSourceFrom', () => {
       | 'timeRemainingS'
       | 'gameOverReason'
       | 'recentEvents'
+      | 'connected'
     > = {
       playerId: 31,
       teamScores: [3, 4],
@@ -1101,6 +1102,7 @@ describe('hudSourceFrom', () => {
       timeRemainingS: 42,
       gameOverReason: GameOverReason.TimeLimit,
       recentEvents: [],
+      connected: true,
     };
 
     const source = hudSourceFrom(world, id, net);
@@ -1117,6 +1119,18 @@ describe('hudSourceFrom', () => {
     // to prove hudSourceFrom does not conflate them.
     expect(source.playerId).toBe(id);
     expect(source.networkPlayerId).toBe(31);
+    expect(source.connection).toBe('online');
+
+    // The chip is the page's answer to "where am I?": the same live client with a dropped
+    // socket must say reconnecting rather than pretending to be a match.
+    const dropped = hudSourceFrom(world, id, { ...net, connected: false });
+    expect(dropped.connection).toBe('reconnecting');
+  });
+  it('says the offline single-player world is practice mode', () => {
+    const world = createWorld(flat, 1);
+    const id = addPlayer(world, { x: 0, y: 0, z: 0 });
+    const source = hudSourceFrom(world, id, null);
+    expect(source.connection).toBe('practice');
   });
 });
 

@@ -38,6 +38,7 @@ function baseSource(overrides: Partial<HudSource> = {}): HudSource {
     world,
     playerId,
     networkPlayerId: playerId,
+    connection: 'online',
     teamScores: [0, 0],
     flags: [],
     gameOver: false,

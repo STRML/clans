@@ -29,6 +29,14 @@ export interface HudSource {
    * value as `playerId` in single-player (which has no separate network identity).
    */
   networkPlayerId: number;
+  /**
+   * Why this page's HUD must say which world it is showing: a bare `pnpm dev:client` (or a
+   * stale dev server still holding the port) silently boots the offline single-player world,
+   * which looks like a match whose bots all left -- "dev:server says it's starting bots but I
+   * don't see any" was exactly that page. 'practice' is the offline world (`net` is null),
+   * 'reconnecting' a configured server whose socket is down, 'online' a live connection.
+   */
+  connection: 'online' | 'practice' | 'reconnecting';
   teamScores: [number, number];
   flags: FlagSnapshotData[];
   gameOver: boolean;
@@ -405,6 +413,13 @@ function updateCompass(el: HTMLElement, source: HudSource): void {
   (el.querySelector('.hud-compass-labels') as HTMLElement).style.transform = `rotate(${-yaw}rad)`;
 }
 
+/** The connection chip's text per HudSource.connection state; 'online' hides the chip. */
+const CONNECTION_TEXT: Record<HudSource['connection'], string> = {
+  online: '',
+  practice: 'PRACTICE MODE (offline)',
+  reconnecting: 'RECONNECTING…',
+};
+
 export function createHud(
   container: HTMLElement,
   initialSource: HudSource,
@@ -440,10 +455,15 @@ export function createHud(
   const killFeed = document.createElement('div');
   killFeed.id = 'hud-kill-feed';
   hud.appendChild(killFeed);
+  const connection = document.createElement('div');
+  connection.id = 'hud-connection';
+  hud.appendChild(connection);
 
   function update(source: HudSource): void {
     const mounted = (source.world.players.mountedVehicleId[source.playerId] ?? -1) !== -1;
     hud.dataset['piloting'] = String(mounted);
+    connection.dataset['state'] = source.connection;
+    connection.textContent = CONNECTION_TEXT[source.connection];
     for (const row of describeHud(source)) {
       const el = rows.get(row.id)!;
       el.dataset['value'] = row.text;

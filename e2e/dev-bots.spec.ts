@@ -80,6 +80,8 @@ test('a bare dev page with no ?server= follows the paired game server and shows 
       timeout: 10_000,
     })
     .toBe(32);
+  // The pairing's success half of the connection chip: online, so the chip stays hidden.
+  await expect(page.locator('#hud-connection')).toBeHidden();
 });
 
 test('?server=off opts a paired dev page out and lands in the offline single-player world', async ({
@@ -99,4 +101,9 @@ test('?server=off opts a paired dev page out and lands in the offline single-pla
       page.evaluate(() => (window as unknown as { __app: App }).__app.net?.connected ?? false),
     )
     .toBe(false);
+  // The chip is the page's answer to "why are there no bots?": the offline world announces
+  // itself instead of looking like a match whose bots all left.
+  const chip = page.locator('#hud-connection');
+  await expect(chip).toBeVisible();
+  await expect(chip).toHaveText('PRACTICE MODE (offline)');
 });

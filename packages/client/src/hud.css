@@ -301,3 +301,28 @@
   font-size: 10px;
   padding: 1px 4px;
 }
+
+/* The connection chip (#hud-connection): says which world the HUD is showing. Hidden while
+ * online; visible in the offline single-player world and while a configured server's socket
+ * is down, so a page that silently fell back to practice mode announces itself (the
+ * "dev:server says bots but I see none" report was exactly that silent fallback). */
+#hud-connection {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  font:
+    bold 12px Arial,
+    sans-serif;
+  letter-spacing: 0.08em;
+  color: #ffd98a;
+  background: rgba(10, 79, 90, 0.55);
+  border: 1px solid #609a9f88;
+  border-radius: 3px;
+  padding: 3px 10px;
+  pointer-events: none;
+  z-index: 5;
+}
+#hud-connection[data-state='online'] {
+  display: none;
+}
