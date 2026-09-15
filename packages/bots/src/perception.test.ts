@@ -71,6 +71,45 @@ describe('findNearestVisibleEnemy', () => {
     expect(findNearestVisibleEnemy(world, bot)).toBeNull();
   });
 
+  it('returns a farther VISIBLE enemy when the nearest candidate is terrain-blocked', () => {
+    // The scan marches candidates in ascending (distance, id) order and stops at the
+    // first visible one (P2 ledger acceleration, docs/ISSUES.md): a nearer candidate that
+    // fails its line-of-sight march must be skipped, not returned -- and the blocked
+    // enemy here also has the LOWER id, so neither "first id wins" nor "nearest candidate
+    // wins" can produce the right answer by accident.
+    const world = createWorld(wallAcrossX(50), 1);
+    const bot = addPlayer(world, { x: -5, y: 0, z: 0 }, 1);
+    const blocked = addPlayer(world, { x: 5, y: 0, z: 0 }, 2); // 10 m, behind the wall
+    const visible = addPlayer(world, { x: -40, y: 0, z: 0 }, 2); // 35 m, bot's own side
+    expect(findNearestVisibleEnemy(world, bot)).toBe(visible);
+    expect(blocked).toBeLessThan(visible); // the id order really is the hostile one
+  });
+
+  it('breaks an exact distance tie by the lower id', () => {
+    // Mirror-image enemies are the same eye-to-hitbox distance to the bit (Math.hypot is
+    // sign-symmetric), which is exactly the case the old strict-< fold settled by walking
+    // ids ascending -- the (distance, id) preference order must agree with it.
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const lowerId = addPlayer(world, { x: 30, y: 0, z: 0 }, 2);
+    addPlayer(world, { x: -30, y: 0, z: 0 }, 2);
+    expect(findNearestVisibleEnemy(world, bot)).toBe(lowerId);
+  });
+
+  it('returns null when every candidate is terrain-blocked, not a partial answer', () => {
+    const world = createWorld(wallAcrossX(50), 1);
+    const bot = addPlayer(world, { x: -5, y: 0, z: 0 }, 1);
+    addPlayer(world, { x: 5, y: 0, z: 0 }, 2);
+    addPlayer(world, { x: 7, y: 0, z: 3 }, 2);
+    expect(findNearestVisibleEnemy(world, bot)).toBeNull();
+  });
+
+  it('returns null when there are no other players at all', () => {
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    expect(findNearestVisibleEnemy(world, bot)).toBeNull();
+  });
+
   it('excludes a mounted enemy even when otherwise in range and in line of sight (failure matrix row 18)', () => {
     const world = createWorld(flat, 1);
     const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);

@@ -347,15 +347,6 @@ export interface AttackableTurret {
   position: Vec3;
 }
 
-/** Issue #32 carrier survival: the nearest enemy base turret that (a) threatens players,
- *  (b) is standing and powered (an unpowered or wrecked turret shoots nobody, and ammo
- *  spent re-killing it is wasted), (c) sits within TURRET_ATTACK_RANGE_M of the bot, and
- *  (d) has line of sight -- a shot at a blocked structure is a wasted disc. Fired when no
- *  player target is visible, so it never competes with a real engagement for the bot's
- *  aim. Both bases' plasma turrets guard the flag approach, which every attacker walks on
- *  the way to a take, so a handful of passing attackers strip the shield (3 damage at 50
- *  energy per point) and health (2.25) over a few runs and the carrier's exit window
- *  stops costing 40-95% health. */
 /** Turret-side twin of collectVisibleEnemies: gathers every enemy turret that threatens
  *  players, is standing and powered, and sits within TURRET_ATTACK_RANGE_M of the bot's
  *  eye (its cheapest-out half of the old fold; the old code checked range before its
@@ -382,6 +373,15 @@ function collectAttackableTurrets(world: World, botId: number): number {
   return n;
 }
 
+/** Issue #32 carrier survival: the nearest enemy base turret that (a) threatens players,
+ *  (b) is standing and powered (an unpowered or wrecked turret shoots nobody, and ammo
+ *  spent re-killing it is wasted), (c) sits within TURRET_ATTACK_RANGE_M of the bot, and
+ *  (d) has line of sight -- a shot at a blocked structure is a wasted disc. Fired when no
+ *  player target is visible, so it never competes with a real engagement for the bot's
+ *  aim. Both bases' plasma turrets guard the flag approach, which every attacker walks on
+ *  the way to a take, so a handful of passing attackers strip the shield (3 damage at 50
+ *  energy per point) and health (2.25) over a few runs and the carrier's exit window
+ *  stops costing 40-95% health. */
 export function findAttackableTurret(world: World, botId: number): AttackableTurret | null {
   // Same (distance, id) order, same first-visible-wins march as the player scans: the old
   // fold walked ids ascending with a strict `<` update and a range check before its march,
