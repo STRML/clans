@@ -619,18 +619,27 @@ result:
   80 m sensor only when someone walks the approach. A deck-side suppression ring
   (150-200 m) found a live powered candidate in **0 of 576** in-ring samples; the
   simplified approach-form of the rung fired **0 times in 16,291** live samples.
-- **Turret regen (`abe9ad0`) is therefore not the mechanism behind the capture drop.** It
-  can only act while the plasmas live (first ~945 ticks), long before the first flag carry
-  (ticks 3,017-5,250 on seeds 1-3). What kills 91 of 94 carrier runs is enemy PLAYERS at a
-  median 17 m at the deck. The 2-of-4 to 0-of-4 delta may be run-to-run variance (single
-  measurement per seed per commit) as much as any behavioral change; a variance estimate
-  needs repeated seeds and is the honest next measurement before any further lever.
+- **What wrecks the plasmas is ordinary Spinfusor splash, and the fragility is the
+  source's own number.** The damage trace (seed 3): team 2 attackers grind team 1's plasma
+  from first chip at tick 944 to wrecked at tick 1,150 with radius splash while dueling the
+  gunners it is shooting at, and `TURRET_BASE_DATA[Large].maxHealth 2.25` is
+  turret.cs:150-192's `maxDamage 2.25` verbatim -- T2 base turrets are that fragile and get
+  cleared by a couple of attackers. The turret lifecycle is working as authored.
+- **The capture drop is real, not variance.** Four further full-length seeds (5-8): 0
+  captures again, reach 0 again -- eight seeds, ~180 carrier runs, zero reaches. Under the
+  pre-regen table's 2-of-4 rate, eight straight misses has probability under 0.4%. The
+  behavioral delta is `abe9ad0` (the only sim commit between the tables), and its plausible
+  channel is the early pushes: regen roughly doubled the plasma's first life, so the first
+  pushes now fight live gunfire where they previously fought a wreck -- and the first
+  carries (ticks 3,017-5,250) are the ones that used to score. What gates every run now is
+  the deck fight itself: enemy players at a median 17 m, a fight the six falsified
+  carrier-side levers and the falsified suppression lever all stand outside of.
 
 The lever's code is reverted with the numbers recorded here (the discipline applied to the
 six carrier-side levers above); the measurement knob (`BOT_TELEMETRY_SEEDS`, default
-unchanged) stays. What this diagnosis leaves as the standing candidates: instrument what
-wrecks the base plasmas, estimate full-length run variance, and the parked craft-
-reservation decision.
+unchanged) stays. What this diagnosis leaves as the standing candidates: the deck fight
+itself (stand-assault quality -- a combat-skill lever, not a policy lever), and the parked
+craft-reservation decision.
 
 ### P2: 48-bot tick bursts during mass engagements (resolved 2026-09-15)
 
