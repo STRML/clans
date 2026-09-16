@@ -55,6 +55,22 @@ const PROJECTILE_INTERP_DELAY_MS = SNAPSHOT_INTERVAL_MS;
  *  constant between bounces, so unlike RemoteBuffer's 8-sample history there is no fresher
  *  anchor to hunt for. */
 const PROJECTILE_HISTORY_LENGTH = 2;
+/** User report 2026-09-16 (jetting disc birth): how long a local shot's rendered birth slides
+ *  from the muzzle the CLIENT saw onto the server's authoritative path. The snapshot that
+ *  first carries the shot arrives 1-2 snapshots after the fire and describes a disc launched
+ *  from the SERVER's own muzzle -- its player store, a tick or two after the client's
+ *  predicted one, metres behind a shooter who kept jetting -- so the birth pull-back alone
+ *  lands the disc on that lagged line and the shot visibly leaves from behind the shooter.
+ *  T2's own cosmetic answer (TribesNext-era): draw the birth from the client's predicted
+ *  muzzle and blend onto the authoritative path over a quarter second -- long enough that
+ *  the slide never reads as a pop, short enough that authority wins while the disc is still
+ *  close enough for the difference to matter. */
+const LAUNCH_BLEND_MS = 250;
+/** How long a recorded launch may wait for the snapshot that first carries its projectile:
+ *  input flight + server tick + snapshot cadence + jitter, comfortably inside 400 ms. Past
+ *  it the shot is presumed lost (dropped packet, pre-join fire) and left uncorrected, so a
+ *  stale launch can never anchor some later projectile's birth. */
+const PENDING_LAUNCH_TIMEOUT_MS = 400;
 
 const WEAPON_COLOR: Record<number, number> = {
   [WeaponId.Spinfusor]: 0x66bbff,
@@ -301,7 +317,13 @@ function addDiscGlow(mesh: THREE.Mesh, p: ProjectileSnapshotData): void {
  *  `addTracerCross` gives for the tracers' own glows. The flash rides the disc rather than
  *  staying at the muzzle because it is parented to the projectile mesh the caller owns; over
  *  80 ms the disc travels 2-3 m, so it reads as the head of the launch streak, and giving it
- *  its own scene object would put a second lifetime on a second list for no visual gain. */
+ *  its own scene object would put a second lifetime on a second list for no visual gain.
+ *
+ *  User report 2026-09-16 (jetting disc birth): the flash is parented at the mesh's own
+ *  origin and born the frame the id is first seen, so it sits wherever placeProjectile draws
+ *  that first frame -- under a launch correction (ProjectileBuffer.setLaunchCorrection) that
+ *  is the client's predicted muzzle. Flash and disc leave the same gun by construction; the
+ *  flash never needs a position of its own. */
 function addDiscMuzzleFlash(mesh: THREE.Mesh, p: ProjectileSnapshotData): void {
   if (p.weaponId !== WeaponId.Spinfusor) return;
   const flash = new THREE.Mesh(
@@ -445,6 +467,15 @@ function sameFlight(a: ProjectileSnapshotData, b: ProjectileSnapshotData): boole
   );
 }
 
+/** The local player's own latest fire, as this client predicted it: the muzzle origin the
+ *  shot left from and the caller's clock at fire. Held until the server snapshot that first
+ *  carries the shot (matchLaunchToBuffer), then handed to the matching ProjectileBuffer as
+ *  its launch correction. */
+export interface PendingLaunch {
+  origin: { x: number; y: number; z: number };
+  atMs: number;
+}
+
 /**
  * One projectile id's flight between snapshots, the projectile twin of remote.ts's
  * RemoteBuffer and the same shape: samples arrive stamped with the caller's clock, and
@@ -474,6 +505,15 @@ function sameFlight(a: ProjectileSnapshotData, b: ProjectileSnapshotData): boole
  */
 export class ProjectileBuffer {
   private samples: ProjectileSample[] = [];
+  private launch: PendingLaunch | undefined;
+
+  /** User report 2026-09-16 (jetting disc birth): anchors this id's rendered birth to the
+   *  muzzle the local client predicted instead of the lagged server one the birth pull-back
+   *  alone lands on (see LAUNCH_BLEND_MS). One correction per buffer; a second call
+   *  overwrites, so a refire after the blend window re-anchors the id to its new shot. */
+  setLaunchCorrection(origin: { x: number; y: number; z: number }, launchAtMs: number): void {
+    this.launch = { origin, atMs: launchAtMs };
+  }
 
   /** Files one poll of a projectile's snapshot state. A repeat of the newest sample is
    *  dropped rather than stored: the caller polls per frame while snapshots land every second
@@ -496,9 +536,12 @@ export class ProjectileBuffer {
   }
 
   /** Drops the history: the id was recycled into a different projectile, so these samples
-   *  describe a flight that is over. */
+   *  describe a flight that is over. The launch correction goes with them -- it anchors one
+   *  specific shot, and the recycled id is a new flight the old shot's muzzle is nowhere
+   *  near. */
   reset(): void {
     this.samples.length = 0;
+    this.launch = undefined;
   }
 
   /** Where to draw the projectile at `nowMs`, or null before any sample has arrived (the
@@ -508,6 +551,20 @@ export class ProjectileBuffer {
     const newest = this.samples.at(-1);
     const oldest = this.samples[0];
     if (!newest || !oldest) return null;
+    return this.withLaunchCorrection(
+      this.snapshotPoseAt(newest, oldest, renderTime),
+      oldest,
+      renderTime,
+    );
+  }
+
+  /** The path the snapshots describe -- the interpolate/dead-reckon policy documented on the
+   *  class, split out so positionAt can wrap it in the launch correction. */
+  private snapshotPoseAt(
+    newest: ProjectileSample,
+    oldest: ProjectileSample,
+    renderTime: number,
+  ): ProjectilePose {
     if (renderTime >= newest.atMs) return extrapolate(newest, renderTime);
     // Before the oldest sample is the birth case: the client learns of a shot up to one
     // snapshot after it was fired and the render clock sits a further delay behind that, so
@@ -523,6 +580,83 @@ export class ProjectileBuffer {
       z: oldest.data.z + (newest.data.z - oldest.data.z) * t,
     };
   }
+
+  /** User report 2026-09-16 (jetting disc birth): slides the rendered birth from the muzzle
+   *  the client's prediction chose onto the snapshot path while a launch correction is live.
+   *  With position rendered as
+   *
+   *      mix(predictedLine, serverPath, age / LAUNCH_BLEND_MS),  age = renderTime - launchAtMs
+   *
+   *  where predictedLine(t) = origin + v * (t - launchAtMs)/1000 and v is the birth sample's
+   *  own reported velocity, the predicted line and the server path never diverge in
+   *  direction -- the same v is on the wire, so aim mismatch is impossible and the mix is a
+   *  straight slide along the constant offset between two parallel lines: at the fire itself
+   *  the disc sits on the predicted muzzle, by LAUNCH_BLEND_MS it sits on the path the
+   *  server says it has been on all along. age <= 0 (the render clock still behind the fire
+   *  -- the shot's first snapshot can land within the interpolation delay of it on a fast
+   *  link) draws the predicted line pure: the disc visibly leaves the gun. */
+  private withLaunchCorrection(
+    server: ProjectilePose,
+    birth: ProjectileSample,
+    renderTime: number,
+  ): ProjectilePose {
+    const launch = this.launch;
+    if (!launch) return server;
+    const age = renderTime - launch.atMs;
+    if (age >= LAUNCH_BLEND_MS) {
+      // Authority won; dropping the correction here keeps every later frame on the plain
+      // server path without re-deriving an expired anchor each one.
+      this.launch = undefined;
+      return server;
+    }
+    const seconds = age / 1000;
+    const predicted: ProjectilePose = {
+      x: launch.origin.x + birth.data.vx * seconds,
+      y: launch.origin.y + birth.data.vy * seconds,
+      z: launch.origin.z + birth.data.vz * seconds,
+    };
+    if (age <= 0) return predicted;
+    const t = age / LAUNCH_BLEND_MS;
+    return {
+      x: predicted.x + (server.x - predicted.x) * t,
+      y: predicted.y + (server.y - predicted.y) * t,
+      z: predicted.z + (server.z - predicted.z) * t,
+    };
+  }
+}
+
+/** User report 2026-09-16 (jetting disc birth): hands a recorded launch (app.ts records the
+ *  local player's own fire events per tick, beside recordLocalShots) to its projectile on
+ *  the first snapshot that carries it. "First" is by flight history: an id not yet in
+ *  `buffers` is a shot this client has never drawn, and the sim's id-reuse delay guarantees
+ *  a recycled id sat out of the list at least one snapshot, so its buffer -- and any old
+ *  correction with it -- was already pruned. Matching the wire's ownerId keeps other
+ *  players' discs and turret shots (-1) out; consuming on match and expiring at
+ *  PENDING_LAUNCH_TIMEOUT_MS keeps a lost shot from anchoring some later projectile's birth.
+ *  Returns the pending that still has no projectile (undefined when absent, consumed, or
+ *  expired) so the caller keeps its state in one expression; the only mutation is the
+ *  correction itself, written through the buffer map the caller already owns -- the same map
+ *  syncProjectileMeshes consumes the moment after, so the very first rendered frame is the
+ *  corrected one. */
+export function matchLaunchToBuffer(
+  pending: PendingLaunch | undefined,
+  projectiles: readonly ProjectileSnapshotData[],
+  localOwnerId: number,
+  buffers: Map<number, ProjectileBuffer>,
+  nowMs: number,
+): PendingLaunch | undefined {
+  if (!pending) return undefined;
+  if (nowMs - pending.atMs >= PENDING_LAUNCH_TIMEOUT_MS) return undefined;
+  for (const projectile of projectiles) {
+    if (projectile.ownerId !== localOwnerId) continue;
+    const existing = buffers.get(projectile.id);
+    if (existing) continue;
+    const buffer = new ProjectileBuffer();
+    buffers.set(projectile.id, buffer);
+    buffer.setLaunchCorrection(pending.origin, pending.atMs);
+    return undefined;
+  }
+  return pending;
 }
 
 /** Dead reckoning from one sample along its own reported velocity, in either direction: the

@@ -50,6 +50,7 @@ import {
   playFlagStateAudio,
   positionOfPlayer,
   recordLocalShots,
+  recordPendingLaunch,
   setLocalGodMode,
   snapshotFlagAudioState,
   stepSinglePlayer,
@@ -1468,6 +1469,70 @@ describe('recordLocalShots (2026-09-16)', () => {
     hitFeedback.confirm([hitAt(2)], 1_300);
     expect(hitSound).toHaveBeenCalledTimes(1);
     expect(hitMarker).toHaveBeenCalledWith(1_300);
+  });
+});
+
+// User report 2026-09-16 (jetting disc birth): the launch-recording twin of recordLocalShots
+// just above -- same drain point (stepNetworked's per-tick loop), same local-only filter, so
+// the pending launch carries only THIS player's shots for matchLaunchToBuffer to anchor.
+describe('recordPendingLaunch (2026-09-16)', () => {
+  const fireFrom = (playerId: number, x: number, weaponId = WeaponId.Spinfusor) => ({
+    playerId,
+    weaponId,
+    isAltFire: false,
+    origin: { x, y: 1.6, z: 0 },
+    direction: { x: 1, y: 0, z: 0 },
+    shooterVelocity: { x: 0, y: 0, z: 0 },
+    energyScale: 1,
+    hitPlayerId: -1,
+    hitPoint: null,
+    projectileId: 1,
+    resolved: false,
+  });
+
+  it("records the local player's fire as a launch waiting for its snapshot", () => {
+    const world = createWorld(flat, 1);
+    const localId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.lastFireEvents = [fireFrom(localId, 3)];
+    expect(recordPendingLaunch(world, localId, 1_000, undefined)).toEqual({
+      origin: { x: 3, y: 1.6, z: 0 },
+      atMs: 1_000,
+    });
+  });
+
+  it('re-anchors to the newest fire, within one drain and across drains', () => {
+    const world = createWorld(flat, 1);
+    const localId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    // Two of this player's shots in one drained list -- a multi-tick frame's backlog: the
+    // last tick's shot is the one the next snapshot will carry first.
+    world.lastFireEvents = [fireFrom(localId, 3), fireFrom(localId, 9)];
+    let pending = recordPendingLaunch(world, localId, 1_000, undefined);
+    expect(pending).toEqual({ origin: { x: 9, y: 1.6, z: 0 }, atMs: 1_000 });
+    // A later drain's shot replaces the whole anchor, muzzle and clock alike.
+    world.lastFireEvents = [fireFrom(localId, 12)];
+    pending = recordPendingLaunch(world, localId, 1_050, pending);
+    expect(pending).toEqual({ origin: { x: 12, y: 1.6, z: 0 }, atMs: 1_050 });
+  });
+
+  it("ignores other players' fire and the Laser Rifle, which spawns no projectile", () => {
+    const world = createWorld(flat, 2);
+    const localId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const botId = addPlayer(world, { x: 0, y: 0, z: 0 }, 2);
+    world.lastFireEvents = [fireFrom(botId, 3)];
+    expect(recordPendingLaunch(world, localId, 1_000, undefined)).toBeUndefined();
+    // Hitscan: there is no snapshot projectile to match, so recording one could only sit
+    // out its timeout.
+    world.lastFireEvents = [fireFrom(localId, 3, WeaponId.LaserRifle)];
+    expect(recordPendingLaunch(world, localId, 1_100, undefined)).toBeUndefined();
+  });
+
+  it("keeps an existing launch when the drain carries none of this player's shots", () => {
+    const world = createWorld(flat, 1);
+    const localId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    world.lastFireEvents = [fireFrom(localId, 3)];
+    const pending = recordPendingLaunch(world, localId, 1_000, undefined);
+    world.lastFireEvents = [];
+    expect(recordPendingLaunch(world, localId, 1_050, pending)).toBe(pending);
   });
 });
 

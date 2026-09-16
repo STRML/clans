@@ -12,6 +12,23 @@ redeployed together.
 
 ## Unreleased
 
+### 2026-09-16 — the disc leaves your gun: launch correction for the jetting shooter
+
+#### Fixed
+
+- Firing while jetting no longer spawns the disc metres behind you. The classic T2 ghosting
+  artifact: the server spawns the projectile from its own (lagged) view of a moving shooter,
+  and the client's predicted body has already flown on. The client now records its predicted
+  muzzle at fire time (the same lastFireEvents drain the audio and hit confirmation use) and,
+  when the server's record of that shot first appears, blends the disc's first 250 ms from the
+  predicted muzzle onto the authoritative path -- positions only, along the birth sample's own
+  wire velocity, so the slide is a straight move down one flight line and aim can never
+  mismatch. Measured on the jetting scenario: first visible frame 6.91 m behind the predicted
+  muzzle before, exactly at it after, monotone convergence, exact server path from 250 ms.
+  Solo mode is untouched (it reads the live sim store and never had the artifact). This is the
+  community's own fix shape for the same T2 complaint: client-side cosmetic launch, server
+  authority untouched.
+
 ### 2026-09-16 — second feel wave: smooth discs, hit feedback, T2 bot behavior
 
 #### Added

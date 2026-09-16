@@ -131,8 +131,9 @@ import {
   type LocalPose,
   type SpawnIndicator,
 } from './weapon-trails.js';
-import type { ProjectileBuffer, ProjectileInterpolation } from './weapons-view.js';
+import type { PendingLaunch, ProjectileBuffer, ProjectileInterpolation } from './weapons-view.js';
 import {
+  matchLaunchToBuffer,
   projectilesFromWorld,
   spawnProjectileImpacts,
   spawnVehicleExplosion,
@@ -1146,6 +1147,29 @@ export function recordLocalShots(
   }
 }
 
+/** User report 2026-09-16 (jetting disc birth): remembers the local player's own latest fire
+ *  as a launch waiting for the server snapshot that first carries its projectile, so
+ *  matchLaunchToBuffer can anchor that projectile's rendered birth to the muzzle the CLIENT
+ *  saw rather than the server's lagged one. Same event source, drain point, and local-only
+ *  filter as recordLocalShots just above; networked only, because solo reads the sim's own
+ *  live projectile store and has no birth artifact to correct. The Laser Rifle is skipped --
+ *  hitscan, it never spawns a snapshot projectile, so a recorded launch could only sit out
+ *  its timeout. Overwrite per fire: a refire re-anchors to the newest shot. Exported for a
+ *  focused unit test. */
+export function recordPendingLaunch(
+  world: World,
+  playerId: number,
+  nowMs: number,
+  pending: PendingLaunch | undefined,
+): PendingLaunch | undefined {
+  for (const event of world.lastFireEvents) {
+    if (event.playerId !== playerId) continue;
+    if (event.weaponId === WeaponId.LaserRifle) continue;
+    pending = { origin: event.origin, atMs: nowMs };
+  }
+  return pending;
+}
+
 /** The victim's own half: T2's damage flash, fed the local player's health once a frame. Health
  *  is the only place a client sees its own damage -- the sim writes it into players.damage and
  *  the networked client reconciles the authoritative value back into that same field -- so the
@@ -1223,6 +1247,30 @@ function projectileInterpFor(
   projectileBuffers: Map<number, ProjectileBuffer>,
 ): ProjectileInterpolation | undefined {
   return net ? { buffers: projectileBuffers, nowMs: performance.now() } : undefined;
+}
+
+/** User report 2026-09-16 (jetting disc birth): anchors a recorded launch to its projectile
+ *  the frame the snapshot first carries it, called just before syncWorldView consumes the
+ *  same buffer map, so the disc's very first rendered frames come from the predicted muzzle.
+ *  Connected only: a dropped socket falls back to raw sample positions and must not collect
+ *  corrections for projectiles it is no longer drawing. Free function for frame()'s
+ *  complexity gate, the same reason projectileInterpFor just above is one. */
+function matchPendingLaunch(
+  net: NetClient | null,
+  pendingLaunch: PendingLaunch | undefined,
+  playerId: number,
+  projectileBuffers: Map<number, ProjectileBuffer>,
+): PendingLaunch | undefined {
+  if (!net || !net.connected) return pendingLaunch;
+  return matchLaunchToBuffer(
+    pendingLaunch,
+    net.projectiles,
+    // Snapshot ownerId lives in the server's id space, not the prediction-world seat the
+    // rest of frame() keys on -- the same remap localNetworkId does for the event stream.
+    net.playerId ?? playerId,
+    projectileBuffers,
+    performance.now(),
+  );
 }
 
 function localPoseOf(world: World, playerId: number): LocalPose {
@@ -1356,7 +1404,8 @@ function stepNetworked(
   remoteBuffers: Map<number, RemoteBuffer>,
   playerId: number,
   hitFeedback: HitFeedback,
-): void {
+  pendingLaunch: PendingLaunch | undefined,
+): PendingLaunch | undefined {
   for (let step = 0; step < steps; step += 1) {
     net.tick(input);
     // User report 2026-09-16 (hit feedback), shooter side: this client predicts its own shots inside net.tick -- the same
@@ -1364,6 +1413,10 @@ function stepNetworked(
     // stepSinglePlayer's own afterStep. Sampled per tick rather than once per frame because
     // lastFireEvents only ever holds the tick that produced it.
     recordLocalShots(hitFeedback, net.world, playerId, performance.now());
+    // User report 2026-09-16 (jetting disc birth): the same drain records the shot as a
+    // launch waiting for its server-side projectile -- per tick for the same
+    // lastFireEvents-only-holds-one-tick reason, and the newest fire wins on a refire.
+    pendingLaunch = recordPendingLaunch(net.world, playerId, performance.now(), pendingLaunch);
   }
   updateRemotes(net, scene, remoteViews, remoteBuffers, performance.now());
   stats.ping = net.stats.ping;
@@ -1371,6 +1424,7 @@ function stepNetworked(
   stats.packetLossEstimate = net.stats.packetLossEstimate;
   stats.predictionErrorM = net.stats.predictionErrorM;
   stats.entityCount = net.stats.entityCount;
+  return pendingLaunch;
 }
 
 function applyRemoteSnapshot(
@@ -2197,6 +2251,12 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   // id, fed only on the networked path (see ProjectileInterpolation's own doc for why the solo
   // branch must keep drawing the raw store positions).
   const projectileBuffers = new Map<number, ProjectileBuffer>();
+  // User report 2026-09-16 (jetting disc birth): the local player's own latest fire, waiting
+  // for the server snapshot that first carries its projectile. Recorded per tick in
+  // stepNetworked, matched against each frame's snapshot just before syncWorldView consumes
+  // the same buffer map (networked only -- solo reads the live sim store and has no birth
+  // artifact).
+  let pendingLaunch: PendingLaunch | undefined;
   // User report 2026-09-16 (hit feedback, environment half): nearby disc-impact cues on one DOM
   // ring; the array is aged/emptied by syncSpawnIndicators, the layer redrawn by
   // renderSpawnIndicators, both below.
@@ -2408,7 +2468,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       const currentInput = gameplayInput(app, usePressed, pilotYaw);
       const simStart = performance.now();
       if (net) {
-        stepNetworked(
+        pendingLaunch = stepNetworked(
           net,
           app.stats,
           currentInput,
@@ -2418,6 +2478,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
           remoteBuffers,
           playerId,
           hitFeedback,
+          pendingLaunch,
         );
       } else {
         stepSinglePlayer(world, playerId, currentInput, steps, localSpawn, (flagsBefore) => {
@@ -2482,6 +2543,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       });
 
       const projectileInterp = projectileInterpFor(net, projectileBuffers);
+      pendingLaunch = matchPendingLaunch(net, pendingLaunch, playerId, projectileBuffers);
       syncWorldView(
         world,
         playerId,

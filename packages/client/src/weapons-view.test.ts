@@ -10,12 +10,14 @@ import {
 import {
   createLaserBeam,
   createProjectileMesh,
+  matchLaunchToBuffer,
   ProjectileBuffer,
   spawnLaserBeams,
   spawnProjectileImpacts,
   syncProjectileMeshes,
   updateEffects,
   type Effect,
+  type PendingLaunch,
 } from './weapons-view.js';
 
 const discImpact = (over: Partial<ProjectileImpact>): ProjectileImpact => ({
@@ -643,5 +645,157 @@ describe('updateEffects', () => {
 
     expect(geometryDispose).toHaveBeenCalledOnce();
     expect(materialDispose).toHaveBeenCalledOnce();
+  });
+});
+
+const dist = (
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number },
+): number => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+
+describe('ProjectileBuffer launch correction (jetting disc birth, 2026-09-16)', () => {
+  // The jetting shot, in client-clock numbers: fired at t=1000 from the predicted muzzle
+  // (0, 2, 0) at the disc's 90 m/s. The server received the input a tick later and spawned
+  // from ITS muzzle (-4, 1.6, 0.5) -- metres behind on the flight line and off-axis, which
+  // is the whole complaint -- so the birth sample the client files at stamp 1064 already
+  // describes the disc 32 ms down that lagged line.
+  const muzzle = { x: 0, y: 2, z: 0 };
+  const laggedSample = { ...disc(1, -1.12), y: 1.6, z: 0.5 };
+
+  const corrected = (): ProjectileBuffer => {
+    const buffer = new ProjectileBuffer();
+    buffer.setLaunchCorrection(muzzle, 1_000);
+    buffer.push(1_064, laggedSample);
+    return buffer;
+  };
+  const plain = (): ProjectileBuffer => {
+    const buffer = new ProjectileBuffer();
+    buffer.push(1_064, laggedSample);
+    return buffer;
+  };
+
+  it('draws the first frame at the predicted muzzle the raw sample is metres away from', () => {
+    // renderTime 1000 sits exactly on the launch: the predicted line pure -- the disc
+    // leaves the gun. The uncorrected buffer's birth pull-back lands the same flight on the
+    // server's lagged spawn line, 6.9 m from that muzzle, which is the reported artifact.
+    expect(corrected().positionAt(1_064)).toEqual(muzzle);
+    const before = plain().positionAt(1_064);
+    if (!before) throw new Error('expected a pose');
+    expect(dist(before, muzzle)).toBeCloseTo(6.91, 2);
+  });
+
+  it('slides monotonically onto the server path across the blend window', () => {
+    // Both lines share the wire's own velocity, so the offset between them is constant and
+    // the mix weight (age / 250) walks it down linearly: the distance to where the plain
+    // buffer draws the same clock shrinks strictly, never zig-zags.
+    const buffer = corrected();
+    const distances = [50, 125, 200].map((ageMs) => {
+      const nowMs = 1_064 + ageMs;
+      const pose = buffer.positionAt(nowMs);
+      const server = plain().positionAt(nowMs);
+      if (!pose || !server) throw new Error('expected poses');
+      return dist(pose, server);
+    });
+    expect(distances[0]).toBeGreaterThan(distances[1]!);
+    expect(distances[1]).toBeGreaterThan(distances[2]!);
+  });
+
+  it('sits exactly on the server path once LAUNCH_BLEND_MS has passed', () => {
+    const buffer = corrected();
+    for (const nowMs of [1_064 + 250, 1_064 + 400]) {
+      expect(buffer.positionAt(nowMs)).toEqual(plain().positionAt(nowMs));
+    }
+  });
+
+  it('re-anchors to a refire instead of stacking corrections', () => {
+    // Second shot, 100 ms after the first and from a muzzle the player has since moved:
+    // the overwrite replaces the live first correction wholesale, so the next birth again
+    // renders from the new muzzle (age 0, pure predicted) rather than anywhere on shot one.
+    const buffer = new ProjectileBuffer();
+    buffer.setLaunchCorrection(muzzle, 1_000);
+    buffer.setLaunchCorrection({ x: 30, y: 2, z: 0 }, 1_100);
+    buffer.push(1_164, laggedSample);
+    expect(buffer.positionAt(1_164)).toEqual({ x: 30, y: 2, z: 0 });
+  });
+
+  it('drops the correction when the id is recycled into a different flight', () => {
+    const buffer = corrected();
+    buffer.reset();
+    buffer.push(1_064, laggedSample);
+    expect(buffer.positionAt(1_064)).toEqual(plain().positionAt(1_064));
+  });
+});
+
+describe('matchLaunchToBuffer (jetting disc birth, 2026-09-16)', () => {
+  const pendingAt = (atMs: number, origin = { x: 0, y: 2, z: 0 }): PendingLaunch => ({
+    origin,
+    atMs,
+  });
+
+  it('anchors a local projectile on its first appearance and consumes the launch', () => {
+    const buffers = new Map<number, ProjectileBuffer>();
+    const pending = pendingAt(1_000, { x: 0, y: 1, z: 0 });
+    const unconsumed = matchLaunchToBuffer(pending, [disc(1, -1.12)], 0, buffers, 1_064);
+    expect(unconsumed).toBeUndefined();
+    const buffer = buffers.get(1);
+    if (!buffer) throw new Error('expected a buffer for the new id');
+    // The correction rides the buffer syncProjectileMeshes is about to file samples into:
+    // its first query, at the fire's own render clock, sits on the predicted muzzle.
+    buffer.push(1_064, disc(1, -1.12));
+    expect(buffer.positionAt(1_064)).toEqual({ x: 0, y: 1, z: 0 });
+  });
+
+  it('keeps the launch while no local projectile has appeared, and expires it at 400 ms', () => {
+    const buffers = new Map<number, ProjectileBuffer>();
+    const pending = pendingAt(1_000);
+    // A shot still in flight (input + tick + cadence + jitter) must stay anchored...
+    expect(matchLaunchToBuffer(pending, [], 0, buffers, 1_399)).toBe(pending);
+    // ...but one that never showed (dropped packet, pre-join fire) expires rather than
+    // anchoring some later projectile's birth.
+    expect(matchLaunchToBuffer(pending, [], 0, buffers, 1_400)).toBeUndefined();
+    expect(buffers.size).toBe(0);
+  });
+
+  it("never matches another player's disc or a turret shot", () => {
+    const buffers = new Map<number, ProjectileBuffer>();
+    const pending = pendingAt(1_000);
+    const remote = { ...disc(2, 5), ownerId: 1 };
+    const turret = { ...disc(3, 5), ownerId: -1 };
+    expect(matchLaunchToBuffer(pending, [remote, turret], 0, buffers, 1_064)).toBe(pending);
+    expect(buffers.size).toBe(0);
+  });
+
+  it('leaves an id that already has flight history alone', () => {
+    // First appearance only: a disc seen in an earlier snapshot is mid-flight, and pinning
+    // its birth to a fire that happened after it was drawn would drag it metres sideways.
+    const buffers = new Map<number, ProjectileBuffer>([[1, new ProjectileBuffer()]]);
+    const pending = pendingAt(1_000);
+    expect(matchLaunchToBuffer(pending, [disc(1, 20)], 0, buffers, 1_064)).toBe(pending);
+  });
+
+  it('feeds the flash the corrected birth frame through the normal sync path', () => {
+    // app.ts matches before sync, the frame the snapshot first carries the shot; the flash
+    // is parented to the disc mesh, so this is the proof flash and disc leave one muzzle.
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    const buffers = new Map<number, ProjectileBuffer>();
+    matchLaunchToBuffer(
+      pendingAt(1_000, { x: 0, y: 1, z: 0 }),
+      [disc(1, -1.12)],
+      0,
+      buffers,
+      1_064,
+    );
+    syncProjectileMeshes(scene, meshes, [disc(1, -1.12)], 0, { buffers, nowMs: 1_064 });
+    const mesh = meshes.get(1);
+    if (!mesh) throw new Error('expected a disc mesh');
+    expect(mesh.position.x).toBeCloseTo(0);
+    const flash = mesh.getObjectByName('disc-muzzle-flash');
+    if (!flash) throw new Error('expected a launch flash');
+    const world = new THREE.Vector3();
+    flash.getWorldPosition(world);
+    expect(world.x).toBeCloseTo(0);
+    expect(world.y).toBeCloseTo(1);
+    expect(world.z).toBeCloseTo(0);
   });
 });
