@@ -12,6 +12,20 @@ redeployed together.
 
 ## Unreleased
 
+### 2026-09-16 — projectile trails: the sampled-path ribbon T2's own emitter draws
+
+#### Added
+
+- Discs and mortar shells grow a trail, T2's mechanism minus the particle system. Torque's
+  `ProjectileData::particleEmitter` samples the projectile's movement between frames and emits
+  along that sampled path (projectile.cpp; the emitter axis is the inverse velocity); our
+  client already holds a per-frame corrected pose for every projectile, so the trail records
+  exactly that sampled path -- one sample per frame on movement, 16 samples (~250 ms) -- and
+  draws the envelope those particles would occupy: a crossed ribbon, width 0.35 m at the head
+  tapering to 0 at the tail, vertex alpha 1 to 0, additive. Discs trail blue (0x7fa8ff, lifted
+  from disc.cs's own light 0.175 0.175 0.5), mortar/grenade shells green. A stationary or
+  frozen projectile grows nothing; trails dispose with their mesh.
+
 ### 2026-09-16 — the disc leaves your gun: launch correction for the jetting shooter
 
 #### Fixed

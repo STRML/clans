@@ -15,6 +15,7 @@ import {
   type ProjectileSnapshotData,
 } from '@clans/protocol';
 import { assetUrl } from './assets.js';
+import { ProjectileTrail } from './projectile-trail.js';
 import { MAX_EXTRAPOLATE_MS } from './remote.js';
 
 const EXPLOSION_LIFETIME_S = 0.25; // Ours: a quick flash, not simulated debris.
@@ -80,6 +81,11 @@ const WEAPON_COLOR: Record<number, number> = {
   [WeaponId.Blaster]: 0x55ccff,
 };
 const GRENADE_COLOR = 0x55aa55;
+/** T2 reads a fast projectile partly BY its trail (projectile-trail.ts), so ours carries the
+ *  weapon's own glow family: the disc's descends from its datablock light `0.175 0.175 0.5`
+ *  (disc.cs:350-378), lifted into the blue the plate already glows in; mortar and grenade
+ *  share the shell green GRENADE_COLOR already gives them. */
+const DISC_TRAIL_COLOR = 0x7fa8ff;
 function sourceTexture(path: string): THREE.Texture | null {
   if (typeof document === 'undefined') return null;
   const texture = new THREE.TextureLoader().load(assetUrl(path));
@@ -699,6 +705,7 @@ function pruneProjectileMeshes(
     if (liveIds.has(id)) continue;
     const mesh = meshes.get(id);
     if (mesh) {
+      disposeProjectileTrail(mesh);
       scene.remove(mesh);
       disposeMesh(mesh);
     }
@@ -747,6 +754,50 @@ function projectileBufferFor(
   return buffer;
 }
 
+/** Whether a projectile presents the position-history trail. T2's Spinfusor and Mortar
+ *  projectiles trail (the datablock's particleEmitter; the thrown grenade's read is the same
+ *  green smoke), so ours does too; the Chaingun and Shrike tracers and the Blaster bolt
+ *  already ARE trails (tracerGeometry / blasterTrailGeometry), and the Laser Rifle never
+ *  spawns a projectile at all. */
+function wantsProjectileTrail(p: ProjectileSnapshotData): boolean {
+  return (
+    p.weaponId === WeaponId.Spinfusor ||
+    p.weaponId === WeaponId.Mortar ||
+    p.type === ProjectileType.Grenade
+  );
+}
+
+/** One live id's trail, hung off the mesh the way the muzzle flash is: created on first sight
+ *  of a trail-worthy id, removed and disposed wherever the mesh is (prune, recycle). The
+ *  ribbon is world-space, so it is a SIBLING of the mesh in the scene -- the mesh's own frame
+ *  is reset to the flight pose every frame and spun (discs, 30 rad/s), which would whip a
+ *  child ribbon around. The thrown grenade rides the Spinfusor's weaponId (weapons.ts's
+ *  altFire), so the colour check separates on the projectile type, not the weapon. */
+function projectileTrailFor(
+  mesh: THREE.Mesh,
+  p: ProjectileSnapshotData,
+): ProjectileTrail | undefined {
+  if (!wantsProjectileTrail(p)) return undefined;
+  const existing = mesh.userData.trail as ProjectileTrail | undefined;
+  if (existing) return existing;
+  const disc = p.weaponId === WeaponId.Spinfusor && p.type !== ProjectileType.Grenade;
+  const trail = new ProjectileTrail(disc ? DISC_TRAIL_COLOR : GRENADE_COLOR);
+  mesh.userData.trail = trail;
+  mesh.parent?.add(trail.mesh);
+  return trail;
+}
+
+/** Releases one mesh's trail: out of the scene, GPU resources disposed -- the same rule
+ *  disposeMesh enforces for the mesh itself. Called from every path that removes a mesh: the
+ *  id recycle (projectileTrackFor) and the id's death (pruneProjectileMeshes). */
+function disposeProjectileTrail(mesh: THREE.Mesh): void {
+  const trail = mesh.userData.trail as ProjectileTrail | undefined;
+  if (!trail) return;
+  trail.mesh.parent?.remove(trail.mesh);
+  trail.dispose();
+  mesh.userData.trail = undefined;
+}
+
 /** One live id's mesh and flight history for this frame, rebuilt and reset when the id turns
  *  out to have been recycled: a new projectile's first frame must not be interpolated from the
  *  previous one's last sample. Split out of syncOneProjectile to hold that function under the
@@ -760,6 +811,7 @@ function projectileTrackFor(
   let mesh = meshes.get(p.id);
   const recycled = isRecycledProjectile(mesh, p);
   if (mesh && recycled) {
+    disposeProjectileTrail(mesh);
     scene.remove(mesh);
     disposeMesh(mesh);
     meshes.delete(p.id);
@@ -775,15 +827,20 @@ function projectileTrackFor(
 
 /** Where the mesh is placed this frame: the flight history's own render-time position when the
  *  caller keeps one, the sample's raw position otherwise (no history yet, or no interpolation
- *  at all -- the solo path). */
+ *  at all -- the solo path). Returns the pose it placed, so the trail (projectileTrailFor)
+ *  samples exactly what was drawn and ribbon and disc can never disagree. */
 function placeProjectile(
   mesh: THREE.Mesh,
   buffer: ProjectileBuffer | undefined,
   p: ProjectileSnapshotData,
   nowMs: number,
-): void {
+): ProjectilePose {
   const pose = buffer?.positionAt(nowMs);
-  mesh.position.set(pose?.x ?? p.x, pose?.y ?? p.y, pose?.z ?? p.z);
+  const x = pose?.x ?? p.x;
+  const y = pose?.y ?? p.y;
+  const z = pose?.z ?? p.z;
+  mesh.position.set(x, y, z);
+  return { x, y, z };
 }
 
 function syncOneProjectile(
@@ -796,7 +853,11 @@ function syncOneProjectile(
 ): void {
   const { mesh, buffer } = projectileTrackFor(scene, meshes, buffers, p);
   buffer?.push(nowMs, p);
-  placeProjectile(mesh, buffer, p, nowMs);
+  const pose = placeProjectile(mesh, buffer, p, nowMs);
+  // The trail samples the pose the mesh was actually drawn at, so ribbon and disc agree --
+  // including the launch-blend slide (ProjectileBuffer's correction), which the ribbon
+  // records as the flight that was presented, not the server's hidden one.
+  projectileTrailFor(mesh, p)?.update(pose);
   projectileOrientation(mesh, p);
   if (p.weaponId === WeaponId.Spinfusor) {
     // The disc spins about its local plate normal. rotateY is a relative rotation, so

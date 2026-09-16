@@ -7,6 +7,7 @@ import {
   WeaponId,
   type ProjectileImpact,
 } from '@clans/sim';
+import { ProjectileTrail } from './projectile-trail.js';
 import {
   createLaserBeam,
   createProjectileMesh,
@@ -106,7 +107,9 @@ describe('syncProjectileMeshes', () => {
     const scene = new THREE.Scene();
     const meshes = new Map<number, THREE.Mesh>();
     syncProjectileMeshes(scene, meshes, [disc(1, 5)]);
-    expect(scene.children).toHaveLength(1);
+    // Mesh plus its position-history trail (a world-space scene sibling; see the projectile
+    // trail tests below).
+    expect(scene.children).toHaveLength(2);
     expect(meshes.get(1)?.position.x).toBe(5);
     syncProjectileMeshes(scene, meshes, []);
     expect(scene.children).toHaveLength(0);
@@ -132,7 +135,8 @@ describe('syncProjectileMeshes', () => {
     expect(shellMesh).not.toBe(discMesh);
     expect(shellMesh?.position.x).toBe(8);
     expect(shellMesh?.geometry).not.toBe(discMesh.geometry);
-    expect(scene.children).toHaveLength(1);
+    // Both id's scene objects swapped: the shell's mesh and its trail for the disc's.
+    expect(scene.children).toHaveLength(2);
   });
 
   it('keeps the same mesh across frames when the id is not reused', () => {
@@ -386,6 +390,104 @@ describe('syncProjectileMeshes', () => {
     // disc it replaced sat at y = 1, which is nowhere on that line.
     expect(meshes.get(1)?.position.x).toBeCloseTo(40);
     expect(meshes.get(1)?.position.y).toBeCloseTo(8.72);
+  });
+});
+
+describe('projectile trails (T2 position-history ribbon)', () => {
+  const trailOf = (mesh: THREE.Mesh): ProjectileTrail => mesh.userData.trail as ProjectileTrail;
+
+  it('grows a trail on a moving disc and none on a stationary one', () => {
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    for (let frame = 0; frame < 3; frame += 1) {
+      syncProjectileMeshes(scene, meshes, [disc(1, frame)], 1 / 60);
+    }
+    const trail = trailOf(meshes.get(1) as THREE.Mesh);
+    // One recorded rendered position per moved frame, ribbon drawn over them.
+    expect(trail.samples).toBe(3);
+    expect(trail.mesh.geometry.drawRange.count).toBeGreaterThan(0);
+    // A world-space sibling of the mesh, not a child: the mesh's frame is reset to the
+    // flight pose (and spun, for a disc) every frame, which would whip a child ribbon around.
+    expect(trail.mesh.parent).toBe(scene);
+
+    const still = new THREE.Scene();
+    const stillMeshes = new Map<number, THREE.Mesh>();
+    for (let frame = 0; frame < 3; frame += 1) {
+      syncProjectileMeshes(still, stillMeshes, [disc(1, 5)], 1 / 60);
+    }
+    const stationary = trailOf(stillMeshes.get(1) as THREE.Mesh);
+    // The birth sample is kept but no second position ever arrives, so nothing renders.
+    expect(stationary.samples).toBe(1);
+    expect(stationary.mesh.geometry.drawRange.count).toBe(0);
+  });
+
+  it('trails discs in the datablock blue, mortar and grenade in the shell green, nothing else', () => {
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    syncProjectileMeshes(
+      scene,
+      meshes,
+      [
+        disc(1, 0),
+        { ...disc(2, 0), weaponId: WeaponId.Mortar },
+        // A thrown grenade rides the Spinfusor's weaponId (weapons.ts's altFire), so the
+        // colour splits on the projectile type: it gets the shell green, not the disc blue.
+        { ...disc(3, 0), type: ProjectileType.Grenade },
+        { ...disc(4, 0), weaponId: WeaponId.Chaingun, type: ProjectileType.Tracer },
+        { ...disc(5, 0), weaponId: WeaponId.Blaster, type: ProjectileType.Energy },
+      ],
+      1 / 60,
+    );
+    const colorOf = (id: number): number =>
+      (
+        trailOf(meshes.get(id) as THREE.Mesh).mesh.material as THREE.MeshBasicMaterial
+      ).color.getHex();
+    expect(colorOf(1)).toBe(0x7fa8ff);
+    expect(colorOf(2)).toBe(0x55aa55);
+    expect(colorOf(3)).toBe(0x55aa55);
+    // Tracers and the Blaster bolt already ARE trails (tracer/blaster geometry); the Laser
+    // Rifle is hitscan. None of them carries a position-history trail.
+    expect(meshes.get(4)?.userData.trail).toBeUndefined();
+    expect(meshes.get(5)?.userData.trail).toBeUndefined();
+  });
+
+  it('prunes and disposes the trail with its projectile', () => {
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    for (let frame = 0; frame < 2; frame += 1) {
+      syncProjectileMeshes(scene, meshes, [disc(1, frame)], 1 / 60);
+    }
+    const trail = trailOf(meshes.get(1) as THREE.Mesh);
+    expect(scene.children).toContain(trail.mesh);
+    const geometryDispose = vi.spyOn(trail.mesh.geometry, 'dispose');
+    const materialDispose = vi.spyOn(trail.mesh.material as THREE.Material, 'dispose');
+
+    syncProjectileMeshes(scene, meshes, []);
+
+    // Gone from the scene AND released -- the rule the mesh itself already follows.
+    expect(scene.children).not.toContain(trail.mesh);
+    expect(geometryDispose).toHaveBeenCalledOnce();
+    expect(materialDispose).toHaveBeenCalledOnce();
+  });
+
+  it('rebuilds the trail when a recycled id becomes a different projectile', () => {
+    // The mesh rebuild on a type/weaponId swap must take the old trail with it: a shell
+    // inheriting the dead disc's ribbon would draw the old flight across the new one.
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    for (let frame = 0; frame < 2; frame += 1) {
+      syncProjectileMeshes(scene, meshes, [disc(1, frame)], 1 / 60);
+    }
+    const discTrail = trailOf(meshes.get(1) as THREE.Mesh);
+    const geometryDispose = vi.spyOn(discTrail.mesh.geometry, 'dispose');
+
+    syncProjectileMeshes(scene, meshes, [{ ...mortarShell(1, 8) }]);
+
+    const shellTrail = trailOf(meshes.get(1) as THREE.Mesh);
+    expect(shellTrail).not.toBe(discTrail);
+    expect((shellTrail.mesh.material as THREE.MeshBasicMaterial).color.getHex()).toBe(0x55aa55);
+    expect(geometryDispose).toHaveBeenCalledOnce();
+    expect(scene.children).not.toContain(discTrail.mesh);
   });
 });
 
