@@ -240,6 +240,17 @@ function updateRack(items: HTMLElement[], source: HudSource, packCell: HTMLEleme
       weapon,
     );
     crosshair.style.backgroundImage = `url(${assetUrl(`gui/${reticle}`)})`;
+    // The reticle is drawn at its own bitmap size rather than a fixed box, so the weapon and
+    // vehicle tables show art at the size it was authored at. The box rides on custom
+    // properties because the fixed-centre rule that positions #crosshair lives in
+    // index.html's own <style>; hud.css turns these into the width/height and the negative
+    // half-size margins that rule needs.
+    const size = reticleBox(reticle, { width: window.innerWidth, height: window.innerHeight });
+    const width = `${String(size.width)}px`;
+    if (crosshair.style.getPropertyValue('--reticle-width') !== width) {
+      crosshair.style.setProperty('--reticle-width', width);
+      crosshair.style.setProperty('--reticle-height', `${String(size.height)}px`);
+    }
   }
 }
 
@@ -337,6 +348,82 @@ export function reticleBitmapFor(kind: VehicleKind | undefined, weapon: WeaponId
     if (mounted !== undefined) return mounted;
   }
   return WEAPON_RETICLE[weapon] ?? 'RET_blaster.png';
+}
+
+/** A bitmap's pixel size, or the size a reticle box is drawn at. */
+export interface ReticleSize {
+  width: number;
+  height: number;
+}
+
+/** The native pixel size of every reticle bitmap `reticleBitmapFor` can return, measured on
+ *  the committed files themselves (`sips -g pixelWidth -g pixelHeight
+ *  assets/out/katabatic/gui/*.png`, plus each file's opaque-pixel bounds). These are the sizes
+ *  the art was authored at: T2's GUI is drawn 1:1 at 1024x768 (gui-sources.ts copies these
+ *  bitmaps unchanged from the retail textures), and the canvases prove it -- the three 32x32
+ *  files each paint a ~30 px mark, the three 64x64 files paint the same ~30 px mark padded out
+ *  to the bigger canvas (hud_ret_shrike.png's mark is 33x33 inside its 64x64 canvas),
+ *  RET_disc.png is a 42x16 mark centred in its 64x16 canvas, and hud_ret_sniper.png is one
+ *  192 px ring inside its 256x256 canvas. Drawing each canvas at its own pixel size is
+ *  therefore what makes the reticles agree with each other and with the art; scaling all of
+ *  them into one fixed 30 px box (the old #crosshair rule) is what shrank the sniper by 8x and
+ *  the vehicle reticles by 2x. */
+export const RETICLE_NATIVE_SIZE: Readonly<Record<string, ReticleSize>> = {
+  'RET_blaster.png': { width: 32, height: 32 },
+  'RET_chaingun.png': { width: 32, height: 32 },
+  'RET_disc.png': { width: 64, height: 16 },
+  'RET_mortor.png': { width: 32, height: 32 },
+  'hud_ret_shrike.png': { width: 64, height: 64 },
+  'hud_ret_sniper.png': { width: 256, height: 256 },
+  'hud_ret_tankchaingun.png': { width: 64, height: 64 },
+  'hud_ret_tankmortar.png': { width: 64, height: 64 },
+};
+
+/** The size a reticle the table has no row for is drawn at. `reticleBitmapFor` only returns
+ *  committed names, so this is the box the crosshair carries before the first frame sets an
+ *  image -- 32x32 being the commonest native size (three of the five on-foot weapon
+ *  crosshairs). */
+const RETICLE_FALLBACK_SIZE: ReticleSize = { width: 32, height: 32 };
+
+/** The screen T2's HUD art was authored against: 1024x768, the reference the GUI bitmaps are
+ *  1:1 with, and therefore the size at which the reticle's own pixels are drawn as-is. */
+const GUI_REFERENCE_SIZE: ReticleSize = { width: 1024, height: 768 };
+
+/** How far the reticle may grow on a viewport larger than the reference screen. The art is a
+ *  fixed instrument, so it keeps its authored pixel size on any screen at or below the
+ *  reference and only stretches enough to stay a comparable share of a large display: 1.5x at
+ *  1536x1152 and beyond, i.e. 48 px for the on-foot crosshairs and a 384 px scope ring for the
+ *  sniper. Not a fov-style scale -- the reticle marks the aim point, not a world distance. */
+const RETICLE_MAX_SCALE = 1.5;
+
+/** The viewport for the reticle scale: the same CSS-pixel size the crosshair is positioned
+ *  in, so a window resize rescales the reticle with the HUD. */
+export interface ReticleViewport {
+  width: number;
+  height: number;
+}
+
+/** How much the reticle is scaled for a viewport, clamped to [1, RETICLE_MAX_SCALE]: the
+ *  fit of the reference screen into the viewport, so the smaller axis decides (a wide 1280x600
+ *  window does not stretch the reticle taller than its own 768-tall reference), and never
+ *  below native -- a small window shows the authored pixels rather than a shrunken reticle. */
+export function reticleScale(viewport: ReticleViewport): number {
+  const fit = Math.min(
+    viewport.width / GUI_REFERENCE_SIZE.width,
+    viewport.height / GUI_REFERENCE_SIZE.height,
+  );
+  return Math.min(RETICLE_MAX_SCALE, Math.max(1, fit));
+}
+
+/** The CSS pixel box `#crosshair` is drawn in for a reticle on a viewport: the bitmap's own
+ *  pixel size times `reticleScale`, rounded to whole pixels so the bitmap is never resampled
+ *  through a fractional box (the 64x16 disc would otherwise be stretched to a 3.9:1 box).
+ *  hud.css keeps `center / contain` on the element, so a rounded box only ever letterboxes a
+ *  reticle by a pixel, and the odd disc aspect is preserved rather than squashed square. */
+export function reticleBox(reticle: string, viewport: ReticleViewport): ReticleSize {
+  const size = RETICLE_NATIVE_SIZE[reticle] ?? RETICLE_FALLBACK_SIZE;
+  const scale = reticleScale(viewport);
+  return { width: Math.round(size.width * scale), height: Math.round(size.height * scale) };
 }
 
 function createWeaponRack(hud: HTMLElement): {

@@ -55,3 +55,15 @@
   height: 100%;
   background: #39d653;
 }
+/* The crosshair-hover enemy plate: the bar alone, no marker and no name (nameplates.ts's
+   hoverEnemyState says what the plate ships and why the name is left out). Same instrument
+   as the teammate bar on purpose -- the point of the hover plate is the health readout, and
+   the HUD has no third readout colour to spend on it. The empty name element still occupies
+   a line box unless it is hidden, which is what these two rules are for. */
+#nameplates .nameplate[data-hover='true'] .nameplate-marker,
+#nameplates .nameplate[data-hover='true'] .nameplate-name {
+  display: none;
+}
+#nameplates .nameplate[data-hover='true'] .nameplate-health {
+  margin-top: 0;
+}

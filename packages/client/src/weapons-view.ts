@@ -11,6 +11,15 @@ import { EventKind, type EventMessage, type ProjectileSnapshotData } from '@clan
 import { assetUrl } from './assets.js';
 
 const EXPLOSION_LIFETIME_S = 0.25; // Ours: a quick flash, not simulated debris.
+/** Issue #57: how long a disc's launch flash lives. Ours -- a muzzle flash is a launch
+ *  marker, not simulated debris, and `disc.cs` has no flash datablock of its own to copy.
+ *  80 ms is two NTSC frames and ~5 frames at 60 fps: long enough to read the disc leaving
+ *  the muzzle, short enough that it never reads as a projectile of its own. */
+const MUZZLE_FLASH_LIFETIME_S = 0.08;
+/** The launch flash spans a little wider than the disc plate it marks (0.816 m across,
+ *  `disc.glb`), so the bloom reads as light coming off the disc rather than as a second
+ *  disc. */
+const MUZZLE_FLASH_SIZE = 1.2;
 const LASER_BEAM_LIFETIME_S = 1; // sniperRifle.cs: fadeTime.
 const EXPLOSION_RADIUS = 1.5; // Ours: a visible flash, unrelated to the weapon's damage radius.
 
@@ -241,6 +250,73 @@ function addDiscGlow(mesh: THREE.Mesh, p: ProjectileSnapshotData): void {
   mesh.add(glow);
 }
 
+/** Issue #57: the disc's launch flash, at the muzzle the disc leaves from.
+ *
+ *  Why a launch marker rather than more disc: the disc is a flat plate 0.816 m across and
+ *  0.062 m thick (`disc.glb`, `disc.cs`'s own shape) flying level, so a shooter looking down
+ *  its own flight line sees it close to edge-on -- at 20 m out, 0.4 m below the eye
+ *  (EYE_HEIGHT 2.0 in app.ts against the sim's MUZZLE_HEIGHT 1.6 in weapons.ts), the plate
+ *  presents a sliver about 2 cm tall. Nothing about that changes at range, so the launch is
+ *  the one moment the disc can be made readable without redrawing its flight presentation.
+ *
+ *  Two crossed quads rather than one, because the mesh they ride spins about its own plate
+ *  normal (`syncOneProjectile`'s `rotateY`: 30 rad/s, ~4.8 rev/s as the source's own disc
+ *  does). A single quad would swing its face off the flight axis within one frame of launch;
+ *  two quads a quarter turn apart on that same axis keep one of them presented to the shooter
+ *  at every point of the spin, with the worst case a 45-degree turn (a 29% dip in the
+ *  additive contribution, not a disappearance) -- the same crossed-quad answer
+ *  `addTracerCross` gives for the tracers' own glows. The flash rides the disc rather than
+ *  staying at the muzzle because it is parented to the projectile mesh the caller owns; over
+ *  80 ms the disc travels 2-3 m, so it reads as the head of the launch streak, and giving it
+ *  its own scene object would put a second lifetime on a second list for no visual gain. */
+function addDiscMuzzleFlash(mesh: THREE.Mesh, p: ProjectileSnapshotData): void {
+  if (p.weaponId !== WeaponId.Spinfusor) return;
+  const flash = new THREE.Mesh(
+    new THREE.PlaneGeometry(MUZZLE_FLASH_SIZE, MUZZLE_FLASH_SIZE),
+    new THREE.MeshBasicMaterial({
+      map: DISC_TEXTURE,
+      color: 0x88bbff,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      fog: false,
+      side: THREE.DoubleSide,
+    }),
+  );
+  flash.name = 'disc-muzzle-flash';
+  // The plate's own frame (projectileOrientation) puts -Z along the flight direction, so this
+  // quad's face points straight back at whoever fired.
+  const cross = new THREE.Mesh(flash.geometry, flash.material);
+  cross.rotation.y = Math.PI / 2;
+  cross.name = 'disc-muzzle-flash-cross';
+  flash.add(cross);
+  mesh.add(flash);
+  mesh.userData.muzzleFlash = flash;
+}
+
+/** Ages the launch flash a projectile carries: fade over MUZZLE_FLASH_LIFETIME_S, then
+ *  release the two quads' own geometry and material (disposeMesh, not removal alone -- same
+ *  rule every owned mesh in this file follows). */
+function ageMuzzleFlash(mesh: THREE.Mesh, dt: number): void {
+  const flash = mesh.userData.muzzleFlash as THREE.Mesh | undefined;
+  if (!flash) return;
+  const age = ((mesh.userData.muzzleFlashAge as number | undefined) ?? 0) + dt;
+  mesh.userData.muzzleFlashAge = age;
+  flash.traverse((node) => {
+    if (node instanceof THREE.Mesh) {
+      (node.material as THREE.MeshBasicMaterial).opacity = Math.max(
+        0,
+        1 - age / MUZZLE_FLASH_LIFETIME_S,
+      );
+    }
+  });
+  if (age >= MUZZLE_FLASH_LIFETIME_S) {
+    mesh.remove(flash);
+    disposeMesh(flash);
+    mesh.userData.muzzleFlash = undefined;
+  }
+}
+
 export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.Mesh {
   // Tribes 2's disc is a spinning flat plate; mortar and grenade are their own chunky
   // green shells, not recoloured copies of the same generic sphere. Only the Shrike's
@@ -267,6 +343,7 @@ export function createProjectileMesh(projectile: ProjectileSnapshotData): THREE.
   );
   addTracerCross(mesh, projectile, tail);
   addDiscGlow(mesh, projectile);
+  addDiscMuzzleFlash(mesh, projectile);
   // Codex review round 2 (PR #9), finding 8: the sim recycles freed projectile ids (same
   // pattern as player id reuse), so a mesh keyed only by id can't tell "same projectile,
   // moved" from "a different projectile got this id". Stamping the type/weaponId it was
@@ -352,6 +429,7 @@ function syncOneProjectile(
     // and broke the plate-level flight frame within a couple of frames.
     mesh.rotateY(dt * 30);
   }
+  ageMuzzleFlash(mesh, dt);
   if (isTracerType(p.type)) {
     const travelled =
       ((mesh.userData.travelled as number | undefined) ?? 0) + Math.hypot(p.vx, p.vy, p.vz) * dt;

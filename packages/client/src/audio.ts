@@ -21,6 +21,67 @@ export const FOOTSTEP_INTERVAL_S = 0.35;
  *  already treat terrain LOS as the occluder of record (hasLineOfSight), so audio uses the
  *  same answer instead of a second geometry model. */
 export const OCCLUSION_ATTENUATION = 0.3;
+/** Issue #57: the Spinfusor's launch, and why the local gunshot needs its own mix path.
+ *
+ *  Two defects, both measured here rather than assumed.
+ *
+ *  1. `play` never connected the one-shot's source into its gain (see the edge it now makes).
+ *     Every cue that goes through it -- all five weapons' fire, footsteps, skis, flag cues,
+ *     impacts, explosions, station cues, voices -- was created, given a buffer, started, and
+ *     never heard. Only `loop` connected, so the cues that DID play were the loops: the jet,
+ *     the repair beam, station/generator hums, engines, and every projectile's flight loop.
+ *     A disc launch therefore sounded like its own flight whoosh with no front to it, which
+ *     is exactly how the Spinfusor was reported. The suite missed it because it asserts node
+ *     counts, gain values and the recording each cue chose -- never the source->gain edge.
+ *  2. With the edge restored, the disc's flight loop is the one cue that can still bury the
+ *     launch, and it is the worst case in the set for it. Committed recordings, measured with
+ *     `ffmpeg -af volumedetect` (mean_volume, dBFS):
+ *
+ *         spinfusor-fire.m4a       -12.0     spinfusor-projectile.m4a   -10.1
+ *         blaster-fire.m4a         -14.6     blaster-projectile.m4a     -17.9
+ *         chaingun-fire.m4a         -8.4     chaingun-projectile.m4a    -15.6
+ *         mortar-fire.m4a           -10.2    mortar-projectile.m4a      -12.5
+ *
+ *     The disc's loop is the hottest sample the game ships and the disc is its slowest
+ *     projectile, so PROJECTILE's own 5 m minDistance holds that loop at full mix level from
+ *     the instant it leaves the muzzle -- 2 dB above the launch's own mean, sustained for the
+ *     whole flight. No other weapon has that shape; the Blaster's loop is 7.8 dB quieter than
+ *     the Spinfusor's and sits 3.3 dB under its own launch.
+ *
+ *  So: the local player's own shot is mixed as a first-person cue (SELF_FIRE_*), and the
+ *  flight loops a launch leaves behind duck under it for its launch window (LAUNCH_DUCK_*). */
+/** Full mix level for the local player's own gunshot. `weaponFire` is that gun by contract
+ *  (app.ts's playWeaponFireAudio drops every other player's fire events), and the camera sits
+ *  at the player's eye while the sim's muzzle sits at MUZZLE_HEIGHT (weapons.ts: 1.6 m), so a
+ *  self shot originates ~0.4 m from the listener. It plays unpositioned and un-occluded, the
+ *  same rule the jet loop, the repair beam and the Chaingun's state cues already follow: a
+ *  shot leaving your own muzzle is not a world cue, and mixing it as one let #56's
+ *  terrain/interior LOS test duck it by OCCLUSION_ATTENUATION (-10.5 dB) for the whole shot. */
+export const SELF_FIRE_GAIN = 1;
+/** The launch punch, as an envelope on top of the recording's own attack: 4 ms to
+ *  SELF_FIRE_GAIN, then a 60 ms glide to SELF_FIRE_SUSTAIN. `spinfusor-fire.m4a` is already a
+ *  hard transient (peak -3.6 dB at 20 ms, -3.8 dB at 40 ms, -20 dB by 740 ms), so the
+ *  envelope's job is not to create the punch but to keep that 20 ms front above the body the
+ *  flight loop used to bury: the attack skips the codec's leading pre-echo, and the sustain
+ *  drops the remaining ~1 s of body to 55% (-5.2 dB) instead of sitting flat at full level. */
+export const SELF_FIRE_ATTACK_S = 0.004;
+export const SELF_FIRE_SUSTAIN = 0.55;
+export const SELF_FIRE_DECAY_S = 0.06;
+/** How close to the listener a shot must originate to count as the listener's own gun. The
+ *  eye-to-muzzle offset is 0.4 m; the margin covers a fire event recorded on an earlier
+ *  simulated tick than the frame that plays it (two ticks at the sim's top speed is ~2.8 m).
+ *  A cue the listener's own position cannot account for keeps the world mix -- falloff,
+ *  occlusion, panning -- which is the conservative answer and the one #56's tests pin. */
+export const SELF_FIRE_RADIUS_M = 3;
+/** How long a launch owns the muzzle, and how far under the launch the flight loops it
+ *  started are held for that window. -9.1 dB keeps the launch transient ~15 dB above its own
+ *  whoosh while it plays, and is short enough that the whoosh is back at full level by the
+ *  time the disc is 4-5 m out -- which is the sound of the disc leaving. */
+export const LAUNCH_DUCK_S = 0.18;
+export const LAUNCH_DUCK_FACTOR = 0.35;
+/** The loop-key prefix setProjectileSound builds. The launch duck's scope: a projectile's
+ *  flight loop is the one cue that can bury the shot that launched it. */
+const PROJECTILE_LOOP_PREFIX = 'projectile:';
 
 interface AudioLike {
   position?: Vec3;
@@ -392,6 +453,8 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
   const loads = new Map<SoundId, Promise<void>>();
   const warned = new Set<SoundId>();
   let disposed = false;
+  /** `context.currentTime` a launch owns the muzzle until (LAUNCH_DUCK_S). */
+  let launchUntil = 0;
   if (typeof fetch === 'function' && context.decodeAudioData) {
     for (const [id, file] of Object.entries(SOUND_FILE) as Array<[SoundId, string]>) {
       const load = fetch(`${import.meta.env.BASE_URL}katabatic/audio/${file}`)
@@ -444,6 +507,23 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
     node.connect(panner).connect(master);
     return panner;
   };
+  /** Starts a one-shot and owns its teardown: tracked in `oneShots` so dispose stops it,
+   *  disconnected once it ends (a sustained weapons exchange otherwise leaks a source/gain
+   *  pair per shot), with `extra` releasing whatever else the cue's own graph added. */
+  const startOneShot = (
+    source: AudioBufferSourceNode,
+    gain: GainNode,
+    extra?: PannerNode,
+  ): void => {
+    oneShots.add(source);
+    source.onended = () => {
+      oneShots.delete(source);
+      source.disconnect();
+      gain.disconnect();
+      extra?.disconnect();
+    };
+    source.start();
+  };
   const play = (id: SoundId, profile: Profile, position?: Vec3): void => {
     if (disposed) return;
     const buffer = buffers.get(id);
@@ -453,22 +533,52 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
     const gain = context.createGain() as GainNode;
     source.buffer = buffer;
     gain.gain.value = level;
-    const panner = connectOutput(gain, position, profile);
-    oneShots.add(source);
-    source.onended = () => {
-      oneShots.delete(source);
-      source.disconnect();
-      gain.disconnect();
-      panner?.disconnect();
-    };
-    source.start();
+    // Issue #57: this edge is what an audible one-shot IS, and it was the one edge this file
+    // never made -- see the block at the top of this module. `loop` below connects the same
+    // way, which is why the cues you could hear before this fix were exactly the loops.
+    source.connect(gain);
+    startOneShot(source, gain, connectOutput(gain, position, profile));
   };
-  const loop = (id: SoundId, profile: Profile, position?: Vec3): Loop => {
+  /** The local player's own gunshot: unpositioned (no panner) and never occluded, like the
+   *  jet/repair loops and the Chaingun's state cues, with the launch envelope the recording's
+   *  own body needs to stay under its transient -- see SELF_FIRE_ATTACK_S. Registers the
+   *  launch window that holds the flight loops it just started under it. */
+  const playSelfFire = (id: SoundId): void => {
+    if (disposed) return;
+    const buffer = buffers.get(id);
+    if (!buffer) return;
+    const source = context.createBufferSource() as AudioBufferSourceNode;
+    const gain = context.createGain() as GainNode;
+    source.buffer = buffer;
+    // The node's own value is the full launch level, so a context that ignores the automation
+    // below still plays the launch at level rather than muting it; the automation is the punch
+    // on top. The test fake reads this field, so the level assertions stay meaningful.
+    gain.gain.value = SELF_FIRE_GAIN;
+    const at = context.currentTime;
+    gain.gain.setValueAtTime(0, at);
+    gain.gain.linearRampToValueAtTime(SELF_FIRE_GAIN, at + SELF_FIRE_ATTACK_S);
+    gain.gain.setTargetAtTime(
+      SELF_FIRE_GAIN * SELF_FIRE_SUSTAIN,
+      at + SELF_FIRE_ATTACK_S,
+      SELF_FIRE_DECAY_S,
+    );
+    source.connect(gain).connect(master);
+    launchUntil = at + LAUNCH_DUCK_S;
+    startOneShot(source, gain);
+  };
+  /** `level` is passed explicitly by setSpatialLoop, which may hold a loop under the launch
+   *  duck at the moment it is created; every other caller leaves the profile's own level. */
+  const loop = (
+    id: SoundId,
+    profile: Profile,
+    position?: Vec3,
+    level = audibleLevel(position, profile),
+  ): Loop => {
     if (disposed) return { stop: () => undefined };
     let source: AudioBufferSourceNode | undefined;
     let stopped = false;
     const gain = context.createGain() as GainNode;
-    gain.gain.value = audibleLevel(position, profile);
+    gain.gain.value = level;
     const panner = connectOutput(gain, position, profile);
     const start = (): void => {
       const buffer = buffers.get(id);
@@ -495,6 +605,15 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
       },
     };
   };
+  /** Issue #57: the flight loops a launch leaves behind duck under it for LAUNCH_DUCK_S, so
+   *  the launch has a front to be heard against. Scoped by loop key rather than by shooter --
+   *  the engine has no shooter identity here, and the loops in flight when the local player
+   *  fires are, in practice, the shot just launched: anything further out already sits below
+   *  full level on PROJECTILE's own falloff. */
+  const launchDucked = (key: string, level: number): number =>
+    key.startsWith(PROJECTILE_LOOP_PREFIX) && context.currentTime < launchUntil
+      ? level * LAUNCH_DUCK_FACTOR
+      : level;
   const setSpatialLoop = (
     key: string,
     id: SoundId,
@@ -503,16 +622,29 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
     active: boolean,
   ): void => {
     if (disposed) return;
-    const level = audibleLevel(position, profile);
-    setLoop(loops, key, active && level > 0, () => loop(id, profile, position));
+    const level = launchDucked(key, audibleLevel(position, profile));
+    setLoop(loops, key, active && level > 0, () => loop(id, profile, position, level));
     const live = loops.get(key);
     live?.setLevel?.(level);
     live?.setPosition?.(position);
   };
+  /** Whether a cue fired at `position` is the listener's own gun. `weaponFire` is the local
+   *  player's own gun by contract, and this game's camera sits at the player's eye while the
+   *  sim's muzzle sits MUZZLE_HEIGHT (1.6 m) above the player's feet, so a self shot is ~0.4 m
+   *  from the listener -- SELF_FIRE_RADIUS_M carries the reasoning for the margin. */
+  const ownShot = (position: Vec3): boolean => {
+    const ear = listener.position;
+    if (!ear) return false;
+    return (
+      Math.hypot(position.x - ear.x, position.y - ear.y, position.z - ear.z) <= SELF_FIRE_RADIUS_M
+    );
+  };
   return {
     weaponFire: (weapon, position) => {
       const sound = WEAPON_PROFILE[weapon];
-      if (sound) play(sound[0], sound[1], position);
+      if (!sound) return;
+      if (ownShot(position)) playSelfFire(sound[0]);
+      else play(sound[0], sound[1], position);
     },
     // The base script's own state sounds (chaingun.cs stateSound[0], [3], [5]/[6]). Mount and
     // spin cues are the local player's own weapon, so they play at full level like the jet and
@@ -552,7 +684,14 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
                 : weaponId === WeaponId.Chaingun
                   ? 'chaingun-projectile'
                   : undefined;
-      if (sound) setSpatialLoop(`projectile:${String(id)}`, sound, PROJECTILE, position, active);
+      if (sound)
+        setSpatialLoop(
+          `${PROJECTILE_LOOP_PREFIX}${String(id)}`,
+          sound,
+          PROJECTILE,
+          position,
+          active,
+        );
     },
     vehicleExplosion: (position) => play('vehicle-explosion', EXPLOSION, position),
     flagCapture: (enemyCaptured = false) =>

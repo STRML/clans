@@ -12,6 +12,43 @@ redeployed together.
 
 ## Unreleased
 
+### 2026-09-16 — the feel wave: Spinfusor, deaths, reticle, hover health, bot stutter
+
+#### Fixed
+
+- Every one-shot sound was silent: audio.ts's one-shot playback graph connected the
+  projection source to the gain node, but the one-shot `play` path never made that
+  connection (only the looping path did). This is why the Spinfusor (and every impact,
+  explosion, footstep, flag cue) played nothing while looping cues came through. The
+  one-shot path now makes the source-to-gain edge, and a self-fire rule raises the local
+  player's own Spinfusor launch above distant fire (`SELF_FIRE_GAIN` with a 60 ms glide,
+  measured against `spinfusor-fire.m4a`'s -12 dB mean and 20 ms peak).
+
+- The Spinfusor disc now reads at the muzzle: a launch flash at the barrel (60-100 ms
+  billboard cross, disc-explosion's existing sprite plumbing) and the disc mesh spawns at
+  full size and opacity immediately instead of building in visibility.
+
+- Remote players now render smoothly instead of stuttering. Root cause measured: the old
+  RemoteBuffer lerped 100 ms behind but a distant player's snapshot stream carries a
+  stale-position repeat every 4th snapshot (server snapshot policy), so with perfect
+  cadence 74% of frames rendered a frozen model and the remaining 25% sprinted at up to 5x
+  the player's speed to catch up. The buffer now dead-reckons on the last moving sample's
+  velocity (320 ms horizon derived from the relevance policy's own silence bound), relaxes
+  fresh-data corrections over a 200 ms exponential instead of stepping, clamps backlog
+  stamp compression to the protocol's own 64 ms spacing, and wraps yaw corrections the
+  short way round. Jittered-arrival harness numbers: worst single-frame step drops from
+  3.8 m to 0.15 m for a 12 m/s skier under head-of-line stalls.
+
+- Death has a visible effect: a disc-explosion burst at the body's pelvis height (1.23 m,
+  measured on the heavy-light body) on the alive-to-dead edge, firing exactly once per
+  real death (the drained-once event stream, with lag-comp rejected hits never reaching
+  it), and the corpse persists ~4 s toppled instead of vanishing on the frame.
+
+- The reticle renders at its bitmap's native size with a responsive scale on large
+  viewports (was a fixed 30x30 downsample), and hovering the crosshair over an enemy
+  within 200 m shows a hover-only enemy health plate (sustained ~100 ms so it never
+  flickers; enemy health was already on the wire).
+
 ### 2026-09-15 — the 48-bot tick burst is gone
 
 #### Fixed

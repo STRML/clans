@@ -16,7 +16,10 @@ import {
   describeHud,
   describeKillFeed,
   packIconSrc,
+  RETICLE_NATIVE_SIZE,
   reticleBitmapFor,
+  reticleBox,
+  reticleScale,
   type HudSource,
 } from './hud.js';
 import { EventKind, type EventMessage, type FlagSnapshotData } from '@clans/protocol';
@@ -275,5 +278,90 @@ describe('reticleBitmapFor (issue #55 vehicle reticles)', () => {
   it('uses the weapon crosshair on foot, and the blaster art for a weapon with none of its own', () => {
     expect(reticleBitmapFor(undefined, WeaponId.Spinfusor)).toBe('RET_disc.png');
     expect(reticleBitmapFor(undefined, WeaponId.LaserRifle)).toBe('hud_ret_sniper.png');
+  });
+});
+
+describe('reticle sizing', () => {
+  const REFERENCE = { width: 1024, height: 768 };
+  // Explicit lists rather than Object.values on the numeric enums, which also yields their
+  // reverse-mapped names (weapons.ts's own note on ALL_WEAPONS).
+  const KINDS: readonly (VehicleKind | undefined)[] = [
+    undefined,
+    VehicleKind.Shrike,
+    VehicleKind.Wildcat,
+    VehicleKind.Bomber,
+    VehicleKind.Havoc,
+    VehicleKind.Tank,
+    VehicleKind.MobilePointBase,
+  ];
+  const WEAPONS: readonly WeaponId[] = [
+    WeaponId.Spinfusor,
+    WeaponId.Chaingun,
+    WeaponId.Mortar,
+    WeaponId.LaserRifle,
+    WeaponId.Blaster,
+  ];
+
+  it('has a measured native size for every reticle the weapon and vehicle tables can return', () => {
+    // The sizing table is hand-copied from the bitmaps, so the thing worth pinning is that
+    // nothing reticleBitmapFor can return is missing from it -- a missing row would fall back
+    // to 32x32 and shrink that reticle exactly the way the fixed 30 px box did.
+    for (const kind of KINDS) {
+      for (const weapon of WEAPONS) {
+        expect(RETICLE_NATIVE_SIZE[reticleBitmapFor(kind, weapon)]).toBeDefined();
+      }
+    }
+  });
+
+  it('carries the bitmaps their own pixel sizes', () => {
+    expect(RETICLE_NATIVE_SIZE['hud_ret_sniper.png']).toEqual({ width: 256, height: 256 });
+    expect(RETICLE_NATIVE_SIZE['hud_ret_shrike.png']).toEqual({ width: 64, height: 64 });
+    expect(RETICLE_NATIVE_SIZE['RET_chaingun.png']).toEqual({ width: 32, height: 32 });
+    // The one non-square reticle: its 42x16 disc mark sits in a 64x16 canvas.
+    expect(RETICLE_NATIVE_SIZE['RET_disc.png']).toEqual({ width: 64, height: 16 });
+  });
+
+  it('draws a reticle at its native size on the reference screen and on anything smaller', () => {
+    expect(reticleScale(REFERENCE)).toBe(1);
+    expect(reticleScale({ width: 800, height: 600 })).toBe(1);
+    expect(reticleBox('hud_ret_sniper.png', REFERENCE)).toEqual({ width: 256, height: 256 });
+    expect(reticleBox('RET_disc.png', { width: 800, height: 600 })).toEqual({
+      width: 64,
+      height: 16,
+    });
+  });
+
+  it('scales up on a large viewport, deciding on the smaller axis, and stops at 1.5x', () => {
+    // 1080p is 1.40625x the reference height, and the height is what decides here: the width
+    // on its own would ask for 1.875x.
+    expect(reticleScale({ width: 1920, height: 1080 })).toBe(1.40625);
+    expect(reticleBox('RET_chaingun.png', { width: 1920, height: 1080 })).toEqual({
+      width: 45,
+      height: 45,
+    });
+    // 4K is 2.8125x on its smaller axis: clamped to the cap.
+    expect(reticleScale({ width: 3840, height: 2160 })).toBe(1.5);
+    expect(reticleBox('hud_ret_sniper.png', { width: 3840, height: 2160 })).toEqual({
+      width: 384,
+      height: 384,
+    });
+    // A wide, short window keeps the authored size rather than stretching to its width.
+    expect(reticleScale({ width: 2560, height: 720 })).toBe(1);
+  });
+
+  it('rounds a scaled box to whole pixels so the bitmap is never resampled', () => {
+    // 32 x (900/768) = 37.5 px, and 16 x 1.171875 = 18.75 px for the disc's own height.
+    expect(reticleBox('RET_blaster.png', { width: 1366, height: 900 })).toEqual({
+      width: 38,
+      height: 38,
+    });
+    expect(reticleBox('RET_disc.png', { width: 1366, height: 900 })).toEqual({
+      width: 75,
+      height: 19,
+    });
+  });
+
+  it('falls back to 32x32 for a name the table does not carry', () => {
+    expect(reticleBox('nonexistent.png', REFERENCE)).toEqual({ width: 32, height: 32 });
   });
 });

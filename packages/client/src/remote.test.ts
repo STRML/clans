@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlayerSnapshotData } from '@clans/sim';
 import { PlayerView } from './players-view.js';
-import { RemoteBuffer, syncRemotePlayers } from './remote.js';
+import { MAX_EXTRAPOLATE_MS, RemoteBuffer, syncRemotePlayers } from './remote.js';
 
 const sample = (x: number, vx: number): PlayerSnapshotData => ({
   id: 1,
@@ -46,10 +46,13 @@ describe('RemoteBuffer', () => {
     expect(buffer.positionAt(150)?.x).toBeCloseTo(5);
   });
 
-  it('extrapolates up to 50 ms past the newest sample using its velocity', () => {
+  it("dead-reckons a moving sample up to INTERP_DELAY_MS + MAX_EXTRAPOLATE_MS past the newest, by that sample's velocity", () => {
     const buffer = new RemoteBuffer();
     buffer.push(0, sample(0, 20));
-    expect(buffer.positionAt(200)?.x).toBeCloseTo(1);
+    // 20 m/s run over the 320 ms horizon (remote.ts's MAX_EXTRAPOLATE_MS), then frozen;
+    // the first render would otherwise read a switched-on residual rather than the path.
+    expect(buffer.positionAt(0 + 100 + MAX_EXTRAPOLATE_MS)?.x).toBeCloseTo(6.4);
+    expect(buffer.positionAt(0 + 100 + MAX_EXTRAPOLATE_MS + 180)?.x).toBeCloseTo(6.4);
   });
 
   it('returns null before any sample arrives', () => {

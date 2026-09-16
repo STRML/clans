@@ -2,8 +2,13 @@ import { describe, expect, it, vi, type Mock } from 'vitest';
 import {
   createAudioEngine,
   footstepCue,
+  LAUNCH_DUCK_FACTOR,
   OCCLUSION_ATTENUATION,
   projectileImpactCue,
+  SELF_FIRE_ATTACK_S,
+  SELF_FIRE_DECAY_S,
+  SELF_FIRE_GAIN,
+  SELF_FIRE_SUSTAIN,
   SOUND_FILE,
 } from './audio.js';
 import type { FootstepSurface } from './audio.js';
@@ -46,7 +51,11 @@ function fakeAudioContext() {
   const panners: FakePanner[] = [];
   const sources: FakeAudioNode[] = [];
   const node = (): FakeAudioNode => ({
-    connect: vi.fn().mockReturnThis(),
+    // Real Web Audio's connect() returns the DESTINATION node, and this file's graph code
+    // chains on that (`node.connect(panner).connect(master)` in connectOutput). A fake that
+    // returned `this` silently turned every chained edge into a second edge on the source
+    // node, which is why the one-shot graph could go unasserted for so long.
+    connect: vi.fn((destination: unknown) => destination),
     disconnect: vi.fn(),
     start: vi.fn(),
     stop: vi.fn(),
@@ -548,6 +557,105 @@ describe('terrain occlusion (#56)', () => {
     const { ctx, engine } = await engineWithSamples(() => true);
     engine.flagDrop();
     expect(ctx._gains[1]?.gain.value).toBe(1);
+    vi.unstubAllGlobals();
+  });
+});
+
+/** Issue #57: a one-shot's source had no edge into its own gain, so every cue that goes
+ *  through `play` -- all five weapons' fire, footsteps, skis, flag cues, impacts, explosions,
+ *  station cues, voices -- was created, started and never heard, while the loops (which do
+ *  connect) played normally. Node counts and gains could not see that, so these pin the graph
+ *  itself: source -> the cue's gain -> (its panner) -> master -> destination. */
+describe('one-shot output graph (#57)', () => {
+  it('connects the source into its own gain and that gain into the master chain', async () => {
+    const { ctx, engine } = await engineWithSamples();
+    engine.flagDrop();
+    expect(ctx._sources[0]?.connect).toHaveBeenCalledWith(ctx._gains[1]);
+    expect(ctx._gains[1]?.connect).toHaveBeenCalledWith(ctx._gains[0]);
+    expect(ctx._gains[0]?.connect).toHaveBeenCalledWith(ctx.destination);
+    vi.unstubAllGlobals();
+  });
+
+  it('carries a positioned one-shot through its panner on the way to the master', async () => {
+    const { ctx, engine } = await engineWithSamples(undefined, { x: 0, y: 0, z: 0 });
+    engine.stationDenied({ x: 30, y: 0, z: 0 });
+    expect(ctx._sources[0]?.connect).toHaveBeenCalledWith(ctx._gains[1]);
+    expect(ctx._gains[1]?.connect).toHaveBeenCalledWith(ctx._panners[0]);
+    expect(ctx._panners[0]?.connect).toHaveBeenCalledWith(ctx._gains[0]);
+    expect(ctx._gains[0]?.connect).toHaveBeenCalledWith(ctx.destination);
+    vi.unstubAllGlobals();
+  });
+});
+
+/** Issue #57: the local player's own gunshot. app.ts's playWeaponFireAudio hands `weaponFire`
+ *  the local player's fire events and nobody else's, and placeCamera sits the camera at that
+ *  player's eye (EYE_HEIGHT 2.0) while weapons.ts's shooterOrigin puts the muzzle at
+ *  MUZZLE_HEIGHT 1.6 -- so a real self shot originates 0.4 m from the listener, and the mix
+ *  treats it as the first-person cue it is rather than as somebody else's world cue. */
+describe('self-fire mix (#57)', () => {
+  const ear = { x: 0, y: 2, z: 0 };
+  const muzzle = { x: 0, y: 1.6, z: 0 };
+
+  it("plays the shooter's own Spinfusor launch at the self level, unpositioned", async () => {
+    const { ctx, engine } = await engineWithSamples(undefined, ear);
+    engine.weaponFire(WeaponId.Spinfusor, muzzle);
+    expect(sourceNames(ctx)).toEqual(['/katabatic/audio/spinfusor-fire.m4a']);
+    expect(ctx._panners).toHaveLength(0);
+    expect(ctx._gains[1]?.gain.value).toBe(SELF_FIRE_GAIN);
+    vi.unstubAllGlobals();
+  });
+
+  it('rises into the launch over the attack, then leaves its body at the sustain', async () => {
+    const { ctx, engine } = await engineWithSamples(undefined, ear);
+    engine.weaponFire(WeaponId.Spinfusor, muzzle);
+    const gain = ctx._gains[1]?.gain;
+    expect(gain?.setValueAtTime).toHaveBeenCalledWith(0, 0);
+    expect(gain?.linearRampToValueAtTime).toHaveBeenCalledWith(SELF_FIRE_GAIN, SELF_FIRE_ATTACK_S);
+    expect(gain?.setTargetAtTime).toHaveBeenCalledWith(
+      SELF_FIRE_GAIN * SELF_FIRE_SUSTAIN,
+      SELF_FIRE_ATTACK_S,
+      SELF_FIRE_DECAY_S,
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it('never ducks the launch for terrain between the eye and the shooter own muzzle', async () => {
+    // #56's occlusion rule is a world-cue rule, and the gun was the one self-cue mixed as a
+    // world cue: its test ray is the 0.4 m from the player's own eye to their own muzzle, so
+    // any geometry the test answers true on ducked the launch by OCCLUSION_ATTENUATION.
+    const { ctx, engine } = await engineWithSamples(() => true, ear);
+    engine.weaponFire(WeaponId.Spinfusor, muzzle);
+    expect(ctx._gains[1]?.gain.value).toBe(SELF_FIRE_GAIN);
+    expect(ctx._panners).toHaveLength(0);
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps the world mix for a shot the listener position cannot account for', async () => {
+    // 30 m down DEFAULT's own falloff (minDistance 20, maxDistance 100) is 0.875, and this
+    // listener is occluded from it -- the conservative half of the rule, unchanged from #56.
+    const { ctx, engine } = await engineWithSamples(() => true, { x: 0, y: 0, z: 0 });
+    engine.weaponFire(WeaponId.Spinfusor, { x: 30, y: 0, z: 0 });
+    expect(ctx._panners).toHaveLength(1);
+    expect(ctx._gains[1]?.gain.value).toBeCloseTo(0.875 * OCCLUSION_ATTENUATION, 6);
+    vi.unstubAllGlobals();
+  });
+
+  it("holds the launched disc's own flight loop under the launch, and only that loop", async () => {
+    // Measured on the committed recordings (ffmpeg volumedetect mean_volume): the disc's
+    // flight loop is -10.1 dB against the launch's -12.0, the hottest sample in the weapon
+    // set, held at PROJECTILE's full level from the muzzle (5 m minDistance) for the whole of
+    // the slowest flight in the game -- so the launch had nothing to be heard against.
+    const { ctx, engine } = await engineWithSamples(undefined, ear);
+    engine.setProjectileSound(1, WeaponId.Spinfusor, ProjectileType.Linear, muzzle, true);
+    expect(ctx._gains[1]?.gain.value).toBe(1);
+    engine.weaponFire(WeaponId.Spinfusor, muzzle);
+    const before = ctx._gains.length;
+    engine.setProjectileSound(2, WeaponId.Spinfusor, ProjectileType.Linear, muzzle, true);
+    expect(ctx._gains[before]?.gain.value).toBe(LAUNCH_DUCK_FACTOR);
+    // The duck is scoped to projectile loops: a station's own hum keeps its level.
+    const beforeHum = ctx._gains.length;
+    engine.setStationHum(0, muzzle, true);
+    expect(ctx._gains[beforeHum]?.gain.value).toBe(1);
     vi.unstubAllGlobals();
   });
 });

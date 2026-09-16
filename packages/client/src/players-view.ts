@@ -111,6 +111,34 @@ const RECOVER_DELAY_TICKS = 30;
  *  fraction of the longest movement cycle in the shipped set. */
 const PHASE_SPREAD_MS = 370;
 
+/** How long a corpse stays on the field, at minimum. T2's own corpse timeout is far longer --
+ *  `$CorpseTimeoutValue = 22 * 1000` (scripts/player.cs:16), faded over its last second and
+ *  then `schedule($CorpseTimeoutValue, "delete")`d in `Armor::onDisabled`
+ *  (player.cs:2076-2082) -- but a corpse here cannot outlive the id that owns it: this sim
+ *  respawns a dead player 5 s later (RESPAWN_TICKS, damage.ts) into the SAME player id and so
+ *  the same PlayerView, and the body has to be off the field before its owner walks back on at
+ *  their spawn point. 4 s sits just inside that window.
+ *
+ *  It is a floor and not the whole rule: the collapse this hold is holding is the body's own
+ *  animation (see corpseFor), and those run longer than 4 s on some bodies -- medium_male's
+ *  dieback is 4.23 s and its diechest 5.37 s -- so cutting the corpse off on a fixed 4 s would
+ *  delete the body in the middle of its own fall, which is the "players vanish on death" this
+ *  effect exists to fix. */
+export const CORPSE_HOLD_MS = 4000;
+/** How long the fallback topple takes, for the corpses that have no collapse of their own to
+ *  play (the capsule stand-in, and any model shipping no usable die clip). Ours: a body takes
+ *  a bit under a second to fall over, and 700 ms reads as a fall rather than a snap. */
+const CORPSE_TOPPLE_MS = 700;
+/** The angle that fallback topple turns through: a quarter turn, which lays a standing body
+ *  flat. It is applied to the view root, whose rotation order is 'YXZ', so it turns about the
+ *  body's own lateral axis (after the yaw) and the body falls along the way it was facing. */
+const CORPSE_TOPPLE_RAD = Math.PI / 2;
+/** How far a fallen corpse settles into the terrain, in metres. Applied to the root, i.e.
+ *  straight down along world Y (the root's own axes are the world's), which is what keeps the
+ *  body from hanging over the downslope side of the ridge it died on. A few centimetres: more
+ *  than that and a body that already lies flat starts sinking visibly into the snow. */
+const CORPSE_SINK_M = 0.08;
+
 /** Everything the clip choice reads, all of it derived from a `PlayerSnapshotData` plus the
  *  three edges a snapshot alone cannot carry (a landing's impact speed, how long ago it
  *  happened, and the previous sample's vertical speed). Kept as a plain interface so
@@ -220,6 +248,45 @@ export function clipFor(state: PlayerAnimState): string {
   return airborneClip(state);
 }
 
+/** What one frame of a corpse presentation is: whether the body is on the field at all, the
+ *  tilt its root carries, and how far it has settled into the ground. */
+export interface CorpseFrame {
+  visible: boolean;
+  tilt: number;
+  sink: number;
+}
+
+/**
+ * The corpse a dead player leaves behind, `sinceDeathMs` after the death edge. `collapseS` is
+ * how long the body's own collapse animation runs, 0 when it has none to run (see the view's
+ * collapseSeconds). Pure and three.js-free, like clipFor/landHoldMs above, so every boundary
+ * here is unit-testable.
+ *
+ * The topple is normally the body's own animation. Every emitted armour carries the eleven
+ * `die*` sequences this file names, and their own tracks take the body to the ground: on
+ * `light_male.glb`, `dieslump` drives `Bip01 Pelvis` from 1.227 m down to 0.159 m and the model
+ * from 2.30 m standing to 0.88 m at its end frame (measured off the emitted GLB through the
+ * same three AnimationMixer these clips are played on; `medium_male`'s `dieback` ends at
+ * 0.86 m and `heavy_male`'s `dieslump` at 1.64 m, and all three already put part of the body
+ * just below grade -- down to -0.18 m on light -- without any help from this file). A view that
+ * added a quarter turn of its own on top of that would compound two falls and push the
+ * shoulder line roughly a metre under the terrain, so `tilt` and `sink` both stay 0 whenever
+ * the body has a collapse to play.
+ *
+ * It is a fallback for the bodies that have none: the capsule stand-in, which exists while a
+ * model is in flight and forever if one never arrives, and any model that ships no usable die
+ * clip. Both would otherwise spend their whole hold standing upright, so the root itself
+ * topples, at CORPSE_TOPPLE_MS and CORPSE_SINK_M below.
+ */
+export function corpseFor(sinceDeathMs: number, collapseS: number): CorpseFrame {
+  if (sinceDeathMs >= Math.max(CORPSE_HOLD_MS, collapseS * 1000)) {
+    return { visible: false, tilt: 0, sink: 0 };
+  }
+  if (collapseS > 0) return { visible: true, tilt: 0, sink: 0 };
+  const fall = Math.min(1, Math.max(0, sinceDeathMs) / CORPSE_TOPPLE_MS);
+  return { visible: true, tilt: fall * CORPSE_TOPPLE_RAD, sink: fall * CORPSE_SINK_M };
+}
+
 // --- The per-player view -----------------------------------------------------------------
 
 /** The capsule the player model replaces, kept as the loading and failure fallback: while
@@ -261,10 +328,18 @@ export class PlayerView {
   private previous: PlayerSnapshotData | null = null;
   private landedAtMs = Number.NEGATIVE_INFINITY;
   private touchdownVy = 0;
+  /** When this player's current death was seen (ms on the caller's clock), or -Infinity while
+   *  they are alive. The death latch is the one piece of state both the death clip and the
+   *  corpse read: `clipSeconds` runs the collapse from it, and `applyCorpse` ages the body
+   *  from it, so the two can never disagree about when this player died. */
   private diedAtMs = Number.NEGATIVE_INFINITY;
 
   constructor(readonly id: number) {
     this.root.name = `player-${String(id)}`;
+    // The corpse's fallback topple (corpseFor) turns the root about the body's own lateral
+    // axis; with the default 'XYZ' order that x rotation would be applied BEFORE the yaw and
+    // so would always tip toward world -z instead of along whichever way the body was facing.
+    this.root.rotation.order = 'YXZ';
     this.root.add(this.capsule);
   }
 
@@ -273,8 +348,8 @@ export class PlayerView {
    *  discrete fields (armour, onGround, ski, health, velocity) are never blended.
    *
    *  `previous` is captured before the latches move: the clip choice needs the sample this
-   *  one is compared against (takeoff, thrust, landing edge), and `observe` is what replaces
-   *  it with this sample. */
+   *  one is compared against (takeoff, thrust, landing edge, death edge), and `observe` is
+   *  what replaces it with this sample. */
   sync(sample: PlayerSnapshotData, pose: RemotePose, nowMs: number): void {
     this.root.position.set(pose.x, pose.y, pose.z);
     this.root.rotation.y = pose.yaw;
@@ -282,6 +357,8 @@ export class PlayerView {
     const previous = this.previous;
     this.observe(sample, previous, nowMs);
     this.pose(sample, previous, nowMs);
+    // After pose, not before: this one moves the root the pose was drawn in.
+    this.applyCorpse(sample, nowMs);
   }
 
   dispose(): void {
@@ -302,8 +379,25 @@ export class PlayerView {
       this.landedAtMs = nowMs;
       this.touchdownVy = Math.max(0, -previous.vy);
     }
-    if (sample.health <= 0 && (!previous || previous.health > 0)) this.diedAtMs = nowMs;
+    if (sample.health <= 0 && this.deathEdge(sample, previous)) this.diedAtMs = nowMs;
     this.previous = sample;
+  }
+
+  /** Everything that counts as "this player's death starts here", and nothing else: the
+   *  alive-to-dead health edge, the first sample this view ever sees of a player who was
+   *  already dead (a client that joined mid-death -- there is no earlier sample to compare
+   *  against), and a respawn sequence that moved while health stayed at 0, which is a second
+   *  death landing entirely between two snapshots this client received. respawnSeq is the
+   *  wire's own authoritative death counter -- damage.ts's respawnPlayer is the only writer,
+   *  and netclient.ts already reads it for exactly this reason -- so the second death restarts
+   *  the collapse and re-arms the corpse instead of inheriting the first corpse's clock.
+   *
+   *  Latching on the edge is also what makes the effect one-per-death: every later sample of
+   *  the same death has previous.health <= 0 and a respawnSeq that matches, so none of the
+   *  three arms fires again. */
+  private deathEdge(sample: PlayerSnapshotData, previous: PlayerSnapshotData | null): boolean {
+    if (!previous || previous.health > 0) return true;
+    return previous.respawnSeq !== sample.respawnSeq;
   }
 
   private animState(
@@ -380,6 +474,30 @@ export class PlayerView {
     if (wanted === LAND_CLIP) return (nowMs - this.landedAtMs) / 1000;
     if (wanted === DIE_CLIP) return (nowMs - this.diedAtMs) / 1000;
     return ((nowMs + this.id * PHASE_SPREAD_MS) / 1000) % duration;
+  }
+
+  /** The corpse: the same mesh the living player was using a moment ago, left where they fell
+   *  and then taken off the field -- T2's own death keeps the body too (`Player::updateDamageState`
+   *  swaps the object's type mask to `CorpseObjectType` and the shape keeps the death thread it
+   *  was given, player.cc:1862-1875), so nothing new is built here and nothing is duplicated.
+   *  An alive sample always wins: it restores visibility, the resting rotation and the height
+   *  in one line, which is what the respawn sample does the moment the id comes back at its
+   *  spawn point. */
+  private applyCorpse(sample: PlayerSnapshotData, nowMs: number): void {
+    const corpse =
+      sample.health <= 0 ? corpseFor(nowMs - this.diedAtMs, this.collapseSeconds()) : null;
+    this.root.visible = corpse ? corpse.visible : true;
+    this.root.rotation.x = corpse ? corpse.tilt : 0;
+    this.root.position.y -= corpse ? corpse.sink : 0;
+  }
+
+  /** How long the collapse this body plays runs, in seconds, or 0 when it has none: 0 for the
+   *  capsule stand-in (no model loaded yet, or one that never arrives) and for a model that
+   *  carries no die clip at all, which resolvesClip reports as the fall back to root. Both are
+   *  the cases corpseFor's own root topple is for, so the two answers cannot drift apart. */
+  private collapseSeconds(): number {
+    const clip = this.resolvedClip(DIE_CLIP);
+    return clip === ROOT_CLIP ? 0 : (this.durations.get(clip) ?? 0);
   }
 
   /** Swap the model when the armour changes under a reused id -- a station loadout change,

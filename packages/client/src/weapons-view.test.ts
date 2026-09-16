@@ -142,6 +142,73 @@ describe('syncProjectileMeshes', () => {
     expect(mesh?.position.x).toBe(6);
   });
 
+  /** Issue #57: a disc launch was unreadable from the muzzle. The plate is 0.816 m across and
+   *  0.062 m thick flying level, so a shooter looking down their own flight line sees it
+   *  edge-on -- a sliver about 2 cm tall at 20 m -- and the disc's own glow quad is coplanar
+   *  with that plate, so it adds nothing at exactly the angle the shooter has. The launch
+   *  flash is the one moment this can be fixed without redrawing the flight presentation. */
+  it('flashes a disc at the muzzle for the launch lifetime, then releases it (#57)', () => {
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    const projectile = disc(1, 0);
+    syncProjectileMeshes(scene, meshes, [projectile], 0);
+    const mesh = meshes.get(1) as THREE.Mesh;
+    const flash = mesh.getObjectByName('disc-muzzle-flash') as THREE.Mesh;
+    expect(flash).toBeInstanceOf(THREE.Mesh);
+    expect(flash.getObjectByName('disc-muzzle-flash-cross')).toBeInstanceOf(THREE.Mesh);
+    expect((flash.material as THREE.MeshBasicMaterial).blending).toBe(THREE.AdditiveBlending);
+    // The plate itself is readable from the frame it appears: full opacity, full size. Only
+    // the flash is transient, and nothing scales or fades the disc in.
+    expect((mesh.material as THREE.MeshBasicMaterial).opacity).toBe(1);
+    expect(mesh.scale.toArray()).toEqual([1, 1, 1]);
+    expect((flash.material as THREE.MeshBasicMaterial).opacity).toBe(1);
+    const geometryDispose = vi.spyOn(flash.geometry, 'dispose');
+    // Three 20 ms frames in: still launching, already fading.
+    for (let frame = 0; frame < 3; frame += 1) {
+      syncProjectileMeshes(scene, meshes, [projectile], 0.02);
+    }
+    expect(mesh.getObjectByName('disc-muzzle-flash')).toBe(flash);
+    expect((flash.material as THREE.MeshBasicMaterial).opacity).toBeLessThan(1);
+    // Past its lifetime it is gone from the mesh and its own geometry is released, not just
+    // detached -- the rule every owned mesh in this file follows.
+    syncProjectileMeshes(scene, meshes, [projectile], 0.02);
+    expect(mesh.getObjectByName('disc-muzzle-flash')).toBeUndefined();
+    expect(geometryDispose).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a launch-quad face toward the shooter whatever the frame time (#57)', () => {
+    // The flash rides a mesh that resets to its flight frame every frame and then rotates by
+    // that frame's own spin delta (syncOneProjectile: projectileOrientation, then rotateY(dt *
+    // 30)), so the shift between a member's face and the flight line the shooter looks down is
+    // 30*dt: 29 degrees at 60 fps, but 172 degrees across a 100 ms hitch. Two quads a quarter
+    // turn apart on that axis keep one of them presented at every phase -- the same answer
+    // addTracerCross gives the tracers -- where a single quad would turn its face away.
+    const projectile = disc(1, 0);
+    const flight = new THREE.Vector3(projectile.vx, projectile.vy, projectile.vz).normalize();
+    const members = ['disc-muzzle-flash', 'disc-muzzle-flash-cross'];
+    for (const dt of [1 / 60, 0.02, 0.04, 0.06]) {
+      const scene = new THREE.Scene();
+      const meshes = new Map<number, THREE.Mesh>();
+      syncProjectileMeshes(scene, meshes, [projectile], 0);
+      syncProjectileMeshes(scene, meshes, [projectile], dt);
+      const mesh = meshes.get(1) as THREE.Mesh;
+      const faceTo = (name: string): number => {
+        const member = mesh.getObjectByName(name) as THREE.Mesh;
+        const normal = new THREE.Vector3(0, 0, 1)
+          .applyQuaternion(member.quaternion)
+          .applyQuaternion(mesh.quaternion);
+        return Math.abs(normal.dot(flight));
+      };
+      expect(mesh.getObjectByName('disc-muzzle-flash')).toBeDefined();
+      expect(Math.max(...members.map(faceTo))).toBeGreaterThan(0.7);
+    }
+  });
+
+  it('gives no launch flash to rounds that are not discs (#57)', () => {
+    const shell = createProjectileMesh(mortarShell(1, 0));
+    expect(shell.getObjectByName('disc-muzzle-flash')).toBeUndefined();
+  });
+
   it('keeps pitched discs level and forward at every cardinal flight heading', () => {
     const scene = new THREE.Scene();
     const meshes = new Map<number, THREE.Mesh>();

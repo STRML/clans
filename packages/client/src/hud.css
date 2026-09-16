@@ -255,10 +255,19 @@
 #hud[data-piloting='true'] #hud-grenades {
   display: none;
 }
+/* The reticle is drawn at its own bitmap's pixel size -- hud.ts's reticleBox computes it from
+   the art's measured native size (RETICLE_NATIVE_SIZE) and the viewport scale, and sets the
+   two custom properties below each frame. index.html's own #crosshair rule is what pins the
+   element to the viewport centre with `top/left: 50%`, so the size and the negative half-size
+   margins here are the whole of the box: a fixed 30x30 box (this rule's earlier form) shrank
+   the sniper reticle 8x and the vehicle reticles 2x, which is the "reticle is too small"
+   report. `contain` keeps whatever aspect the bitmap has (the disc's 64x16) instead of
+   squashing it square, and matches the box exactly whenever the box is the native size. The
+   32 px fallbacks are the commonest native size, for the frame before the first update. */
 #crosshair {
-  width: 30px;
-  height: 30px;
-  margin: -15px 0 0 -15px;
+  width: var(--reticle-width, 32px);
+  height: var(--reticle-height, 32px);
+  margin: calc(var(--reticle-height, 32px) / -2) 0 0 calc(var(--reticle-width, 32px) / -2);
   border: 0;
   background: center / contain no-repeat;
   border-radius: 0;

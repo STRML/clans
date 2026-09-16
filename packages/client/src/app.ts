@@ -1,3 +1,4 @@
+import { createDiscExplosion } from './disc-explosion.js';
 import { createInteractionPrompt } from './interaction-prompt.js';
 import { createWeaponModel } from './weapon-model.js';
 import * as THREE from 'three';
@@ -43,6 +44,7 @@ import {
 import { EventKind, OrderKind, MessageType } from '@clans/protocol';
 import type {
   BaseObjectSnapshotData,
+  EventMessage,
   ProjectileSnapshotData,
   RosterEntryMessage,
   TurretSnapshotData,
@@ -1111,6 +1113,54 @@ export function playImpactAudio(
   for (const impact of impacts) audio.projectileImpact(impact);
 }
 
+/** Where a death burst sits on the body it replaces: the emitted bodies' pelvis height, 1.227 m
+ *  on `light_male.glb` (measured) against its 2.30 m standing height, i.e. the torso rather than
+ *  the feet or the head -- the same reason the disc's own blast is drawn at the contact point
+ *  rather than below it. */
+const DEATH_BURST_HEIGHT_M = 1.2;
+
+/**
+ * The burst each PlayerKilled event renders, at the victim's last known position. The sim
+ * already produces one death record per kill (`world.pendingDeaths`, broadcast by net.ts's
+ * killEvents as EventKind.PlayerKilled with the victim id in `b`), and `newEvents` is the
+ * drained-once stream -- so this fires exactly once per death, and a lag-compensated hit the
+ * server rejected has its pendingDeaths entry removed before that drain (net.ts's
+ * unkillPlayer), which keeps a phantom burst off a shot whose target never actually died.
+ *
+ * The blast is `disc_explosion`, the one authored detonation this client loads (disc-explosion.ts).
+ * T2 has no death blast of its own to reuse: the `GenericDeathEffect` profile player.cs
+ * declares (scripts/player.cs:112-116, `effectname = "misc/generic_death"`) is referenced
+ * nowhere in the script, and the bodies' death assets are animation sequences, not emitters.
+ * What the source does have is the corpse itself, which players-view.ts keeps on the field.
+ *
+ * The local player is skipped: this client draws no world mesh for itself (first person, and
+ * weapon-model.ts hides the held weapon the moment its owner is dead), so the only thing a
+ * burst at the local id's position would put a fireball inside is the camera.
+ */
+export function spawnPlayerDeathBursts(
+  scene: THREE.Scene,
+  effects: Effect[],
+  newEvents: readonly EventMessage[],
+  positionOf: (playerId: number) => { x: number; y: number; z: number } | null,
+  localPlayerId = -1,
+): void {
+  for (const event of newEvents) {
+    if (event.kind !== EventKind.PlayerKilled || event.b === localPlayerId) continue;
+    const position = positionOf(event.b);
+    if (!position) continue;
+    const burst = createDiscExplosion({
+      x: position.x,
+      y: position.y + DEATH_BURST_HEIGHT_M,
+      z: position.z,
+    });
+    // The authored template is still preloading, or is missing entirely: the corpse's own
+    // collapse is what the player sees, the same way an impact falls back to its flash.
+    if (!burst) continue;
+    scene.add(burst.mesh);
+    effects.push(burst);
+  }
+}
+
 export function syncWorldView(
   world: World,
   playerId: number,
@@ -1155,13 +1205,12 @@ export function syncWorldView(
   const allEvents: TimestampedEvent[] = net ? net.recentEvents : [];
   const newEvents = drainNewEvents(allEvents, seenEventSeq);
   syncEventAudio(audio, newEvents, world, playerId, net);
-  spawnLaserBeams(
-    scene,
-    effects,
-    newEvents,
-    (id) => positionOfPlayer(world, net, id),
-    localNetworkId(net, playerId),
-  );
+  // One resolver and one local id for both event-driven spawners below, rather than a closure
+  // each: they are rebuilt every frame either way, and both want exactly the same answer.
+  const positionOf = (id: number) => positionOfPlayer(world, net, id);
+  const localId = localNetworkId(net, playerId);
+  spawnLaserBeams(scene, effects, newEvents, positionOf, localId);
+  spawnPlayerDeathBursts(scene, effects, newEvents, positionOf, localId);
   const impacts = impactRecordsFromEvents(newEvents);
   spawnProjectileImpacts(scene, effects, impacts);
   playImpactAudio(audio, impacts);
