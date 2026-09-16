@@ -49,6 +49,7 @@ import {
   playImpactAudio,
   playFlagStateAudio,
   positionOfPlayer,
+  recordLocalShots,
   setLocalGodMode,
   snapshotFlagAudioState,
   stepSinglePlayer,
@@ -77,6 +78,7 @@ import type {
   TimestampedEvent,
 } from './netclient.js';
 import { carriedWeaponSlots, describeHud } from './hud.js';
+import { createHitFeedback } from './hit-feedback.js';
 import { speakVoiceLine } from './voicebinds.js';
 
 // speakVoiceLine ultimately starts a recorded audio clip in the browser --
@@ -1413,6 +1415,59 @@ describe('playImpactAudio (#52 residual)', () => {
 
   it('is a safe no-op without an engine', () => {
     expect(() => playImpactAudio(undefined, [record(1)])).not.toThrow();
+  });
+});
+
+// User report 2026-09-16 (hit feedback), shooter side: the confirmer only ever hears about THIS player's shots, and the
+// filter that decides that is here rather than in hit-feedback.ts because it is a property of
+// the local world's own fire-event list: every player in a single-player match fires into it,
+// and world.lastFireEvents is overwritten by each tick that simulated one.
+describe('recordLocalShots (2026-09-16)', () => {
+  const shotAt = (playerId: number) => ({
+    playerId,
+    weaponId: WeaponId.Spinfusor,
+    isAltFire: false,
+    origin: { x: 0, y: 1.6, z: 0 },
+    direction: { x: 1, y: 0, z: 0 },
+    shooterVelocity: { x: 0, y: 0, z: 0 },
+    energyScale: 1,
+    hitPlayerId: -1,
+    hitPoint: null,
+    projectileId: 1,
+    resolved: false,
+  });
+  // A Direct contact 3 m down the +x line that shot was fired along.
+  const hitAt = (seq: number): ProjectileImpact => ({
+    x: 3,
+    y: 1.6,
+    z: 0,
+    weaponId: WeaponId.Spinfusor,
+    type: ProjectileType.Linear,
+    reason: ProjectileImpactReason.Direct,
+    seq,
+  });
+
+  it("feeds the confirmer the local player's own fire events and nobody else's", () => {
+    const world = createWorld(flat, 2);
+    const localId = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const botId = addPlayer(world, { x: 0, y: 0, z: 0 }, 2);
+    const hitSound = vi.fn();
+    const hitMarker = vi.fn();
+    const hitFeedback = createHitFeedback({ hitSound, hitMarker });
+
+    // Another player's shot is on nobody's account here: the disc that lands 3 m out is
+    // theirs, and confirming it would tell this player they hit something they did not.
+    world.lastFireEvents = [shotAt(botId)];
+    recordLocalShots(hitFeedback, world, localId, 1_000);
+    hitFeedback.confirm([hitAt(1)], 1_100);
+    expect(hitSound).not.toHaveBeenCalled();
+
+    // The same shot, this time fired by the local player.
+    world.lastFireEvents = [shotAt(localId)];
+    recordLocalShots(hitFeedback, world, localId, 1_200);
+    hitFeedback.confirm([hitAt(2)], 1_300);
+    expect(hitSound).toHaveBeenCalledTimes(1);
+    expect(hitMarker).toHaveBeenCalledWith(1_300);
   });
 });
 

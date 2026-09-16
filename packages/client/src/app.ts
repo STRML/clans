@@ -68,7 +68,13 @@ import {
   type PlayerPosition,
 } from './commander-map.js';
 import { flagsFromWorld, syncFlagMeshes } from './flag-view.js';
-import { createHud, type HudSource } from './hud.js';
+import { createHud, type Hud, type HudSource } from './hud.js';
+import {
+  createDamageFlash,
+  createHitFeedback,
+  type DamageFlash,
+  type HitFeedback,
+} from './hit-feedback.js';
 import { Input } from './input.js';
 import { loadInteriorColliders } from './interior-collision.js';
 import { advance, type Accumulator } from './loop.js';
@@ -118,6 +124,14 @@ import {
   type VehiclePadMenu,
 } from './vehiclePadMenu.js';
 import { createVoiceMenu, speakVoiceLine, type VoiceMenu } from './voicebinds.js';
+import {
+  createSpawnIndicatorLayer,
+  renderSpawnIndicators,
+  syncSpawnIndicators,
+  type LocalPose,
+  type SpawnIndicator,
+} from './weapon-trails.js';
+import type { ProjectileBuffer, ProjectileInterpolation } from './weapons-view.js';
 import {
   projectilesFromWorld,
   spawnProjectileImpacts,
@@ -1113,6 +1127,42 @@ export function playImpactAudio(
   for (const impact of impacts) audio.projectileImpact(impact);
 }
 
+/** The shooter's own half of hit feedback: the local player's fire events in, one per simulated
+ *  tick. Both modes sample them where they sample the fire audio -- solo inside
+ *  stepSinglePlayer's own per-tick afterStep, networked inside stepNetworked's per-tick loop --
+ *  and for the same reason: world.lastFireEvents is overwritten by every stepWeapons call, so a
+ *  multi-step frame that sampled once would lose every earlier tick's shots, and with them the
+ *  hits those shots are the only evidence for. Exported for a focused unit test, like the other
+ *  per-frame twins in this file. */
+export function recordLocalShots(
+  hitFeedback: HitFeedback,
+  world: World,
+  playerId: number,
+  nowMs: number,
+): void {
+  for (const event of world.lastFireEvents) {
+    if (event.playerId !== playerId) continue;
+    hitFeedback.shot(event, nowMs);
+  }
+}
+
+/** The victim's own half: T2's damage flash, fed the local player's health once a frame. Health
+ *  is the only place a client sees its own damage -- the sim writes it into players.damage and
+ *  the networked client reconciles the authoritative value back into that same field -- so the
+ *  drop between two frames is exactly what a T2 damageObject call would have flashed for. */
+function updateDamageFlash(
+  damageFlash: DamageFlash,
+  hud: Pick<Hud, 'setDamageFlash'>,
+  world: World,
+  playerId: number,
+  dtSeconds: number,
+): void {
+  const armor = armorFor(world, playerId);
+  hud.setDamageFlash(
+    damageFlash.sample(armor.maxDamage - (world.players.damage[playerId] ?? 0), dtSeconds),
+  );
+}
+
 /** Where a death burst sits on the body it replaces: the emitted bodies' pelvis height, 1.227 m
  *  on `light_male.glb` (measured) against its 2.30 m standing height, i.e. the torso rather than
  *  the feet or the head -- the same reason the disc's own blast is drawn at the contact point
@@ -1161,6 +1211,67 @@ export function spawnPlayerDeathBursts(
   }
 }
 
+/** The local player's own pose in the frame every spawn-indicator cue is measured in: the feet
+ *  position and look yaw (weapon-trails.ts's LocalPose), read straight off the world stores the
+ *  same way hud.ts:502 reads yaw. `playerId * 3` is the position-store slot convention both the
+ *  solo world and the networked world share (addPlayer/net ids line up by design). */
+/** User report 2026-09-16 (projectile interpolation): this frame's interpolation feed --
+ *  snapshot-cadenced histories, networked only (solo reads the sim's own live store; see
+ *  ProjectileInterpolation). A free function so frame() stays under the complexity gate. */
+function projectileInterpFor(
+  net: NetClient | null,
+  projectileBuffers: Map<number, ProjectileBuffer>,
+): ProjectileInterpolation | undefined {
+  return net ? { buffers: projectileBuffers, nowMs: performance.now() } : undefined;
+}
+
+function localPoseOf(world: World, playerId: number): LocalPose {
+  const base = playerId * 3;
+  return {
+    x: world.players.position[base] ?? 0,
+    y: world.players.position[base + 1] ?? 0,
+    z: world.players.position[base + 2] ?? 0,
+    yaw: world.players.yaw[playerId] ?? 0,
+  };
+}
+
+/** The projectile + flag half of syncWorldView, split out for the complexity gate: the
+ *  networked/solo branching both feeds live here (which list to read, whether to interpolate,
+ *  which flag state to draw), while the event-driven half below stays flat. */
+function syncProjectileViews(
+  world: World,
+  net: Pick<NetClient, 'connected' | 'flags' | 'projectiles'> | null,
+  scene: THREE.Scene,
+  effects: Effect[],
+  projectileMeshes: Map<number, THREE.Mesh>,
+  previousProjectiles: Map<number, ProjectileSnapshotData>,
+  flagMeshes: Map<number, THREE.Group>,
+  dtSeconds: number,
+  audio: AudioEngine | undefined,
+  projectileInterp?: ProjectileInterpolation,
+): void {
+  const connected = net ? net.connected : true;
+  const projectiles = net ? (connected ? net.projectiles : []) : projectilesFromWorld(world);
+  // Issue #52: projectile FX come from the sim's authoritative impact records now -- a
+  // projectile vanishing from this snapshot list is no longer evidence of an impact (it may
+  // have expired silently, or never appeared in any snapshot at all), so no disappearance
+  // diff runs here and the same shot can never produce a duplicate effect.
+  if (audio) syncProjectileAudio(audio, previousProjectiles, projectiles);
+  // The interpolation feed is snapshot-cadenced by contract, so a connected session
+  // interpolates and a dropped one falls back to sitting exactly on its last sample.
+  syncProjectileMeshes(
+    scene,
+    projectileMeshes,
+    projectiles,
+    dtSeconds,
+    connected ? projectileInterp : undefined,
+  );
+  previousProjectiles.clear();
+  for (const projectile of projectiles) previousProjectiles.set(projectile.id, projectile);
+
+  syncFlagMeshes(scene, flagMeshes, net ? (connected ? net.flags : []) : flagsFromWorld(world));
+}
+
 export function syncWorldView(
   world: World,
   playerId: number,
@@ -1188,19 +1299,31 @@ export function syncWorldView(
   seenEventSeq: { seq: number },
   dtSeconds: number,
   audio?: AudioEngine,
+  /** User report 2026-09-16 (hit feedback), shooter side: the local player's own hit confirmation -- `impacts` above is
+   *  already drained exactly once, so this is the one place a networked hit can be confirmed
+   *  without a second cursor. Optional on the same terms as `audio`: the view-sync tests build
+   *  worlds to render, not sessions to play, and a caller with no confirmer simply gets no
+   *  confirmation instead of a synthesized one. */
+  hitFeedback?: HitFeedback,
+  /** User report 2026-09-16 (projectile interpolation): snapshot-cadenced flight histories --
+   *  networked callers only, for the same reason ProjectileInterpolation documents. */
+  projectileInterp?: ProjectileInterpolation,
+  /** User report 2026-09-16 (hit feedback, environment half): live impact cues; solo drains
+   *  through the same array from its afterStep instead (recentEvents is a net-only stream). */
+  spawnIndicators?: SpawnIndicator[],
 ): void {
-  const connected = net ? net.connected : true;
-  const projectiles = net ? (connected ? net.projectiles : []) : projectilesFromWorld(world);
-  // Issue #52: projectile FX come from the sim's authoritative impact records now -- a
-  // projectile vanishing from this snapshot list is no longer evidence of an impact (it may
-  // have expired silently, or never appeared in any snapshot at all), so no disappearance
-  // diff runs here and the same shot can never produce a duplicate effect.
-  if (audio) syncProjectileAudio(audio, previousProjectiles, projectiles);
-  syncProjectileMeshes(scene, projectileMeshes, projectiles, dtSeconds);
-  previousProjectiles.clear();
-  for (const projectile of projectiles) previousProjectiles.set(projectile.id, projectile);
-
-  syncFlagMeshes(scene, flagMeshes, net ? (connected ? net.flags : []) : flagsFromWorld(world));
+  syncProjectileViews(
+    world,
+    net,
+    scene,
+    effects,
+    projectileMeshes,
+    previousProjectiles,
+    flagMeshes,
+    dtSeconds,
+    audio,
+    projectileInterp,
+  );
 
   const allEvents: TimestampedEvent[] = net ? net.recentEvents : [];
   const newEvents = drainNewEvents(allEvents, seenEventSeq);
@@ -1214,6 +1337,11 @@ export function syncWorldView(
   const impacts = impactRecordsFromEvents(newEvents);
   spawnProjectileImpacts(scene, effects, impacts);
   playImpactAudio(audio, impacts);
+  // User report 2026-09-16 (hit feedback, environment half): the same exactly-once drained
+  // records the explosions above consume, so a cue and its detonation can never disagree.
+  if (spawnIndicators)
+    syncSpawnIndicators(spawnIndicators, impacts, localPoseOf(world, playerId), performance.now());
+  hitFeedback?.confirm(impacts, performance.now());
 
   hud.update(hudSourceFrom(world, playerId, net));
 }
@@ -1226,8 +1354,17 @@ function stepNetworked(
   scene: THREE.Scene,
   remoteViews: Map<number, PlayerView>,
   remoteBuffers: Map<number, RemoteBuffer>,
+  playerId: number,
+  hitFeedback: HitFeedback,
 ): void {
-  for (let step = 0; step < steps; step += 1) net.tick(input);
+  for (let step = 0; step < steps; step += 1) {
+    net.tick(input);
+    // User report 2026-09-16 (hit feedback), shooter side: this client predicts its own shots inside net.tick -- the same
+    // stepWorld the server runs -- so its fire events are here, per tick, exactly as they are in
+    // stepSinglePlayer's own afterStep. Sampled per tick rather than once per frame because
+    // lastFireEvents only ever holds the tick that produced it.
+    recordLocalShots(hitFeedback, net.world, playerId, performance.now());
+  }
   updateRemotes(net, scene, remoteViews, remoteBuffers, performance.now());
   stats.ping = net.stats.ping;
   stats.bytesPerSecond = net.stats.bytesPerSecond;
@@ -2056,6 +2193,16 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   const vehicleBuffers = new Map<number, VehicleBuffer>();
   const fps: FpsWindow = { windowStart: performance.now(), frames: 0 };
   const projectileMeshes = new Map<number, THREE.Mesh>();
+  // User report 2026-09-16 (projectile interpolation): one flight history per live projectile
+  // id, fed only on the networked path (see ProjectileInterpolation's own doc for why the solo
+  // branch must keep drawing the raw store positions).
+  const projectileBuffers = new Map<number, ProjectileBuffer>();
+  // User report 2026-09-16 (hit feedback, environment half): nearby disc-impact cues on one DOM
+  // ring; the array is aged/emptied by syncSpawnIndicators, the layer redrawn by
+  // renderSpawnIndicators, both below.
+  const spawnIndicators: SpawnIndicator[] = [];
+  const spawnIndicatorLayer = createSpawnIndicatorLayer();
+  document.body.appendChild(spawnIndicatorLayer);
   const previousProjectiles = new Map<number, ProjectileSnapshotData>();
   const flagMeshes = new Map<number, THREE.Group>();
   const effects: Effect[] = [];
@@ -2070,6 +2217,18 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
   repairStatus.id = 'repair-status';
   document.body.appendChild(repairStatus);
   const hud = createHud(document.body, hudSourceFrom(world, playerId, net));
+  // User report 2026-09-16 (hit feedback): the two halves of hit feedback, both driven from this frame loop's own state --
+  // the confirmer (our shots in, confirmed hits out, see hit-feedback.ts) and the victim's
+  // damage flash, which hud.ts renders as T2's own red screen tint.
+  const hitFeedback = createHitFeedback({
+    hitSound: () => {
+      audio.hitConfirm();
+    },
+    hitMarker: (atMs) => {
+      hud.showHitMarker(atMs);
+    },
+  });
+  const damageFlash = createDamageFlash();
   const scoreboard = createScoreboard(document.body);
   const nameplates = createNameplates(document.body);
   const interactionPrompt = createInteractionPrompt(document.body);
@@ -2249,7 +2408,17 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
       const currentInput = gameplayInput(app, usePressed, pilotYaw);
       const simStart = performance.now();
       if (net) {
-        stepNetworked(net, app.stats, currentInput, steps, scene, remoteViews, remoteBuffers);
+        stepNetworked(
+          net,
+          app.stats,
+          currentInput,
+          steps,
+          scene,
+          remoteViews,
+          remoteBuffers,
+          playerId,
+          hitFeedback,
+        );
       } else {
         stepSinglePlayer(world, playerId, currentInput, steps, localSpawn, (flagsBefore) => {
           playWeaponFireAudio(world, playerId, audio);
@@ -2280,6 +2449,19 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
           // would otherwise lose every impact but the final tick's.
           spawnProjectileImpacts(scene, effects, world.projectiles.lastImpacts);
           playImpactAudio(audio, world.projectiles.lastImpacts);
+          // User report 2026-09-16 (hit feedback, environment half), solo: lastImpacts is this
+          // tick's authoritative records (see the #52 note above), the same feed the networked
+          // path gets from drained events.
+          syncSpawnIndicators(
+            spawnIndicators,
+            world.projectiles.lastImpacts,
+            localPoseOf(world, playerId),
+            performance.now(),
+          );
+          // User report 2026-09-16 (hit feedback), shooter side, solo: this world IS the authority, so the record that
+          // confirms a hit is the one the same store just produced for the player's own shot.
+          recordLocalShots(hitFeedback, world, playerId, performance.now());
+          hitFeedback.confirm(world.projectiles.lastImpacts, performance.now());
         });
       }
       app.stats.simMs = performance.now() - simStart;
@@ -2299,6 +2481,7 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         dtSeconds,
       });
 
+      const projectileInterp = projectileInterpFor(net, projectileBuffers);
       syncWorldView(
         world,
         playerId,
@@ -2312,7 +2495,18 @@ export async function createApp(container: HTMLElement, options: AppOptions = {}
         seenEventSeq,
         dtSeconds,
         audio,
+        hitFeedback,
+        projectileInterp,
+        spawnIndicators,
       );
+      // User report 2026-09-16 (hit feedback, environment half): the ring is drawn from this
+      // frame's aged cue array -- once here covers both paths (solo's afterStep already synced
+      // it above), and the array is empty again by the next frame's sync.
+      renderSpawnIndicators(spawnIndicatorLayer, spawnIndicators);
+      // User report 2026-09-16 (hit feedback), victim side: T2's damage flash, sampled from the health the step above just
+      // left the local player with -- one sample per frame, in both modes, because the flash is
+      // a wall-clock tint rather than a simulation value.
+      updateDamageFlash(damageFlash, hud, world, playerId, dtSeconds);
 
       const baseAssetsState: BaseAssetsViewState = {
         world,

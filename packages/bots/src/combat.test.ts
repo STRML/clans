@@ -27,6 +27,7 @@ import {
   CARRIER_THREAT_RADIUS_M,
   findCarrierThreat,
   findNearestVisibleEnemy,
+  refreshBotMemory,
 } from './perception.js';
 import { BotRole, createBotRuntimeState } from './types.js';
 
@@ -241,10 +242,10 @@ describe('selectCombatTarget (issue #32 escort threat priority)', () => {
     world.flags.carrierId[1] = carrier;
     // The escort's own nearest is one answer; the carrier's nearest is the other.
     expect(findNearestVisibleEnemy(world, escort)).toBe(nearEscort);
-    expect(selectCombatTarget(world, escort)).toBe(nearCarrier);
+    const runtime = createBotRuntimeState(escort, BotRole.Attacker, 1);
+    expect(selectCombatTarget(world, runtime)).toBe(nearCarrier);
     // And the switch is live in the aim path itself: handed its own nearest, aimAndFire
     // engages the carrier's threat instead (engagedTargetId is what the aim solve used).
-    const runtime = createBotRuntimeState(escort, BotRole.Attacker, 1);
     aimAndFire(world, runtime, escort, nearEscort);
     expect(runtime.engagedTargetId).toBe(nearCarrier);
   });
@@ -256,8 +257,8 @@ describe('selectCombatTarget (issue #32 escort threat priority)', () => {
     const escort = addPlayer(world, { x: 0, y: 0, z: -20 }, 1);
     const nearEscort = addPlayer(world, { x: 0, y: 0, z: -25 }, 2);
     addPlayer(world, { x: 0, y: 0, z: 10 }, 2);
-    expect(selectCombatTarget(world, escort)).toBe(nearEscort);
     const runtime = createBotRuntimeState(escort, BotRole.Attacker, 1);
+    expect(selectCombatTarget(world, runtime)).toBe(nearEscort);
     aimAndFire(world, runtime, escort, nearEscort);
     expect(runtime.engagedTargetId).toBe(nearEscort);
   });
@@ -273,10 +274,11 @@ describe('selectCombatTarget (issue #32 escort threat priority)', () => {
     // The carrier's threat exists and is inside CARRIER_THREAT_RADIUS_M of the carrier --
     // only the escort's distance from the carrier rejects it.
     expect(findCarrierThreat(world, carrier, CARRIER_THREAT_RADIUS_M)).toBe(nearCarrier);
-    expect(selectCombatTarget(world, escort)).toBe(nearEscort);
+    const runtime = createBotRuntimeState(escort, BotRole.Attacker, 1);
+    expect(selectCombatTarget(world, runtime)).toBe(nearEscort);
     // Exactly at the cover radius the carrier's fight is the escort's again.
     world.players.position[carrier * 3 + 2] = -ESCORT_COVER_RADIUS_M;
-    expect(selectCombatTarget(world, escort)).toBe(nearCarrier);
+    expect(selectCombatTarget(world, runtime)).toBe(nearCarrier);
   });
 
   it('falls back to its own nearest when the carrier sees a threat the escort itself cannot', () => {
@@ -288,6 +290,45 @@ describe('selectCombatTarget (issue #32 escort threat priority)', () => {
     const carrierOnlyThreat = addPlayer(world, { x: 0, y: 0, z: 60 }, 2); // 60 m from carrier, 160 m from escort
     world.flags.carrierId[1] = carrier;
     expect(findCarrierThreat(world, carrier, CARRIER_THREAT_RADIUS_M)).toBe(carrierOnlyThreat);
-    expect(selectCombatTarget(world, escort)).toBe(nearEscort);
+    expect(selectCombatTarget(world, createBotRuntimeState(escort, BotRole.Attacker, 1))).toBe(
+      nearEscort,
+    );
+  });
+});
+
+describe('selectCombatTarget retaliation (T2 damage memory, dg.cs:812-815)', () => {
+  it('prefers the enemy that damaged the bot over a nearer one that did not', () => {
+    const world = createWorld(flat, 1);
+    addFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 10 }, 2); // the nearest enemy at the hit
+    const other = addPlayer(world, { x: 0, y: 0, z: 120 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    refreshBotMemory(world, runtime); // baseline damage sample
+    expect(selectCombatTarget(world, runtime)).toBe(shooter);
+    world.players.damage[bot] = 12;
+    refreshBotMemory(world, runtime); // the hit is attributed to the nearest visible enemy
+    expect(runtime.damageFromId).toBe(shooter);
+    // The shooter backs off; the other enemy is now the nearest one, and the bot still
+    // turns on the one that shot it.
+    world.players.position[shooter * 3 + 2] = 140;
+    expect(findNearestVisibleEnemy(world, bot)).toBe(other);
+    expect(selectCombatTarget(world, runtime)).toBe(shooter);
+  });
+
+  it('lets the escort duty outrank the grudge', () => {
+    const world = createWorld(flat, 1);
+    addFlags(world);
+    const carrier = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const escort = addPlayer(world, { x: 0, y: 0, z: -20 }, 1);
+    const carrierThreat = addPlayer(world, { x: 0, y: 0, z: 10 }, 2); // 10 m from the carrier
+    const shooter = addPlayer(world, { x: 0, y: 0, z: -25 }, 2); // the escort's own nearest
+    world.flags.carrierId[1] = carrier;
+    const runtime = createBotRuntimeState(escort, BotRole.Attacker, 1);
+    refreshBotMemory(world, runtime);
+    world.players.damage[escort] = 8;
+    refreshBotMemory(world, runtime);
+    expect(runtime.damageFromId).toBe(shooter); // the grudge names the escort's own nearest
+    expect(selectCombatTarget(world, runtime)).toBe(carrierThreat); // the carrier's fight wins
   });
 });

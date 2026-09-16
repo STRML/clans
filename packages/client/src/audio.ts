@@ -79,6 +79,25 @@ export const SELF_FIRE_RADIUS_M = 3;
  *  time the disc is 4-5 m out -- which is the sound of the disc leaving. */
 export const LAUNCH_DUCK_S = 0.18;
 export const LAUNCH_DUCK_FACTOR = 0.35;
+/** The shooter's own confirmation cue (hit-feedback.ts's HitFeedbackSink). T2's base scripts
+ *  give the shooter nothing at all -- the only hit feedback in them runs on the victim's own
+ *  machine (player.cs's damage flash, :2790-2795, and its pain cry, :2849) -- and the on-hit
+ *  sound the classic mod added (`cg_hard4.wav`) is a mod asset this project does not ship. So
+ *  rather than synthesize a substitute (this file's own rule on the footstep rows and on
+ *  pending loops), the recorded cue is the sentry turret's bullet impact: the lightest and
+ *  crispest small-arms impact in the committed set, bled off over HIT_CONFIRM_DECAY_S so a
+ *  Chaingun burst reads as a train of ticks instead of a wash. */
+export const HIT_CONFIRM_SOUND: SoundId = 'turret-sentry-impact';
+/** It plays at the listener's own ear, unpositioned and un-occluded like the self shot and the
+ *  Chaingun's state cues: this is the shooter's feedback about their own aim, not a world cue,
+ *  and at 0.5 it sits under the gunshot that caused it while staying audible over a hit landing
+ *  100 m away. */
+export const HIT_CONFIRM_GAIN = 0.5;
+/** Time constant of the confirmation's own decay, as the third argument setTargetAtTime takes
+ *  (the level reaches ~5% after one full 0.12 s). Every candidate recording in the committed
+ *  set is 0.6-0.9 s of continuous energy -- none of them is a tick on its own -- and the
+ *  recording's attack is what carries the cue, so this is what trims them to one. */
+export const HIT_CONFIRM_DECAY_S = 0.12;
 /** The loop-key prefix setProjectileSound builds. The launch duck's scope: a projectile's
  *  flight loop is the one cue that can bury the shot that launched it. */
 const PROJECTILE_LOOP_PREFIX = 'projectile:';
@@ -383,6 +402,11 @@ function levelAt(ear: Vec3 | undefined, position: Vec3 | undefined, profile: Pro
 
 export interface AudioEngine {
   weaponFire(weaponId: WeaponId, position: Vec3): void;
+  /** The shooter's own hit confirmation (hit-feedback.ts decides which impacts deserve it).
+   *  Unpositioned and un-occluded: the listener's own aim feedback, played once per confirmed
+   *  hit, trimmed to a tick by HIT_CONFIRM_DECAY_S -- see HIT_CONFIRM_SOUND for why this cue
+   *  is the sentry turret's bullet impact rather than a synthesized blip. */
+  hitConfirm(): void;
   /** Issue #56 Chaingun state cues. The sim exposes weaponSlot/weaponState, not the state
    *  transitions the T2 image has, so this edge-detects them: the mount one-shot when the
    *  slot becomes the Chaingun, spin-up on entering SpinUp, spin-down on leaving
@@ -566,6 +590,24 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
     launchUntil = at + LAUNCH_DUCK_S;
     startOneShot(source, gain);
   };
+  /** The shooter's hit confirmation: one decoded recording at the listener's ear, bled off so
+   *  only its attack is heard -- see HIT_CONFIRM_SOUND. Same shape as playSelfFire minus the
+   *  launch window (nothing else in the mix needs ducking under a tick this short). */
+  const playHitConfirm = (): void => {
+    if (disposed) return;
+    const buffer = buffers.get(HIT_CONFIRM_SOUND);
+    if (!buffer) return;
+    const source = context.createBufferSource() as AudioBufferSourceNode;
+    const gain = context.createGain() as GainNode;
+    source.buffer = buffer;
+    // The node's own value is the full level, so a context that ignores the automation below
+    // still plays the tick at level rather than muting it; the decay is the trim on top. The
+    // test fake reads this field, so the level assertions stay meaningful.
+    gain.gain.value = HIT_CONFIRM_GAIN;
+    gain.gain.setTargetAtTime(0, context.currentTime, HIT_CONFIRM_DECAY_S / 3);
+    source.connect(gain).connect(master);
+    startOneShot(source, gain);
+  };
   /** `level` is passed explicitly by setSpatialLoop, which may hold a loop under the launch
    *  duck at the moment it is created; every other caller leaves the profile's own level. */
   const loop = (
@@ -646,6 +688,7 @@ export function createAudioEngine(listener: AudioLike): AudioEngine {
       if (ownShot(position)) playSelfFire(sound[0]);
       else play(sound[0], sound[1], position);
     },
+    hitConfirm: playHitConfirm,
     // The base script's own state sounds (chaingun.cs stateSound[0], [3], [5]/[6]). Mount and
     // spin cues are the local player's own weapon, so they play at full level like the jet and
     // repair loops rather than through a panner.

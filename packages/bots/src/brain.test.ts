@@ -32,6 +32,7 @@ import {
   stepBots,
 } from './brain.js';
 import { buildWaypointGraph } from './waypoints.js';
+import { rememberSightedTarget } from './perception.js';
 import { BotRole, BotState, createBotRuntimeState } from './types.js';
 
 const flat: Heightfield = {
@@ -1092,5 +1093,63 @@ describe('carrier fire discipline and escort priority through decideCombat (issu
     expect(decideCombat(world, createBotRuntimeState(escort, BotRole.Attacker, 1)).targetId).toBe(
       nearestToEscort,
     );
+  });
+});
+
+/** Issue #53-style fidelity slice: T2's engage task does not drop a target the moment it
+ *  breaks line of sight -- it walks to the target's LAST KNOWN LOCATION and looks there
+ *  (aiDefaultTasks.cs:205-247). These cover the goal layer's half of that: when the goal
+ *  becomes a search, when it must not, and what the bot does after the memory is spent. */
+describe('engage-task search state (T2 aiDefaultTasks.cs:205-247)', () => {
+  it('walks to the last known position after the target breaks line of sight', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const runner = addPlayer(world, { x: 0, y: 0, z: 40 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    rememberSightedTarget(world, runtime, runner);
+    // The runner is gone (past VISION_RANGE); the bot walks to where it last saw it.
+    world.players.position[runner * 3 + 2] = 250;
+    const goal = decideGoal(world, runtime, null);
+    expect(goal.key).toBe(`search:${String(runner)}`);
+    expect(goal.position).toEqual({ x: 0, y: 0, z: 40 });
+    // Once the bot reaches the spot the memory is consumed and the CTF goal resumes.
+    world.players.position[bot * 3 + 2] = 38;
+    expect(decideGoal(world, runtime, null).key).toBe('enemyFlag:1');
+  });
+
+  it('does not search while the target is still in sight', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const enemy = addPlayer(world, { x: 0, y: 0, z: 40 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    rememberSightedTarget(world, runtime, enemy);
+    expect(decideGoal(world, runtime, null).key).toBe('enemyFlag:1');
+  });
+
+  it('never sends a flag carrier off its home leg to search', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const carrier = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const runner = addPlayer(world, { x: 0, y: 0, z: 40 }, 2);
+    world.flags.carrierId[1] = carrier; // team 1's bot holds team 2's flag
+    world.flags.state[1] = FlagState.Carried;
+    const runtime = createBotRuntimeState(carrier, BotRole.Attacker, 1);
+    rememberSightedTarget(world, runtime, runner);
+    world.players.position[runner * 3 + 2] = 250;
+    expect(decideGoal(world, runtime, null).key).toBe('home:0');
+  });
+
+  it('keeps a posted defender at its post instead of searching past the leash', () => {
+    const world = createWorld(flat, 1);
+    setupFlags(world);
+    const defender = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const runner = addPlayer(world, { x: 0, y: 0, z: 250 }, 2); // > DEFEND_ENGAGE_RADIUS from home
+    const runtime = createBotRuntimeState(defender, BotRole.Defender, 1);
+    rememberSightedTarget(world, runtime, runner);
+    world.players.position[runner * 3 + 2] = 400;
+    const goal = decideGoal(world, runtime, null);
+    expect(goal.key).not.toBe(`search:${String(runner)}`);
   });
 });

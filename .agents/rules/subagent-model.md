@@ -6,6 +6,12 @@ do not name a specialist) must run on `neuralwatt/glm-5.3-flash`.
 Why: this is a low-priority repo and the zai tokens are close to free. Do not
 spend the expensive subscriptions (anthropic/openai) on subagents here.
 
+Known failure mode (hit 2026-09-16): glm-worker's model list used to include
+deepseek fallbacks (opencode-go/deepseek-flash, neuralwatt variants), so a
+"glm-worker" spawn could silently run DeepSeek on a zai blip. That list is now
+pinned to `zai/glm-5.3-flash` only. If a zai outage kills spawns, ASK rather
+than falling back to another provider unprompted.
+
 Implementation notes:
 - Spawn with `"agent": "glm-worker"` on every subagent. If a slice genuinely
   needs a heavier model, ask Sam first.

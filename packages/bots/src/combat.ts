@@ -13,6 +13,7 @@ import {
 import type { BotRuntimeState } from './types.js';
 import {
   CARRIER_THREAT_RADIUS_M,
+  damageMemoryTarget,
   findCarrierThreat,
   findEscortedCarrier,
   findNearestVisibleEnemy,
@@ -311,7 +312,18 @@ function escortPriorityTarget(world: World, botId: number, fallbackTargetId: num
   return threatId;
 }
 
-/** Issue #32 escort threat priority: which enemy this bot should aim at this tick, for the
+/** T2's retaliation rule (dg.cs:812-815 and its clientDetected call): the bot that just
+ *  took damage engages the client that dealt it -- T2 hands the victim `%clVictim
+ *  .lastDamagedBy` and flags the attacker as detected, and the victim's engage task
+ *  targets them from then on, with no line-of-sight requirement of its own. The memory
+ *  side lives in perception.ts (damageMemoryTarget), which is also where the honest
+ *  caveats about attribution belong; this is the decision rule on top of it: while the
+ *  memory is fresh and its attacker is visible, that attacker IS the target, even when a
+ *  different enemy is nearer. That is the "they come back for you" half of the original's
+ *  feel, and it costs nothing when the nearest enemy is already the one that shot the bot
+ *  (the overwhelmingly common case -- see attributedDamageSource's second pass).
+ *
+ *  Issue #32 escort threat priority: which enemy this bot should aim at this tick, for the
  *  decision layer. Same rule escortPriorityTarget applies inside aimAndFire, with the
  *  bot's own nearest visible enemy as the fallback -- so a caller that selects a target
  *  BEFORE aiming (decideCombat picks one for decideState and the defender leash) and the
@@ -319,9 +331,14 @@ function escortPriorityTarget(world: World, botId: number, fallbackTargetId: num
  *  an enemy the escort cannot see can never be its target, so there is nothing to swap.
  *  The measured failure this addresses: carriers lose duels at 6-51% health with
  *  friendlies nowhere near, and a bodyguard fighting its own nearest enemy is not
- *  standing in the fight that kills its principal. */
-export function selectCombatTarget(world: World, botId: number): number | null {
-  const nearest = findNearestVisibleEnemy(world, botId);
+ *  standing in the fight that kills its principal.
+ *
+ *  Takes the runtime (not a bare id) because the T2 damage memory is per-bot state: the
+ *  retaliation swap is applied between the nearest-enemy pick and the escort swap, in that
+ *  order -- a bodyguard's job is the enemy killing its principal, not its own grudge. */
+export function selectCombatTarget(world: World, runtime: BotRuntimeState): number | null {
+  const nearest = findNearestVisibleEnemy(world, runtime.playerId);
   if (nearest === null) return null;
-  return escortPriorityTarget(world, botId, nearest);
+  const remembered = damageMemoryTarget(world, runtime) ?? nearest;
+  return escortPriorityTarget(world, runtime.playerId, remembered);
 }

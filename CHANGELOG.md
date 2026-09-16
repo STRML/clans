@@ -12,6 +12,41 @@ redeployed together.
 
 ## Unreleased
 
+### 2026-09-16 — second feel wave: smooth discs, hit feedback, T2 bot behavior
+
+#### Added
+
+- Projectiles interpolate on the snapshot cadence. Discs flew at the wire's rate while players
+  interpolated; now each flight carries a two-sample buffer (same stamp-compression clamp and
+  extrapolation cap as RemoteBuffer, plus a birth pull-back that puts a freshly seen disc back
+  on its flight line near the muzzle instead of freezing it 6 m downrange). A real-sim harness
+  measured the old path at frozen on 3 of every 4 frames with a 5.76 m catch-up jump; the new
+  path renders every frame at the disc's true 90 m/s (mean 1.493 m/frame at 60 Hz).
+
+- Hit feedback, both directions. Shooter side: a hit sound and a 120 ms reticle marker when the
+  sim's own `ProjectileImpactReason.Direct` verdict lands on a shot the local player fired
+  (ownership inferred geometrically from our launch states; seq-deduped). Victim side: T2's
+  authentic red damage flash, ported formula-for-formula from player.cs:2790-2795
+  (`flash += amount*2`, cap 0.75) with T2's own 0.007/tick decay measured out of
+  TribesRebirth's playerUpdate.cpp, so the flash is a tint that clears in ~3.4 s, not a blink.
+  T2 base had neither shooter-side cue (verified: no hit marker, damage numbers, or enemy
+  health anywhere in the base scripts) -- those are ours by request; the victim flash is T2's.
+
+- Nearby-disc impact indicators: a Spinfusor disc landing within 25 m draws a wedge on a ring
+  around the screen centre, at the bearing it landed, fading over 1.2 s. The impact record
+  carries no shooter, so the cue is judged from the observer's pose -- it doubles as "where is
+  that shooter" and "where did my shot land".
+
+- Bots inherit T2's combat memory (t2ds source-verified): a bot that takes damage remembers its
+  damager for 5 s and prefers it as a target (dg.cs 812-815's lastDamagedBy + clientDetected);
+  a target that breaks line of sight is searched for at its last seen position with a 4 m
+  arrival tolerance (aiDefaultTasks.cs:205-247's search-after-LOS-loss); teammate damage writes
+  no memory at all (aiCTF.cs:66-76's lastDamageClient clear). Pooled 4-seed 24v24 measurement:
+  kills +34% (240 -> 321), both-flags-carried ticks -62%, escort coverage much tighter;
+  touches 18 -> 15 within per-seed variance (3-5). Two variants measured worse and were
+  reverted with numbers in their comments (a 70 m search gate; clearing sight memory on
+  respawn).
+
 ### 2026-09-16 — the feel wave: Spinfusor, deaths, reticle, hover health, bot stutter
 
 #### Fixed

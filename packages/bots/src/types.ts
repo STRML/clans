@@ -154,6 +154,34 @@ export interface BotRuntimeState {
    *  same side on every skip is exactly the "repath recomputes the identical unreachable
    *  route" failure the original skip fallback was written against, one level down. */
   stuckSkipSide: 1 | -1;
+  /** T2 damage memory (dg.cs:812-815): the victim's own `%clVictim.lastDamagedBy` plus the
+   *  `clientDetected(%attacker)` call that follows it -- a T2 bot learns who shot it even
+   *  with no line of sight, and that memory is what turns it around. Our sim keeps no
+   *  per-player damage attribution (only `world.players.damage`, an accumulated bar, and
+   *  `pendingDeaths`' killer id at death), so the attribution here is derived at the
+   *  damage edge -- perception.ts's refreshBotMemory owns the derivation and the honest
+   *  caveats. `damageAtTick` is the world tick the last damage landed on (-1 = no damage
+   *  remembered), `damageFromId` the attributed attacker (-1 = unknown source: a turret,
+   *  a fall, a mortar from beyond the bot's own vision, or a teammate -- see the
+   *  teammate case in refreshBotMemory). */
+  damageAtTick: number;
+  damageFromId: number;
+  /** The raw `world.players.damage[playerId]` value seen on the previous call, i.e. the
+   *  edge detector above: a larger value this call means damage landed, a smaller one
+   *  means the bar was zeroed (respawn or a station refill) and the memory is stale.
+   *  -1 = not sampled yet. */
+  lastDamageSeen: number;
+  /** T2 engage-task target memory (aiDefaultTasks.cs's EngageTask: the bot engages while
+   *  it has LOS, remembers its target through `%losTime < %detectPeriod`, and MOVES TO THE
+   *  LAST KNOWN LOCATION once that window is all it has left). The id, the tick it was
+   *  last seen on, and its x/z/y feet position at that moment -- flat numbers rather than
+   *  a Vec3 so the per-tick refresh allocates nothing (the same rule perception.ts's scan
+   *  scratch follows). `sightTargetId` -1 = no memory. */
+  sightTargetId: number;
+  sightTargetTick: number;
+  sightTargetX: number;
+  sightTargetY: number;
+  sightTargetZ: number;
   random: RandomState;
 }
 
@@ -188,6 +216,14 @@ export function createBotRuntimeState(
     escapeJetTicks: 0,
     pocketTicks: 0,
     pocketBaseGap: 0,
+    damageAtTick: -1,
+    damageFromId: -1,
+    lastDamageSeen: -1,
+    sightTargetId: -1,
+    sightTargetTick: -1,
+    sightTargetX: 0,
+    sightTargetY: 0,
+    sightTargetZ: 0,
     rideStallTicks: 0,
     rideBestDistance: Infinity,
     carrierStageSinceTick: -1,

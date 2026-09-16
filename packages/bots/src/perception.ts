@@ -9,6 +9,7 @@ import {
   type Vec3,
   type World,
 } from '@clans/sim';
+import type { BotRuntimeState } from './types.js';
 
 export const VISION_RANGE = 150; // Ours.
 export const LOW_HEALTH_FRACTION = 0.4; // Ours.
@@ -191,6 +192,208 @@ export function visibleEnemyDistanceM(
 export function findNearestVisibleEnemy(world: World, botId: number): number | null {
   const candidates = collectVisibleEnemies(world, botId, VISION_RANGE);
   return firstVisibleCollected(world, botEye(world, botId), candidates);
+}
+
+/** T2's engage-task memory window: how long a bot holds on to a target it can no longer
+ *  see and how long it remembers who shot it. T2's EngageTask engages while it has line of
+ *  sight OR has had it within `%detectPeriod`, moves to the target's LAST KNOWN LOCATION
+ *  once the window is that close to expiring, and gives the target up entirely after it
+ *  (aiDefaultTasks.cs:205-247's engage/search state). The original's detectPeriod is 5 s
+ *  of game time; this sim runs a fixed 32 ms tick (armor.ts:56, movement.ts:20 and the rest
+ *  of the sim's own citations of that rate), so 5 s rounds to 156 ticks. Ours in the sense
+ *  that the exact original figure is 5.0 s and this is its tick-quantized twin. */
+export const ENGAGE_MEMORY_TICKS = 156;
+
+/** The search state's arrival tolerance: T2's engage task stops walking once it is within
+ *  ~4 m of the remembered point (aiDefaultTasks.cs's search/arrival state, the same 4 m
+ *  the original's own move-tolerance uses) and gives up on the search from there rather
+ *  than orbiting a spot it has already reached. */
+export const SEARCH_ARRIVE_M = 4; // Ours, meters.
+
+/** T2 bounds this whole system with a 70 m rule for OBJECTIVE bots -- a TouchObject bot
+ *  abandons its engagement once the path distance to whoever engaged it passes 70 m
+ *  (aiObjectives.cs TouchObject::monitor) -- and a 70 m gate on this search was tried and
+ *  REJECTED here, by measurement, so nobody re-derives it: over the same four seeds it
+ *  cost 54 of the 81 extra kills (267 pooled against 321 unbounded, 240 at baseline),
+ *  took the both-flags share back up to 12756 pooled ticks (4135 unbounded, 11011 at
+ *  baseline -- i.e. worse than doing nothing), pushed the carrier route-stall share from
+ *  42/43/21/57% to 50/67/82/61%, and left one seed's carriers never reaching their own
+ *  stand at all (915 m closest med). The original earns its 70 m rule from a task
+ *  scheduler weighing two live objectives against each other; this goal layer has one
+ *  search state that already expires after 5 s and stops 4 m from the spot, and bounds
+ *  itself without a distance gate. */
+
+/** T2's `%clVictim.lastDamagedBy` (dg.cs:812-815), as far as this sim can supply it: the
+ *  shooter of the shot that hurt this bot this tick.
+ *
+ *  Divergence, stated plainly: T2 hands the victim the attacking client's id outright, so
+ *  a T2 bot knows who hurt it even when the attacker never entered its view. This sim keeps
+ *  no per-player attribution at all -- `world.players.damage` is an accumulated bar and the
+ *  only killer id anywhere is `pendingDeaths`' own, which arrives after the fact -- so the
+ *  attribution is derived here in two passes:
+ *
+ *  1. EXACT, when the shot resolved in this very tick: weapons.ts's FireEvent carries
+ *     `hitPlayerId` (filled by the same code path that applied the damage) for the weapons
+ *     whose hit-test runs synchronously at fire time -- the Laser Rifle's hitscan and the
+ *     Chaingun's Tracer (weapons.ts's own comment on those two fields). Friendly fire is
+ *     therefore caught exactly; every traveling projectile is not.
+ *  2. BEST-EFFORT: the nearest enemy the bot can actually see right now (LOS, inside
+ *     VISION_RANGE). The overwhelming majority of damage a bot takes in these matches comes
+ *     from someone it can see shooting at it, and a wrong guess here has one consequence
+ *     only -- which enemy the bot turns on -- so a nearest-visible fallback is the honest
+ *     approximation, not a silent fabrication.
+ *
+ *  A turret, a fall, a teammate out of the exact pass, or a mortar lobbed from beyond the
+ *  bot's vision all end up -1 (unknown source): the bot still remembers that it was hit
+ *  and when, but has nobody to name. */
+function attributedDamageSource(world: World, botId: number): number {
+  for (const event of world.lastFireEvents) {
+    if (!event.resolved || event.hitPlayerId !== botId || event.playerId === botId) continue;
+    if (!world.players.active[event.playerId]) continue;
+    return event.playerId;
+  }
+  return findNearestVisibleEnemy(world, botId) ?? -1;
+}
+
+/** T2's `onAIDamaged` teammate half (aiCTF.cs:66-76): damage from a teammate does NOT make
+ *  the victim treat them as an enemy -- the original plays its "watch it" voice line and
+ *  then clears `lastDamageClient` outright so the bot never turns on its own team. The
+ *  voice line has no equivalent here (voicebinds are client-side, played by the client that
+ *  pressed the bind, and a server-side bot has no socket -- brain.ts's own note on direct
+ *  sim calls vs queued wire messages), so what this keeps is the half that changes
+ *  behavior: teammate damage leaves NO memory, no retaliation, and no search. */
+function clearDamageMemory(runtime: BotRuntimeState): void {
+  runtime.damageAtTick = -1;
+  runtime.damageFromId = -1;
+}
+
+/** The damage edge, once per bot per tick: compares the bot's accumulated damage bar
+ *  against the value this function last saw and, on a rise, records WHEN and (see
+ *  attributedDamageSource) WHO. A fall means the bar was zeroed -- respawn or a station
+ *  refill -- so the grudge is dropped rather than aged out: T2's own damage handler treats
+ *  a fresh, uninjured client as having no last-damager (`lastDamageClient` is cleared
+ *  rather than kept across the respawn), and a bot that came back from the dead still
+ *  angry at the man who killed it is exactly the stale state that rule exists to prevent.
+ *  `-1` is the not-sampled-yet sentinel, since a real bar starts at 0.
+ *
+ *  The SIGHT memory is deliberately NOT cleared here, and that was measured, not assumed:
+ *  clearing it on the same edge cost 36 of the 81 extra kills over the four seeds (285
+ *  against 321 with it kept, 240 at baseline) and took the carrier route-stall share from
+ *  42/43/21/57% back out to 57/68/42/54%, because a station refit is a bar reset too and
+ *  refits happen mid-fight. It does not need the help: this sim's respawn delay
+ *  (RESPAWN_TICKS, damage.ts:5-7) is 156 ticks and so is the memory window itself, so a
+ *  bot that dies and comes back is always at the edge of its own memory already. */
+function refreshDamageMemory(world: World, runtime: BotRuntimeState): void {
+  const damage = world.players.damage[runtime.playerId] ?? 0;
+  const seen = runtime.lastDamageSeen;
+  runtime.lastDamageSeen = damage;
+  if (seen < 0 || damage < seen) {
+    clearDamageMemory(runtime);
+    return;
+  }
+  if (damage <= seen) return;
+  const source = attributedDamageSource(world, runtime.playerId);
+  const team = world.players.team[runtime.playerId] ?? -1;
+  // -2 = "no team known for the source", kept distinct from the store's own -1 so an
+  // unknown source can never be read as sharing the bot's own team.
+  const sourceTeam = source >= 0 ? (world.players.team[source] ?? -2) : -2;
+  if (sourceTeam === team) {
+    clearDamageMemory(runtime);
+    return;
+  }
+  runtime.damageAtTick = world.tick;
+  runtime.damageFromId = source;
+}
+
+/** T2's death rule for the memory this file owns: a dead client holds nothing. T2's
+ *  onAIKilled unassigns the client from every objective before scheduling the respawn, so
+ *  nothing a bot learned while dying steers the body that comes back -- and the equivalent
+ *  here is that a bot with no body has no target and no grudge. In a live match this
+ *  branch is a guarantee rather than a path: brain.ts's stepBots never steps a dead bot,
+ *  and the cross-death case is closed by the numbers instead -- the respawn delay and the
+ *  memory window are both 156 ticks, so a memory that crosses a death is spent by the time
+ *  its owner is stepped again. */
+function clearEngagementMemory(runtime: BotRuntimeState): void {
+  runtime.sightTargetId = -1;
+  runtime.sightTargetTick = -1;
+}
+
+/** The tick's memory refresh for one bot, called once from brain.ts's stepBot BEFORE the
+ *  goal and combat decisions so both see the same tick's facts. Living bots fold in this
+ *  tick's damage edge; a dead one is emptied (clearEngagementMemory above) and then skipped
+ *  by its caller anyway. */
+export function refreshBotMemory(world: World, runtime: BotRuntimeState): void {
+  if (!world.players.alive[runtime.playerId]) {
+    clearEngagementMemory(runtime);
+    clearDamageMemory(runtime);
+    return;
+  }
+  refreshDamageMemory(world, runtime);
+}
+
+/** Records a target the bot can see RIGHT NOW (its id, the tick, its feet position), the
+ *  memory T2's engage task keeps as its own target reference. Called from the decision
+ *  layer exactly where a visible enemy is chosen (brain.ts's decideCombat), because
+ *  visibility -- not intent -- is what the memory is about: a target the defender leash
+ *  then refuses to engage has still been SEEN, and that is what the search state walks to
+ *  later. Positions are the player store's own feet columns, the same floats steering's
+ *  walk goals are built from. */
+export function rememberSightedTarget(
+  world: World,
+  runtime: BotRuntimeState,
+  targetId: number,
+): void {
+  const base = targetId * 3;
+  runtime.sightTargetId = targetId;
+  runtime.sightTargetTick = world.tick;
+  runtime.sightTargetX = world.players.position[base] ?? 0;
+  runtime.sightTargetY = world.players.position[base + 1] ?? 0;
+  runtime.sightTargetZ = world.players.position[base + 2] ?? 0;
+}
+
+/** T2's search state, as a goal: the last known position to walk to, or null when there is
+ *  nothing to search. Null returns cover every way the original's engage task ends --
+ *  no memory at all, the memory window expired (ENGAGE_MEMORY_TICKS), the target is back
+ *  in sight (then it is an engagement, not a search -- the caller's own combat decision
+ *  takes over), the target is dead or gone (nothing to find there; also the reason
+ *  liveness is re-derived here instead of trusted from the stored id), and the bot already
+ *  standing within SEARCH_ARRIVE_M of the spot -- which CONSUMES the memory, so a bot
+ *  cannot orbit a point it has reached: the next call returns null on the first two
+ *  checks and the goal layer hands back to the bot's own objective. T2 idles at that point
+ *  until its task weight decays; here the objective resumes immediately, because this goal
+ *  layer has no task-weight scheduler to decay with (documented divergence). */
+export function searchMemoryPoint(
+  world: World,
+  runtime: BotRuntimeState,
+  botPosition: { x: number; y: number; z: number },
+): { x: number; y: number; z: number } | null {
+  const id = runtime.sightTargetId;
+  if (id < 0) return null;
+  if (world.tick - runtime.sightTargetTick > ENGAGE_MEMORY_TICKS) return null;
+  if (id >= world.players.count) return null;
+  if (!world.players.active[id] || !world.players.alive[id]) return null;
+  if (visibleEnemyDistanceM(world, runtime.playerId, id) !== null) return null;
+  const point = { x: runtime.sightTargetX, y: runtime.sightTargetY, z: runtime.sightTargetZ };
+  const gap = Math.hypot(botPosition.x - point.x, botPosition.z - point.z);
+  if (gap <= SEARCH_ARRIVE_M) {
+    clearEngagementMemory(runtime);
+    return null;
+  }
+  return point;
+}
+
+/** The remembered attacker of the freshest damage, when it is a target this bot could
+ *  actually shoot this tick -- the retaliation half of T2's damage memory (dg.cs's
+ *  clientDetected). Null when nothing has hit the bot inside the window, or when the
+ *  remembered attacker is not visible right now (an enemy the bot cannot see cannot be
+ *  aimed at; the search state above is what answers that case). */
+export function damageMemoryTarget(world: World, runtime: BotRuntimeState): number | null {
+  const id = runtime.damageFromId;
+  if (id < 0) return null;
+  if (world.tick - runtime.damageAtTick > ENGAGE_MEMORY_TICKS) return null;
+  if (id >= world.players.count) return null;
+  if (visibleEnemyDistanceM(world, runtime.playerId, id) === null) return null;
+  return id;
 }
 
 export function needsHealing(world: World, botId: number): boolean {

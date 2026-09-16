@@ -1,14 +1,21 @@
 import { createDiscExplosion } from './disc-explosion.js';
 import * as THREE from 'three';
 import {
+  FIXED_TICK_MS,
   ProjectileImpactReason,
   ProjectileType,
   WeaponId,
   type ProjectileImpact,
   type World,
 } from '@clans/sim';
-import { EventKind, type EventMessage, type ProjectileSnapshotData } from '@clans/protocol';
+import {
+  EventKind,
+  SNAPSHOT_EVERY_N_TICKS,
+  type EventMessage,
+  type ProjectileSnapshotData,
+} from '@clans/protocol';
 import { assetUrl } from './assets.js';
+import { MAX_EXTRAPOLATE_MS } from './remote.js';
 
 const EXPLOSION_LIFETIME_S = 0.25; // Ours: a quick flash, not simulated debris.
 /** Issue #57: how long a disc's launch flash lives. Ours -- a muzzle flash is a launch
@@ -22,6 +29,32 @@ const MUZZLE_FLASH_LIFETIME_S = 0.08;
 const MUZZLE_FLASH_SIZE = 1.2;
 const LASER_BEAM_LIFETIME_S = 1; // sniperRifle.cs: fadeTime.
 const EXPLOSION_RADIUS = 1.5; // Ours: a visible flash, unrelated to the weapon's damage radius.
+/** The snapshot cadence itself, derived exactly the way remote.ts's own private constant is:
+ *  the server sends one every SNAPSHOT_EVERY_N_TICKS ticks (server/src/net.ts), 64 ms at the
+ *  sim's 32 ms tick. Derived here rather than imported: remote.ts keeps its copy private to its
+ *  own file, and a two-line product of the two published constants is cheaper than widening
+ *  that surface for the projectile path. */
+const SNAPSHOT_INTERVAL_MS = FIXED_TICK_MS * SNAPSHOT_EVERY_N_TICKS;
+/** How far behind the newest projectile sample a disc is drawn: one whole snapshot interval,
+ *  which is the smallest delay that keeps the render clock inside the newest CLOSED segment
+ *  (a sample on either side of it) rather than in front of the newest sample, where every
+ *  frame would be a prediction. That distinction is the whole point for a projectile: inside a
+ *  closed segment the draw is an interpolation between two positions the sim really reported,
+ *  so a velocity change the client has not seen yet (a bounce) cannot pop the mesh the way a
+ *  dead-reckoned prediction would, and the stale-copy repeats RemoteBuffer has to tolerate
+ *  cannot happen here at all (projectiles beyond the relevance radius are never sent,
+ *  server/src/snapshot-policy.ts, so every projectile sample describes motion). It is
+ *  deliberately NOT remote.ts's INTERP_DELAY_MS: that 100 ms exists so a *player's* pose is
+ *  bracketed at a 64 ms cadence, and the extra 36 ms would only park the disc further behind
+ *  the explosion its own impact record draws -- 9 m of flight at the disc's 90 m/s. */
+const PROJECTILE_INTERP_DELAY_MS = SNAPSHOT_INTERVAL_MS;
+/** How many samples one projectile's flight history keeps. Two is the whole need: the render
+ *  clock can sit between them (interpolate), after the newest (dead-reckon forward into a
+ *  stalled stream), or -- for the first frames of a shot, before the second sample has landed
+ *  -- before the oldest (dead-reckon back along the flight line). A projectile's velocity is
+ *  constant between bounces, so unlike RemoteBuffer's 8-sample history there is no fresher
+ *  anchor to hunt for. */
+const PROJECTILE_HISTORY_LENGTH = 2;
 
 const WEAPON_COLOR: Record<number, number> = {
   [WeaponId.Spinfusor]: 0x66bbff,
@@ -386,6 +419,143 @@ function disposeMesh(target: THREE.Object3D): void {
   });
 }
 
+/** One projectile's flight, in the client's own frame: where the disc is drawn this frame,
+ *  dead-reckoned or interpolated between the snapshots that describe it. */
+export interface ProjectilePose {
+  x: number;
+  y: number;
+  z: number;
+}
+
+interface ProjectileSample {
+  atMs: number;
+  data: ProjectileSnapshotData;
+}
+
+/** The pose and velocity the sim reported are the same six numbers, so a difference in any of
+ *  them is real information and an identical set is the caller re-observing one snapshot. The
+ *  comparison is exact on purpose: the wire carries full state per projectile record (no
+ *  stale-copy resend -- a distant one is simply not sent), and this file's caller polls the
+ *  newest decoded list every FRAME, so a repeat is literally the same floats. An epsilon like
+ *  remote.ts's REPEAT_EPSILON_M would instead swallow a genuinely creeping projectile's step
+ *  (a mortar shell on its last few metres moves 3 mm a snapshot). */
+function sameFlight(a: ProjectileSnapshotData, b: ProjectileSnapshotData): boolean {
+  return (
+    a.x === b.x && a.y === b.y && a.z === b.z && a.vx === b.vx && a.vy === b.vy && a.vz === b.vz
+  );
+}
+
+/**
+ * One projectile id's flight between snapshots, the projectile twin of remote.ts's
+ * RemoteBuffer and the same shape: samples arrive stamped with the caller's clock, and
+ * `positionAt` answers at a render time one delay behind now.
+ *
+ * The path is RemoteBuffer's own policy -- interpolate when the render time is bracketed by
+ * two samples, dead-reckon from the nearest sample when it is not -- because a projectile
+ * carries its own ballistic velocity on the wire, which is what dead reckoning needs and
+ * interpolation does not: `x(t) = x_i + v_i * (t - t_i)` over the segment the render clock is
+ * inside is exactly the sim's own integration of that segment (projectiles.ts moves a
+ * projectile by velocity * dt, so two samples of a straight flight lie on one line). The
+ * delay then only has to place the clock inside a closed segment, and no residual relaxation
+ * is needed the way it is for a player: while the clock is inside the held pair, both ends of
+ * the segment it is sweeping are positions the sim itself reported, so a sample landing mid
+ * sweep cannot move the drawn point at all -- only advance it along a line the sim drew. The
+ * frames that are not inside the pair are the first ones of a shot (there is nothing but a
+ * birth sample yet) and the ones a stalled or backlogged socket leaves at the pair's edges;
+ * both are carried on a held sample's own reported velocity, which for a disc -- no drag, no
+ * gravity, no elasticity (WEAPON_DATA) -- is the same line the missing segment lay on. A
+ * bouncing bolt would be the one to see that difference, for a frame's worth of it.
+ *
+ * Two things it deliberately does NOT do, both covered elsewhere: recycled ids (the sim holds
+ * a freed id unallocated for at least one snapshot, so the id is always seen missing and its
+ * history pruned, and a same-id different-weapon swap is caught by the mesh rebuild's own
+ * type/weaponId test, whose caller resets this), and the solo path (no snapshots, no cadence
+ * to hide: syncProjectileMeshes leaves the mesh on the sim's live position there).
+ */
+export class ProjectileBuffer {
+  private samples: ProjectileSample[] = [];
+
+  /** Files one poll of a projectile's snapshot state. A repeat of the newest sample is
+   *  dropped rather than stored: the caller polls per frame while snapshots land every second
+   *  tick (SNAPSHOT_EVERY_N_TICKS), so storing repeats would stamp the same state a segment
+   *  later every frame and walk the render clock ever further behind the sim. */
+  push(atMs: number, projectile: ProjectileSnapshotData): void {
+    const newest = this.samples.at(-1);
+    if (newest && sameFlight(newest.data, projectile)) return;
+    // The wire carries one snapshot every SNAPSHOT_INTERVAL_MS, so two samples stamped closer
+    // together than that are the caller's arrival clock, not the server's: a socket that
+    // stalled and released its backlog puts two samples that are 64 ms apart on the wire 17 ms
+    // apart on the clock (app.ts's per-frame poll can see two snapshots' worth of movement in
+    // consecutive frames). Interpolated at face value the disc crosses that segment at 3.8x
+    // its real speed; keeping the protocol's own spacing leaves the segment the same length in
+    // render time as it was on the server. The same clamp, and the same reasoning, as
+    // RemoteBuffer's own.
+    const stampedAtMs = newest ? Math.max(atMs, newest.atMs + SNAPSHOT_INTERVAL_MS) : atMs;
+    this.samples.push({ atMs: stampedAtMs, data: projectile });
+    if (this.samples.length > PROJECTILE_HISTORY_LENGTH) this.samples.shift();
+  }
+
+  /** Drops the history: the id was recycled into a different projectile, so these samples
+   *  describe a flight that is over. */
+  reset(): void {
+    this.samples.length = 0;
+  }
+
+  /** Where to draw the projectile at `nowMs`, or null before any sample has arrived (the
+   *  caller then falls back to the sample it holds, as it does without a buffer at all). */
+  positionAt(nowMs: number): ProjectilePose | null {
+    const renderTime = nowMs - PROJECTILE_INTERP_DELAY_MS;
+    const newest = this.samples.at(-1);
+    const oldest = this.samples[0];
+    if (!newest || !oldest) return null;
+    if (renderTime >= newest.atMs) return extrapolate(newest, renderTime);
+    // Before the oldest sample is the birth case: the client learns of a shot up to one
+    // snapshot after it was fired and the render clock sits a further delay behind that, so
+    // for the first frames the clock is behind the only sample there is. Carrying it BACK
+    // along that sample's own velocity puts the disc where the flight line says it was -- near
+    // the muzzle -- instead of freezing it at the position a snapshot already carried it 5.8 m
+    // past, which is what made a freshly seen disc hang in the air and then jump.
+    if (renderTime <= oldest.atMs) return extrapolate(oldest, renderTime);
+    const t = (renderTime - oldest.atMs) / (newest.atMs - oldest.atMs);
+    return {
+      x: oldest.data.x + (newest.data.x - oldest.data.x) * t,
+      y: oldest.data.y + (newest.data.y - oldest.data.y) * t,
+      z: oldest.data.z + (newest.data.z - oldest.data.z) * t,
+    };
+  }
+}
+
+/** Dead reckoning from one sample along its own reported velocity, in either direction: the
+ *  flight line is the same curve backwards as forwards. Bounded by remote.ts's
+ *  MAX_EXTRAPOLATE_MS on both sides -- the same constant answers "how far may a client invent
+ *  motion from a sample" for a stalled socket's forward glide and for the birth pull-back, and
+ *  past it the projectile freezes rather than sliding further than the sim's evidence carries
+ *  it. */
+function extrapolate(sample: ProjectileSample, renderTime: number): ProjectilePose {
+  const held = renderTime - sample.atMs;
+  const seconds = Math.max(-MAX_EXTRAPOLATE_MS, Math.min(held, MAX_EXTRAPOLATE_MS)) / 1000;
+  return {
+    x: sample.data.x + sample.data.vx * seconds,
+    y: sample.data.y + sample.data.vy * seconds,
+    z: sample.data.z + sample.data.vz * seconds,
+  };
+}
+
+/** Where the caller keeps one frame's projectile interpolation state. Optional at the call
+ *  site, and only for a SNAPSHOT-CADENCED feed: the solo app reads the sim's own live projectile
+ *  store (a fresh position every frame, so there is no cadence to hide) and must keep drawing
+ *  the mesh on the raw position it just read. Feeding those live positions here would have the
+ *  stamp clamp stretch 17 ms of render clock into a 64 ms segment, drawing a disc at a quarter
+ *  of its speed -- app.ts passes this from its networked branch only. */
+export interface ProjectileInterpolation {
+  /** One flight history per live projectile id; pruned against each frame's own list, the way
+   *  app.ts prunes its remote-player buffers. */
+  buffers: Map<number, ProjectileBuffer>;
+  /** The caller's clock -- the same `performance.now()` RemoteBuffer.positionAt is queried
+   *  with, so a disc and the remote player it flies past come out of one render time. */
+  nowMs: number;
+}
+
 function pruneProjectileMeshes(
   scene: THREE.Scene,
   meshes: Map<number, THREE.Mesh>,
@@ -402,25 +572,97 @@ function pruneProjectileMeshes(
   }
 }
 
-function syncOneProjectile(
+/** The history of an id the snapshot list no longer reports. An id only comes back as a new
+ *  projectile after at least one snapshot it was missing from (PROJECTILE_ID_REUSE_DELAY_TICKS,
+ *  projectiles.ts), so this is what makes a recycled id a birth rather than a slide from where
+ *  its predecessor died -- the same job remote.ts's teleport test does for a player id. A
+ *  render loop that stalls across the whole reuse window would still see the id reappear
+ *  without an observed gap; that residual is a brief slide on one disc, not worth a
+ *  distance heuristic that would misfire on the 425 m/s Chaingun tracers. */
+function pruneProjectileBuffers(
+  buffers: Map<number, ProjectileBuffer> | undefined,
+  liveIds: Set<number>,
+): void {
+  if (!buffers) return;
+  for (const id of [...buffers.keys()]) {
+    if (!liveIds.has(id)) buffers.delete(id);
+  }
+}
+
+/** Whether an id's mesh was built for a different projectile than the one now carrying that
+ *  id: the sim recycles freed ids, so "same id" is not "same projectile" (round 2, PR #9,
+ *  finding 8). Stamped onto the mesh in createProjectileMesh. */
+function isRecycledProjectile(mesh: THREE.Mesh | undefined, p: ProjectileSnapshotData): boolean {
+  return (
+    mesh !== undefined && (mesh.userData.type !== p.type || mesh.userData.weaponId !== p.weaponId)
+  );
+}
+
+/** One live id's flight history, created on first sight and reset when the id turns out to
+ *  have been recycled under its mesh -- a new projectile's first frame must not be interpolated
+ *  from the previous one's last sample. */
+function projectileBufferFor(
+  buffers: Map<number, ProjectileBuffer> | undefined,
+  p: ProjectileSnapshotData,
+  recycled: boolean,
+): ProjectileBuffer | undefined {
+  if (!buffers) return undefined;
+  const buffer = buffers.get(p.id) ?? new ProjectileBuffer();
+  if (recycled) buffer.reset();
+  buffers.set(p.id, buffer);
+  return buffer;
+}
+
+/** One live id's mesh and flight history for this frame, rebuilt and reset when the id turns
+ *  out to have been recycled: a new projectile's first frame must not be interpolated from the
+ *  previous one's last sample. Split out of syncOneProjectile to hold that function under the
+ *  complexity gate, the same reason projectileNum exists below. */
+function projectileTrackFor(
   scene: THREE.Scene,
   meshes: Map<number, THREE.Mesh>,
+  buffers: Map<number, ProjectileBuffer> | undefined,
   p: ProjectileSnapshotData,
-  dt: number,
-): void {
+): { mesh: THREE.Mesh; buffer: ProjectileBuffer | undefined } {
   let mesh = meshes.get(p.id);
-  if (mesh && (mesh.userData.type !== p.type || mesh.userData.weaponId !== p.weaponId)) {
+  const recycled = isRecycledProjectile(mesh, p);
+  if (mesh && recycled) {
     scene.remove(mesh);
     disposeMesh(mesh);
     meshes.delete(p.id);
     mesh = undefined;
   }
-  if (!mesh) {
-    mesh = createProjectileMesh(p);
-    scene.add(mesh);
-    meshes.set(p.id, mesh);
-  }
-  mesh.position.set(p.x, p.y, p.z);
+  const buffer = projectileBufferFor(buffers, p, recycled);
+  if (mesh) return { mesh, buffer };
+  const created = createProjectileMesh(p);
+  scene.add(created);
+  meshes.set(p.id, created);
+  return { mesh: created, buffer };
+}
+
+/** Where the mesh is placed this frame: the flight history's own render-time position when the
+ *  caller keeps one, the sample's raw position otherwise (no history yet, or no interpolation
+ *  at all -- the solo path). */
+function placeProjectile(
+  mesh: THREE.Mesh,
+  buffer: ProjectileBuffer | undefined,
+  p: ProjectileSnapshotData,
+  nowMs: number,
+): void {
+  const pose = buffer?.positionAt(nowMs);
+  mesh.position.set(pose?.x ?? p.x, pose?.y ?? p.y, pose?.z ?? p.z);
+}
+
+function syncOneProjectile(
+  scene: THREE.Scene,
+  meshes: Map<number, THREE.Mesh>,
+  buffers: Map<number, ProjectileBuffer> | undefined,
+  p: ProjectileSnapshotData,
+  dt: number,
+  nowMs: number,
+): void {
+  const { mesh, buffer } = projectileTrackFor(scene, meshes, buffers, p);
+  buffer?.push(nowMs, p);
+  placeProjectile(mesh, buffer, p, nowMs);
   projectileOrientation(mesh, p);
   if (p.weaponId === WeaponId.Spinfusor) {
     // The disc spins about its local plate normal. rotateY is a relative rotation, so
@@ -438,15 +680,24 @@ function syncOneProjectile(
   }
 }
 
+/** Draws the snapshot's projectiles, each at `interpolation.positionAt` under the caller's own
+ *  clock rather than at the newest sample's raw position. Without `interpolation` this is the
+ *  old behaviour exactly -- mesh on the sample -- which is what the solo app and this file's
+ *  own presentation tests still want. */
 export function syncProjectileMeshes(
   scene: THREE.Scene,
   meshes: Map<number, THREE.Mesh>,
   projectiles: ProjectileSnapshotData[],
   dtSeconds = 1 / 60,
+  interpolation?: ProjectileInterpolation,
 ): void {
   const liveIds = new Set(projectiles.map((p) => p.id));
   pruneProjectileMeshes(scene, meshes, liveIds);
-  for (const projectile of projectiles) syncOneProjectile(scene, meshes, projectile, dtSeconds);
+  pruneProjectileBuffers(interpolation?.buffers, liveIds);
+  const nowMs = interpolation?.nowMs ?? 0;
+  for (const projectile of projectiles) {
+    syncOneProjectile(scene, meshes, interpolation?.buffers, projectile, dtSeconds, nowMs);
+  }
 }
 
 // Pulls the `?? fallback` branches for a projectile's scalar fields out of

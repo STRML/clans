@@ -2,6 +2,9 @@ import { describe, expect, it, vi, type Mock } from 'vitest';
 import {
   createAudioEngine,
   footstepCue,
+  HIT_CONFIRM_DECAY_S,
+  HIT_CONFIRM_GAIN,
+  HIT_CONFIRM_SOUND,
   LAUNCH_DUCK_FACTOR,
   OCCLUSION_ATTENUATION,
   projectileImpactCue,
@@ -657,6 +660,42 @@ describe('self-fire mix (#57)', () => {
     engine.setStationHum(0, muzzle, true);
     expect(ctx._gains[beforeHum]?.gain.value).toBe(1);
     vi.unstubAllGlobals();
+  });
+});
+
+/** User report 2026-09-16 (hit feedback), shooter side: the shooter's own hit confirmation. T2 base has no shooter-side
+ *  cue at all -- the only hit feedback in the scripts runs on the victim's machine -- so this
+ *  one is ours, and the two things worth pinning are that it plays the committed recording
+ *  (not a synthesized blip: this engine never creates an oscillator, and every cue in it is a
+ *  decoded sample) and that it is trimmed to a tick rather than the recording's full 0.74 s. */
+describe('hit confirmation (2026-09-16)', () => {
+  it('plays its committed recording at the listener, unpositioned', async () => {
+    const { ctx, engine } = await engineWithSamples(undefined, { x: 0, y: 2, z: 0 });
+    engine.hitConfirm();
+    expect(sourceNames(ctx)).toEqual([`/katabatic/audio/${SOUND_FILE[HIT_CONFIRM_SOUND]}`]);
+    // No panner: this is the listener's own feedback about their own aim, like the self shot,
+    // not a cue positioned at the hit.
+    expect(ctx._panners).toHaveLength(0);
+    expect(ctx._gains[1]?.gain.value).toBe(HIT_CONFIRM_GAIN);
+    expect(ctx.createOscillator).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('bleeds the recording off over HIT_CONFIRM_DECAY_S so a burst reads as a train of ticks', async () => {
+    const { ctx, engine } = await engineWithSamples(undefined, { x: 0, y: 2, z: 0 });
+    engine.hitConfirm();
+    expect(ctx._gains[1]?.gain.setTargetAtTime).toHaveBeenCalledWith(0, 0, HIT_CONFIRM_DECAY_S / 3);
+    vi.unstubAllGlobals();
+  });
+
+  it('stays silent before its recording has decoded rather than substituting a tone', async () => {
+    // The bufferless path: engineWithSamples' opposite, and the guard the whole file's
+    // no-synthesis rule is about.
+    const ctx = fakeAudioContext();
+    const engine = createAudioEngine({ context: ctx as unknown as AudioContext });
+    engine.hitConfirm();
+    expect(ctx.createOscillator).not.toHaveBeenCalled();
+    expect(ctx.createBufferSource).not.toHaveBeenCalled();
   });
 });
 

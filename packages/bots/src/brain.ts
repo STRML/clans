@@ -25,6 +25,9 @@ import {
   isCarryingEnemyFlag,
   LOW_HEALTH_FRACTION,
   needsHealing,
+  refreshBotMemory,
+  rememberSightedTarget,
+  searchMemoryPoint,
 } from './perception.js';
 import { steerToward } from './steering.js';
 import { BotRole, BotState, type BotRuntimeState } from './types.js';
@@ -904,6 +907,38 @@ function orderGoal(
   const key = order.kind === OrderKind.Attack ? 'order:attack' : 'order:defend';
   return { position: { x: order.x, y: 0, z: order.z }, key };
 }
+/** T2's engage-task search state (aiDefaultTasks.cs:205-247), as a goal: a bot that has
+ *  lost line of sight on its target does not forget it -- the original keeps the target
+ *  while `%losTime < %detectPeriod`, then MOVES TO THE TARGET'S LAST KNOWN LOCATION and
+ *  looks there, giving the search up once the memory window is spent. That is what this
+ *  returns: the remembered point (perception.ts's searchMemoryPoint owns the window, the
+ *  liveness and arrival checks, and the "already standing on it" bookkeeping), as a goal
+ *  the steering layer can walk to.
+ *
+ *  Two gates, both of them restatements of rules this file already applies to ENGAGEMENT,
+ *  because a search for a fight is a fight:
+ *   - the defender leash (isOutsideDefendLeash, the same call decideCombat makes): a
+ *     defender with a live post does not leave it to comb a spot 150 m away. Once its post
+ *     is gone (own flag away, or a carrier to bodyguard) it searches like anyone else;
+ *   - the carry outranks it, structurally: decideGoal returns carrierHomeGoal above this,
+ *     so a carrier never searches at all.
+ *
+ *  The 5 s window is short by design: this is a look-around-the-corner step in a live
+ *  fight, not a hunt across the map. T2's own 70 m abandonment rule (aiObjectives.cs
+ *  TouchObject::monitor) was tried as one more distance gate here and measured worse than
+ *  no gate at all -- see perception.ts's SEARCH_ARRIVE_M comment for the numbers. */
+function decideSearchGoal(
+  world: World,
+  runtime: BotRuntimeState,
+): { position: Vec3; key: string } | null {
+  const memoryId = runtime.sightTargetId;
+  if (memoryId < 0) return null;
+  if (isOutsideDefendLeash(world, runtime, memoryId)) return null;
+  const point = searchMemoryPoint(world, runtime, playerPoint(world, runtime.playerId));
+  if (point === null) return null;
+  return { position: point, key: `search:${String(memoryId)}` };
+}
+
 /** Issue #32 gear-up, REJECTED design (kept documented so nobody re-derives it): a
  *  dedicated "walk to a station and grab an Energy Pack" goal deadlocked the whole bot
  *  population on production Katabatic -- most stations sit inside base structures the
@@ -936,6 +971,11 @@ export function decideGoal(
   // latch is cleared with it -- a later take stages on its own merits.
   runtime.carrierStageSinceTick = -1;
   runtime.carrierStageLaunched = false;
+  // T2's search state (decideSearchGoal) sits between the carry and the role duty: a bot
+  // that lost its target a moment ago walks the few metres to where it last saw them before
+  // resuming its own objective.
+  const searchGoal = decideSearchGoal(world, runtime);
+  if (searchGoal !== null) return searchGoal;
   return runtime.role === BotRole.Attacker
     ? decideAttackerGoal(world, runtime)
     : decideDefenderGoal(world, runtime);
@@ -1028,7 +1068,13 @@ export function decideCombat(
   weaponId: WeaponId | null;
   aiming: boolean;
 } {
-  const targetId = selectCombatTarget(world, runtime.playerId);
+  const targetId = selectCombatTarget(world, runtime);
+  // T2's engage-target memory (aiDefaultTasks.cs's EngageTask): a target this bot can SEE
+  // right now is remembered -- id, tick, position -- whether or not the leash below lets it
+  // shoot it. Recorded before the leash check on purpose: the memory is about visibility,
+  // and the search state's whole job is the case where the leash said no or the target
+  // broke contact.
+  if (targetId !== null) rememberSightedTarget(world, runtime, targetId);
   if (targetId !== null && !isOutsideDefendLeash(world, runtime, targetId)) {
     const { yaw, pitch, fire, weaponId } = aimAndFire(world, runtime, runtime.playerId, targetId);
     return { yaw, pitch, fire, targetId, weaponId, aiming: true };
@@ -1147,6 +1193,11 @@ export function stepBot(
   runtime: BotRuntimeState,
   order: TeamOrder | null,
 ): PlayerInput {
+  // T2's memory tick, first: the damage edge (who shot me) and the death clear are folded
+  // in before anything this tick reads them -- the goal layer's search state and the combat
+  // layer's retaliation both read state this call refreshes (perception.ts's
+  // refreshBotMemory).
+  refreshBotMemory(world, runtime);
   maybeHeal(world, runtime.playerId);
   applyRepairOrder(world, runtime, order);
   const goal = decideGoal(world, runtime, order);

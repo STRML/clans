@@ -10,6 +10,7 @@ import {
 import {
   createLaserBeam,
   createProjectileMesh,
+  ProjectileBuffer,
   spawnLaserBeams,
   spawnProjectileImpacts,
   syncProjectileMeshes,
@@ -337,6 +338,153 @@ describe('syncProjectileMeshes', () => {
     syncProjectileMeshes(scene, meshes, []);
     expect(geometryDispose).toHaveBeenCalledOnce();
     expect(materialDispose).toHaveBeenCalledOnce();
+  });
+
+  it('draws the disc where its flight line puts it, not at the newest snapshot position', () => {
+    // A disc moves 5.8 m between snapshots (90 m/s, WEAPON_DATA) and rendering it at the
+    // newest sample's own position quantized every one of those to the 64 ms cadence.
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    const buffers = new Map<number, ProjectileBuffer>();
+    const projectile = disc(1, 5.76); // one snapshot interval of flight at 90 m/s
+
+    // First frame the client sees it: the render clock is one snapshot interval behind the
+    // sample, which puts the disc back at the muzzle rather than hanging 5.8 m out.
+    syncProjectileMeshes(scene, meshes, [projectile], 0, { buffers, nowMs: 64 });
+    expect(meshes.get(1)?.position.x).toBeCloseTo(0);
+
+    // One frame later it has moved a frame's worth (90 m/s / 60), not stood still.
+    syncProjectileMeshes(scene, meshes, [projectile], 1 / 60, { buffers, nowMs: 64 + 1000 / 60 });
+    expect(meshes.get(1)?.position.x).toBeCloseTo(1.5);
+  });
+
+  it('drops a flight history once its id leaves the snapshot list', () => {
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    const buffers = new Map<number, ProjectileBuffer>();
+    const interpolation = { buffers, nowMs: 0 };
+    syncProjectileMeshes(scene, meshes, [disc(1, 5)], 0, interpolation);
+    expect(buffers.size).toBe(1);
+    syncProjectileMeshes(scene, meshes, [], 0, interpolation);
+    expect(buffers.size).toBe(0);
+  });
+
+  it('starts a fresh flight when a recycled id comes back as a different projectile', () => {
+    // The disc dies and the sim hands its id to a mortar shell: the mesh is rebuilt on the
+    // type/weaponId swap (round 2, PR #9, finding 8), and the flight history has to go with
+    // it -- otherwise the new shell's first frames are interpolated from the old disc's last
+    // sample and it slides in from wherever that was.
+    const scene = new THREE.Scene();
+    const meshes = new Map<number, THREE.Mesh>();
+    const buffers = new Map<number, ProjectileBuffer>();
+    const interpolation = { buffers, nowMs: 0 };
+    syncProjectileMeshes(scene, meshes, [disc(1, 0)], 0, interpolation);
+    syncProjectileMeshes(scene, meshes, [{ ...mortarShell(1, 40), y: 10 }], 0, interpolation);
+    // The shell's own first frame: 64 ms back along its own 20 m/s climb from y = 10. The
+    // disc it replaced sat at y = 1, which is nowhere on that line.
+    expect(meshes.get(1)?.position.x).toBeCloseTo(40);
+    expect(meshes.get(1)?.position.y).toBeCloseTo(8.72);
+  });
+});
+
+describe('ProjectileBuffer', () => {
+  it('interpolates between two samples one snapshot interval behind the newest', () => {
+    const buffer = new ProjectileBuffer();
+    buffer.push(0, disc(1, 0));
+    buffer.push(64, disc(1, 5.76));
+    // renderTime 32 -- halfway through the 0 -> 64 segment -- is a clock 96 ms in.
+    expect(buffer.positionAt(96)?.x).toBeCloseTo(2.88);
+  });
+
+  it('returns null before any sample arrives', () => {
+    expect(new ProjectileBuffer().positionAt(0)).toBeNull();
+  });
+
+  it('carries a freshly seen shot back along its own flight line instead of freezing it', () => {
+    // The client learns of a shot up to a snapshot after it was fired, so the first sample it
+    // gets already describes a disc several metres downrange. Drawing the sample's own
+    // position would hang the disc there for a frame and then jump; carrying it back along the
+    // reported velocity puts it where the flight line says it was -- at the muzzle.
+    const buffer = new ProjectileBuffer();
+    buffer.push(500, disc(1, 5.76));
+    expect(buffer.positionAt(500)?.x).toBeCloseTo(0);
+    expect(buffer.positionAt(516.7)?.x).toBeCloseTo(1.5);
+  });
+
+  it("keeps the wire's own spacing when two samples arrive inside one snapshot interval", () => {
+    // A stalled socket releasing its backlog puts two samples 64 ms apart on the wire on
+    // consecutive frames 17 ms apart. Interpolated at face value the disc crosses that
+    // segment at 3.8x its real speed (remote.ts's stamp clamp, ported here).
+    const buffer = new ProjectileBuffer();
+    buffer.push(0, disc(1, 0));
+    buffer.push(16.7, disc(1, 5.76));
+    const first = buffer.positionAt(100)?.x ?? 0;
+    const second = buffer.positionAt(116.7)?.x ?? 0;
+    expect(second - first).toBeCloseTo(1.5);
+  });
+
+  it('ignores a re-observed sample instead of stamping it a segment later', () => {
+    // app.ts polls the newest decoded projectile list every FRAME while snapshots only change
+    // every 64 ms, so most pushes repeat the state already filed. Storing the repeats (each
+    // stamped a segment after the last) would walk the render clock further behind the sim
+    // every frame until the disc sat frozen hundreds of milliseconds back.
+    const buffer = new ProjectileBuffer();
+    const projectile = { ...disc(1, 0), vx: 90 };
+    buffer.push(0, projectile);
+    for (let frame = 1; frame <= 10; frame += 1) buffer.push(frame * 16.7, projectile);
+    // 167 ms of render time, 64 ms of it the interp delay: 103 ms of flight at 90 m/s.
+    expect(buffer.positionAt(167)?.x).toBeCloseTo(9.27);
+  });
+
+  it('dead-reckons past the newest sample and freezes at the extrapolation cap', () => {
+    const buffer = new ProjectileBuffer();
+    buffer.push(0, disc(1, 0));
+    // 90 m/s over remote.ts's 320 ms horizon, then frozen: a socket that has gone quiet
+    // must not glide a disc onward on forever.
+    expect(buffer.positionAt(64 + 320)?.x).toBeCloseTo(28.8);
+    expect(buffer.positionAt(64 + 320 + 500)?.x).toBeCloseTo(28.8);
+  });
+
+  it('draws every frame of a jittered snapshot feed moving, with no frozen frame and no burst', () => {
+    // The complaint this closes: the mesh sat on the newest snapshot's position, so a disc
+    // stood still for three frames and then jumped 5.8 m. Feed the buffer the way app.ts's
+    // render loop does -- the newest decoded list, polled every frame -- with arrivals jittered
+    // across the frame boundary, and measure what the mesh does.
+    const FRAME_MS = 1000 / 60;
+    const SPEED_M_S = 90; // WEAPON_DATA[WeaponId.Spinfusor].speed
+    const NOMINAL_PER_FRAME = (SPEED_M_S * FRAME_MS) / 1000;
+    // A deterministic jitter pattern: arrivals land 4 or 5 frames apart, the way a socket's
+    // own delivery does, rather than on frame boundaries.
+    const JITTER_MS = [0, 16, 8, 24, 4, 20, 12, 1, 17, 9, 25, 5, 21, 13, 2, 18];
+    const buffer = new ProjectileBuffer();
+    const moves: number[] = [];
+    let latest: ProjectileSnapshotData | null = null;
+    let index = 0;
+    let previous: number | null = null;
+    for (let nowMs = 0; nowMs <= 2000; nowMs += FRAME_MS) {
+      const sendAtMs = index * 64;
+      if (nowMs >= sendAtMs + (JITTER_MS[index % JITTER_MS.length] ?? 0)) {
+        latest = disc(1, (sendAtMs * SPEED_M_S) / 1000);
+        index += 1;
+      }
+      if (latest) buffer.push(nowMs, latest);
+      const drawn = buffer.positionAt(nowMs)?.x ?? null;
+      if (drawn !== null && previous !== null) moves.push(drawn - previous);
+      previous = drawn;
+    }
+    expect(moves.length).toBeGreaterThan(100);
+    // Every frame moves, in the flight's own direction, at a real fraction of the disc's
+    // speed: the staircase this replaces drew three frozen frames out of every four.
+    expect(Math.min(...moves)).toBeGreaterThan(0.5 * NOMINAL_PER_FRAME);
+    // No frame covers more than 1.5x a nominal frame's travel -- the burst a face-value
+    // reading of a backlog batch's close-together stamps would produce.
+    expect(Math.max(...moves)).toBeLessThan(1.5 * NOMINAL_PER_FRAME);
+    // And the feed as a whole runs at the disc's own 90 m/s. It can sit a hair under nominal:
+    // an arrival that landed late on the frame clock stretches that segment's render time,
+    // which is the honest lag for a delivery that really was late (the clamp is a floor under
+    // the protocol's spacing, never a ceiling over it).
+    const mean = moves.reduce((sum, move) => sum + move, 0) / moves.length;
+    expect(mean).toBeCloseTo(NOMINAL_PER_FRAME, 1);
   });
 });
 

@@ -12,14 +12,18 @@ import {
   type Heightfield,
 } from '@clans/sim';
 import {
+  armHitMarker,
   carriedWeaponSlots,
   describeHud,
   describeKillFeed,
+  hitMarkerIsShown,
+  HIT_MARKER_MS,
   packIconSrc,
   RETICLE_NATIVE_SIZE,
   reticleBitmapFor,
   reticleBox,
   reticleScale,
+  type HitMarker,
   type HudSource,
 } from './hud.js';
 import { EventKind, type EventMessage, type FlagSnapshotData } from '@clans/protocol';
@@ -363,5 +367,28 @@ describe('reticle sizing', () => {
 
   it('falls back to 32x32 for a name the table does not carry', () => {
     expect(reticleBox('nonexistent.png', REFERENCE)).toEqual({ width: 32, height: 32 });
+  });
+});
+
+// User report 2026-09-16 (hit feedback), shooter side: T2's base scripts have no shooter-side hit feedback at all, so the
+// reticle's marker is ours. What it owes the frame loop is a window: shown from the confirmed
+// hit's own timestamp, gone HIT_MARKER_MS later, and re-armed rather than restarted by a hit
+// that lands inside it (a Chaingun burst).
+describe('hit marker window', () => {
+  it('shows the marker for HIT_MARKER_MS after a hit and expires it on time', () => {
+    const marker: HitMarker = { untilMs: 0 };
+    expect(hitMarkerIsShown(marker, 1_000)).toBe(false);
+    armHitMarker(marker, 1_000);
+    expect(hitMarkerIsShown(marker, 1_000)).toBe(true);
+    expect(hitMarkerIsShown(marker, 1_000 + HIT_MARKER_MS - 1)).toBe(true);
+    expect(hitMarkerIsShown(marker, 1_000 + HIT_MARKER_MS)).toBe(false);
+  });
+
+  it('re-arms the window for a hit that lands while the marker is still up', () => {
+    const marker: HitMarker = { untilMs: 0 };
+    armHitMarker(marker, 1_000);
+    armHitMarker(marker, 1_050);
+    expect(hitMarkerIsShown(marker, 1_000 + HIT_MARKER_MS)).toBe(true);
+    expect(hitMarkerIsShown(marker, 1_050 + HIT_MARKER_MS)).toBe(false);
   });
 });

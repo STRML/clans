@@ -6,10 +6,14 @@ import {
   createFlags,
   createWorld,
   stepPower,
+  WeaponId,
   type Heightfield,
+  type World,
 } from '@clans/sim';
 import {
   CARRIER_THREAT_RADIUS_M,
+  damageMemoryTarget,
+  ENGAGE_MEMORY_TICKS,
   findCarrierThreat,
   findEnemyFlagCarrier,
   findEscortedCarrier,
@@ -17,8 +21,13 @@ import {
   findNearestVisibleEnemy,
   isCarryingEnemyFlag,
   needsHealing,
+  refreshBotMemory,
+  rememberSightedTarget,
+  SEARCH_ARRIVE_M,
+  searchMemoryPoint,
   VISION_RANGE,
 } from './perception.js';
+import { BotRole, createBotRuntimeState } from './types.js';
 
 const flat: Heightfield = {
   gridSize: 2,
@@ -322,5 +331,192 @@ describe('isCarryingEnemyFlag (issue #32 carrier fire discipline)', () => {
     expect(isCarryingEnemyFlag(world, bot)).toBe(true);
     const mate = addPlayer(world, { x: 5, y: 0, z: 0 }, 1);
     expect(isCarryingEnemyFlag(world, mate)).toBe(false);
+  });
+});
+
+/** A resolved hitscan hit from `shooter` onto `victim`: the shape weapons.ts's FireEvent
+ *  carries for the two weapons whose hit-test runs in the tick they fire (the Laser Rifle
+ *  and the Chaingun's Tracer) -- the only exact damage attribution this sim can offer. */
+function pushResolvedHit(world: World, shooter: number, victim: number): void {
+  world.lastFireEvents.push({
+    playerId: shooter,
+    weaponId: WeaponId.LaserRifle,
+    isAltFire: false,
+    origin: { x: 0, y: 1.6, z: 0 },
+    direction: { x: 0, y: 0, z: 1 },
+    shooterVelocity: { x: 0, y: 0, z: 0 },
+    energyScale: 1,
+    hitPlayerId: victim,
+    hitPoint: { x: 0, y: 1, z: 1 },
+    projectileId: -1,
+    resolved: true,
+  });
+}
+
+describe('refreshBotMemory (T2 damage memory, dg.cs:812-815)', () => {
+  it('names the nearest visible enemy as the source of a damage tick', () => {
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 30 }, 2);
+    addPlayer(world, { x: 0, y: 0, z: 60 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    refreshBotMemory(world, runtime); // first sample: nothing to compare against yet
+    expect(runtime.damageFromId).toBe(-1);
+    world.tick = 10;
+    world.players.damage[bot] = 20;
+    refreshBotMemory(world, runtime);
+    expect(runtime.damageFromId).toBe(shooter);
+    expect(runtime.damageAtTick).toBe(10);
+    // A tick with no further damage leaves the memory alone.
+    world.tick = 11;
+    refreshBotMemory(world, runtime);
+    expect(runtime.damageAtTick).toBe(10);
+  });
+
+  it('prefers the exact same-tick hitscan attribution over the nearest-visible guess', () => {
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    addPlayer(world, { x: 0, y: 0, z: 10 }, 2); // nearer, but did not fire
+    const farShooter = addPlayer(world, { x: 0, y: 0, z: 100 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    refreshBotMemory(world, runtime);
+    pushResolvedHit(world, farShooter, bot);
+    world.players.damage[bot] = 15;
+    refreshBotMemory(world, runtime);
+    expect(runtime.damageFromId).toBe(farShooter);
+  });
+
+  it('keeps no memory at all for teammate damage (aiCTF.cs:66-76)', () => {
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const teammate = addPlayer(world, { x: 0, y: 0, z: 10 }, 1);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    refreshBotMemory(world, runtime);
+    pushResolvedHit(world, teammate, bot);
+    world.tick = 5;
+    world.players.damage[bot] = 15;
+    refreshBotMemory(world, runtime);
+    expect(runtime.damageFromId).toBe(-1);
+    expect(runtime.damageAtTick).toBe(-1);
+  });
+
+  it('records an unknown source when nobody is visible and no shot resolved', () => {
+    const world = createWorld(wallAcrossX(50), 1);
+    const bot = addPlayer(world, { x: -5, y: 0, z: 0 }, 1);
+    addPlayer(world, { x: 5, y: 0, z: 0 }, 2); // behind the wall: not visible
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    refreshBotMemory(world, runtime);
+    world.tick = 42;
+    world.players.damage[bot] = 30;
+    refreshBotMemory(world, runtime);
+    expect(runtime.damageFromId).toBe(-1);
+    expect(runtime.damageAtTick).toBe(42);
+  });
+
+  it('drops the grudge when the damage bar resets (respawn or a refit)', () => {
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 20 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    refreshBotMemory(world, runtime);
+    world.players.damage[bot] = 25;
+    refreshBotMemory(world, runtime);
+    rememberSightedTarget(world, runtime, shooter);
+    expect(runtime.damageAtTick).toBe(0);
+    expect(runtime.sightTargetId).toBe(shooter);
+    // Respawn or a station refill zeroes the bar: the grudge is stale. The sight memory is
+    // deliberately kept (the respawn delay and the memory window are both 156 ticks, and
+    // clearing it on this edge cost 36 kills -- see refreshDamageMemory).
+    world.players.damage[bot] = 0;
+    refreshBotMemory(world, runtime);
+    expect(runtime.damageFromId).toBe(-1);
+    expect(runtime.damageAtTick).toBe(-1);
+    expect(runtime.sightTargetId).toBe(shooter);
+  });
+
+  it('clears both memories outright for a dead bot', () => {
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    addPlayer(world, { x: 0, y: 0, z: 20 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    refreshBotMemory(world, runtime);
+    world.players.damage[bot] = 10;
+    refreshBotMemory(world, runtime);
+    rememberSightedTarget(world, runtime, 1);
+    world.players.alive[bot] = 0;
+    refreshBotMemory(world, runtime);
+    expect(runtime.damageFromId).toBe(-1);
+    expect(runtime.sightTargetId).toBe(-1);
+  });
+});
+
+describe('damageMemoryTarget (T2 retaliation)', () => {
+  it('returns the remembered attacker while it is visible and inside the window', () => {
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const shooter = addPlayer(world, { x: 0, y: 0, z: 75 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    refreshBotMemory(world, runtime);
+    world.players.damage[bot] = 12;
+    refreshBotMemory(world, runtime);
+    expect(damageMemoryTarget(world, runtime)).toBe(shooter);
+    // Out of the window, the grudge is gone.
+    world.tick = ENGAGE_MEMORY_TICKS + 1;
+    expect(damageMemoryTarget(world, runtime)).toBeNull();
+  });
+
+  it('returns null once the remembered attacker is out of the bot line of sight', () => {
+    const world = createWorld(wallAcrossX(50), 1);
+    const bot = addPlayer(world, { x: -5, y: 0, z: 0 }, 1);
+    const shooter = addPlayer(world, { x: 5, y: 0, z: 0 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    refreshBotMemory(world, runtime);
+    pushResolvedHit(world, shooter, bot);
+    world.players.damage[bot] = 9;
+    refreshBotMemory(world, runtime);
+    expect(runtime.damageFromId).toBe(shooter);
+    expect(damageMemoryTarget(world, runtime)).toBeNull();
+  });
+});
+
+describe('searchMemoryPoint (T2 engage-task search state)', () => {
+  it('returns the last known position once the target breaks line of sight', () => {
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const runner = addPlayer(world, { x: 0, y: 0, z: 40 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    rememberSightedTarget(world, runtime, runner);
+    // Reality moves the runner out past VISION_RANGE; the memory keeps the spot it was
+    // SEEN at.
+    world.players.position[runner * 3 + 2] = 200;
+    const point = searchMemoryPoint(world, runtime, { x: 0, y: 0, z: 0 });
+    expect(point).toEqual({ x: 0, y: 0, z: 40 });
+  });
+
+  it('returns null while the target is still in sight, and for a target that is gone', () => {
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const enemy = addPlayer(world, { x: 0, y: 0, z: 40 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    rememberSightedTarget(world, runtime, enemy);
+    expect(searchMemoryPoint(world, runtime, { x: 0, y: 0, z: 0 })).toBeNull();
+    // Inside the window but with the target dead, the search is still refused.
+    world.players.alive[enemy] = 0;
+    expect(searchMemoryPoint(world, runtime, { x: 0, y: 0, z: 0 })).toBeNull();
+    // And once the window has passed, a live target is refused too.
+    world.players.alive[enemy] = 1;
+    world.tick = ENGAGE_MEMORY_TICKS + 1;
+    expect(searchMemoryPoint(world, runtime, { x: 0, y: 0, z: 0 })).toBeNull();
+  });
+
+  it('consumes the memory when the bot reaches the remembered spot', () => {
+    const world = createWorld(flat, 1);
+    const bot = addPlayer(world, { x: 0, y: 0, z: 0 }, 1);
+    const runner = addPlayer(world, { x: 0, y: 0, z: 40 }, 2);
+    const runtime = createBotRuntimeState(bot, BotRole.Attacker, 1);
+    rememberSightedTarget(world, runtime, runner);
+    world.players.position[runner * 3 + 2] = 200;
+    expect(searchMemoryPoint(world, runtime, { x: 0, y: 0, z: 40 - SEARCH_ARRIVE_M })).toBeNull();
+    expect(runtime.sightTargetId).toBe(-1);
   });
 });

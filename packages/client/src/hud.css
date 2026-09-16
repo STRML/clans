@@ -20,6 +20,20 @@
   position: absolute;
   box-sizing: border-box;
 }
+/* The victim's own damage flash: T2's red screen tint. Its alpha IS the flash value the script
+   accumulates (hit-feedback.ts's DamageFlash, from the base scripts' player.cs:2790-2795), which
+   the engine renders as the camera's own alpha blend -- alphaBlend = damageFlash, alphaColor
+   (1, 0, 0) (FearPlayerPSC.cpp:1378-1384). hud.ts writes it as --flash every frame it changes;
+   0 is both the resting state and the common one, and the layer is invisible then. It sits above
+   the world and below #hud (DOM order in createHud), so the instruments stay legible while the
+   screen is red. */
+#hud-damage-flash {
+  position: fixed;
+  inset: 0;
+  background: rgb(255, 0, 0);
+  opacity: var(--flash, 0);
+  pointer-events: none;
+}
 #hud-kill-feed {
   top: 12px;
   left: 12px;
@@ -272,9 +286,36 @@
   background: center / contain no-repeat;
   border-radius: 0;
   box-shadow: none;
+  /* The damage tint above is a world-level layer, not an instrument: it is appended after the
+     reticle (createHud appends it, app.ts appends #crosshair before that), and T2's own tint is
+     the camera's alpha blend UNDER the 2D HUD rather than over it. The reticle is the one
+     instrument that has to survive being shot at, so it sits above the tint -- and the hit
+     marker is drawn off it (::after below), which keeps a marker visible through a flash too. */
+  z-index: 1;
 }
 #crosshair::after {
   content: none;
+}
+/* The shooter's own hit marker: a small diamond around the reticle's centre, drawn for
+   HIT_MARKER_MS after a confirmed hit on another player (hud.ts's hitMarkerIsShown writes the
+   attribute). T2's base scripts have no shooter-side feedback of any kind, so this is the one
+   piece of hit feedback that is ours rather than the source's -- a chevron in the HUD's own ink
+   family would read as part of the reticle, so it is red, and it is deliberately small and
+   fixed-size so it marks the aim point on every reticle, from the 32 px crosshairs to the
+   sniper's 192 px scope, without hiding the target it just reported. */
+#crosshair[data-hit='1']::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border: 2px solid #ff4d4d;
+  border-radius: 2px;
+  transform: rotate(45deg);
+  box-shadow: 0 0 2px rgb(0 0 0 / 0.9);
+  pointer-events: none;
 }
 @media (max-width: 700px) {
   #hud-kill-feed {
@@ -334,4 +375,33 @@
 }
 #hud-connection[data-state='online'] {
   display: none;
+}
+
+/* User report 2026-09-16 (hit feedback, environment half): the spawn-indicator ring. One
+   full-screen container pinned over the screen centre, with one pooled wedge per live cue --
+   weapon-trails.ts's renderSpawnIndicators writes rotate(bearing) and opacity per frame, so the
+   CSS only supplies the geometry: the layer is a 0x0 anchor at the screen centre (index.html's
+   #crosshair convention, top/left 50%), each cue rotates about that anchor and slides out to
+   38vmin along the bearing it was born with (0 rad = up = dead ahead, positive clockwise to the
+   player's right, CSS's own convention), where a clip-path wedge points outward, back toward
+   the detonation it names. Under #hud (DOM order), pointer-events none, so it can never eat an
+   input; the wedge is the same hazard orange the vehicle meters already use. */
+#spawn-indicator-ring {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+.spawn-indicator-cue {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 22px;
+  height: 12px;
+  transform-origin: 11px 19vmin;
+  transform: translateY(-19vmin) rotate(0rad);
+  clip-path: polygon(50% 0%, 100% 100%, 50% 72%, 0% 100%);
+  background: #ff9a2a;
 }

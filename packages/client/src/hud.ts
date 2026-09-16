@@ -219,7 +219,12 @@ export function carriedWeaponSlots(world: World, playerId: number): number {
   return stored === 0 ? defaultWeaponMask(armorFor(world, playerId)) : stored;
 }
 
-function updateRack(items: HTMLElement[], source: HudSource, packCell: HTMLElement): void {
+function updateRack(
+  items: HTMLElement[],
+  source: HudSource,
+  packCell: HTMLElement,
+  crosshair: HTMLElement | null,
+): void {
   const carried = carriedWeaponSlots(source.world, source.playerId);
   for (const [slot, item] of items.entries()) {
     const ammo = source.world.players.ammo[ammoIndex(source.playerId, slot)] ?? 0;
@@ -232,9 +237,8 @@ function updateRack(items: HTMLElement[], source: HudSource, packCell: HTMLEleme
   }
   syncPackCell(packCell, source);
   const vehicleId = source.world.players.mountedVehicleId[source.playerId] ?? -1;
-  const weapon = source.world.players.weaponSlot[source.playerId] ?? WeaponId.Blaster;
-  const crosshair = document.getElementById('crosshair');
   if (crosshair) {
+    const weapon = source.world.players.weaponSlot[source.playerId] ?? WeaponId.Blaster;
     const reticle = reticleBitmapFor(
       vehicleId === -1 ? undefined : source.world.vehicles.kind[vehicleId],
       weapon,
@@ -426,6 +430,39 @@ export function reticleBox(reticle: string, viewport: ReticleViewport): ReticleS
   return { width: Math.round(size.width * scale), height: Math.round(size.height * scale) };
 }
 
+/** How long the reticle's hit marker stays up after a confirmed hit. Ours (T2's base scripts
+ *  have no shooter-side feedback at all -- see hit-feedback.ts): long enough to register as an
+ *  event on a 60 Hz display (seven frames), short enough that a Chaingun burst reads as a
+ *  stream of markers rather than one long flash. */
+export const HIT_MARKER_MS = 120;
+/** The marker's own window, as a wall-clock deadline. Wall clock, not simulated time, for the
+ *  same reason the muzzle flash decays on it: a frame stall must expire the marker rather than
+ *  leave it up until the simulation catches up. */
+export interface HitMarker {
+  untilMs: number;
+}
+/** Arms the marker at `atMs` -- and RE-arms it for a hit that lands while it is still up, which
+ *  is what makes a burst look like a burst. */
+export function armHitMarker(marker: HitMarker, atMs: number): void {
+  marker.untilMs = atMs + HIT_MARKER_MS;
+}
+/** Whether the marker is drawn at `nowMs`: the whole show/expire rule. `#crosshair` carries it
+ *  as its `data-hit` attribute (hud.css draws the marker off it, e2e specs read it). */
+export function hitMarkerIsShown(marker: HitMarker, nowMs: number): boolean {
+  return nowMs < marker.untilMs;
+}
+
+/** The HUD's own surface: the per-frame render plus the two hit-feedback inputs (hit-feedback.ts
+ *  decides WHEN each fires; this only draws them). */
+export interface Hud {
+  update(source: HudSource): void;
+  /** The victim's damage flash, 0..DAMAGE_FLASH_MAX (T2's own value -- hit-feedback.ts's
+   *  DamageFlash). Written as the tint layer's alpha: hud.css's #hud-damage-flash. */
+  setDamageFlash(value: number): void;
+  /** A confirmed hit on another player: opens the reticle's marker for HIT_MARKER_MS. */
+  showHitMarker(atMs?: number): void;
+}
+
 function createWeaponRack(hud: HTMLElement): {
   slots: HTMLElement[];
   packCell: HTMLElement;
@@ -547,10 +584,15 @@ function writeBarFill(el: HTMLElement, id: string, text: string): void {
   el.setAttribute('aria-label', `${id === 'hud-health' ? 'Health' : 'Energy'} ${text}`);
 }
 
-export function createHud(
-  container: HTMLElement,
-  initialSource: HudSource,
-): { update(source: HudSource): void } {
+export function createHud(container: HTMLElement, initialSource: HudSource): Hud {
+  // User report 2026-09-16 (hit feedback), victim side: T2's damage tint -- a red full-screen layer whose alpha IS the
+  // flash value (hit-feedback.ts's DamageFlash, from player.cs:2790-2795 and FearPlayerPSC.cpp's
+  // own render of it). Appended BEFORE #hud so the instruments stay legible while the screen is
+  // red, which is also how T2 draws it: the tint is the camera's alpha blend over the 3D view,
+  // and the 2D HUD paints after it.
+  const damageFlash = document.createElement('div');
+  damageFlash.id = 'hud-damage-flash';
+  container.appendChild(damageFlash);
   const hud = document.createElement('div');
   hud.id = 'hud';
   container.appendChild(hud);
@@ -585,6 +627,12 @@ export function createHud(
   const connection = document.createElement('div');
   connection.id = 'hud-connection';
   hud.appendChild(connection);
+  // User report 2026-09-16 (hit feedback): the marker's window and the tint's last-written value. The tint is written only
+  // when it changes -- 0 is both the resting state and the common one, and a per-frame style
+  // write for it would be a layout invalidation the renderer never needs (see updateRows's own
+  // note on that).
+  const hitMarker: HitMarker = { untilMs: 0 };
+  let flash = 0;
 
   function update(source: HudSource): void {
     const mounted = (source.world.players.mountedVehicleId[source.playerId] ?? -1) !== -1;
@@ -601,12 +649,29 @@ export function createHud(
       })
       .join('\n');
     if (scores.textContent !== scoreText) scores.textContent = scoreText;
-    updateRack(slots, source, packCell);
+    // One lookup serves both the reticle and the marker: they are two faces of the same
+    // element, and this runs every frame.
+    const crosshair = document.getElementById('crosshair');
+    updateRack(slots, source, packCell, crosshair);
+    if (crosshair) {
+      const shown = hitMarkerIsShown(hitMarker, performance.now()) ? '1' : '0';
+      if (crosshair.dataset['hit'] !== shown) crosshair.dataset['hit'] = shown;
+    }
     const messages = describeKillFeed(source);
     const feedText = messages.length ? messages.join('\n') : 'Clans \u00b7 Capture the Flag';
     if (killFeed.textContent !== feedText) killFeed.textContent = feedText;
     hud.dataset['ready'] = '1';
   }
   update(initialSource);
-  return { update };
+  return {
+    update,
+    setDamageFlash(value: number): void {
+      if (value === flash) return;
+      flash = value;
+      damageFlash.style.setProperty('--flash', String(value));
+    },
+    showHitMarker(atMs: number = performance.now()): void {
+      armHitMarker(hitMarker, atMs);
+    },
+  };
 }
