@@ -100,7 +100,9 @@ rerun in this audit. GitHub issue numbers below refer to
    rides it less and therefore fights less. Reserving the craft subtracts from the encounters it
    was meant to create. Six levers, all falsified on the numbers, and that exhausts the
    vehicle-and-carrier-policy space this repo can vary: the vehicle path is not what is holding
-   the capture rate down.
+   the capture rate down. (Independently corroborated by a second, from-scratch implementation
+   of the reservation gates measured later the same day: 0 captures pooled across four seeds,
+   kills 415 to 353, touches 17 to 15, reach 0 of 18 runs -- same direction, same verdict.)
 
    **Measured at the game's own match length, and it changes the picture.** Every capture
    number above was taken on the harness's own 12,000-tick window, which is not a match:
