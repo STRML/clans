@@ -84,6 +84,7 @@ rerun in this audit. GitHub issue numbers below refer to
    | topping up a destroyed craft from the pad, as a player would | inert: byte-identical matches, so crafts are not being destroyed at all |
    | a deflection ladder on a stalled ride, turning 45 degrees and retrying instead of dismounting | worse: 0 captures, kills 415 to 278, closest approach 2 to 6 m |
    | reserving the team's craft for the carrier, so a rider gives it up when its team takes the flag | worse: 1 capture either way (seed 4), kills 415 to 340, touches 17 to 16, both-flags-carried 4,766 to 3,296 |
+   | a dedicated chaser: attackers hunt the enemy thief and the defenders' intercept parity lifts while both flags are carried | worse: the both-carried window shrank as designed (4,766 to 3,611 ticks) but 0 captures, kills 415 to 326, touches 17 to 14 -- the pulled attackers and defenders stop winning the fights that were producing the carrier runs in the first place |
 
    Two of the five are informative and they point the same way: the limit is not attrition
    (topping up a destroyed craft changed nothing) and not the driver's obstacle handling
@@ -103,6 +104,11 @@ rerun in this audit. GitHub issue numbers below refer to
    the capture rate down. (Independently corroborated by a second, from-scratch implementation
    of the reservation gates measured later the same day: 0 captures pooled across four seeds,
    kills 415 to 353, touches 17 to 15, reach 0 of 18 runs -- same direction, same verdict.)
+   The thief-hunting half of the window got the same treatment (#60's hypotheses 1 and 3): a
+   dedicated chaser -- every defender on the thief and attackers redirected to it while both
+   flags are carried -- shrank the window and still lost everywhere else. The window is a
+   symptom: shortening it by weakening the fights (fewer attackers converging, fewer escorts)
+   removes the runs that would end in it.
 
    **Measured at the game's own match length, and it changes the picture.** Every capture
    number above was taken on the harness's own 12,000-tick window, which is not a match:
