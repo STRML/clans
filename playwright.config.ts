@@ -9,8 +9,13 @@ export default defineConfig({
   use: {
     baseURL: 'http://127.0.0.1:5173',
     headless: true,
+    // Locally, drive the installed (auto-updating) Chrome with its sandbox on:
+    // Playwright's bundled Chromium lags Chrome stable on security fixes, and
+    // Playwright launches Chromium without the sandbox by default.
+    ...(process.env.CI ? {} : { channel: 'chrome' }),
     launchOptions: {
       args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'],
+      chromiumSandbox: !process.env.CI,
     },
   },
   webServer: {
