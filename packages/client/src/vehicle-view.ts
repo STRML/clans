@@ -298,7 +298,7 @@ function createVehicleMesh(assets: Pick<KatabaticAssets, 'scene'>, kind: Vehicle
  *  reuse lands without an observed destroyed=1 sample in between (a dropped snapshot
  *  spanning the whole retention window): a destroyed vehicle is pruned by
  *  pruneVehicleMeshes, so its replacement builds a fresh mesh anyway. Split out of sync
- *  to keep that function's own ESLint complexity budget flat. */
+ *  to keep that function's own lint complexity budget flat. */
 function ensureVehicleMesh(
   scene: THREE.Scene,
   assets: Pick<KatabaticAssets, 'scene'>,

@@ -1098,7 +1098,7 @@ function headingOf(yaw: number, pitch: number): Vec3 {
 
 /** `arr[i] ?? 0` as a call instead of an inline operator -- every physics function below
  *  reads a typed array many times per tick, and each inline `?? 0` counts as its own branch
- *  toward that function's own ESLint `complexity` budget. Moving the fallback in here keeps
+ *  toward that function's own lint `complexity` budget. Moving the fallback in here keeps
  *  the reading code flat without inflating every caller. */
 function at(arr: Float64Array | Uint8Array | Int16Array, i: number): number {
   return arr[i] ?? 0;

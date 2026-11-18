@@ -57,7 +57,7 @@ function advance(world: World, telemetry: CarrierTelemetry, ticks = 1): void {
   }
 }
 
-/** A named accessor instead of `runs[i]?.field` chains: ESLint's complexity rule counts
+/** A named accessor instead of `runs[i]?.field` chains: the complexity lint rule counts
  *  every optional chain as a branch, and these tests assert a dozen fields per run. */
 function runAt(summary: MatchTelemetry, index: number): CarrierRun {
   const run = summary.runs[index];
