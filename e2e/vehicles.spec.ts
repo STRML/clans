@@ -188,7 +188,7 @@ test('spawn the wheeled Mobile Point Base from the pad menu, mount, drive', asyn
           const app = debugWindow.__app;
           const id = app.world.players.mountedVehicleId[app.playerId];
           const mesh = app.scene.getObjectByName(`vehicle-${String(id)}`);
-          return (mesh?.userData as { shapeStatus?: string }).shapeStatus ?? 'missing';
+          return (mesh?.userData as { shapeStatus?: string } | undefined)?.shapeStatus ?? 'missing';
         }),
       { timeout: 15_000 },
     )

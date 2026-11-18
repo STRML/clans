@@ -853,7 +853,7 @@ function steerToward(
  *  world.tick, so guidance behaves identically whether the caller is stepWorld or a test
 /** `arr[base + i] ?? 0` as one call instead of six inline operators -- the same reason
  *  vehicles.ts's own `at()` exists: each inline `?? 0` is a separate branch against this
- *  file's ESLint complexity budget, and a seeker step reads two full Vec3s per tick. */
+ *  file's lint complexity budget, and a seeker step reads two full Vec3s per tick. */
 function vecAt(arr: Float64Array, base: number): Vec3 {
   return { x: arr[base] ?? 0, y: arr[base + 1] ?? 0, z: arr[base + 2] ?? 0 };
 }

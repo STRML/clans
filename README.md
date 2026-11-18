@@ -198,7 +198,7 @@ records the original source paths. These textures add approximately 7 MB to the 
 ```sh
 pnpm test          # unit tests (Vitest)
 pnpm e2e           # browser tests (Playwright, needs `pnpm exec playwright install chromium` once)
-pnpm lint          # ESLint and Prettier
+pnpm lint          # oxlint and Prettier
 pnpm typecheck     # tsc -b
 pnpm assets:build  # regenerate assets/out from the T2 data files (downloads them on first run)
 ```
